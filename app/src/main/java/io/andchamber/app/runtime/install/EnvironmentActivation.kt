@@ -71,15 +71,12 @@ internal fun activateRuntimeEnvironment(
 internal fun normalizeRuntimeSymlinks(environment: File) {
     if (!environment.isDirectory) return
     val marker = File(environment, ".internal-symlinks-relative")
-    if (marker.isFile) return
+    // Versioned: v1 missed /data/data aliases, so environments marked by it are normalized again.
+    if (marker.isFile && marker.readText().trim() == NORMALIZATION_VERSION) return
 
     val current = environment.toPath().toAbsolutePath().normalize()
     val possibleRoots =
-        listOf(
-            current,
-            current.resolveSibling("environment.staging"),
-            current.resolveSibling("environment.rollback"),
-        )
+        siblingRoots(current).flatMap(::appDataAliases).distinct()
     // A guest rootfs carries directories the app's own uid cannot open - PRoot's bind-mount points
     // come out of the tarball with no permissions at all. Walking with a visitor lets those be
     // skipped; Files.walk would abort the whole traversal with an UncheckedIOException instead.
@@ -100,7 +97,33 @@ internal fun normalizeRuntimeSymlinks(environment: File) {
             ): FileVisitResult = FileVisitResult.CONTINUE
         },
     )
-    marker.writeText("normalized\n")
+    marker.writeText("$NORMALIZATION_VERSION\n")
+}
+
+private const val NORMALIZATION_VERSION = "normalized-v2"
+
+private fun siblingRoots(current: Path): List<Path> =
+    listOf(
+        current,
+        current.resolveSibling("environment.staging"),
+        current.resolveSibling("environment.rollback"),
+    )
+
+/**
+ * Android reaches the same app data directory through several spellings: `filesDir` reports
+ * `/data/user/<n>/<pkg>`, while PRoot records link2symlink targets under `/data/data/<pkg>` (seen on
+ * device). Both must count as the same root, or links survive the swap still pointing at staging.
+ */
+internal fun appDataAliases(path: Path): List<Path> {
+    val text = path.toString()
+    val userPrefix = Regex("""^/data/user/\d+/""")
+    val alias: Path? =
+        when {
+            userPrefix.containsMatchIn(text) -> Path.of(text.replaceFirst(userPrefix, "/data/data/"))
+            text.startsWith("/data/data/") -> Path.of(text.replaceFirst("/data/data/", "/data/user/0/"))
+            else -> null
+        }
+    return listOfNotNull(path, alias)
 }
 
 /** Rewrites [link] to point inside [current] when it still targets an older environment root. */

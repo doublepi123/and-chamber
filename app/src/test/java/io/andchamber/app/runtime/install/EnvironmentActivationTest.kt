@@ -221,6 +221,19 @@ class LocalRuntimeEnvironmentActivationTest {
     }
 
     @Test
+    fun `android app data path spellings are treated as the same root`() {
+        // Seen on device: filesDir is /data/user/0/<pkg>, PRoot records /data/data/<pkg> link targets.
+        val user = java.nio.file.Path.of("/data/user/0/io.andchamber.app/files/runtime/environment.staging")
+        val data = java.nio.file.Path.of("/data/data/io.andchamber.app/files/runtime/environment.staging")
+        assertTrue(data in appDataAliases(user))
+        assertTrue(user in appDataAliases(data))
+        assertEquals(
+            listOf(java.nio.file.Path.of("/tmp/x")),
+            appDataAliases(java.nio.file.Path.of("/tmp/x")),
+        )
+    }
+
+    @Test
     fun `normalization repairs links left behind by an older staging activation`() {
         val root = temporaryFolder.newFolder("runtime-stale-links")
         val active = root.resolve("environment").apply { mkdirs() }
