@@ -119,8 +119,9 @@ class OpenChamberInstaller(
                 )
 
                 report.step(InstallStep.Verify, null, "Checking node, opencode and the web bundle")
-                val nodeVersion = runner.output("node --version").trim()
-                val opencodeVersion = runner.output("opencode --version").trim()
+                val nodeVersion = extractVersion(runner.output("node --version"))
+                // Prints `opencode v2.0.32`: parse the number, never the raw line.
+                val opencodeVersion = extractVersion(runner.output("opencode --version"))
                 require(compareVersions(opencodeVersion, MIN_OPENCODE_VERSION) >= 0) {
                     "OpenCode $opencodeVersion is older than the required $MIN_OPENCODE_VERSION"
                 }
@@ -352,13 +353,18 @@ class OpenChamberInstaller(
             });
             """.trimIndent() + "\n"
 
-        /** Dotted numeric comparison; non-numeric segments count as 0. */
+        private val VERSION_PATTERN = Regex("""\d+(?:\.\d+)+""")
+
+        /** First dotted version in a tool's output: `opencode v2.0.32` -> `2.0.32`, `v24.18.1` -> `24.18.1`. */
+        fun extractVersion(output: String): String = VERSION_PATTERN.find(output)?.value ?: output.trim().removePrefix("v")
+
+        /** Dotted numeric comparison of the versions found in each string; missing segments count as 0. */
         fun compareVersions(
             left: String,
             right: String,
         ): Int {
-            val a = left.trim().removePrefix("v").split('.', '-').map { it.toIntOrNull() ?: 0 }
-            val b = right.trim().removePrefix("v").split('.', '-').map { it.toIntOrNull() ?: 0 }
+            val a = extractVersion(left).split('.').map { it.toIntOrNull() ?: 0 }
+            val b = extractVersion(right).split('.').map { it.toIntOrNull() ?: 0 }
             for (index in 0 until maxOf(a.size, b.size)) {
                 val diff = a.getOrElse(index) { 0 }.compareTo(b.getOrElse(index) { 0 })
                 if (diff != 0) return diff

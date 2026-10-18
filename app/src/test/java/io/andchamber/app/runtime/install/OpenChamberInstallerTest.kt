@@ -65,6 +65,11 @@ class OpenChamberInstallerTest {
     fun `version comparison accepts equal and newer and rejects older opencode`() {
         assertTrue(OpenChamberInstaller.compareVersions("2.0.20", MIN_OPENCODE_VERSION) >= 0)
         assertTrue(OpenChamberInstaller.compareVersions("v2.0.32", MIN_OPENCODE_VERSION) >= 0)
+        // Real `opencode --version` output carries the program name (seen on device).
+        assertTrue(OpenChamberInstaller.compareVersions("opencode v2.0.32\n", MIN_OPENCODE_VERSION) > 0)
+        assertFalse(OpenChamberInstaller.compareVersions("opencode v2.0.19", MIN_OPENCODE_VERSION) >= 0)
+        assertEquals("2.0.32", OpenChamberInstaller.extractVersion("opencode v2.0.32\n"))
+        assertEquals("24.18.1", OpenChamberInstaller.extractVersion("v24.18.1\n"))
         assertFalse(OpenChamberInstaller.compareVersions("2.0.19", MIN_OPENCODE_VERSION) >= 0)
         assertTrue(OpenChamberInstaller.compareVersions("3.0.0", MIN_OPENCODE_VERSION) > 0)
     }
