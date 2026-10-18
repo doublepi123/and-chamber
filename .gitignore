@@ -16,3 +16,5 @@ captures/
 .env
 .DS_Store
 __pycache__/
+.ignore
+.opencode/
