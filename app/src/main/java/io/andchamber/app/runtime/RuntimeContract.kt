@@ -42,7 +42,10 @@ sealed interface RuntimeState {
     data class Installing(
         val step: InstallStep,
         val progress: Float?,
+        /** Technical detail text (untranslated), e.g. a package command; the step label is localised. */
         val detail: String?,
+        /** Localised progress phrase for the current sub-step, when there is one. */
+        val messageKey: MessageKey? = null,
     ) : RuntimeState
 
     data object Stopped : RuntimeState
@@ -55,11 +58,90 @@ sealed interface RuntimeState {
     data class Stopping(val detail: String?) : RuntimeState
 
     /** [recoverable] true -> offer "Retry/Start", false -> offer "Repair (reinstall)". [phase] says what Retry should redo. */
+    /**
+     * [reason] is the English, technical text (logs, tests, fallbacks). [messageKey] names the
+     * localised headline the UI should show instead; [detail] is raw technical output (logs, command
+     * text) and is never translated.
+     */
     data class Failed(
         val reason: String,
         val recoverable: Boolean,
         val phase: FailurePhase = FailurePhase.Runtime,
+        val messageKey: MessageKey? = null,
+        val detail: String? = null,
     ) : RuntimeState
+}
+
+/**
+ * Keys for user-visible runtime messages. The UI resolves each to a string resource; new messages get
+ * a key here and an entry in values/strings.xml and values-zh/strings.xml.
+ */
+enum class MessageKey {
+    /** Network output seen during setup: the Alpine or npm mirrors were not reachable. */
+    MirrorsUnreachable,
+
+    /** Linux packages (apk) failed to install. */
+    PackagesFailed,
+
+    /** OpenChamber could not be installed from npm. */
+    OpenChamberInstallFailed,
+
+    /** The OpenChamber port is held by another app. */
+    PortInUse,
+
+    /** OpenCode reported an error while starting. The detail carries its message. */
+    OpenCodeStartFailed,
+
+    /** OpenChamber exited while starting. */
+    ExitedDuringStart,
+
+    /** OpenChamber did not start listening in time. */
+    NotListeningInTime,
+
+    /** OpenChamber did not become ready in time. */
+    NotReadyInTime,
+
+    /** OpenChamber stopped on its own and the restart budget is spent. */
+    KeptStopping,
+
+    /** OpenChamber stopped unexpectedly. */
+    StoppedUnexpectedly,
+
+    /** A restart attempt failed. */
+    RestartFailed,
+
+    /** The embedded PRoot launcher is missing from the app. */
+    EmbeddedProotMissing,
+
+    /** Generic failure with no more specific message. */
+    Generic,
+
+    /** The node-pty terminal module could not be built. */
+    NativeBuildFailed,
+
+    /** The rebuilt node-pty module does not work in the guest. */
+    PtySmokeFailed,
+
+    /** Install sub-step: unpacking the Linux base. */
+    ProgressUnpacking,
+
+    /** Install sub-step: installing system packages. */
+    ProgressInstallingPackages,
+
+    /** Install sub-step: installing OpenChamber and OpenCode. */
+    ProgressInstallingOpenChamber,
+
+    /** Install sub-step: building terminal support. */
+    ProgressBuildingNative,
+
+    /** Install sub-step: checking the installation. */
+    ProgressVerifying,
+
+    /** Install sub-step: activating the environment. */
+    ProgressActivating,
+
+    /** Install finished. */
+    ProgressDone,
 }
 
 data class RuntimeInfo(

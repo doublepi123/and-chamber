@@ -231,8 +231,9 @@ class DefaultLocalRuntimeController(
                     step: InstallStep,
                     progress: Float?,
                     detail: String?,
+                    messageKey: MessageKey?,
                 ) {
-                    publish(RuntimeState.Installing(step, progress, detail))
+                    publish(RuntimeState.Installing(step, progress, detail, messageKey))
                 }
 
                 override fun log(line: String) = appendLog(line)
@@ -305,7 +306,17 @@ class DefaultLocalRuntimeController(
         appendLog("ERROR: $reason")
         if (error != null) appendLog(error.stackTraceToString().lineSequence().take(3).joinToString("\n"))
         wantsRunning = false
-        publish(RuntimeState.Failed(reason, recoverable = true, phase = phase))
+        // A typed failure carries its own localised headline; anything else is generic.
+        val typed = error as? UserFacingException
+        publish(
+            RuntimeState.Failed(
+                reason = reason,
+                recoverable = true,
+                phase = phase,
+                messageKey = typed?.key ?: MessageKey.Generic,
+                detail = typed?.detail,
+            ),
+        )
     }
 
     /**

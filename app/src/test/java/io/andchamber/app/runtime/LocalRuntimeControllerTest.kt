@@ -78,6 +78,9 @@ class LocalRuntimeControllerTest {
         var installed: InstalledRuntime? = null,
         var installFails: Boolean = false,
     ) : RuntimeInstaller {
+        /** When set, install throws this instead of the generic network error. */
+        var failWith: Throwable? = null
+
         var discarded = 0
         var removed = 0
         var recovered = 0
@@ -91,6 +94,7 @@ class LocalRuntimeControllerTest {
 
         override suspend fun install(report: InstallReporter): InstalledRuntime {
             report.step(InstallStep.DownloadRootfs, 0.5f, "half")
+            failWith?.let { throw it }
             if (installFails) error("network down")
             return fakeRuntime(root).also { installed = it }
         }
@@ -270,6 +274,25 @@ class LocalRuntimeControllerTest {
             assertTrue(failed.recoverable)
         }
 
+    /** A typed failure keeps its own headline key and raw detail, so the UI can translate the headline. */
+    @Test
+    fun `a user-facing failure carries its message key and untranslated detail`() =
+        controllerTest {
+            val root = folder.root
+            val installer =
+                FakeInstaller(root).apply {
+                    failWith = UserFacingException(MessageKey.PackagesFailed, "apk failed (exit 1)", detail = "fetch failed")
+                }
+            val controller = controller(installer, FakeServer())
+            controller.perform(RuntimeOperation.Install)
+            step()
+
+            val failed = controller.state.value as RuntimeState.Failed
+            assertEquals(MessageKey.PackagesFailed, failed.messageKey)
+            assertEquals("fetch failed", failed.detail)
+            assertEquals(FailurePhase.Install, failed.phase)
+        }
+
     @Test
     fun `install failure is tagged Install so Retry reinstalls`() =
         controllerTest {
@@ -278,7 +301,7 @@ class LocalRuntimeControllerTest {
             step()
 
             assertEquals(
-                RuntimeState.Failed("network down", recoverable = true, phase = FailurePhase.Install),
+                RuntimeState.Failed("network down", recoverable = true, phase = FailurePhase.Install, messageKey = MessageKey.Generic),
                 controller.state.value,
             )
         }
@@ -463,7 +486,7 @@ class LocalRuntimeControllerTest {
             assertEquals(0, installer.discarded)
             assertTrue("old runtime is still recorded as installed", installer.installedRuntime() != null)
             assertEquals(
-                RuntimeState.Failed("network down", recoverable = true, phase = FailurePhase.Install),
+                RuntimeState.Failed("network down", recoverable = true, phase = FailurePhase.Install, messageKey = MessageKey.Generic),
                 controller.state.value,
             )
             // Retry (Start) is possible because the old runtime is intact.

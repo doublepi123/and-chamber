@@ -1,6 +1,7 @@
 package io.andchamber.app.runtime.install
 
 import io.andchamber.app.runtime.InstallStep
+import io.andchamber.app.runtime.MessageKey
 import kotlinx.serialization.Serializable
 import java.io.File
 
@@ -29,6 +30,7 @@ interface InstallReporter {
         step: InstallStep,
         progress: Float?,
         detail: String?,
+        messageKey: MessageKey? = null,
     )
 
     fun log(line: String)

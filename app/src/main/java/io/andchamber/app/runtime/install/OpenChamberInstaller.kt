@@ -2,7 +2,9 @@ package io.andchamber.app.runtime.install
 
 import android.system.Os
 import io.andchamber.app.runtime.InstallStep
+import io.andchamber.app.runtime.MessageKey
 import io.andchamber.app.runtime.RuntimePaths
+import io.andchamber.app.runtime.UserFacingException
 import io.andchamber.app.runtime.fs.copyTreeNoFollow
 import io.andchamber.app.runtime.fs.deleteTree
 import io.andchamber.app.runtime.fs.deleteTreeOrThrow
@@ -66,7 +68,7 @@ class OpenChamberInstaller(
                     report.step(InstallStep.DownloadRootfs, fraction, "Alpine ${manifest.alpineVersion}")
                 }
 
-                report.step(InstallStep.ExtractRootfs, null, "Unpacking the Linux userland")
+                report.step(InstallStep.ExtractRootfs, null, null, MessageKey.ProgressUnpacking)
                 val rootfs = File(staging, "rootfs").apply { mkdirs() }
                 archive.inputStream().use { RuntimeArchive.extractTarGz(it, rootfs) }
                 configureRootfs(rootfs)
@@ -75,12 +77,13 @@ class OpenChamberInstaller(
                 val env = ProotCommands.installEnvironment(proot.environment(), paths.prootTmp)
                 val runner = GuestRunner(paths, proot, rootfs, env, report, killPid = killPid)
 
-                report.step(InstallStep.InstallPackages, null, "apk add nodejs npm git ...")
+                report.step(InstallStep.InstallPackages, null, "apk add nodejs npm git ...", MessageKey.ProgressInstallingPackages)
                 // set -e: any failing command fails the step, even inside a chain.
                 runner.mustSucceed(
                     "set -e; export PATH=${ProotCommands.GUEST_PATH}; " +
                         "apk --cache-dir /var/cache/apk add $APK_PACKAGES; " +
                         "update-ca-certificates",
+                    MessageKey.PackagesFailed,
                     "Unable to install Linux packages. Check the network and retry.",
                     timeoutMinutes = APK_TIMEOUT_MINUTES,
                 )
@@ -96,15 +99,17 @@ class OpenChamberInstaller(
                     "set -e; npm i -g --no-fund --no-audit " +
                         "@openchamber/web@${manifest.openChamberVersion} " +
                         "@opencode/cli@${manifest.openCodeVersion}",
+                    MessageKey.OpenChamberInstallFailed,
                     "Unable to install OpenChamber from npm.",
                     timeoutMinutes = NPM_TIMEOUT_MINUTES,
                 )
 
                 // The node-pty prebuild is glibc-linked and segfaults on musl, so a source rebuild is
                 // required. A build failure fails the install (recoverable; the old environment stays).
-                report.step(InstallStep.BuildNativeModules, null, "Building node-pty for musl")
+                report.step(InstallStep.BuildNativeModules, null, "node-pty for musl", MessageKey.ProgressBuildingNative)
                 runner.mustSucceed(
                     "set -e; cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild",
+                    MessageKey.NativeBuildFailed,
                     "Unable to build node-pty for the terminal feature. Check the network and retry.",
                     timeoutMinutes = NATIVE_TIMEOUT_MINUTES,
                 )
@@ -114,11 +119,12 @@ class OpenChamberInstaller(
                 }
                 runner.mustSucceed(
                     "set -e; node $PTY_SMOKE_GUEST_PATH",
+                    MessageKey.PtySmokeFailed,
                     "The rebuilt node-pty does not work in the guest. The install is incomplete.",
                     timeoutMinutes = PTY_SMOKE_TIMEOUT_MINUTES,
                 )
 
-                report.step(InstallStep.Verify, null, "Checking node, opencode and the web bundle")
+                report.step(InstallStep.Verify, null, "node, opencode, web bundle", MessageKey.ProgressVerifying)
                 val nodeVersion = extractVersion(runner.output("node --version"))
                 // Prints `opencode v2.0.32`: parse the number, never the raw line.
                 val opencodeVersion = extractVersion(runner.output("opencode --version"))
@@ -143,13 +149,13 @@ class OpenChamberInstaller(
                 // Metadata is written inside the environment, so the directory rename commits it too.
                 File(staging, RuntimePaths.METADATA_FILE_NAME).writeText(json.encodeToString(metadata))
 
-                report.step(InstallStep.Verify, null, "Activating the environment")
+                report.step(InstallStep.Verify, null, null, MessageKey.ProgressActivating)
                 activateRuntimeEnvironment(
                     active = paths.environment,
                     staging = staging,
                     rollback = paths.rollback,
                 )
-                report.step(InstallStep.Verify, 1f, "Done")
+                report.step(InstallStep.Verify, 1f, null, MessageKey.ProgressDone)
                 InstalledRuntime(metadata = metadata, rootfs = paths.rootfs)
             } catch (error: Throwable) {
                 // Best effort: a leftover staging tree is removed before the next install anyway.
@@ -240,14 +246,18 @@ class OpenChamberInstaller(
          */
         fun mustSucceed(
             script: String,
-            failure: String,
+            failure: MessageKey,
+            failureText: String,
             timeoutMinutes: Long = DEFAULT_TIMEOUT_MINUTES,
         ) {
             val lines = mutableListOf<String>()
             val exit = run(script, timeoutMinutes) { line -> lines += line }
             if (exit == 0) return
-            val reason = if (lines.any(NetworkFailure::isNetworkOutput)) NetworkFailure.MESSAGE else failure
-            error("$reason (exit $exit)")
+            // Mirror problems are the common cause on a phone; name them instead of a generic failure.
+            val unreachable = lines.any(NetworkFailure::isNetworkOutput)
+            val key = if (unreachable) MessageKey.MirrorsUnreachable else failure
+            val text = if (unreachable) NetworkFailure.MESSAGE else failureText
+            throw UserFacingException(key, "$text (exit $exit)", detail = lines.takeLast(MAX_DETAIL_LINES).joinToString("\n"))
         }
 
         /** Captures stdout of a short, quiet guest command. Timeouts kill the tree, like [run]. */
@@ -322,6 +332,9 @@ class OpenChamberInstaller(
                 "nodejs", "npm", "bash", "git", "curl", "ripgrep", "openssh-client",
                 "ca-certificates", "libstdc++", "python3", "make", "g++", "linux-headers",
             ).joinToString(" ")
+
+        /** How many trailing output lines travel with a failure, for the technical detail. */
+        const val MAX_DETAIL_LINES = 40
 
         const val OPENCHAMBER_MODULE_ROOT = "/usr/local/lib/node_modules/@openchamber/web"
         const val SHIM_GUEST_PATH = "/opt/andchamber/android-shim.cjs"
