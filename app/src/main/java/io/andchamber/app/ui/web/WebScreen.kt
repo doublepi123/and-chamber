@@ -70,6 +70,7 @@ import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.WebSessionResult
 import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.displayAddress
+import io.andchamber.app.ui.findActivity
 import io.andchamber.app.ui.label
 import io.andchamber.app.ui.rememberLastNonNull
 import kotlinx.coroutines.CancellationException
@@ -203,7 +204,14 @@ internal fun WebScreen(
         }
 
     BackHandler {
-        if (overlay == null && web != null && web.canGoBack()) web.goBack() else onExit()
+        when {
+            overlay == null && web != null && web.canGoBack() -> web.goBack()
+            // The local OpenChamber is the app's main screen: leaving it with Back behaves like
+            // leaving any app (to the launcher), not a step back into the control room. The edge
+            // handle still offers Home. Panels with an error or progress keep the old way out.
+            isLocal && overlay == null -> context.findActivity()?.moveTaskToBack(true) ?: onExit()
+            else -> onExit()
+        }
     }
 
     val pageColor = web?.pageColor?.let { Color(OPAQUE or it) } ?: themeBackground
