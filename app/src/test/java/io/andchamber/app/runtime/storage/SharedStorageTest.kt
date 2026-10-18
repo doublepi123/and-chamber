@@ -198,6 +198,25 @@ class SharedStorageTest {
         assertTrue(File(dir, "node_modules").isDirectory)
     }
 
+    @Test
+    fun `prepareExceptions adopts the existing private service json instead of an empty placeholder`() {
+        val dir = folder.newFolder("home-private-2")
+        val legacy = folder.newFolder("legacy-config")
+        File(legacy, "service.json").writeText("{\"password\":\"real\"}")
+        // An empty placeholder from an earlier start must be replaced by the real file.
+        File(dir, "service.json").createNewFile()
+
+        SharedStorageDecision.prepareExceptions(dir, legacy)
+
+        assertEquals("{\"password\":\"real\"}", File(dir, "service.json").readText())
+        assertEquals(0L, File(dir, "service.json.tmp").length())
+
+        // Once it holds content it is never replaced again.
+        File(dir, "service.json").writeText("{\"password\":\"rotated\"}")
+        SharedStorageDecision.prepareExceptions(dir, legacy)
+        assertEquals("{\"password\":\"rotated\"}", File(dir, "service.json").readText())
+    }
+
     // --- README ---
 
     @Test

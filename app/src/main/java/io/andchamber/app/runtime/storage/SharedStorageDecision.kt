@@ -46,13 +46,30 @@ object SharedStorageDecision {
      * (empty, so the renames of `service.json.tmp` stay inside private storage) and the node_modules
      * directory. Existing entries are left alone. Returns the paths that were created.
      */
-    fun prepareExceptions(privateExceptionsDir: File): List<File> {
+    fun prepareExceptions(
+        privateExceptionsDir: File,
+        legacyConfigDir: File? = null,
+    ): List<File> {
         val created = mutableListOf<File>()
         privateExceptionsDir.mkdirs()
         listOf(SharedStorageLayout.SERVICE_FILE, SharedStorageLayout.SERVICE_TMP).forEach { name ->
-            File(privateExceptionsDir, name).takeIf { !it.exists() }?.let {
-                it.createNewFile()
-                created += it
+            val target = File(privateExceptionsDir, name)
+            // Carry the existing service.json (it holds OpenCode's service password) over from the
+            // private config dir, so the bind shows its real content instead of an empty file.
+            val legacy = legacyConfigDir?.let { File(it, name) }
+            val adoptLegacy =
+                name == SharedStorageLayout.SERVICE_FILE &&
+                    legacy != null && legacy.isFile && legacy.length() > 0 &&
+                    (!target.exists() || target.length() == 0L)
+            when {
+                adoptLegacy -> {
+                    legacy!!.copyTo(target, overwrite = true)
+                    created += target
+                }
+                !target.exists() -> {
+                    target.createNewFile()
+                    created += target
+                }
             }
         }
         File(privateExceptionsDir, SharedStorageLayout.NODE_MODULES).takeIf { !it.exists() }?.let {

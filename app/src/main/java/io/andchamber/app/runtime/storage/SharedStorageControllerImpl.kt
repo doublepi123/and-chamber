@@ -63,7 +63,7 @@ class SharedStorageControllerImpl(
         val binds = bindsFor(status)
         // Private exceptions must exist before PRoot nests binds on them, in the Active status only.
         if (binds.sharedOpencodeHostPath != null) {
-            SharedStorageDecision.prepareExceptions(privateExceptionsDir())
+            SharedStorageDecision.prepareExceptions(privateExceptionsDir(), File(paths.home, ".config/opencode"))
         }
         return binds
     }
