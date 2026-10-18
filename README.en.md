@@ -8,6 +8,15 @@
 
 [中文](README.md)
 
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="AndChamber home" width="240">
+  &nbsp;
+  <img src="docs/screenshots/openchamber.png" alt="OpenChamber on the phone" width="240">
+  &nbsp;
+  <img src="docs/screenshots/session.png" alt="Chatting with OpenCode on the phone" width="240">
+</p>
+<p align="center"><sub>Home: local server and project folder · OpenChamber on the phone · A session opened from a notification</sub></p>
+
 AndChamber builds an Alpine Linux userland with PRoot inside the app's private storage, installs and runs OpenChamber and OpenCode there, and shows the local OpenChamber in a full-screen WebView. It can also connect to an OpenChamber server running on your computer.
 
 > [!IMPORTANT]
@@ -20,6 +29,8 @@ AndChamber builds an Alpine Linux userland with PRoot inside the app's private s
 - **Automatic sign-in**: the local server uses a random UI password and the app signs in for you.
 - **Keeps running**: the runtime lives in a foreground service, survives backgrounding, and is restarted if it crashes.
 - **Shared folder** (optional): projects and OpenCode settings live in `/sdcard/AndChamber/`, editable with a file manager or over USB. Session database, sign-ins and plugin dependencies stay private.
+- **Notifications with quick replies**: when the app is in the background, OpenChamber's finished, error, question and permission notifications arrive as Android notifications. Reply, allow or deny, or answer simple questions right from the notification; tapping opens that session. AndChamber's own runtime errors are notified too.
+- **English and Chinese**: the UI follows the system language.
 - **Remote servers**: add the address of OpenChamber on your computer; plain HTTP needs an explicit confirmation.
 - **Working terminal**: `node-pty` is rebuilt on the device for musl, so OpenChamber's terminal works.
 

@@ -8,6 +8,15 @@
 
 [English](README.en.md)
 
+<p align="center">
+  <img src="docs/screenshots/home.png" alt="AndChamber 首页" width="240">
+  &nbsp;
+  <img src="docs/screenshots/openchamber.png" alt="手机上的 OpenChamber" width="240">
+  &nbsp;
+  <img src="docs/screenshots/session.png" alt="在手机上与 OpenCode 对话" width="240">
+</p>
+<p align="center"><sub>首页：本机服务与项目文件夹 · 在手机上打开 OpenChamber · 从通知直接进入会话</sub></p>
+
 AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空间，在其中安装并运行 OpenChamber 与 OpenCode，再用全屏 WebView 打开本机的 OpenChamber。也可以连接电脑上运行的 OpenChamber 服务器。
 
 > [!IMPORTANT]
@@ -20,6 +29,8 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 - **自动登录**：本机服务使用随机生成的 UI 密码，App 自动登录，不需要手动输入。
 - **后台常驻**：运行时在前台服务中运行，切到后台也不会断；服务异常退出时自动重启。
 - **公共目录**（可选）：项目和 OpenCode 配置放在 `/sdcard/AndChamber/`，可以用文件管理器或通过 USB 在电脑上维护；会话数据库、登录凭据、插件依赖仍留在私有目录。
+- **系统通知与快捷回复**：App 在后台时，OpenChamber 的完成、出错、提问、权限请求等通知会以 Android 通知送达；可以直接在通知上回复、允许/拒绝权限、回答简单问题，点通知直接进入对应会话。AndChamber 自身的运行错误也会通知。
+- **中英双语**：界面跟随系统语言显示中文或英文。
 - **远程服务器**：添加电脑上 OpenChamber 的地址即可连接；明文 HTTP 需要手动确认。
 - **终端可用**：`node-pty` 在设备上针对 musl 重新编译，OpenChamber 的终端功能正常可用。
 
