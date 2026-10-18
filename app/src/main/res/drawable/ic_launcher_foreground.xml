@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Terminal prompt chevron inside a chat bubble. -->
+    <path
+        android:fillColor="#EDB449"
+        android:pathData="M24,30 H84 A6,6 0 0 1 90,36 V66 A6,6 0 0 1 84,72 H52 L38,84 V72 H24 A6,6 0 0 1 18,66 V36 A6,6 0 0 1 24,30 Z" />
+    <path
+        android:fillColor="#151313"
+        android:pathData="M34,42 L46,50 L34,58 L37,62 L52,50 L37,38 Z" />
+    <path
+        android:fillColor="#151313"
+        android:pathData="M56,58 H72 V62 H56 Z" />
+</vector>

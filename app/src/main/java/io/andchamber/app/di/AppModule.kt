@@ -1,0 +1,114 @@
+package io.andchamber.app.di
+
+import android.content.Context
+import android.os.Build
+import android.webkit.CookieManager
+import io.andchamber.app.data.DefaultWebSessionAuthenticator
+import io.andchamber.app.data.EncryptedRemoteServerStore
+import io.andchamber.app.data.WebCookieSink
+import io.andchamber.app.runtime.DefaultLocalRuntimeController
+import io.andchamber.app.runtime.ForegroundStarter
+import io.andchamber.app.runtime.LocalRuntimeController
+import io.andchamber.app.runtime.RemoteServerStore
+import io.andchamber.app.runtime.RuntimePaths
+import io.andchamber.app.runtime.RuntimeSecrets
+import io.andchamber.app.runtime.RuntimeStateListener
+import io.andchamber.app.runtime.WebSessionAuthenticator
+import io.andchamber.app.runtime.install.RuntimeInstallerImpl
+import io.andchamber.app.runtime.network.AndroidSystemDnsProvider
+import io.andchamber.app.runtime.network.ResolvConf
+import io.andchamber.app.runtime.install.VerifiedRuntimeDownloader
+import io.andchamber.app.runtime.manifest.RuntimeManifestReader
+import io.andchamber.app.runtime.process.EmbeddedCommandSuite
+import io.andchamber.app.runtime.process.HealthProbe
+import io.andchamber.app.runtime.process.ProotOpenChamberServer
+import io.andchamber.app.runtime.process.ProotStaleServerCleaner
+import io.andchamber.app.service.RuntimeService
+import okhttp3.OkHttpClient
+import org.koin.dsl.module
+import java.io.File
+import java.util.concurrent.TimeUnit
+
+val appModule =
+    module {
+        single<OkHttpClient> {
+            OkHttpClient.Builder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .build()
+        }
+
+        single<WebCookieSink> {
+            object : WebCookieSink {
+                override fun setCookie(
+                    url: String,
+                    header: String,
+                ) {
+                    CookieManager.getInstance().setCookie(url, header)
+                }
+
+                override fun flush() {
+                    CookieManager.getInstance().flush()
+                }
+            }
+        }
+
+        single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
+
+        single<LocalRuntimeController> {
+            val context = get<Context>()
+            val paths = RuntimePaths.under(context.filesDir)
+            val abi = primaryAbi()
+            val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+            val suite = { EmbeddedCommandSuite(nativeDir, paths).resolve() }
+            val manifest =
+                RuntimeManifestReader {
+                    context.assets.open(RuntimeManifestReader.ASSET_NAME).bufferedReader().use { it.readText() }
+                }.read()
+            val dnsProvider = AndroidSystemDnsProvider(context)
+            val installer =
+                RuntimeInstallerImpl(
+                    paths = paths,
+                    abi = abi,
+                    manifest = manifest,
+                    suite = suite,
+                    downloader = VerifiedRuntimeDownloader(get<OkHttpClient>()),
+                    shimAsset = {
+                        context.assets.open("android-shim.cjs").bufferedReader().use { it.readText() }
+                    },
+                    dnsProvider = dnsProvider,
+                )
+            DefaultLocalRuntimeController(
+                paths = paths,
+                abi = abi,
+                installer = installer,
+                server =
+                    ProotOpenChamberServer(
+                        paths = paths,
+                        suite = suite,
+                        health = HealthProbe.Loopback,
+                        refreshDns = { runtime -> ResolvConf.write(runtime.rootfs, dnsProvider.dnsServers()) },
+                        staleCleaner = { port, guestRunDir, prootLib ->
+                            ProotStaleServerCleaner(
+                                paths = paths,
+                                isPortFree = { p -> HealthProbe.isPortFree(p) },
+                            ).cleanBeforeStart(port, guestRunDir, prootLib)
+                        },
+                    ),
+                uiPassword = RuntimeSecrets::uiPassword,
+                listener = RuntimeStateListener { state -> RuntimeService.sync(context, state) },
+                foregroundStarter = ForegroundStarter { RuntimeService.start(context) },
+            ).also { it.initialize() }
+        }
+
+        single<WebSessionAuthenticator> {
+            val paths = RuntimePaths.under(get<Context>().filesDir)
+            DefaultWebSessionAuthenticator(
+                client = get(),
+                cookies = get(),
+                localPassword = { RuntimeSecrets.existingUiPassword(paths) },
+            )
+        }
+    }
+
+private fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()

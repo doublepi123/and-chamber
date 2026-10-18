@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AndChamber</string>
+    <string name="runtime_notification_channel">OpenChamber runtime</string>
+    <string name="runtime_notification_channel_description">Keeps the on-device OpenChamber server running</string>
+    <string name="runtime_notification_title">OpenChamber</string>
+    <string name="runtime_notification_setup">Setting up the Linux environment</string>
+    <string name="runtime_notification_starting">Starting OpenChamber</string>
+    <string name="runtime_notification_running">Running at %1$s</string>
+    <string name="runtime_notification_stopping">Stopping OpenChamber</string>
+    <string name="runtime_notification_stop">Stop</string>
+</resources>
