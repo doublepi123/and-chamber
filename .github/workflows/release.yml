@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v0.0.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Set from the tag below; workflow_dispatch passes the chosen tag through the same path.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check release secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDCHAMBER_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDCHAMBER_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDCHAMBER_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDCHAMBER_KEY_PASSWORD }}
+        run: |
+          missing=()
+          [ -n "$KEYSTORE_B64" ] || missing+=("ANDCHAMBER_KEYSTORE_BASE64")
+          [ -n "$KEYSTORE_PASSWORD" ] || missing+=("ANDCHAMBER_KEYSTORE_PASSWORD")
+          [ -n "$KEY_ALIAS" ] || missing+=("ANDCHAMBER_KEY_ALIAS")
+          [ -n "$KEY_PASSWORD" ] || missing+=("ANDCHAMBER_KEY_PASSWORD")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]}. Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Derive version from tag
+        run: |
+          if ! [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Tag '$TAG' must look like vMAJOR.MINOR.PATCH (e.g. v0.0.1)."
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]}; minor=${BASH_REMATCH[2]}; patch=${BASH_REMATCH[3]}
+          if [ "$minor" -gt 99 ] || [ "$patch" -gt 99 ]; then
+            echo "::error::Minor and patch must be 0-99 for the versionCode scheme."
+            exit 1
+          fi
+          version="$major.$minor.$patch"
+          code=$((major * 10000 + minor * 100 + patch))
+          echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$code" >> "$GITHUB_ENV"
+          echo "Version $version (code $code)"
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDCHAMBER_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          echo "ANDCHAMBER_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test and build signed release
+        env:
+          ANDCHAMBER_KEYSTORE_PASSWORD: ${{ secrets.ANDCHAMBER_KEYSTORE_PASSWORD }}
+          ANDCHAMBER_KEY_ALIAS: ${{ secrets.ANDCHAMBER_KEY_ALIAS }}
+          ANDCHAMBER_KEY_PASSWORD: ${{ secrets.ANDCHAMBER_KEY_PASSWORD }}
+        run: |
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --stacktrace \
+            -Pandchamber.versionName="$VERSION_NAME" \
+            -Pandchamber.versionCode="$VERSION_CODE"
+
+      - name: Verify signature and checksum
+        run: |
+          apk="app/build/outputs/apk/release/AndChamber-$VERSION_NAME.apk"
+          test -f "$apk" || { echo "::error::Release APK not found at $apk"; exit 1; }
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" "$RUNNER_TEMP/certs.txt" \
+            || { echo "::error::APK is not signed with the v2 scheme"; exit 1; }
+          sha256sum "$apk" | awk '{print $1}' > "$RUNNER_TEMP/apk.sha"
+          printf '%s  AndChamber-%s.apk\n' "$(cat "$RUNNER_TEMP/apk.sha")" "$VERSION_NAME" \
+            > "$RUNNER_TEMP/AndChamber-$VERSION_NAME.apk.sha256"
+          cp "$RUNNER_TEMP/AndChamber-$VERSION_NAME.apk.sha256" "app/build/outputs/apk/release/"
+
+      - name: Choose release notes
+        run: |
+          notes="docs/release-notes/v$VERSION_NAME.md"
+          if [ -f "$notes" ]; then
+            echo "NOTES_FILE=$notes" >> "$GITHUB_ENV"
+            echo "GENERATE_NOTES=false" >> "$GITHUB_ENV"
+          else
+            echo "No $notes; using generated notes."
+            echo "NOTES_FILE=" >> "$GITHUB_ENV"
+            echo "GENERATE_NOTES=true" >> "$GITHUB_ENV"
+          fi
+          # 0.x versions are pre-releases.
+          case "$VERSION_NAME" in 0.*) echo "PRERELEASE=true" >> "$GITHUB_ENV" ;; *) echo "PRERELEASE=false" >> "$GITHUB_ENV" ;; esac
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: AndChamber v${{ env.VERSION_NAME }}
+          body_path: ${{ env.NOTES_FILE }}
+          generate_release_notes: ${{ env.GENERATE_NOTES }}
+          prerelease: ${{ env.PRERELEASE }}
+          files: |
+            app/build/outputs/apk/release/AndChamber-${{ env.VERSION_NAME }}.apk
+            app/build/outputs/apk/release/AndChamber-${{ env.VERSION_NAME }}.apk.sha256
+            NOTICE
