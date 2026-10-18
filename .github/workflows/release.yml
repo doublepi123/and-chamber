@@ -97,7 +97,7 @@ jobs:
         run: |
           apk="app/build/outputs/apk/release/AndChamber-$VERSION_NAME.apk"
           test -f "$apk" || { echo "::error::Release APK not found at $apk"; exit 1; }
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
           grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" "$RUNNER_TEMP/certs.txt" \
             || { echo "::error::APK is not signed with the v2 scheme"; exit 1; }
           sha256sum "$apk" | awk '{print $1}' > "$RUNNER_TEMP/apk.sha"
