@@ -161,6 +161,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    // Process-wide foreground state, used to suppress OpenChamber notifications while the app is open.
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation("androidx.activity:activity-compose:1.9.3")
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))

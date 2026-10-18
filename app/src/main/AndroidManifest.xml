@@ -44,6 +44,11 @@
             </intent-filter>
         </activity>
 
+        <!-- Notification buttons and reply text. Not exported: only our own notifications reach it. -->
+        <receiver
+            android:name=".notify.NotificationActionReceiver"
+            android:exported="false" />
+
         <service
             android:name=".service.RuntimeService"
             android:exported="false"

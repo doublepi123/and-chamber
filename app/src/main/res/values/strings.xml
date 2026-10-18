@@ -9,4 +9,15 @@
     <string name="runtime_notification_running">Running at %1$s</string>
     <string name="runtime_notification_stopping">Stopping OpenChamber</string>
     <string name="runtime_notification_stop">Stop</string>
+    <string name="channel_agent_finished">Agent finished</string>
+    <string name="channel_needs_input">Needs your input</string>
+    <string name="channel_errors">Errors</string>
+    <string name="channel_other">Other</string>
+    <string name="action_reply">Reply</string>
+    <string name="action_allow_once">Allow once</string>
+    <string name="action_always_allow">Always allow</string>
+    <string name="action_deny">Deny</string>
+    <string name="reply_sent">Sent</string>
+    <string name="reply_failed">Couldn\'t send: %1$s</string>
+    <string name="permission_done">Permission answered</string>
 </resources>
