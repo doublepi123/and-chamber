@@ -60,7 +60,10 @@ object ProotCommands {
         ) +
             listOf("/bin/sh", "-lc", script)
 
-    /** The OpenChamber server, bound to loopback and running in the foreground. Private-only binds. */
+    /**
+     * The OpenChamber server, bound to loopback and running in the foreground. Private-only binds:
+     * ~/projects is the private workspace.
+     */
     fun serverCommand(
         proot: File,
         rootfs: File,
@@ -78,8 +81,8 @@ object ProotCommands {
         )
 
     /**
-     * The OpenChamber server with an explicit bind set. The working directory is /workspace, so the
-     * shared projects folder is the default project when shared storage is active.
+     * The OpenChamber server with an explicit bind set. The working directory is the home (`~`), so
+     * OpenChamber's default project root and file browser start there.
      */
     fun serverCommand(
         proot: File,
@@ -91,7 +94,7 @@ object ProotCommands {
         prootArguments(
             proot,
             rootfs,
-            bindArguments(binds.specs() + extraBinds) + listOf("-w", SharedStorageLayout.GUEST_WORKSPACE),
+            bindArguments(binds.specs() + extraBinds) + listOf("-w", SharedStorageLayout.GUEST_HOME),
         ) +
             listOf(GUEST_NODE, OPENCHAMBER_CLI, "serve", "--foreground", "--port", port.toString())
 

@@ -36,36 +36,89 @@ class SharedStorageTest {
     // --- GuestBinds order and content ---
 
     @Test
-    fun `off binds the private workspace at workspace and at workspace-private, home first`() {
+    fun `off binds the private workspace only at projects, home first, with no second mount`() {
         val cmd = ProotCommands.serverCommand(proot, rootfs, GuestBinds.privateOnly(home, privateWs), emptyList(), 3000)
 
         assertEquals(
             listOf(
                 "/data/runtime/home:/root",
-                "/data/runtime/workspace:/workspace",
-                "/data/runtime/workspace:/workspace-private",
+                "/data/runtime/workspace:/root/projects",
             ),
             cmd.bindPairs(),
         )
-        assertEquals("/workspace", cmd[cmd.indexOf("-w") + 1])
+        assertEquals("/root", cmd[cmd.indexOf("-w") + 1])
     }
 
     @Test
-    fun `active binds in the fixed order - home, workspaces, whole opencode dir, then the private exceptions`() {
-        val pairs = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs()
+    fun `active binds in the fixed order - home, projects, projects-private, whole opencode dir, then the private exceptions`() {
+        val cmd = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000)
 
         assertEquals(
             listOf(
                 "/data/runtime/home:/root",
-                "/storage/emulated/0/AndChamber/projects:/workspace",
-                "/data/runtime/workspace:/workspace-private",
+                "/storage/emulated/0/AndChamber/projects:/root/projects",
+                "/data/runtime/workspace:/root/projects-private",
                 "/storage/emulated/0/AndChamber/opencode:/root/.config/opencode",
                 "/data/runtime/home-private/opencode/service.json:/root/.config/opencode/service.json",
                 "/data/runtime/home-private/opencode/service.json.tmp:/root/.config/opencode/service.json.tmp",
                 "/data/runtime/home-private/opencode/node_modules:/root/.config/opencode/node_modules",
             ),
-            pairs,
+            cmd.bindPairs(),
         )
+        assertEquals("/root", cmd[cmd.indexOf("-w") + 1])
+    }
+
+    @Test
+    fun `no bind targets the old workspace mount points`() {
+        val all =
+            ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs() +
+                ProotCommands.serverCommand(proot, rootfs, GuestBinds.privateOnly(home, privateWs), emptyList(), 3000).bindPairs()
+
+        assertFalse(all.any { it.endsWith(":/workspace") || it.endsWith(":/workspace-private") })
+    }
+
+    @Test
+    fun `shared projects mount at home projects and the private workspace at home projects-private`() {
+        val pairs = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs()
+
+        assertTrue(pairs.contains("/storage/emulated/0/AndChamber/projects:/root/projects"))
+        assertTrue(pairs.contains("/data/runtime/workspace:/root/projects-private"))
+    }
+
+    @Test
+    fun `the mount points under the home are the ones the binds target`() {
+        val targets = activeBinds().specs().map { it.substringAfter(':') }.filter { it.startsWith("/root/") }
+        val homeRelative = targets.map { it.removePrefix("/root/") }
+
+        assertEquals(
+            SharedStorageLayout.MOUNT_POINTS.toSet(),
+            homeRelative.filter { !it.contains("service.json") && !it.contains("node_modules") }.toSet(),
+        )
+    }
+
+    @Test
+    fun `off mode creates only projects in the home, not projects-private or the config dir`() {
+        val h = folder.newFolder("home-off")
+        val binds = GuestBinds.privateOnly(h, File(h, "unused-ws"))
+
+        val mountPoints = SharedStorageLayout.mountPointsFor(h, binds)
+        mountPoints.forEach { it.mkdirs() }
+
+        assertTrue(File(h, "projects").isDirectory)
+        assertFalse(File(h, "projects-private").exists())
+        assertFalse(File(h, ".config/opencode").exists())
+    }
+
+    @Test
+    fun `active mode creates projects, projects-private and the opencode config dir in the home`() {
+        val h = folder.newFolder("home-active")
+        val binds = GuestBinds.shared(h, File(h, "unused-ws"), File("/sdcard/p"), File("/sdcard/o"), File(h, "priv"))
+
+        SharedStorageLayout.mountPointsFor(h, binds).forEach { it.mkdirs() }
+
+        assertTrue(File(h, "projects").isDirectory)
+        assertTrue(File(h, "projects-private").isDirectory)
+        assertTrue(File(h, ".config/opencode").isDirectory)
     }
 
     @Test
@@ -230,7 +283,9 @@ class SharedStorageTest {
         assertTrue(text.contains("auth.json"))
         assertTrue(text.contains("session"))
         assertTrue(text.contains("OpenChamber"))
-        assertTrue(text.contains("/workspace-private"))
+        assertTrue(text.contains("~/projects-private"))
+        assertTrue(text.contains("~/projects"))
+        assertFalse(text.contains("/workspace"))
     }
 
     // --- Decision and restartRequired ---

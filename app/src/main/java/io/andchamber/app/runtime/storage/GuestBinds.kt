@@ -4,23 +4,24 @@ import java.io.File
 
 /**
  * The effective bind mounts for one server launch. Pure data, turned into PRoot `-b` arguments by
- * ProotCommands.
+ * ProotCommands. Every mount is under the persistent home (`/root`, i.e. `~`).
  *
  * Order matters and is fixed:
  *  1. the persistent private home over /root,
- *  2. the workspace binds (/workspace, /workspace-private),
- *  3. the whole shared OpenCode folder over /root/.config/opencode (Active only),
+ *  2. the project binds: `~/projects` and, in Active mode, `~/projects-private`,
+ *  3. the whole shared OpenCode folder over `~/.config/opencode` (Active only),
  *  4. private exceptions nested on top of that folder: service.json, service.json.tmp, node_modules.
  *
- * Step 4 must come after step 3, otherwise the directory bind would hide the private files.
+ * Step 4 must come after step 3, otherwise the directory bind would hide the private files. The server's
+ * working directory is always `~` (see ProotCommands).
  */
 data class GuestBinds(
     /** Persistent private home, bound over /root. Always present. */
     val homeHostPath: File,
-    /** Working directory mount at /workspace: shared projects when active, else the private workspace. */
-    val workspaceHostPath: File,
-    /** The private workspace, always bound at /workspace-private. */
-    val privateWorkspaceHostPath: File,
+    /** Mounted at ~/projects: shared projects when active, else the private workspace. */
+    val projectsHostPath: File,
+    /** The private workspace, mounted at ~/projects-private. Only in Active mode (null otherwise). */
+    val privateProjectsHostPath: File?,
     /** Shared OpenCode config folder, bound over the guest config dir. Null when shared config is off. */
     val sharedOpencodeHostPath: File?,
     /** Private exceptions nested over the shared folder: (host path, guest path). Empty when off. */
@@ -29,30 +30,30 @@ data class GuestBinds(
     /** Ordered `host:guest` specs for PRoot `-b`, following the fixed order above. */
     fun specs(): List<String> =
         buildList {
-            add("${homeHostPath.absolutePath}:/root")
-            add("${workspaceHostPath.absolutePath}:${SharedStorageLayout.GUEST_WORKSPACE}")
-            add("${privateWorkspaceHostPath.absolutePath}:${SharedStorageLayout.GUEST_PRIVATE_WORKSPACE}")
+            add("${homeHostPath.absolutePath}:${SharedStorageLayout.GUEST_HOME}")
+            add("${projectsHostPath.absolutePath}:${SharedStorageLayout.GUEST_PROJECTS}")
+            privateProjectsHostPath?.let { add("${it.absolutePath}:${SharedStorageLayout.GUEST_PRIVATE_PROJECTS}") }
             sharedOpencodeHostPath?.let { add("${it.absolutePath}:${SharedStorageLayout.GUEST_OPENCODE_CONFIG}") }
             privateExceptions.forEach { (host, guest) -> add("${host.absolutePath}:$guest") }
         }
 
     companion object {
-        /** Private-only: /workspace is the private workspace, also at /workspace-private, no config bind. */
+        /** Private-only: ~/projects is the private workspace. No second mount, no config bind. */
         fun privateOnly(
             home: File,
             privateWorkspace: File,
         ) = GuestBinds(
             homeHostPath = home,
-            workspaceHostPath = privateWorkspace,
-            privateWorkspaceHostPath = privateWorkspace,
+            projectsHostPath = privateWorkspace,
+            privateProjectsHostPath = null,
             sharedOpencodeHostPath = null,
             privateExceptions = emptyList(),
         )
 
         /**
-         * Shared: projects at /workspace, the whole shared opencode folder over the guest config dir, and
-         * the private exceptions on top. [privateExceptionsDir] holds the empty placeholder files and the
-         * node_modules directory, so renames of service.json and service.json.tmp stay in private storage.
+         * Shared: ~/projects is the shared projects folder, ~/projects-private the private workspace, and
+         * the shared opencode folder over ~/.config/opencode with the private exceptions on top.
+         * [privateExceptionsDir] holds the empty placeholder files and the node_modules directory.
          */
         fun shared(
             home: File,
@@ -70,8 +71,8 @@ data class GuestBinds(
                         "$guestConfig/${SharedStorageLayout.NODE_MODULES}")
             return GuestBinds(
                 homeHostPath = home,
-                workspaceHostPath = sharedProjects,
-                privateWorkspaceHostPath = privateWorkspace,
+                projectsHostPath = sharedProjects,
+                privateProjectsHostPath = privateWorkspace,
                 sharedOpencodeHostPath = sharedOpencode,
                 privateExceptions = exceptions,
             )

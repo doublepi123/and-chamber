@@ -61,6 +61,9 @@ class SharedStorageControllerImpl(
             }
         }
         val binds = bindsFor(status)
+        // PRoot can only bind onto paths that exist, so the mount points are created in the home first.
+        // Both modes need them: ~/projects always, ~/projects-private and ~/.config/opencode in Active.
+        ensureMountPoints(binds)
         // Private exceptions must exist before PRoot nests binds on them, in the Active status only.
         if (binds.sharedOpencodeHostPath != null) {
             SharedStorageDecision.prepareExceptions(privateExceptionsDir(), File(paths.home, ".config/opencode"))
@@ -72,6 +75,14 @@ class SharedStorageControllerImpl(
         SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot, privateExceptionsDir())
 
     private fun privateExceptionsDir(): File = File(paths.root, "home-private/opencode")
+
+    /**
+     * Creates the directories PRoot binds onto inside the home. Only the mounts the current bind set
+     * uses are needed, so `projects-private` and `.config/opencode` exist only in Active mode.
+     */
+    private fun ensureMountPoints(binds: GuestBinds) {
+        SharedStorageLayout.mountPointsFor(paths.home, binds).forEach { it.mkdirs() }
+    }
 
     /** Called by the server once a start has been issued with [binds]. */
     fun recordStarted(binds: GuestBinds) {

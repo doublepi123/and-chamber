@@ -184,7 +184,6 @@ class OpenChamberInstaller(
             setWritable(true, false)
             setExecutable(true, false)
         }
-        File(rootfs, "workspace").mkdirs()
         ResolvConf.write(rootfs, dnsProvider.dnsServers())
         File(rootfs, "etc/hosts").writeText("127.0.0.1 localhost\n::1 localhost\n")
         // The compact Alpine archive omits a SONAME symlink that apk loads by name.

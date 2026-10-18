@@ -55,12 +55,13 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 
 ```text
 /sdcard/AndChamber/
-├── projects/    → Linux 中的 /workspace（默认工作目录）
+├── projects/    → Linux 中的 ~/projects（服务器默认工作目录为 ~）
 ├── opencode/    → OpenCode 全局配置目录（opencode.json(c)、AGENTS.md、skills/、agents/、commands/ 等）
 └── README.txt
 ```
 
-- 私有目录 `/workspace-private` 始终可用，适合需要符号链接、`node_modules` 或可执行权限的项目（共享存储不支持这些）。
+- 私有目录 `~/projects-private` 始终可用，适合需要符号链接、`node_modules` 或可执行权限的项目（共享存储不支持这些）。
+- 关闭公共目录时，`~/projects` 指向私有目录，不再挂载 `~/projects-private`。
 - `opencode/` 里的 `service.json`、`node_modules/` 是私有数据的挂载占位，请不要修改或删除。
 - 开启公共目录后，其他拥有“所有文件访问”权限的 App 也能读取该目录，请不要在配置文件中直接写入 API Key。
 

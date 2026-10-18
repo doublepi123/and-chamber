@@ -39,6 +39,7 @@ object SharedStorageDecision {
                 )
             SharedStorageStatus.Off, SharedStorageStatus.NeedsPermission ->
                 GuestBinds.privateOnly(home = home, privateWorkspace = privateWorkspace)
+
         }
 
     /**

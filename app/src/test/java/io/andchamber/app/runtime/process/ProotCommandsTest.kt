@@ -52,9 +52,10 @@ class ProotCommandsTest {
         assertTrue(command.containsPair("-b", "/proc"))
         assertTrue(command.containsPair("-b", "/sys"))
         assertTrue(command.containsPair("-b", "/system"))
-        assertTrue(command.containsPair("-b", "${workspace.absolutePath}:/workspace"))
+        assertTrue(command.containsPair("-b", "${workspace.absolutePath}:/root/projects"))
         assertTrue(command.containsPair("-b", "/storage/emulated/0:/sdcard"))
-        assertEquals("/workspace", command[command.indexOf("-w") + 1])
+        assertFalse(command.any { it.endsWith(":/workspace") || it.endsWith(":/workspace-private") })
+        assertEquals("/root", command[command.indexOf("-w") + 1])
 
         val guest = command.subList(command.size - 6, command.size)
         assertEquals(

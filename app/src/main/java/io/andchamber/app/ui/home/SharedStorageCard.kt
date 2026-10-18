@@ -86,7 +86,7 @@ private val RailReach = 6.dp
 private const val STATUS_SETTLE_MS = 900L
 
 /**
- * "Projects and settings folder": keeps /workspace and OpenCode's settings in AndChamber/ on
+ * "Projects and settings folder": keeps ~/projects and OpenCode's settings in AndChamber/ on
  * shared storage. The switch is the setting; the body explains the current status, and a notice
  * offers a restart when the running server still uses the old folders.
  */
@@ -256,7 +256,7 @@ private fun OffBody() {
     Spacer(Modifier.height(10.dp))
     NoteRow(
         icon = Icons.Rounded.Info,
-        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_workspace), "node_modules"),
+        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_projects), "node_modules"),
     )
 }
 
@@ -330,11 +330,11 @@ private fun NeedsPermissionBody(
 private fun ActiveBody(hostRoot: String) {
     FolderLayout(hostRoot = hostRoot)
     Spacer(Modifier.height(12.dp))
-    NoteRow(icon = Icons.Rounded.Lock, text = codeSpans(stringResource(R.string.storage_private), stringResource(R.string.guest_private_workspace)))
+    NoteRow(icon = Icons.Rounded.Lock, text = codeSpans(stringResource(R.string.storage_private), stringResource(R.string.guest_private_projects)))
     Spacer(Modifier.height(6.dp))
     NoteRow(
         icon = Icons.Rounded.Info,
-        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_workspace), "node_modules"),
+        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_projects), "node_modules"),
     )
 }
 
@@ -375,7 +375,7 @@ private fun FolderLayout(hostRoot: String) {
             }
             FolderRow(name = stringResource(R.string.storage_projects_dir), railColor = rail, first = true, last = false) {
                 Text(
-                    text = stringResource(R.string.guest_workspace),
+                    text = stringResource(R.string.guest_projects),
                     style = ChamberTextStyles.code,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

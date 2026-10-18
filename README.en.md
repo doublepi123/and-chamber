@@ -51,12 +51,12 @@ Download `AndChamber-<version>.apk` from [Releases](https://github.com/doublepi1
 
 ```text
 /sdcard/AndChamber/
-├── projects/    → /workspace inside Linux (default working directory)
+├── projects/    → ~/projects inside Linux (the home ~ is the default working directory)
 ├── opencode/    → OpenCode's global config folder
 └── README.txt
 ```
 
-`/workspace-private` is always available for projects that need symlinks, `node_modules` or executable bits. `service.json` and `node_modules/` inside `opencode/` are placeholders for private binds — leave them alone. Other apps with all-files access can read this folder, so keep API keys out of config files.
+`~/projects-private` is always available in shared mode for projects that need symlinks, `node_modules` or executable bits. When shared storage is off, `~/projects` is the private workspace and `~/projects-private` is not mounted. `service.json` and `node_modules/` inside `opencode/` are placeholders for private binds — leave them alone. Other apps with all-files access can read this folder, so keep API keys out of config files.
 
 ## Build from source
 

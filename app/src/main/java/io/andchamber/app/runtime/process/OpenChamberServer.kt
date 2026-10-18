@@ -115,7 +115,7 @@ class ProotOpenChamberServer(
     ): Long {
         stop()
         val port = runtime.metadata.port
-        // OpenChamber's own data dir inside the guest. home is bind-mounted to /root (see ProotCommands).
+        // OpenChamber's own data dir inside the guest. home is bind-mounted to /root (see GuestBinds).
         val guestRunDir = File(paths.home, ".config/openchamber/run")
         // Port ownership is decided before anything is spawned: a foreign listener that survives our
         // cleanup means we must not launch, and must never send the password to it.

@@ -15,10 +15,32 @@ object SharedStorageLayout {
     const val OPENCODE = "opencode"
     const val README = "README.txt"
 
-    /** Guest paths. */
-    const val GUEST_WORKSPACE = "/workspace"
-    const val GUEST_PRIVATE_WORKSPACE = "/workspace-private"
+    /**
+     * Guest paths, all under the persistent home `~` (= /root). The server's working directory is `~`,
+     * so OpenChamber's default project root and file browser start there.
+     */
+    const val GUEST_HOME = "/root"
+    const val GUEST_PROJECTS = "/root/projects"
+    const val GUEST_PRIVATE_PROJECTS = "/root/projects-private"
     const val GUEST_OPENCODE_CONFIG = "/root/.config/opencode"
+
+    /** Mount points under the home bind, created in the home before PRoot binds onto them. */
+    val MOUNT_POINTS = listOf("projects", "projects-private", ".config/opencode")
+
+    /**
+     * The home-relative directories PRoot needs for [binds]: `projects` always, `projects-private` and
+     * `.config/opencode` only when the binds mount them. Private exceptions are files/dirs created by
+     * SharedStorageDecision.prepareExceptions, not here.
+     */
+    fun mountPointsFor(
+        home: File,
+        binds: GuestBinds,
+    ): List<File> =
+        buildList {
+            add(File(home, "projects"))
+            if (binds.privateProjectsHostPath != null) add(File(home, "projects-private"))
+            if (binds.sharedOpencodeHostPath != null) add(File(home, ".config/opencode"))
+        }
 
     /** Holds a password, so it stays private. OpenCode also writes `<configFile>.tmp` next to it. */
     const val SERVICE_FILE = "service.json"
@@ -146,8 +168,8 @@ object SharedStorageLayout {
         ========================
 
         ${hostRoot.absolutePath}/
-          projects/   Your project folders. Opened as the working directory (/workspace)
-                      inside the Linux environment when shared storage is active.
+          projects/   Your project folders. Inside the Linux environment they appear as
+                      ~/projects (the home directory is the server's working directory).
           opencode/   The OpenCode global config folder. It is bound over the environment's
                       ~/.config/opencode, so every file here is live config: opencode.jsonc,
                       AGENTS.md, skills/, agents/, commands/, and any other file OpenCode or its
@@ -162,7 +184,7 @@ object SharedStorageLayout {
 
         Caveat: shared storage has no symlinks and no executable bits. Projects that rely on
         symlinks, node_modules or executable scripts can misbehave here, and git may report
-        mode changes. For those projects use /workspace-private, which is always the app's
-        private workspace.
+        mode changes. For those projects use ~/projects-private, which is the app's private
+        workspace.
         """.trimIndent() + "\n"
 }

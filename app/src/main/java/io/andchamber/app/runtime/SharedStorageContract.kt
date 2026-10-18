@@ -9,15 +9,15 @@ import kotlinx.coroutines.flow.StateFlow
  * Layout on shared storage (host side):
  * ```
  * /sdcard/AndChamber/
- *   projects/          -> guest /workspace            (default working directory)
+ *   projects/          -> guest ~/projects            (home is the working directory)
  *   opencode/          -> guest /root/.config/opencode/{opencode.jsonc,AGENTS.md,skills,agents,commands}
  * ```
- * Private (app-only) storage keeps: guest /workspace-private, OpenCode's session database, auth.json
+ * Private (app-only) storage keeps: guest ~/projects-private, OpenCode's session database, auth.json
  * credentials, plugin node_modules, and OpenChamber's secrets. Shared storage is readable by other
  * apps that hold all-files access, so secrets never go there.
  */
 enum class SharedStorageStatus {
-    /** The user has not turned the feature on. Guest /workspace is private storage. */
+    /** The user has not turned the feature on. Guest ~/projects is private storage. */
     Off,
 
     /** Turned on, but all-files access is not granted (or was revoked). Falls back to private. */
