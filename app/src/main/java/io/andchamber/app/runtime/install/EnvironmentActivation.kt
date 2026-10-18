@@ -119,8 +119,8 @@ internal fun appDataAliases(path: Path): List<Path> {
     val userPrefix = Regex("""^/data/user/\d+/""")
     val alias: Path? =
         when {
-            userPrefix.containsMatchIn(text) -> Path.of(text.replaceFirst(userPrefix, "/data/data/"))
-            text.startsWith("/data/data/") -> Path.of(text.replaceFirst("/data/data/", "/data/user/0/"))
+            userPrefix.containsMatchIn(text) -> java.nio.file.Paths.get(text.replaceFirst(userPrefix, "/data/data/"))
+            text.startsWith("/data/data/") -> java.nio.file.Paths.get(text.replaceFirst("/data/data/", "/data/user/0/"))
             else -> null
         }
     return listOfNotNull(path, alias)
