@@ -44,6 +44,22 @@ val prepareAndChamberRuntimeNativeLibs =
         )
     }
 
+// Version: CI passes the tag-derived values as Gradle properties; local builds use the defaults.
+val appVersionName: String = providers.gradleProperty("andchamber.versionName").orNull ?: "0.0.1"
+val appVersionCode: Int = providers.gradleProperty("andchamber.versionCode").orNull?.toInt() ?: 1
+
+// Release signing is enabled only when all four values are provided (env var or Gradle property of
+// the same lowercase name). Without them release builds stay unsigned, so local builds still work.
+fun signingValue(name: String): String? =
+    (System.getenv(name) ?: providers.gradleProperty(name.lowercase()).orNull)?.takeIf { it.isNotBlank() }
+
+val releaseKeystoreFile = signingValue("ANDCHAMBER_KEYSTORE_FILE")
+val releaseKeystorePassword = signingValue("ANDCHAMBER_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("ANDCHAMBER_KEY_ALIAS")
+val releaseKeyPassword = signingValue("ANDCHAMBER_KEY_PASSWORD")
+val hasReleaseSigning =
+    listOf(releaseKeystoreFile, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword).all { it != null }
+
 android {
     namespace = "io.andchamber.app"
     compileSdk = 35
@@ -52,8 +68,8 @@ android {
         applicationId = "io.andchamber.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         // The on-device runtime only exists for these two ABIs (see prepare_android_runtime_native_libs.py).
         ndk {
@@ -65,9 +81,28 @@ android {
         }
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystoreFile!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                // v1 is kept for old verifiers; v2/v3 are what Android installs with.
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // No R8 in v0.0.1: shrinking is a separate risk to validate on device first.
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -108,6 +143,17 @@ android {
 
 tasks.named("preBuild").configure {
     dependsOn(prepareAndChamberRuntimeNativeLibs)
+}
+
+// Release APK is named AndChamber-<versionName>.apk for publishing. Debug keeps the AGP default.
+// AGP 8.5 exposes the output file name on the variant's ApkVariantOutput (the applicationVariants API).
+android.applicationVariants.all {
+    if (buildType.name == "release") {
+        outputs.all {
+            (this as com.android.build.gradle.internal.api.ApkVariantOutputImpl).outputFileName =
+                "AndChamber-$appVersionName.apk"
+        }
+    }
 }
 
 dependencies {
