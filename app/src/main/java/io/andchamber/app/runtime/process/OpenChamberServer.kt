@@ -194,6 +194,11 @@ class ProotOpenChamberServer(
                     }
                     onLog(line)
                 }
+            } catch (_: java.io.IOException) {
+                // Stop/destroy closes the pipe under us (InterruptedIOException on Android): normal end.
+            } catch (error: Throwable) {
+                // An uncaught throwable on this thread kills the whole app; log and end the pump instead.
+                runCatching { onLog("Output reader stopped: ${error.message}") }
             } finally {
                 runCatching { writer?.close() }
                 // The child's output ended: it has exited. Forget trust immediately.

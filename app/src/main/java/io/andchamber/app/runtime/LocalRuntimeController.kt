@@ -302,18 +302,29 @@ class DefaultLocalRuntimeController(
         watchdog?.cancel()
         watchdog =
             scope.launch {
+                var missedProbes = 0
                 while (true) {
                     delay(watchdogPollMillis)
                     val running = mutableState.value as? RuntimeState.Running ?: return@launch
-                    val healthy =
-                        runCatching { server.isAlive() && health.read(running.port)?.serverOk == true }
-                            .getOrElse { error ->
-                                if (error is CancellationException) throw error
-                                appendLog("Watchdog probe failed: ${error.message}")
-                                false
-                            }
-                    if (healthy) {
+                    // A dead child is certain; a slow /health is not. Opening the web UI fires a burst of
+                    // requests and a phone can take seconds to answer, so only a dead process or
+                    // several consecutive missed probes count as a crash (seen on device).
+                    val alive = runCatching { server.isAlive() }.getOrDefault(false)
+                    val answered =
+                        alive &&
+                            runCatching { withContext(ioDispatcher) { health.read(running.port)?.serverOk == true } }
+                                .getOrElse { error ->
+                                    if (error is CancellationException) throw error
+                                    appendLog("Watchdog probe failed: ${error.message}")
+                                    false
+                                }
+                    if (answered) {
+                        missedProbes = 0
                         restartPolicy.onHealthy(nowMillis())
+                        continue
+                    }
+                    if (alive && ++missedProbes < WATCHDOG_MISSES_BEFORE_RESTART) {
+                        appendLog("Server did not answer a health check ($missedProbes/$WATCHDOG_MISSES_BEFORE_RESTART)")
                         continue
                     }
                     startRecovery()
@@ -408,5 +419,6 @@ class DefaultLocalRuntimeController(
 
     private companion object {
         const val MAX_LOG_LINES = 400
+        const val WATCHDOG_MISSES_BEFORE_RESTART = 3
     }
 }

@@ -186,6 +186,52 @@ class ForeignListenerTest {
         assertEquals(null, srv.readyLaunchId())
     }
 
+    /**
+     * Android throws InterruptedIOException from the child's stream when stop closes it mid-read. The
+     * output thread must absorb that: an uncaught exception there crashes the whole app.
+     */
+    @Test
+    fun `output pump survives a stream closed mid-read without an uncaught exception`() {
+        val uncaught = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, error -> uncaught.set(error) }
+        try {
+            val closing =
+                object : Process() {
+                    private val stream =
+                        object : java.io.InputStream() {
+                            private var reads = 0
+
+                            override fun read(): Int {
+                                if (reads++ == 0) return 'O'.code
+                                throw java.io.InterruptedIOException("read interrupted by close() on another thread")
+                            }
+                        }
+
+                    override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+
+                    override fun getInputStream(): InputStream = stream
+
+                    override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+                    override fun waitFor(): Int = 0
+
+                    override fun exitValue(): Int = 0
+
+                    override fun destroy() {}
+
+                    override fun isAlive(): Boolean = false
+                }
+            val srv = server(closing, RecordingHealth(null), mutableListOf())
+            runCatching { srv.start(runtime(), "ui-secret", {}, { false }) }
+            Thread.sleep(200)
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+
+        assertEquals("no uncaught exception may escape the output thread", null, uncaught.get())
+    }
+
     @Test
     fun `the listen marker must match our port`() {
         assertTrue(Readiness.childListening(listOf("OpenChamber server listening on 127.0.0.1:3000"), 3000))

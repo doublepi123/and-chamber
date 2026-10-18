@@ -49,8 +49,9 @@ fun interface HealthProbe {
             HealthProbe { port ->
                 val connection = URL("http://127.0.0.1:$port/health").openConnection() as HttpURLConnection
                 try {
-                    connection.connectTimeout = 1_500
-                    connection.readTimeout = 2_000
+                    connection.connectTimeout = 2_000
+                    // Node on a phone can stall for seconds under the web UI's initial request burst.
+                    connection.readTimeout = 5_000
                     if (connection.responseCode !in 200..299) return@HealthProbe null
                     parse(connection.inputStream.bufferedReader().use { it.readText() })
                 } catch (_: Exception) {

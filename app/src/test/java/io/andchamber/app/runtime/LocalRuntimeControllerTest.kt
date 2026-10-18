@@ -12,6 +12,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestResult
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -57,6 +58,20 @@ class LocalRuntimeControllerTest {
         scopes.forEach { it.cancel() }
         scopes.clear()
     }
+
+    /**
+     * runTest waits for every coroutine on its scheduler before it returns. A live watchdog never
+     * finishes, so the controller scopes must be cancelled INSIDE the body; @After runs too late and
+     * the test hangs in runTest's end-of-body drain (seen as a >15 min hang).
+     */
+    private fun controllerTest(body: suspend TestScope.() -> Unit): TestResult =
+        runTest {
+            try {
+                body()
+            } finally {
+                scopes.forEach { it.cancel() }
+            }
+        }
 
     private class FakeInstaller(
         private val root: File,
@@ -180,7 +195,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `fresh device with no install reports NotInstalled after recovery`() =
-        runTest {
+        controllerTest {
             val installer = FakeInstaller(folder.root)
             val controller = controller(installer, FakeServer())
             controller.initialize()
@@ -192,14 +207,14 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `detecting is the initial state before the disk check`() =
-        runTest {
+        controllerTest {
             val controller = controller(FakeInstaller(folder.root), FakeServer())
             assertEquals(RuntimeState.Detecting, controller.state.value)
         }
 
     @Test
     fun `unsupported abi short-circuits to UnsupportedAbi`() =
-        runTest {
+        controllerTest {
             val controller = controller(FakeInstaller(folder.root), FakeServer(), abi = "x86_64")
             controller.initialize()
             step()
@@ -209,7 +224,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `install then start reaches Running and passes the UI password`() =
-        runTest {
+        controllerTest {
             val server = FakeServer()
             val states = mutableListOf<RuntimeState>()
             val controller = controller(FakeInstaller(folder.root), server, states = states)
@@ -225,7 +240,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `intermediate Stopped between install and start is published`() =
-        runTest {
+        controllerTest {
             val states = mutableListOf<RuntimeState>()
             val controller = controller(FakeInstaller(folder.root), FakeServer(), states = states)
             controller.perform(RuntimeOperation.Install)
@@ -240,7 +255,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `auto-start throwing becomes Failed(Start) and does not escape the scope`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer(startError = IllegalStateException("OpenCode backend failed to start: boom"))
             val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server)
@@ -257,7 +272,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `install failure is tagged Install so Retry reinstalls`() =
-        runTest {
+        controllerTest {
             val controller = controller(FakeInstaller(folder.root, installFails = true), FakeServer())
             controller.perform(RuntimeOperation.Install)
             step()
@@ -270,7 +285,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `rapid crash loop exhausts the budget and reports Failed(Runtime)`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer()
             val health = FakeHealth(ok = true)
@@ -297,7 +312,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `stop during backoff cancels the pending restart`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer()
             val health = FakeHealth(ok = true)
@@ -325,7 +340,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `a healthy window of two minutes refills the budget`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer()
             val health = FakeHealth(ok = true)
@@ -349,7 +364,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `busy clears after the budget is exhausted so the service can finish`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer()
             val health = FakeHealth(ok = true)
@@ -381,7 +396,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `a request arriving while the previous op finishes never publishes busy false while work is queued`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), FakeServer())
             controller.initialize()
@@ -403,7 +418,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `stop kills owned processes even when the server was never started`() =
-        runTest {
+        controllerTest {
             val killed = mutableListOf<Int>()
             val controller = controller(FakeInstaller(folder.root), FakeServer(), killed = killed)
             controller.perform(RuntimeOperation.Stop)
@@ -414,7 +429,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `repair stops owned processes and never discards the live environment first`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val killed = mutableListOf<Int>()
             val installer = FakeInstaller(root, installed = fakeRuntime(root))
@@ -433,7 +448,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `repair whose install fails leaves the old runtime installed and startable`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = fakeRuntime(root))
             val controller = controller(installer, FakeServer())
@@ -462,7 +477,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `install sets the run intent so a crash after the auto-start is recovered`() =
-        runTest {
+        controllerTest {
             val server = FakeServer()
             val health = FakeHealth(ok = true)
             val controller = controller(FakeInstaller(folder.root), server, health = health, watchdogPollMillis = 500L)
@@ -470,10 +485,9 @@ class LocalRuntimeControllerTest {
             step()
             assertTrue(controller.state.value is RuntimeState.Running)
 
-            // Server dies right after the auto-start; the watchdog must restart it.
-            health.ok = false
+            // The child dies right after the auto-start: the watchdog must restart it at once.
+            server.alive = false
             step(500L)
-            health.ok = true
             step(1_500L)
 
             assertEquals(2, server.starts.size)
@@ -482,9 +496,79 @@ class LocalRuntimeControllerTest {
             step()
         }
 
+    /** Alive child, /health silent. The watchdog must tolerate misses before it restarts anything. */
+    @Test
+    fun `alive child with two missed probes then a healthy answer does not restart`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server, health = health, watchdogPollMillis = 500L)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            health.ok = false
+            step(500L) // miss 1
+            step(500L) // miss 2
+            health.ok = true
+            step(1_000L)
+
+            assertEquals("no restart for two misses", 1, server.starts.size)
+            assertTrue(controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `alive child with three consecutive missed probes is recovered`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server, health = health, watchdogPollMillis = 500L)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            health.ok = false
+            step(500L) // miss 1
+            step(500L) // miss 2
+            step(500L) // miss 3 -> recovery
+            health.ok = true
+            step(3_000L)
+
+            assertEquals("three misses trigger a restart", 2, server.starts.size)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `dead child is recovered immediately without waiting for misses`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server, health = health, watchdogPollMillis = 500L)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            server.alive = false // the process is gone; /health is irrelevant
+            step(500L) // the very next watchdog tick
+            step(1_500L)
+
+            assertEquals("a dead child restarts on the first tick", 2, server.starts.size)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
     @Test
     fun `a failed automatic restart is retried within the budget and succeeds on the next attempt`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val server = FakeServer()
             val health = FakeHealth(ok = true)
@@ -504,10 +588,9 @@ class LocalRuntimeControllerTest {
             // Crash. The first automatic restart does not come up; the server is still dead during that
             // attempt, so the loop must consume another budget step (not give up) and try again.
             server.failNextStarts = 1
-            health.ok = false
+            server.alive = false // the child is gone: an immediate recovery, not a miss count
             step(500L) // death seen; restart begins: backoff 1 s, attempt fails
-            step(1_500L) // second backoff 1 s, second attempt
-            health.ok = true // the server comes up on the second attempt
+            step(1_500L) // second backoff 1 s, second attempt succeeds
             step(1_000L)
 
             assertTrue("expected Running after the retry, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
@@ -518,7 +601,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `uninstall returns to NotInstalled and removes the runtime`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = fakeRuntime(root))
             val controller = controller(installer, FakeServer())
@@ -533,7 +616,7 @@ class LocalRuntimeControllerTest {
 
     @Test
     fun `stop is not queued behind a long start - the cancel flag reaches the server`() =
-        runTest {
+        controllerTest {
             val root = folder.root
             var sawCancel = false
             val server =
