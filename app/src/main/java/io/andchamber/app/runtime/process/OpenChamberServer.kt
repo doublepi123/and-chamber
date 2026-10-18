@@ -6,7 +6,6 @@ import io.andchamber.app.runtime.install.InstalledRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
-import java.io.FileOutputStream
 import java.util.ArrayDeque
 
 /** Runs and stops the OpenChamber server process. */
@@ -191,7 +190,7 @@ class ProotOpenChamberServer(
         onLog: (String) -> Unit,
     ): Thread =
         Thread({
-            val writer = runCatching { FileOutputStream(paths.serverLog, true).bufferedWriter() }.getOrNull()
+            val writer = BoundedLogWriter(paths.serverLog, maxLogBytes)
             try {
                 process.inputStream.bufferedReader().forEachLine { line ->
                     // Desktop-notify lines carry user text: hand them to the sink, keep them out of the
@@ -205,11 +204,7 @@ class ProotOpenChamberServer(
                         while (recentOutput.size > DIAGNOSTIC_LINES) recentOutput.removeFirst()
                     }
                     if (line.contains(Readiness.listenMarker(port))) signal.complete(Unit)
-                    runCatching {
-                        writer?.write(line)
-                        writer?.newLine()
-                        writer?.flush()
-                    }
+                    writer.appendLine(line)
                     onLog(line)
                 }
             } catch (_: java.io.IOException) {
@@ -218,7 +213,6 @@ class ProotOpenChamberServer(
                 // An uncaught throwable on this thread kills the whole app; log and end the pump instead.
                 runCatching { onLog("Output reader stopped: ${error.message}") }
             } finally {
-                runCatching { writer?.close() }
                 // The child's output ended: it has exited. Forget trust immediately.
                 synchronized(lock) { if (this.process === process) readyId = null }
             }

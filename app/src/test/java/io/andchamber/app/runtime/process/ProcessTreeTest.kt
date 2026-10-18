@@ -7,6 +7,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 
 class ProcessTreeTest {
     @get:Rule val folder = TemporaryFolder()
@@ -156,5 +159,73 @@ class ProcessTreeTest {
         val remaining = logFile.readText()
         assertTrue("truncated log is too large: ${remaining.length}", remaining.length <= 50 + 30)
         assertTrue(remaining.contains("19$line") || remaining.contains("18$line"))
+    }
+
+    @Test
+    fun `bounded writer limits repeated appends and preserves recent UTF8 content`() {
+        val log = folder.newFile("bounded.log")
+        val writer = BoundedLogWriter(log, 32)
+        repeat(8) {
+            writer.appendLine("记录-$it")
+            assertTrue("size after append $it was ${log.length()}", log.length() <= 32)
+        }
+        assertTrue(log.readText().contains("记录-7"))
+    }
+
+    @Test
+    fun `bounded writer handles oversized line and nonpositive limits`() {
+        val log = folder.newFile("oversized.log")
+        BoundedLogWriter(log, 12).appendLine("x".repeat(500))
+        assertTrue(log.length() <= 12)
+        log.writeText("history".repeat(10000))
+        BoundedLogWriter(log, 0).appendLine("discard")
+        assertEquals(0L, log.length())
+        BoundedLogWriter(log, -1).appendLine("discard")
+        assertEquals(0L, log.length())
+    }
+
+    @Test
+    fun `small limits and oversized multilingual lines retain valid UTF8 without append holes`() {
+        val log = folder.newFile("small-limit.log")
+        for (limit in 1L..8L) {
+            val writer = BoundedLogWriter(log, limit)
+            writer.appendLine("中文🙂🚀".repeat(100))
+            assertTrue("limit=$limit size=${log.length()}", log.length() <= limit)
+            assertValidUtf8(log)
+            writer.appendLine("新🙂")
+            assertTrue("limit=$limit size=${log.length()}", log.length() <= limit)
+            val content = log.readBytes()
+            assertFalse("unexpected NUL at limit=$limit", content.contains(0.toByte()))
+            assertValidUtf8(content)
+        }
+    }
+
+    @Test
+    fun `writer bounds old history without reading the full file into memory`() {
+        val log = folder.newFile("history.log")
+        RandomAccessFile(log, "rw").use { raf ->
+            raf.setLength(Int.MAX_VALUE.toLong() + 1024L)
+            val recentHistory = "old-tail\nsecond\n".toByteArray(Charsets.UTF_8)
+            raf.seek(raf.length() - recentHistory.size)
+            raf.write(recentHistory)
+        }
+        truncateLogFile(log, 64)
+        assertTrue(log.length() <= 64)
+        val writer = BoundedLogWriter(log, 64)
+        writer.appendLine("recent")
+        assertTrue(log.length() <= 64)
+        val retained = log.readBytes()
+        assertTrue(retained.toString(Charsets.UTF_8).contains("recent"))
+        assertFalse(retained.contains(0.toByte()))
+        assertValidUtf8(retained)
+    }
+
+    private fun assertValidUtf8(file: File) = assertValidUtf8(file.readBytes())
+
+    private fun assertValidUtf8(bytes: ByteArray) {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        decoder.decode(ByteBuffer.wrap(bytes))
     }
 }

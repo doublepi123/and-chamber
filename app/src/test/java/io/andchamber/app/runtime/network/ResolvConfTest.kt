@@ -8,9 +8,9 @@ import org.junit.Test
 
 class ResolvConfTest {
     @Test
-    fun `system servers come first and public fills the remaining slots`() {
+    fun `usable system servers are used without public resolvers`() {
         assertEquals(
-            "nameserver 192.168.1.1\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n",
+            "nameserver 192.168.1.1\n",
             ResolvConf.render(listOf("192.168.1.1")),
         )
     }
@@ -30,28 +30,29 @@ class ResolvConfTest {
     @Test
     fun `duplicates are removed`() {
         assertEquals(
-            listOf("8.8.8.8", "1.1.1.1"),
+            listOf("8.8.8.8"),
             ResolvConf.servers(listOf("8.8.8.8", "8.8.8.8")),
         )
     }
 
     @Test
+    fun `empty and unusable system servers use public fallback`() {
+        assertEquals(ResolvConf.PUBLIC_FALLBACK, ResolvConf.servers(emptyList()))
+        assertEquals(ResolvConf.PUBLIC_FALLBACK, ResolvConf.servers(listOf("", "0.0.0.0", "::", "bad addr")))
+    }
+
+    @Test
     fun `ipv6 scope ids and brackets are stripped`() {
         assertEquals(
-            listOf("fe80::1", "2001:db8::53", "1.1.1.1"),
+            listOf("fe80::1", "2001:db8::53"),
             ResolvConf.servers(listOf("fe80::1%wlan0", "[2001:db8::53]")),
         )
     }
 
     @Test
-    fun `unusable addresses are dropped and fall back to public`() {
-        assertEquals(ResolvConf.PUBLIC_FALLBACK, ResolvConf.servers(listOf("", "0.0.0.0", "::", "bad addr")))
-    }
-
-    @Test
-    fun `ipv6 system server is kept ahead of public resolvers`() {
+    fun `ipv6 system server is kept without public resolvers`() {
         assertEquals(
-            listOf("2408:8888::53", "1.1.1.1", "8.8.8.8"),
+            listOf("2408:8888::53"),
             ResolvConf.servers(listOf("2408:8888::53")),
         )
     }

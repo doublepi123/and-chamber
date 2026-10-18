@@ -14,6 +14,8 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Port identity. A foreign process may hold the OpenChamber port. Trust order in readiness is:
@@ -99,6 +101,8 @@ class ForeignListenerTest {
         health: HealthProbe,
         spawned: MutableList<Boolean>,
         precheckFree: Boolean = true,
+        maxLogBytes: Long = 1_048_576L,
+        notificationSink: (String) -> Unit = {},
     ) = ProotOpenChamberServer(
         paths = RuntimePaths(folder.root),
         suite = {
@@ -116,6 +120,8 @@ class ForeignListenerTest {
         cleanBeforeStart = { _, _, _ -> precheckFree },
         readyTimeoutMillis = 2_000L,
         pollMillis = 1L,
+        maxLogBytes = maxLogBytes,
+        notificationSink = notificationSink,
         sleep = { Thread.sleep(1) },
         spawn = { _, _, _ ->
             spawned += true
@@ -257,6 +263,52 @@ class ForeignListenerTest {
         assertEquals(listOf(notifyLine), sunk)
         assertFalse("the raw notify line must not be logged", logged.any { it.startsWith("[OpenChamberDesktopNotify]") })
         assertTrue(logged.contains("booting"))
+    }
+
+    @Test
+    fun `output pump bounds persisted log while routing notification lines away`() {
+        val notifyLine = "[OpenChamberDesktopNotify] private notification payload"
+        val lastLine = "PERSISTED-LAST-MARKER"
+        val child = FakeChild(
+            output = buildString {
+                append("OpenChamber server listening on 127.0.0.1:$port\n")
+                repeat(12) { append("ordinary-output-line-$it\n") }
+                append("$notifyLine\n")
+                append("$lastLine\n")
+            },
+            exitCode = 0,
+            lifetimeMillis = 10_000L,
+        )
+        val health = RecordingHealth(
+            HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours"),
+        )
+        val notifySeen = CountDownLatch(1)
+        val finalLogged = CountDownLatch(1)
+        val logLines = mutableListOf<String>()
+        val server = server(
+            child,
+            health,
+            mutableListOf(),
+            maxLogBytes = 96,
+            notificationSink = { if (it == notifyLine) notifySeen.countDown() },
+        )
+        try {
+            server.start(runtime(), "ui-secret", {
+                synchronized(logLines) { logLines += it }
+                if (it == lastLine) finalLogged.countDown()
+            }, { false })
+            assertTrue("output pump did not log final line", finalLogged.await(2, TimeUnit.SECONDS))
+            assertTrue("notification line was not routed", notifySeen.await(2, TimeUnit.SECONDS))
+
+            val log = RuntimePaths(folder.root).serverLog
+            assertTrue("server log exceeded cap: ${log.length()}", log.length() <= 96L)
+            val persisted = log.readText()
+            assertTrue(persisted.contains(lastLine))
+            assertFalse(persisted.contains("OpenChamberDesktopNotify"))
+            assertFalse(synchronized(logLines) { logLines.any { it.startsWith("[OpenChamberDesktopNotify]") } })
+        } finally {
+            server.stop()
+        }
     }
 
     private fun serverWithSink(

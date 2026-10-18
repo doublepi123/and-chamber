@@ -24,10 +24,9 @@ class AndroidSystemDnsProvider(
 /**
  * The guest's /etc/resolv.conf. Rendering is pure so the policy is unit-tested.
  *
- * musl reads at most three nameservers, so the list is capped at three. System servers come first
- * because they are the ones that work on this network; public resolvers fill the remaining slots,
- * or are used alone when the system reports none. Public DNS is blocked on some networks, so it is
- * never the only choice when the system has servers.
+ * musl reads at most three nameservers, so the list is capped at three. When the system reports
+ * usable servers, only those are used: public DNS may be blocked or inappropriate for this network.
+ * Public resolvers are used only when no usable system server is available.
  */
 object ResolvConf {
     const val MAX_NAMESERVERS = 3
@@ -36,7 +35,7 @@ object ResolvConf {
     fun servers(system: List<String>): List<String> {
         val usable = system.map(::normalize).filter(::isUsable).distinct().take(MAX_NAMESERVERS)
         if (usable.isEmpty()) return PUBLIC_FALLBACK
-        return (usable + PUBLIC_FALLBACK).distinct().take(MAX_NAMESERVERS)
+        return usable
     }
 
     fun render(system: List<String>): String =

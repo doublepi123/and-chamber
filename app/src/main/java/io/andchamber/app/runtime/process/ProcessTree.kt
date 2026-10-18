@@ -1,6 +1,7 @@
 package io.andchamber.app.runtime.process
 
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
 
 /**
@@ -154,13 +155,61 @@ internal fun truncateLogFile(
     maxBytes: Long,
 ) {
     if (!logFile.isFile) return
-    if (logFile.length() <= maxBytes) return
-    runCatching {
-        val keepSize = maxBytes / 2
-        val bytes = logFile.readBytes()
-        val cutPoint = (bytes.size - keepSize.toInt()).coerceAtLeast(0)
-        val lineBreak = (cutPoint until bytes.size).firstOrNull { bytes[it] == '\n'.code.toByte() } ?: -1
-        val start = if (lineBreak >= 0 && lineBreak < bytes.size - 1) lineBreak + 1 else cutPoint
-        logFile.writeBytes(bytes.copyOfRange(start, bytes.size))
+    runCatching { BoundedLogWriter(logFile, maxBytes) }
+}
+
+/** Appends UTF-8 log lines while retaining only a bounded recent tail on disk. */
+internal class BoundedLogWriter(private val file: File, private val maxBytes: Long) {
+    init {
+        file.parentFile?.mkdirs()
+        runCatching { RandomAccessFile(file, "rw").use { trim(it) } }
+    }
+
+    @Synchronized fun appendLine(line: String) {
+        if (maxBytes <= 0) {
+            runCatching { RandomAccessFile(file, "rw").use { it.setLength(0) } }
+            return
+        }
+        // Avoid a second allocation proportional to an arbitrarily long line. Only its newest
+        // maxBytes characters can possibly contribute to the retained UTF-8 tail.
+        val boundedLine = if (line.length.toLong() > maxBytes) line.takeLast(maxBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) else line
+        val bytes = (boundedLine + "\n").toByteArray(Charsets.UTF_8)
+        runCatching {
+            RandomAccessFile(file, "rw").use { raf ->
+                trim(raf)
+                if (bytes.size.toLong() >= maxBytes) {
+                    val start = utf8Start(bytes, (bytes.size - maxBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()).coerceAtLeast(0))
+                    raf.setLength(0)
+                    raf.write(bytes, start, bytes.size - start)
+                } else {
+                    raf.seek(raf.length())
+                    raf.write(bytes)
+                    if (raf.length() > maxBytes) trim(raf)
+                }
+            }
+        }
+    }
+
+    private fun trim(raf: RandomAccessFile) {
+        if (maxBytes <= 0) { raf.setLength(0); return }
+        val size = raf.length()
+        if (size <= maxBytes) return
+        val keep = (maxBytes / 2).coerceAtLeast(1).coerceAtMost(Int.MAX_VALUE.toLong())
+        val cut = (size - keep).coerceAtLeast(0)
+        val count = (size - cut).toInt()
+        val tail = ByteArray(count)
+        raf.seek(cut)
+        raf.readFully(tail)
+        val newline = tail.indexOf(10.toByte())
+        val start = if (newline >= 0 && newline + 1 < tail.size) newline + 1 else utf8Start(tail, 0)
+        val retained = tail.copyOfRange(start, tail.size)
+        raf.setLength(0)
+        raf.write(retained)
+    }
+
+    private fun utf8Start(bytes: ByteArray, requested: Int): Int {
+        var start = requested.coerceIn(0, bytes.size)
+        while (start < bytes.size && (bytes[start].toInt() and 0xC0) == 0x80) start++
+        return start
     }
 }

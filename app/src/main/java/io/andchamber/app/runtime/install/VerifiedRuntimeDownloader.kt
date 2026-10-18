@@ -56,6 +56,13 @@ class VerifiedRuntimeDownloader(
         val backup = File(destination.parentFile, destination.name + ".backup")
         recoverBackupIfDestinationMissing(destination, backup)
 
+        if (isValidArchive(destination, expectedSha256, expectedSizeBytes)) {
+            partial.delete()
+            backup.delete()
+            onProgress(1f)
+            return
+        }
+
         var completed = false
         var validationFailed = false
         try {
@@ -69,10 +76,7 @@ class VerifiedRuntimeDownloader(
             // Verify the preserved body first so a complete partial can be activated offline.
             val partialAlreadyComplete =
                 downloaded > 0L &&
-                    (expectedSizeBytes == null || downloaded == expectedSizeBytes) &&
-                    runCatching {
-                        RuntimeArchive.verifySha256(partial, expectedSha256)
-                    }.isSuccess
+                    isValidArchive(partial, expectedSha256, expectedSizeBytes)
             if (!partialAlreadyComplete && expectedSizeBytes != null && downloaded == expectedSizeBytes) {
                 partial.delete()
                 downloaded = 0L
@@ -135,11 +139,7 @@ class VerifiedRuntimeDownloader(
                 validationFailed = false
             }
 
-            if (destination.isFile &&
-                runCatching {
-                    RuntimeArchive.verifySha256(destination, expectedSha256)
-                }.isSuccess
-            ) {
+            if (isValidArchive(destination, expectedSha256, expectedSizeBytes)) {
                 partial.delete()
                 backup.delete()
                 onProgress(1f)
@@ -177,6 +177,11 @@ class VerifiedRuntimeDownloader(
             recoverBackupIfDestinationMissing(destination, backup)
         }
     }
+
+    private fun isValidArchive(file: File, expectedSha256: String, expectedSizeBytes: Long?): Boolean =
+        file.isFile &&
+            (expectedSizeBytes == null || file.length() == expectedSizeBytes) &&
+            runCatching { RuntimeArchive.verifySha256(file, expectedSha256) }.isSuccess
 
     private fun recoverBackupIfDestinationMissing(
         destination: File,
