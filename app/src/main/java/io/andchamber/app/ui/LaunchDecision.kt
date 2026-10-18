@@ -65,6 +65,12 @@ internal fun initialLaunchStage(
     }
 }
 
+/** [path] (`/?session=…`) on the server at [baseUrl], e.g. `http://127.0.0.1:3000/?session=…`. */
+internal fun withSessionPath(
+    baseUrl: String,
+    path: String,
+): String = baseUrl.trimEnd('/') + "/" + path.trimStart('/')
+
 /**
  * A start that was just requested reads as Starting until the runtime reports back, so screens
  * don't show "Stopped" (or the old failure) for the moment the service takes to pick it up.

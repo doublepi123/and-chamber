@@ -15,7 +15,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        offerSessionFrom(intent)
+        // A recreated activity still carries the intent it was first launched with; that tap was
+        // already handled (or is kept in the UI's saved state), so it is offered only once.
+        if (savedInstanceState == null) offerSessionFrom(intent)
         setContent {
             AndChamberApp(
                 runtime = get<LocalRuntimeController>(),
@@ -34,6 +36,8 @@ class MainActivity : ComponentActivity() {
 
     private fun offerSessionFrom(intent: android.content.Intent?) {
         if (intent?.action != io.andchamber.app.notify.OpenChamberNotifier.ACTION_OPEN_SESSION) return
+        // Reopening from Recents replays the original notification intent; that isn't a new tap.
+        if (intent.flags and android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
         io.andchamber.app.notify.OpenSessionLink.offer(
             sessionId = intent.getStringExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_SESSION_ID),
             directory = intent.getStringExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_DIRECTORY),

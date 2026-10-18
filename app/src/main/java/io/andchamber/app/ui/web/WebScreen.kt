@@ -49,6 +49,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,6 +74,7 @@ import io.andchamber.app.ui.displayAddress
 import io.andchamber.app.ui.findActivity
 import io.andchamber.app.ui.label
 import io.andchamber.app.ui.rememberLastNonNull
+import io.andchamber.app.ui.withSessionPath
 import kotlinx.coroutines.CancellationException
 import java.util.Locale
 
@@ -125,6 +127,9 @@ internal fun WebScreen(
     onExit: () -> Unit,
     onStartLocal: () -> Unit,
     onSystemBarColor: (Color?) -> Unit,
+    /** A path such as `/?session=…` to show instead of the start page; reported back once used. */
+    deepLinkPath: String? = null,
+    onDeepLinkUsed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val inspection = LocalInspectionMode.current
@@ -148,6 +153,10 @@ internal fun WebScreen(
         )
     }
     var attempt by remember(web) { mutableIntStateOf(0) }
+    // Read when the page is actually loaded, which can be long after this screen appeared
+    // (e.g. the local server was still starting).
+    val latestDeepLink by rememberUpdatedState(deepLinkPath)
+    val latestDeepLinkUsed by rememberUpdatedState(onDeepLinkUsed)
 
     LaunchedEffect(web, sessionKey, attempt) {
         val view = web ?: return@LaunchedEffect
@@ -168,17 +177,26 @@ internal fun WebScreen(
             }
         phase =
             when (result) {
-                is WebSessionResult.Ready -> {
-                    view.load(result.url, key)
-                    SessionPhase.Loaded
-                }
-                // OpenChamber shows its own sign-in page in this case.
-                is WebSessionResult.NeedsLogin -> {
-                    view.load(result.url, key)
+                // NeedsLogin: OpenChamber shows its own sign-in page at the same address.
+                is WebSessionResult.Ready, is WebSessionResult.NeedsLogin -> {
+                    val start = if (result is WebSessionResult.Ready) result.url else (result as WebSessionResult.NeedsLogin).url
+                    // A session picked from a notification is the first page, not a second load.
+                    val link = latestDeepLink
+                    view.load(link?.let { withSessionPath(start, it) } ?: start, key)
+                    if (link != null) latestDeepLinkUsed()
                     SessionPhase.Loaded
                 }
                 is WebSessionResult.Unreachable -> SessionPhase.Unreachable(result.reason)
             }
+    }
+
+    // A session picked while this server's page is already loaded: open it in place.
+    LaunchedEffect(web, deepLinkPath, phase, sessionKey) {
+        val view = web ?: return@LaunchedEffect
+        val link = deepLinkPath ?: return@LaunchedEffect
+        val base = target?.baseUrl ?: return@LaunchedEffect
+        if (phase != SessionPhase.Loaded || sessionKey == null || view.sessionKey != sessionKey) return@LaunchedEffect
+        if (view.navigateWithinSession(withSessionPath(base, link))) latestDeepLinkUsed()
     }
 
     val retry = {

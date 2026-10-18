@@ -65,6 +65,13 @@ class LaunchDecisionTest {
     }
 
     @Test
+    fun `session path joins the server address with one slash`() {
+        assertEquals("http://127.0.0.1:3000/?session=ses_1", withSessionPath("http://127.0.0.1:3000", "/?session=ses_1"))
+        assertEquals("http://127.0.0.1:3000/?session=ses_1", withSessionPath("http://127.0.0.1:3000/", "/?session=ses_1"))
+        assertEquals("http://127.0.0.1:3000/?session=a%20b", withSessionPath("http://127.0.0.1:3000", "?session=a%20b"))
+    }
+
+    @Test
     fun `real states pass through`() {
         assertSame(running, shownLocalState(running, pendingStartFrom = RuntimeState.Stopped))
         val starting = RuntimeState.Starting("Starting OpenChamber on port 3000")

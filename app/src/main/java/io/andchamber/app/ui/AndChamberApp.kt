@@ -20,6 +20,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -45,6 +46,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import io.andchamber.app.notify.OpenSessionLink
 import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RemoteServerStore
@@ -118,6 +120,9 @@ private class LocalActions(
         askForNotifications()
         inSetup = false
         val from = runtime.state.value
+        // A start already requested from this same state hasn't reached the runtime yet; a second
+        // one would queue behind it and start the server twice.
+        if (pendingStartFrom != null && from == pendingStartFrom) return
         runtime.start()
         // The request only reaches the runtime through the service, a moment later.
         if (from is RuntimeState.Stopped || from is RuntimeState.Failed) pendingStartFrom = from
@@ -216,10 +221,17 @@ fun AndChamberApp(
         val uiPrefs = rememberUiPrefs()
         val inspection = LocalInspectionMode.current
         val lifecycle = LocalLifecycleOwner.current.lifecycle
+        // A session picked from a notification (`/?session=…`), held until the local page shows it.
+        // Saved, so it survives recreation; cleared once used, so it never applies twice.
+        var sessionLink by rememberSaveable { mutableStateOf<String?>(null) }
+        // A notification tap asks for the local server even when opening it on launch is off.
+        val wantsLocal = {
+            !inspection && (uiPrefs.autoOpenLocal || sessionLink != null || OpenSessionLink.pending.value != null)
+        }
         // Saved, so recreation never runs the decision again; Back to Home then stays on Home.
         var launchPending by rememberSaveable { mutableStateOf(true) }
         var stage by remember {
-            mutableStateOf(initialLaunchStage(launchPending, !inspection && uiPrefs.autoOpenLocal, runtime.state.value))
+            mutableStateOf(initialLaunchStage(launchPending, wantsLocal(), runtime.state.value))
         }
         // A tap on the app icon while the app is open on Home counts as a new launch.
         LauncherIntentEffect {
@@ -228,7 +240,7 @@ fun AndChamberApp(
         }
         LaunchedEffect(launchPending) {
             if (!launchPending) return@LaunchedEffect
-            if (!inspection && uiPrefs.autoOpenLocal) {
+            if (wantsLocal()) {
                 try {
                     openLocalOnLaunch(
                         runtime = runtime,
@@ -248,6 +260,36 @@ fun AndChamberApp(
             }
             stage = LaunchStage.Done
             launchPending = false
+        }
+
+        // --- Notification taps: open the notified session in the local OpenChamber. ---
+        var linkRequest by remember { mutableIntStateOf(0) }
+        LaunchedEffect(inspection) {
+            if (inspection) return@LaunchedEffect
+            OpenSessionLink.pending.collect { offered ->
+                if (offered == null) return@collect
+                val taken = OpenSessionLink.take() ?: return@collect
+                sessionLink = OpenSessionLink.pathFor(taken.sessionId)
+                linkRequest++
+            }
+        }
+        LaunchedEffect(linkRequest) {
+            if (sessionLink == null) return@LaunchedEffect
+            // A launch in progress opens the local server itself (it counts the link as a reason to).
+            snapshotFlow { launchPending }.first { pending -> !pending }
+            try {
+                openLocalForLink(
+                    runtime = runtime,
+                    nav = nav,
+                    lifecycle = lifecycle,
+                    local = local,
+                    onDiscard = { sessionLink = null },
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                sessionLink = null
+            }
         }
 
         var webBarColor by remember { mutableStateOf<Color?>(null) }
@@ -348,9 +390,15 @@ fun AndChamberApp(
                             sessionKey = sessionKey,
                             auth = auth,
                             pool = pool,
-                            onExit = { nav.closeIfResumed(entry) },
+                            onExit = {
+                                // Leaving on purpose: a session that never got to open isn't kept.
+                                if (isLocal) sessionLink = null
+                                nav.closeIfResumed(entry)
+                            },
                             onStartLocal = local::startOrRetry,
                             onSystemBarColor = { webBarColor = it },
+                            deepLinkPath = if (isLocal) sessionLink else null,
+                            onDeepLinkUsed = { sessionLink = null },
                         )
                     }
                 }
@@ -424,6 +472,44 @@ private suspend fun openLocalOnLaunch(
 }
 
 /**
+ * A notification tap: show the local OpenChamber, starting the server first if it is stopped. The
+ * web screen then opens the session itself (on its first load, or in place if already loaded).
+ * Setup, problems and unsupported devices land on Home, and the link is dropped ([onDiscard]).
+ */
+private suspend fun openLocalForLink(
+    runtime: LocalRuntimeController,
+    nav: NavHostController,
+    lifecycle: Lifecycle,
+    local: LocalActions,
+    onDiscard: () -> Unit,
+) {
+    runtime.state.first { it != RuntimeState.Detecting }
+    withTimeoutOrNull(NAV_READY_TIMEOUT_MS) { nav.currentBackStackEntryFlow.first() } ?: return onDiscard()
+    // A tap brings the app to the foreground; a start needs it there. No suspension after this.
+    lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+    val entry = nav.currentBackStackEntry
+    val onLocal =
+        entry?.destination?.route == Routes.WEB && entry.arguments?.getString(Routes.ARG_TARGET) == ServerTarget.LOCAL_ID
+    // A start the launch just requested reads as Starting, so it isn't requested a second time.
+    when (launchTarget(shownLocalState(runtime.state.value, local.pendingStartFrom))) {
+        LaunchTarget.StartAndOpenLocal -> if (runCatching { local.start() }.isFailure) return onDiscard()
+        LaunchTarget.OpenLocal -> Unit
+        LaunchTarget.Home, LaunchTarget.Wait -> {
+            onDiscard()
+            if (entry?.destination?.route != Routes.HOME) nav.showHome()
+            return
+        }
+    }
+    if (!onLocal) {
+        nav.navigate(Routes.web(ServerTarget.LOCAL_ID)) {
+            // From another server's page, Back still leads to Home.
+            popUpTo(Routes.HOME)
+            launchSingleTop = true
+        }
+    }
+}
+
+/**
  * Calls [onLauncherTap] when the app icon is tapped while this activity is alive. Android only
  * delivers that tap to an existing activity when it is declared `launchMode="singleTop"`.
  */
@@ -456,6 +542,10 @@ private fun NavHostController.openIfResumed(
 
 private fun NavHostController.closeIfResumed(entry: NavBackStackEntry) {
     if (!entry.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+    showHome()
+}
+
+private fun NavHostController.showHome() {
     if (!popBackStack(Routes.HOME, inclusive = false)) {
         navigate(Routes.HOME) {
             popUpTo(0)

@@ -171,6 +171,20 @@ internal class ChamberWebView(
         sessionKey = null
     }
 
+    /**
+     * Opens [url] in the session that is already loaded: same WebView, cookies and sign-in, the
+     * current page stays up until the new one paints. Only addresses on the session's own server
+     * are accepted. Returns false when no session is loaded.
+     */
+    fun navigateWithinSession(url: String): Boolean {
+        if (destroyed || sessionKey == null || origin.isEmpty() || originOf(url) != origin) return false
+        if (currentUrl == url && pageError == null) return true // Already showing it.
+        pageError = null
+        foreignRecoveries = 0
+        view.loadUrl(url)
+        return true
+    }
+
     fun reload() {
         if (destroyed) return
         pageError = null
