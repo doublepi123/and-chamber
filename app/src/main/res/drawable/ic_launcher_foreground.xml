@@ -1,17 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- AndChamber launcher foreground: the OpenChamber cube (same isometric geometry as
+     logo-dark-512x512.svg, scaled around the centre) with the OpenCode mark in amber on the open top.
+     The mark is pre-projected with the logo's matrix(0.866, 0.5, -0.866, 0.5, 0, -24), since vector
+     groups cannot skew. Everything stays inside the 66dp safe circle. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Terminal prompt chevron inside a chat bubble. -->
+    <!-- Left face -->
     <path
-        android:fillColor="#EDB449"
-        android:pathData="M24,30 H84 A6,6 0 0 1 90,36 V66 A6,6 0 0 1 84,72 H52 L38,84 V72 H24 A6,6 0 0 1 18,66 V36 A6,6 0 0 1 24,30 Z" />
+        android:fillColor="#FFFBF5EA"
+        android:fillAlpha="0.2"
+        android:pathData="M54,54 L31.483,41 L31.483,67 L54,80 Z" />
+    <!-- Right face -->
     <path
-        android:fillColor="#151313"
-        android:pathData="M34,42 L46,50 L34,58 L37,62 L52,50 L37,38 Z" />
+        android:fillColor="#FFFBF5EA"
+        android:fillAlpha="0.35"
+        android:pathData="M54,54 L76.517,41 L76.517,67 L54,80 Z" />
+    <!-- Edges: silhouette + inner Y (top face stays open) -->
     <path
-        android:fillColor="#151313"
-        android:pathData="M56,58 H72 V62 H56 Z" />
+        android:strokeColor="#FFFBF5EA"
+        android:strokeWidth="3.25"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M54,28 L76.517,41 L76.517,67 L54,80 L31.483,67 L31.483,41 Z M31.483,41 L54,54 L76.517,41 M54,54 L54,80" />
+    <!-- OpenCode mark, lower part of the hole -->
+    <path
+        android:fillColor="#FFEDB449"
+        android:fillAlpha="0.4"
+        android:pathData="M52.574,38.573 L58.203,41.823 L52.649,45.03 L47.02,41.78 Z" />
+    <!-- OpenCode mark frame, projected onto the top face -->
+    <path
+        android:fillColor="#FFEDB449"
+        android:fillType="evenOdd"
+        android:pathData="M55.351,33.46 L67.06,40.22 L52.649,48.54 L40.94,41.78 Z M55.351,36.97 L60.98,40.22 L52.649,45.03 L47.02,41.78 Z" />
 </vector>

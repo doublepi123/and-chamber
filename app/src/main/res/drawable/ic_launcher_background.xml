@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AndChamber launcher background: warm black (#151313) with a faint amber glow behind the cube's open top. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Warm black base (same colour as the app background) -->
+    <path
+        android:fillColor="@color/ic_launcher_background"
+        android:pathData="M0,0 H108 V108 H0 Z" />
+    <!-- Soft glow behind the open top of the cube -->
+    <path android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="41"
+                android:gradientRadius="44"
+                android:type="radial">
+                <item
+                    android:color="#24EDB449"
+                    android:offset="0" />
+                <item
+                    android:color="#16EDB449"
+                    android:offset="0.35" />
+                <item
+                    android:color="#07EDB449"
+                    android:offset="0.7" />
+                <item
+                    android:color="#00EDB449"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
