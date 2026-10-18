@@ -124,7 +124,14 @@ class SharedStorageControllerImpl(
         check(projects.isDirectory) { "cannot create ${projects.path}" }
         val sharedOpencode = SharedStorageLayout.opencodeDir(hostRoot)
         val privateOpencode = File(paths.home, ".config/opencode")
-        SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(privateOpencode, sharedOpencode))
+        // Once only: after the first migration the shared folder is authoritative, so a file the user
+        // deletes there must not come back from the stale private copy on the next start.
+        val migrated = File(privateExceptionsDir(), ".migrated-to-shared")
+        if (!migrated.isFile) {
+            SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(privateOpencode, sharedOpencode))
+            migrated.parentFile?.mkdirs()
+            migrated.writeText("1\n")
+        }
         SharedStorageLayout.ensureMinimal(sharedOpencode)
         File(hostRoot, SharedStorageLayout.README).writeText(SharedStorageLayout.readme(hostRoot))
     }
