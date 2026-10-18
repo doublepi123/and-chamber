@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/icon/preview.png" alt="AndChamber icon" width="520">
+  <img src="docs/icon/icon.png" alt="AndChamber" width="112">
 </p>
 
 # AndChamber
