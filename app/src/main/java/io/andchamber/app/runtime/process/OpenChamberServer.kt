@@ -59,6 +59,14 @@ class ProotOpenChamberServer(
     private val refreshDns: (InstalledRuntime) -> Unit = {},
     /** Pre-start cleanup; returns true when the port is free afterwards. */
     private val cleanBeforeStart: (port: Int, guestRunDir: File, prootPath: String) -> Boolean = { _, _, _ -> true },
+    /** The bind set for this launch (shared storage decision). Defaults to private-only. */
+    private val bindsForStart: () -> io.andchamber.app.runtime.storage.GuestBinds = {
+        io.andchamber.app.runtime.storage.GuestBinds.privateOnly(paths.home, paths.workspace)
+    },
+    /** Told the binds a launch actually started with, so restartRequired can compare against it. */
+    private val onStarted: (io.andchamber.app.runtime.storage.GuestBinds) -> Unit = {},
+    /** Told when the server stops, so nothing is marked as needing a restart. */
+    private val onStopped: () -> Unit = {},
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -119,14 +127,13 @@ class ProotOpenChamberServer(
         paths.prootTmp.mkdirs()
         truncateLogFile(paths.serverLog, maxLogBytes)
 
+        val binds = bindsForStart()
         val command =
             ProotCommands.serverCommand(
                 proot = resolved.proot,
                 rootfs = runtime.rootfs,
-                home = paths.home,
-                workspace = paths.workspace,
-                // No device-storage binds: MANAGE_EXTERNAL_STORAGE was removed (YAGNI for v1).
-                storageArguments = emptyList(),
+                binds = binds,
+                extraBinds = emptyList(),
                 port = port,
             )
         val env = ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword)
@@ -151,6 +158,7 @@ class ProotOpenChamberServer(
             // Only the launch that is still the current child becomes trusted.
             if (process === started) readyId = id
         }
+        onStarted(binds)
         return id
     }
 
@@ -166,6 +174,7 @@ class ProotOpenChamberServer(
         val roots =
             proot?.let { scanner.ownedRoots(prootPath = it, rootfsPath = paths.rootfs.absolutePath) }.orEmpty()
         terminateProcessTree(current, scanner, roots, signal)
+        onStopped()
     }
 
     /**

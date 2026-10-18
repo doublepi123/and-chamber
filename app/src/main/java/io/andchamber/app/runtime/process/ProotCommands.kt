@@ -1,5 +1,7 @@
 package io.andchamber.app.runtime.process
 
+import io.andchamber.app.runtime.storage.GuestBinds
+import io.andchamber.app.runtime.storage.SharedStorageLayout
 import java.io.File
 
 /**
@@ -58,7 +60,7 @@ object ProotCommands {
         ) +
             listOf("/bin/sh", "-lc", script)
 
-    /** The OpenChamber server, bound to loopback and running in the foreground. */
+    /** The OpenChamber server, bound to loopback and running in the foreground. Private-only binds. */
     fun serverCommand(
         proot: File,
         rootfs: File,
@@ -67,12 +69,29 @@ object ProotCommands {
         storageArguments: List<String>,
         port: Int,
     ): List<String> =
+        serverCommand(
+            proot = proot,
+            rootfs = rootfs,
+            binds = GuestBinds.privateOnly(home = home, privateWorkspace = workspace),
+            extraBinds = storageArguments,
+            port = port,
+        )
+
+    /**
+     * The OpenChamber server with an explicit bind set. The working directory is /workspace, so the
+     * shared projects folder is the default project when shared storage is active.
+     */
+    fun serverCommand(
+        proot: File,
+        rootfs: File,
+        binds: GuestBinds,
+        extraBinds: List<String>,
+        port: Int,
+    ): List<String> =
         prootArguments(
             proot,
             rootfs,
-            bindArguments(listOf(homeBindSpec(home), "${workspace.absolutePath}:/workspace")) +
-                storageArguments +
-                listOf("-w", "/workspace"),
+            bindArguments(binds.specs() + extraBinds) + listOf("-w", SharedStorageLayout.GUEST_WORKSPACE),
         ) +
             listOf(GUEST_NODE, OPENCHAMBER_CLI, "serve", "--foreground", "--port", port.toString())
 

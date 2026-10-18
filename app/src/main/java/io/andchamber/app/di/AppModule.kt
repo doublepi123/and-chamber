@@ -13,6 +13,11 @@ import io.andchamber.app.runtime.ForegroundStarter
 import io.andchamber.app.runtime.process.ProcessScanner
 import io.andchamber.app.runtime.process.OpenChamberServer
 import io.andchamber.app.runtime.process.killOwnedRuntime
+import io.andchamber.app.runtime.SharedStorageController
+import io.andchamber.app.runtime.storage.PrefsSharedStoragePrefs
+import io.andchamber.app.runtime.storage.SharedStorageAccess
+import io.andchamber.app.runtime.storage.SharedStorageControllerImpl
+import io.andchamber.app.runtime.storage.SharedStoragePermission
 import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RemoteServerStore
 import io.andchamber.app.runtime.RuntimePaths
@@ -61,12 +66,25 @@ val appModule =
 
         single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
 
+        single<SharedStorageControllerImpl> {
+            val context = get<Context>()
+            SharedStorageControllerImpl(
+                paths = RuntimePaths.under(context.filesDir),
+                hostRoot = SharedStorageAccess.defaultHostRoot(),
+                prefs = PrefsSharedStoragePrefs.open(context),
+                permission = SharedStoragePermission { SharedStorageAccess.granted(context) },
+            )
+        }
+
+        single<SharedStorageController> { get<SharedStorageControllerImpl>() }
+
         single<OpenChamberServer> {
             val context = get<Context>()
             val paths = RuntimePaths.under(context.filesDir)
             val nativeDir = File(context.applicationInfo.nativeLibraryDir)
             val suite = { EmbeddedCommandSuite(nativeDir, paths).resolve() }
             val scanner = ProcessScanner(myUid = Os.getuid(), myPid = Os.getpid().toLong())
+            val storage = get<SharedStorageControllerImpl>()
             ProotOpenChamberServer(
                 paths = paths,
                 suite = suite,
@@ -82,6 +100,9 @@ val appModule =
                         isPortFree = HealthProbe.Companion::isPortFree,
                     ).cleanBeforeStart(port, guestRunDir, proot)
                 },
+                bindsForStart = { storage.prepareForStart() },
+                onStarted = { binds -> storage.recordStarted(binds) },
+                onStopped = { storage.recordStopped() },
             )
         }
 
