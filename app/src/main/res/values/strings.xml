@@ -118,7 +118,7 @@
     <string name="allow_access">Allow access</string>
     <string name="storage_others_all_files">Other apps with all-files access can read this folder.</string>
     <string name="storage_others_legacy">Other apps with storage access can read this folder.</string>
-    <string name="storage_projects_dir">projects/ → ~/projects</string>
+    <string name="storage_projects_dir">projects/</string>
     <string name="storage_opencode_dir">opencode/</string>
     <string name="guest_projects">~/projects</string>
     <string name="guest_private_projects">~/projects-private</string>

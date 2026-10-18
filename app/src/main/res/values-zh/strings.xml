@@ -117,7 +117,7 @@
     <string name="allow_access">允许访问</string>
     <string name="storage_others_all_files">拥有“所有文件访问”权限的其他应用可以读取此文件夹。</string>
     <string name="storage_others_legacy">拥有存储访问权限的其他应用可以读取此文件夹。</string>
-    <string name="storage_projects_dir">projects/ → ~/projects</string>
+    <string name="storage_projects_dir">projects/</string>
     <string name="storage_opencode_dir">opencode/</string>
     <string name="guest_projects">~/projects</string>
     <string name="guest_private_projects">~/projects-private</string>
