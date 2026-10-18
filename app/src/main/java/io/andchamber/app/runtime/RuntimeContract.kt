@@ -99,6 +99,9 @@ interface LocalRuntimeController {
     /** Remove the whole runtime directory. */
     fun uninstall()
 
+    /** Stop and start again as one queued operation (applies new storage bindings). */
+    fun restart()
+
     /**
      * Runs one operation inside the foreground service. Called by RuntimeService only, after it has
      * started in the foreground. UI code uses install/start/stop/repair/uninstall above.

@@ -157,6 +157,8 @@ internal fun LocalRuntimeCard(
     onUninstall: () -> Unit,
     modifier: Modifier = Modifier,
     checking: Boolean = false,
+    /** True when projects live in the shared folder, which uninstall leaves in place. */
+    sharedFolderInUse: Boolean = false,
 ) {
     val phase = if (checking || state == RuntimeState.Detecting) RuntimePhase.Checking else state.phase
     var logOpen by rememberSaveable { mutableStateOf(false) }
@@ -291,7 +293,7 @@ internal fun LocalRuntimeCard(
         PendingConfirm.Uninstall ->
             ConfirmDialog(
                 title = Strings.uninstallDialogTitle,
-                body = Strings.uninstallDialogBody,
+                body = if (sharedFolderInUse) Strings.uninstallDialogBodyShared else Strings.uninstallDialogBody,
                 confirmLabel = Strings.uninstall,
                 onConfirm = onUninstall,
                 onDismiss = { confirm = null },

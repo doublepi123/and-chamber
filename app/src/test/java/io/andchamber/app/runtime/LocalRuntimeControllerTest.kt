@@ -600,6 +600,27 @@ class LocalRuntimeControllerTest {
         }
 
     @Test
+    fun `restart stops and starts again as one operation and ends Running`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+            assertTrue(controller.state.value is RuntimeState.Running)
+
+            controller.perform(RuntimeOperation.Restart)
+            step()
+
+            assertTrue("expected Running after restart, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            assertEquals(2, server.startAttempts)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
     fun `uninstall returns to NotInstalled and removes the runtime`() =
         controllerTest {
             val root = folder.root

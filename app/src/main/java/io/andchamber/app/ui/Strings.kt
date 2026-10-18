@@ -89,6 +89,44 @@ internal object Strings {
     const val unknownValue = "—"
     const val uninstall = "Uninstall"
 
+    // Shared storage
+    const val storageTitle = "Projects and settings folder"
+    const val storageOff = "Off"
+    const val storageNeedsAccess = "Needs access"
+    const val storageOn = "On"
+    const val storageFolderName = "AndChamber/"
+    const val storageIntro =
+        "Keep projects and OpenCode settings in AndChamber/ on your phone's storage, so you can edit them " +
+            "with a file manager or over USB."
+    const val storageNeedsAllFiles =
+        "AndChamber needs all-files access to use this folder. You can turn it on in system settings."
+    const val storageNeedsLegacy = "AndChamber needs access to your phone's storage to use this folder."
+    const val allowAccess = "Allow access"
+    const val storageOthersAllFiles = "Other apps with all-files access can read this folder."
+    const val storageOthersLegacy = "Other apps with storage access can read this folder."
+    const val storageProjectsDir = "projects/"
+    const val storageOpencodeDir = "opencode/"
+    const val guestWorkspace = "/workspace"
+    const val guestPrivateWorkspace = "/workspace-private"
+    const val storageOpencodeTarget = "OpenCode settings"
+    const val storagePrivate = "Private: sessions, sign-ins, plugins, /workspace-private"
+    const val storageUnavailable =
+        "AndChamber has access, but can't create AndChamber/ on your phone's storage. " +
+            "Make sure the storage is available."
+    const val checkAgain = "Check again"
+    const val storageCaveat =
+        "Shared storage doesn't keep symlinks or executable bits — use /workspace-private for projects " +
+            "that need node_modules."
+    const val copyFolderPath = "Copy folder path"
+    const val restartToApply = "Restart the server to apply"
+    const val restart = "Restart"
+    const val storageOffDialogTitle = "Stop using the shared folder?"
+    const val storageOffDialogBody =
+        "Your files stay in AndChamber/ on your phone's storage. From the next server start, OpenChamber " +
+            "uses its private folders again and won't see them."
+    const val turnOff = "Turn off"
+    const val cantOpenSettings = "Couldn't open system settings"
+
     const val repairDialogTitle = "Repair the Linux system?"
     const val repairDialogBody =
         "This stops OpenChamber, deletes the Linux system and installs it again, which downloads about 1.2 GB. " +
@@ -97,6 +135,9 @@ internal object Strings {
     const val uninstallDialogBody =
         "This stops OpenChamber and deletes the Linux system from this phone, including projects, sessions " +
             "and settings stored inside it. Saved servers are not affected."
+    const val uninstallDialogBodyShared =
+        "This stops OpenChamber and deletes the Linux system from this phone, including everything stored " +
+            "inside it. The AndChamber/ folder on your phone's storage is kept. Saved servers are not affected."
     const val cancel = "Cancel"
 
     // Remote servers

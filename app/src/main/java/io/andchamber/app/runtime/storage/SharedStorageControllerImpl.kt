@@ -50,11 +50,17 @@ class SharedStorageControllerImpl(
      * creates them, seeds the config, and writes the README. Failure to prepare falls back to private.
      */
     fun prepareForStart(): GuestBinds {
-        val status = decideStatus()
-        val binds = SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot)
+        var status = decideStatus()
         if (status == SharedStorageStatus.Active) {
-            prepareShared()
+            // Shared storage is a convenience: if it can't be prepared (FUSE refused, volume gone),
+            // start on private storage rather than failing the whole server start.
+            val prepared = runCatching { prepareShared() }
+            if (prepared.isFailure) {
+                android.util.Log.w("AndChamber", "Shared storage unavailable, using private", prepared.exceptionOrNull())
+                status = SharedStorageStatus.NeedsPermission
+            }
         }
+        val binds = SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot)
         // Placeholders must exist before PRoot binds a file onto them, in any status that binds them.
         if (binds.nestedConfig.isNotEmpty()) {
             SharedStorageDecision.placeholdersNeeded(paths.home).forEach { it.parentFile?.mkdirs(); it.createNewFile() }

@@ -7,6 +7,9 @@ import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeOperation
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
+import io.andchamber.app.runtime.SharedStorageController
+import io.andchamber.app.runtime.SharedStorageState
+import io.andchamber.app.runtime.SharedStorageStatus
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.WebSessionResult
 import kotlinx.coroutines.awaitCancellation
@@ -57,8 +60,11 @@ internal class FakeRuntimeController(
             RuntimeOperation.Repair -> repair()
             RuntimeOperation.Stop -> stop()
             RuntimeOperation.Uninstall -> uninstall()
+            RuntimeOperation.Restart -> restart()
         }
     }
+
+    override fun restart() = start()
 }
 
 internal class FakeRemoteServerStore(
@@ -76,6 +82,21 @@ internal class FakeRemoteServerStore(
     }
 }
 
+/** Shared-storage switch for previews. Turning it on lands in NeedsPermission, as on a fresh install. */
+internal class FakeSharedStorageController(
+    initial: SharedStorageState = PreviewData.storage(SharedStorageStatus.Off),
+) : SharedStorageController {
+    private val mutable = MutableStateFlow(initial)
+    override val state: StateFlow<SharedStorageState> = mutable.asStateFlow()
+
+    override fun setEnabled(enabled: Boolean) {
+        val status = if (enabled) SharedStorageStatus.NeedsPermission else SharedStorageStatus.Off
+        mutable.value = mutable.value.copy(status = status)
+    }
+
+    override fun refreshPermission() = Unit
+}
+
 /** Answers with [result], or never answers when it is null (to preview the connecting state). */
 internal class FakeWebSessionAuthenticator(
     private val result: WebSessionResult? = null,
@@ -84,6 +105,13 @@ internal class FakeWebSessionAuthenticator(
 }
 
 internal object PreviewData {
+    const val sharedRoot = "/storage/emulated/0/AndChamber"
+
+    fun storage(
+        status: SharedStorageStatus,
+        restartRequired: Boolean = false,
+    ) = SharedStorageState(status = status, hostRoot = sharedRoot, restartRequired = restartRequired)
+
     val info =
         RuntimeInfo(
             abi = "arm64-v8a",

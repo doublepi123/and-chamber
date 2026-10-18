@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
@@ -34,13 +36,16 @@ import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RemoteServerStore
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
+import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.theme.AndChamberTheme
 import io.andchamber.app.ui.web.WebScreen
 import io.andchamber.app.ui.web.WebViewPool
-import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withContext
 
 internal object Routes {
     const val HOME = "home"
@@ -96,6 +101,16 @@ private class LocalActions(
 
     fun stop() = runtime.stop()
 
+    /**
+     * Stop, then start, so new folder settings apply. One request, made right away while the app is
+     * in the foreground; the controller runs stop and start as a single queued operation.
+     */
+    fun restart() {
+        if (runtime.state.value !is RuntimeState.Running) return
+        askForNotifications()
+        runtime.restart()
+    }
+
     fun repair() {
         askForNotifications()
         inSetup = true
@@ -120,6 +135,7 @@ fun AndChamberApp(
     runtime: LocalRuntimeController,
     remotes: RemoteServerStore,
     auth: WebSessionAuthenticator,
+    storage: SharedStorageController,
 ) {
     AndChamberTheme {
         val nav = rememberNavController()
@@ -129,6 +145,21 @@ fun AndChamberApp(
         val askForNotifications = rememberNotificationPermissionRequest()
         val local = remember(runtime, askForNotifications, pool) { LocalActions(runtime, askForNotifications, pool) }
         LaunchedEffect(local) { runtime.state.collect(local::observe) }
+
+        // Shared-storage calls touch the disk: run them in order, off the main thread.
+        val storageJobs = remember { Channel<() -> Unit>(Channel.UNLIMITED) }
+        LaunchedEffect(storageJobs) {
+            withContext(Dispatchers.IO) {
+                for (job in storageJobs) runCatching { job() }
+            }
+        }
+        val refreshStorage: () -> Unit =
+            remember(storage) {
+                { storageJobs.trySend(storage::refreshPermission) }
+            }
+        // Picks up access granted (or revoked) in system settings when the user comes back.
+        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refreshStorage() }
+        val requestStorageAccess = rememberStorageAccessRequest(onResult = refreshStorage)
 
         // Until the runtime has looked at the disk it reports Detecting; no "Set up" offer before then.
         val checking = runtime.state.collectAsState().value == RuntimeState.Detecting
@@ -154,8 +185,9 @@ fun AndChamberApp(
                 val info by runtime.info.collectAsStateWithLifecycle()
                 val logLines by runtime.logTail.collectAsStateWithLifecycle()
                 val servers by remotes.servers.collectAsStateWithLifecycle()
+                val storageState by storage.state.collectAsStateWithLifecycle()
                 val actions =
-                    remember(local, remotes, pool, nav, entry) {
+                    remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess) {
                         HomeActions(
                             onSetUp = local::install,
                             onStart = local::start,
@@ -170,6 +202,10 @@ fun AndChamberApp(
                                 pool.discard(server.id)
                                 remotes.remove(server.id)
                             },
+                            onSharedStorageChange = { on -> storageJobs.trySend { storage.setEnabled(on) } },
+                            onAllowStorageAccess = requestStorageAccess,
+                            onCheckStorageAgain = refreshStorage,
+                            onRestartLocal = local::restart,
                         )
                     }
                 HomeScreen(
@@ -179,6 +215,7 @@ fun AndChamberApp(
                     logLines = logLines,
                     servers = servers,
                     actions = actions,
+                    storage = storageState,
                 )
             }
 
@@ -221,7 +258,6 @@ fun AndChamberApp(
         }
     }
 }
-
 
 /** Ignores repeated taps while a transition is already running. */
 private fun NavHostController.openIfResumed(

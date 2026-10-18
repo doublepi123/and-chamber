@@ -1,5 +1,10 @@
 package io.andchamber.app.ui.home
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,9 +51,12 @@ import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
+import io.andchamber.app.runtime.SharedStorageState
+import io.andchamber.app.runtime.SharedStorageStatus
 import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.ChamberMark
 import io.andchamber.app.ui.components.SectionHeader
+import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.revealOnEnter
 
 /** Everything the home screen can do, so previews and the app share one surface. */
@@ -63,7 +71,16 @@ internal class HomeActions(
     val onOpenRemote: (ServerTarget.Remote) -> Unit,
     val onSaveRemote: (ServerTarget.Remote) -> Unit,
     val onRemoveRemote: (ServerTarget.Remote) -> Unit,
+    val onSharedStorageChange: (Boolean) -> Unit = {},
+    val onAllowStorageAccess: () -> Unit = {},
+    val onCheckStorageAgain: () -> Unit = {},
+    /** Stops the local server and starts it again, so new folder settings apply. */
+    val onRestartLocal: () -> Unit = {},
 )
+
+/** The storage card only makes sense where the local server can exist at all. */
+private fun RuntimeState.allowsSharedStorage(): Boolean =
+    this != RuntimeState.Detecting && this != RuntimeState.UnsupportedAbi && this != RuntimeState.NotInstalled
 
 /** Editor dialog target for a new server; existing servers use their id so it survives rotation. */
 private const val NEW_SERVER = "__new__"
@@ -80,6 +97,7 @@ internal fun HomeScreen(
     servers: List<ServerTarget.Remote>,
     actions: HomeActions,
     checking: Boolean = false,
+    storage: SharedStorageState? = null,
 ) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -133,15 +151,34 @@ internal fun HomeScreen(
                         onRetry = actions.onRetry,
                         onRepair = actions.onRepair,
                         onUninstall = actions.onUninstall,
+                        sharedFolderInUse = storage?.status == SharedStorageStatus.Active,
                         modifier = Modifier.revealOnEnter(1, animate),
                     )
+                    AnimatedVisibility(
+                        visible = storage != null && !checking && state.allowsSharedStorage(),
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut(),
+                        modifier = Modifier.revealOnEnter(2, animate),
+                    ) {
+                        rememberLastNonNull(storage)?.let { shown ->
+                            SharedStorageCard(
+                                state = shown,
+                                serverRunning = state is RuntimeState.Running,
+                                onEnabledChange = actions.onSharedStorageChange,
+                                onAllowAccess = actions.onAllowStorageAccess,
+                                onCheckAgain = actions.onCheckStorageAgain,
+                                onRestart = actions.onRestartLocal,
+                                modifier = Modifier.padding(top = 12.dp),
+                            )
+                        }
+                    }
 
                     SectionHeader(
                         text = Strings.sectionServers,
                         modifier =
                             Modifier
                                 .padding(top = 28.dp, bottom = if (servers.isEmpty()) 10.dp else 2.dp)
-                                .revealOnEnter(2, animate),
+                                .revealOnEnter(3, animate),
                         trailing =
                             if (servers.isNotEmpty()) {
                                 {
@@ -161,7 +198,7 @@ internal fun HomeScreen(
                         onAdd = { editingId = NEW_SERVER },
                         onEdit = { editingId = it.id },
                         onRemove = { removingId = it.id },
-                        modifier = Modifier.revealOnEnter(2, animate),
+                        modifier = Modifier.revealOnEnter(3, animate),
                     )
                     Spacer(Modifier.height(32.dp))
                 }

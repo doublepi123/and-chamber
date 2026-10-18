@@ -15,11 +15,14 @@ import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
+import io.andchamber.app.runtime.SharedStorageState
+import io.andchamber.app.runtime.SharedStorageStatus
 import io.andchamber.app.ui.AndChamberApp
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.home.LocalRuntimeCard
 import io.andchamber.app.ui.home.ServerEditorDialog
+import io.andchamber.app.ui.home.SharedStorageCard
 import io.andchamber.app.ui.theme.AndChamberTheme
 import io.andchamber.app.ui.web.ConnectingPanel
 import io.andchamber.app.ui.web.LocalServerPanel
@@ -45,6 +48,7 @@ private fun HomePreview(
     state: RuntimeState,
     info: RuntimeInfo? = PreviewData.info,
     servers: List<ServerTarget.Remote> = PreviewData.servers,
+    storage: SharedStorageState? = PreviewData.storage(SharedStorageStatus.Off),
 ) {
     AndChamberTheme {
         HomeScreen(
@@ -53,6 +57,7 @@ private fun HomePreview(
             logLines = PreviewData.log,
             servers = servers,
             actions = noActions,
+            storage = storage,
         )
     }
 }
@@ -60,6 +65,49 @@ private fun HomePreview(
 @Preview(name = "Home · running", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
 private fun HomeRunningPreview() = HomePreview(PreviewData.running)
+
+@Preview(name = "Home · shared folder on", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES, heightDp = 1000)
+@Composable
+private fun HomeSharedActivePreview() =
+    HomePreview(PreviewData.running, storage = PreviewData.storage(SharedStorageStatus.Active, restartRequired = true))
+
+@Composable
+private fun StoragePreview(
+    state: SharedStorageState,
+    serverRunning: Boolean = true,
+) {
+    AndChamberTheme {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                SharedStorageCard(
+                    state = state,
+                    serverRunning = serverRunning,
+                    onEnabledChange = {},
+                    onAllowAccess = {},
+                    onCheckAgain = {},
+                    onRestart = {},
+                )
+            }
+        }
+    }
+}
+
+@Preview(name = "Storage · off", uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun StorageOffPreview() = StoragePreview(PreviewData.storage(SharedStorageStatus.Off))
+
+@Preview(name = "Storage · needs access (light)", uiMode = Configuration.UI_MODE_NIGHT_NO)
+@Composable
+private fun StorageNeedsAccessPreview() = StoragePreview(PreviewData.storage(SharedStorageStatus.NeedsPermission))
+
+@Preview(name = "Storage · on", uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun StorageActivePreview() = StoragePreview(PreviewData.storage(SharedStorageStatus.Active))
+
+@Preview(name = "Storage · on, restart needed (light)", uiMode = Configuration.UI_MODE_NIGHT_NO)
+@Composable
+private fun StorageRestartPreview() =
+    StoragePreview(PreviewData.storage(SharedStorageStatus.Active, restartRequired = true))
 
 @Preview(name = "Home · running (light)", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_NO)
 @Composable
@@ -169,5 +217,6 @@ private fun AppPreview() {
         runtime = FakeRuntimeController(initial = PreviewData.running),
         remotes = FakeRemoteServerStore(),
         auth = FakeWebSessionAuthenticator(),
+        storage = FakeSharedStorageController(),
     )
 }

@@ -27,7 +27,7 @@ fun interface RuntimeStateListener {
 }
 
 /** The operations that must run inside the foreground service's lifetime. */
-enum class RuntimeOperation { Install, Start, Repair, Stop, Uninstall }
+enum class RuntimeOperation { Install, Start, Repair, Stop, Uninstall, Restart }
 
 /**
  * Gate between the UI and the controller. [request] must bring the foreground service up first and
@@ -120,6 +120,8 @@ class DefaultLocalRuntimeController(
 
     override fun uninstall() = foregroundStarter.request(RuntimeOperation.Uninstall)
 
+    override fun restart() = foregroundStarter.request(RuntimeOperation.Restart)
+
     /**
      * Runs one [RuntimeOperation] on the controller. Called by the foreground service after it has
      * started in the foreground; never by the UI directly.
@@ -147,6 +149,18 @@ class DefaultLocalRuntimeController(
                     currentPhase = FailurePhase.Install
                     installLocked(thenStart = true)
                 }
+            RuntimeOperation.Restart -> {
+                // One queued op, so stop and start can't be reordered by the lock (two separate
+                // launches race for it). Used to apply new storage bindings.
+                wantsRunning = false
+                restartJob?.cancel()
+                cancelRequested = false
+                launch(FailurePhase.Start) {
+                    stopLocked()
+                    cancelRequested = false
+                    startLocked(manual = true)
+                }
+            }
             RuntimeOperation.Uninstall ->
                 launch(FailurePhase.Runtime) {
                     stopLocked()
