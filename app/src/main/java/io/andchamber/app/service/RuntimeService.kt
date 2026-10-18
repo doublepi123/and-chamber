@@ -15,6 +15,7 @@ import androidx.core.app.ServiceCompat
 import io.andchamber.app.MainActivity
 import io.andchamber.app.R
 import io.andchamber.app.runtime.LocalRuntimeController
+import io.andchamber.app.runtime.RuntimeOperation
 import io.andchamber.app.runtime.RuntimeState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,26 +26,32 @@ import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
 /**
- * Keeps the OpenChamber server alive in the background. Shows an ongoing notification with the
- * current state and a Stop action, and holds a partial wake lock while installing or running.
- * Stops itself once the runtime is Stopped, NotInstalled or Failed.
+ * Hosts runtime work in the foreground.
+ *
+ * Lifetime is the operation's, not the state's: the service is started with an operation intent,
+ * calls [startForeground] first, then hands the operation to the controller. It stops only when
+ * the controller reaches a terminal state after that operation. Intermediate states (Stopped between
+ * install and start, Detecting, progress ticks) never stop it. The wake lock is held while work runs
+ * and released on terminal states, on exceptions, and in onDestroy.
  */
 class RuntimeService : Service() {
     private val runtime: LocalRuntimeController by inject()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var observer: Job? = null
+
+    /** True between an operation intent and its terminal state. Read on the main thread only. */
+    private var operationActive = false
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel(this)
-        scope.launch {
-            runtime.state.collectLatest { state ->
-                updateNotification(state)
-                updateWakeLock(state)
-                if (state.shouldStopSelf()) {
-                    stopSelfCompat()
+        observer =
+            scope.launch {
+                runtime.state.collectLatest { state ->
+                    if (operationActive) updateNotification(state)
+                    if (operationActive && state.isTerminal()) finishOperation()
                 }
             }
-        }
     }
 
     override fun onStartCommand(
@@ -52,20 +59,53 @@ class RuntimeService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        // Barrier: foreground first, always, before anything touches the controller.
+        startForegroundCompat(buildNotification(runtime.state.value))
+        WakeHold.acquire(this)
         when (intent?.action) {
-            ACTION_STOP -> runtime.stop()
+            ACTION_OPERATION -> {
+                val operation = intent.getStringExtra(EXTRA_OPERATION)?.let(RuntimeOperation::valueOf)
+                if (operation != null) {
+                    operationActive = true
+                    runtime.perform(operation)
+                }
+            }
+            ACTION_STOP_NOTIFICATION -> {
+                operationActive = true
+                runtime.perform(RuntimeOperation.Stop)
+            }
+            else -> Unit
         }
-        val initial = runtime.state.value
-        startForegroundCompat(buildNotification(initial))
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        releaseWakeLock()
+        WakeHold.release()
+        observer?.cancel()
         scope.coroutineContext[Job]?.cancel()
         super.onDestroy()
+    }
+
+    /** Terminal states end the operation; the service then stops itself. */
+    private fun RuntimeState.isTerminal(): Boolean =
+        this is RuntimeState.Stopped ||
+            this is RuntimeState.NotInstalled ||
+            this is RuntimeState.Failed ||
+            this is RuntimeState.UnsupportedAbi ||
+            this is RuntimeState.Running
+
+    private fun finishOperation() {
+        operationActive = false
+        // Running keeps the service (and its notification) alive as the server's lifetime.
+        if (runtime.state.value is RuntimeState.Running) {
+            WakeHold.acquire(this)
+            return
+        }
+        WakeHold.release()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun startForegroundCompat(notification: Notification) {
@@ -78,27 +118,7 @@ class RuntimeService : Service() {
     }
 
     private fun updateNotification(state: RuntimeState) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(state))
-    }
-
-    /**
-     * Held from install/start until Running (or until stopped/failed). Dozing otherwise freezes the
-     * CPU mid-startup, and OpenChamber's internal readiness probe times out.
-     */
-    private fun updateWakeLock(state: RuntimeState) {
-        val keepAwake =
-            state is RuntimeState.Installing ||
-                state is RuntimeState.Starting ||
-                state is RuntimeState.Running
-        if (keepAwake) WakeHold.acquire(this) else WakeHold.release()
-    }
-
-    private fun releaseWakeLock() = WakeHold.release()
-
-    private fun stopSelfCompat() {
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(state))
     }
 
     private fun buildNotification(state: RuntimeState): Notification {
@@ -108,7 +128,7 @@ class RuntimeService : Service() {
                 is RuntimeState.Starting -> getString(R.string.runtime_notification_starting) to true
                 is RuntimeState.Running -> getString(R.string.runtime_notification_running, state.url) to true
                 is RuntimeState.Stopping -> getString(R.string.runtime_notification_stopping) to true
-                else -> (state.label()) to false
+                else -> state.label() to false
             }
         val openApp =
             PendingIntent.getActivity(
@@ -121,7 +141,7 @@ class RuntimeService : Service() {
             PendingIntent.getService(
                 this,
                 1,
-                Intent(this, RuntimeService::class.java).setAction(ACTION_STOP),
+                Intent(this, RuntimeService::class.java).setAction(ACTION_STOP_NOTIFICATION),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -154,43 +174,22 @@ class RuntimeService : Service() {
             else -> ""
         }
 
-    private fun RuntimeState.shouldStopSelf(): Boolean =
-        this is RuntimeState.Stopped || this is RuntimeState.NotInstalled || this is RuntimeState.Failed
-
     companion object {
-        const val ACTION_STOP = "io.andchamber.app.action.STOP_RUNTIME"
+        private const val ACTION_OPERATION = "io.andchamber.app.action.OPERATION"
+        private const val ACTION_STOP_NOTIFICATION = "io.andchamber.app.action.STOP_FROM_NOTIFICATION"
+        private const val EXTRA_OPERATION = "operation"
         private const val CHANNEL_ID = "openchamber-runtime"
         private const val NOTIFICATION_ID = 4101
 
-        /**
-         * Brings the service up in the foreground before the controller starts any network work.
-         * Must be called while the app is in the foreground (from a UI action).
-         */
-        fun start(context: Context) {
-            WakeHold.acquire(context)
-            val intent = Intent(context, RuntimeService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
-
-        /**
-         * Called by the controller on every state change. Starts the service while work is in
-         * flight (install, start, running) and does nothing otherwise; the service stops itself on
-         * Stopped, NotInstalled or Failed.
-         */
-        fun sync(
+        /** Starts the service in the foreground for [operation]. Called from the UI, in the foreground. */
+        fun request(
             context: Context,
-            state: RuntimeState,
+            operation: RuntimeOperation,
         ) {
-            val keepAlive =
-                state is RuntimeState.Installing ||
-                    state is RuntimeState.Starting ||
-                    state is RuntimeState.Running
-            if (!keepAlive) return
-            val intent = Intent(context, RuntimeService::class.java)
+            val intent =
+                Intent(context, RuntimeService::class.java)
+                    .setAction(ACTION_OPERATION)
+                    .putExtra(EXTRA_OPERATION, operation.name)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {

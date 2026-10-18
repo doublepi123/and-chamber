@@ -4,6 +4,7 @@ import io.andchamber.app.runtime.InstallStep
 import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RemoteServerStore
 import io.andchamber.app.runtime.RuntimeInfo
+import io.andchamber.app.runtime.RuntimeOperation
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.WebSessionAuthenticator
@@ -45,6 +46,16 @@ internal class FakeRuntimeController(
     override fun uninstall() {
         mutableInfo.value = null
         mutableState.value = RuntimeState.NotInstalled
+    }
+
+    override fun perform(operation: RuntimeOperation) {
+        when (operation) {
+            RuntimeOperation.Install -> install()
+            RuntimeOperation.Start -> start()
+            RuntimeOperation.Repair -> repair()
+            RuntimeOperation.Stop -> stop()
+            RuntimeOperation.Uninstall -> uninstall()
+        }
     }
 }
 

@@ -11,6 +11,25 @@ class ProotCommandsTest {
     private val rootfs = File("/data/runtime/environment/rootfs")
     private val workspace = File("/data/runtime/workspace")
     private val prootTmp = File("/data/runtime/proot-tmp")
+    private val home = File("/data/runtime/home")
+
+    @Test
+    fun `guest home is bind-mounted from outside the environment for server and installer`() {
+        val server =
+            ProotCommands.serverCommand(
+                proot = proot,
+                rootfs = rootfs,
+                home = home,
+                workspace = workspace,
+                storageArguments = emptyList(),
+                port = 3000,
+            )
+        val installer = ProotCommands.guestShellCommand(proot, rootfs, home, emptyList(), "true")
+
+        assertTrue(server.containsPair("-b", "/data/runtime/home:/root"))
+        assertTrue(installer.containsPair("-b", "/data/runtime/home:/root"))
+        assertFalse(server.any { it.startsWith(rootfs.absolutePath + "/root") })
+    }
 
     @Test
     fun `server command line binds the rootfs and runs cli serve in the foreground`() {
@@ -18,6 +37,7 @@ class ProotCommandsTest {
             ProotCommands.serverCommand(
                 proot = proot,
                 rootfs = rootfs,
+                home = home,
                 workspace = workspace,
                 storageArguments = listOf("-b", "/storage/emulated/0:/sdcard"),
                 port = 3000,
@@ -101,6 +121,7 @@ class ProotCommandsTest {
             ProotCommands.guestShellCommand(
                 proot = proot,
                 rootfs = rootfs,
+                home = home,
                 extraBinds = listOf("/cache/apk:/var/cache/apk"),
                 script = "npm --version",
             )

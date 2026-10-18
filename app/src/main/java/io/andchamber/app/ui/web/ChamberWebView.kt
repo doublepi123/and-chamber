@@ -7,6 +7,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -96,9 +97,18 @@ internal class ChamberWebView(
         )
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
-    private val bridgeToken = UUID.randomUUID().toString()
+    private val bridge = Bridge()
+
+    // Rotated on every page start and on origin change; the helper script embeds the current one.
+    @Volatile private var bridgeToken = UUID.randomUUID().toString()
+
+    // True only while the main frame shows a document from [origin]. Gates the bridge and helper.
+    @Volatile private var mainTrusted = false
     private val crashTimes = ArrayDeque<Long>()
     private var origin: String = ""
+    private var targetUrl: String? = null
+    private var lastTrustedUrl: String? = null
+    private var foreignRecoveries = 0
     private var clearHistoryAfterLoad = false
     private var destroyed = false
 
@@ -141,7 +151,13 @@ internal class ChamberWebView(
     ) {
         if (destroyed) return
         this.sessionKey = sessionKey
-        origin = originOf(url)
+        val newOrigin = originOf(url)
+        if (newOrigin != origin) rotateToken()
+        mainTrusted = false
+        origin = newOrigin
+        targetUrl = url
+        lastTrustedUrl = null
+        foreignRecoveries = 0
         currentUrl = url
         pageError = null
         committed = false
@@ -164,6 +180,10 @@ internal class ChamberWebView(
         } else {
             view.reload()
         }
+    }
+
+    private fun rotateToken() {
+        bridgeToken = UUID.randomUUID().toString()
     }
 
     fun canGoBack(): Boolean = !destroyed && view.canGoBack()
@@ -194,6 +214,7 @@ internal class ChamberWebView(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        mainTrusted = false
         host = null
         val old = view
         (old.parent as? ViewGroup)?.removeView(old)
@@ -222,7 +243,7 @@ internal class ChamberWebView(
             @Suppress("DEPRECATION")
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             javaScriptCanOpenWindowsAutomatically = true
             // target=_blank and window.open() navigate this WebView; shouldOverrideUrlLoading then
             // sends anything that isn't the server to the browser.
@@ -230,18 +251,24 @@ internal class ChamberWebView(
             useWideViewPort = true
             loadWithOverviewMode = true
             allowFileAccess = false
+            allowContentAccess = false
+            @Suppress("DEPRECATION")
+            allowFileAccessFromFileURLs = false
+            @Suppress("DEPRECATION")
+            allowUniversalAccessFromFileURLs = false
             setSupportZoom(false)
         }
         CookieManager.getInstance().let { cookies ->
             cookies.setAcceptCookie(true)
-            cookies.setAcceptThirdPartyCookies(webView, true)
+            cookies.setAcceptThirdPartyCookies(webView, false)
         }
         webView.webViewClient = Client()
         webView.webChromeClient = Chrome()
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             onDownload(url, userAgent, contentDisposition, mimeType)
         }
-        webView.addJavascriptInterface(Bridge(), BRIDGE_NAME)
+        // Registered now, but only page starts on the target origin keep it (see onPageStarted).
+        webView.addJavascriptInterface(bridge, BRIDGE_NAME)
         return webView
     }
 
@@ -251,10 +278,44 @@ internal class ChamberWebView(
         override fun shouldOverrideUrlLoading(
             view: WebView,
             request: WebResourceRequest,
-        ): Boolean = request.isForMainFrame && routeOutside(request.url)
+        ): Boolean {
+            if (!request.isForMainFrame) return false
+            return routeOutside(request.url)
+        }
 
         // pageError is cleared only by load()/reload(): some WebView versions start their own error
         // page right after a failure, which would otherwise hide the error again.
+
+        override fun onPageStarted(
+            view: WebView,
+            url: String?,
+            favicon: Bitmap?,
+        ) {
+            if (!isCurrent(view)) return
+            // Every main-frame document starts with a fresh token and no bridge unless it is ours.
+            rotateToken()
+            mainTrusted = false
+            if (url.isNullOrEmpty() || url == BLANK) {
+                view.removeJavascriptInterface(BRIDGE_NAME)
+                return
+            }
+            if (origin.isNotEmpty() && originOf(url) == origin) {
+                mainTrusted = true
+                view.addJavascriptInterface(bridge, BRIDGE_NAME)
+                return
+            }
+            // A foreign main-frame document (e.g. a POST or redirect that bypassed shouldOverrideUrlLoading).
+            view.removeJavascriptInterface(BRIDGE_NAME)
+            view.stopLoading()
+            val back = targetUrl
+            if (back != null && foreignRecoveries < MAX_FOREIGN_RECOVERIES) {
+                foreignRecoveries++
+                main.post { if (isCurrent(view)) view.loadUrl(back) }
+            } else {
+                progress = 100
+                pageError = Strings.pageFailedTitle
+            }
+        }
 
         override fun onPageCommitVisible(
             view: WebView,
@@ -270,6 +331,9 @@ internal class ChamberWebView(
             if (!isCurrent(view)) return
             progress = 100
             committed = true
+            val trusted = origin.isNotEmpty() && originOf(url) == origin
+            mainTrusted = trusted
+            if (!trusted) return
             if (!url.isNullOrEmpty() && url != BLANK) currentUrl = url
             if (clearHistoryAfterLoad) {
                 // A new session must not let Back walk into pages of the previous one.
@@ -354,14 +418,21 @@ internal class ChamberWebView(
         }
     }
 
-    /** Returns true when the navigation was handled outside the WebView. */
+    /**
+     * Top-level navigation policy. Returns true when the WebView must NOT load the URL itself.
+     * Only the target origin loads in the WebView; blob:/data:/about:/javascript: top-level loads
+     * (other than the initial about:blank) are dropped so they cannot run with the bridge in scope.
+     */
     private fun routeOutside(uri: Uri): Boolean {
-        when (uri.scheme?.lowercase(Locale.ROOT)) {
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+        val text = uri.toString()
+        when (scheme) {
             "http", "https" -> {
-                if (originOf(uri.toString()) == origin) return false
+                if (origin.isNotEmpty() && originOf(text) == origin) return false
                 openExternally(Intent(Intent.ACTION_VIEW, uri))
             }
-            null, "about", "blob", "data", "javascript" -> return false
+            "about" -> return text != BLANK
+            "blob", "data", "javascript", "null" -> return true
             "file", "content" -> Unit // Never navigate the app WebView to local files.
             "intent" -> openIntentUri(uri)
             else -> openExternally(Intent(Intent.ACTION_VIEW, uri))
@@ -429,15 +500,22 @@ internal class ChamberWebView(
         mimeType: String?,
     ) {
         val name = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val scheme = Uri.parse(url).scheme?.lowercase(Locale.ROOT)
         when {
-            url.startsWith("blob:") ->
+            // blob:/data: downloads only come from the trusted server page; anything else is dropped.
+            scheme == "blob" -> {
+                if (!mainTrusted) return
                 view.evaluateJavascript(
                     "window.__andchamber && window.__andchamber.fetchAndSave(" +
                         "${JSONObject.quote(url)}, ${JSONObject.quote(name)});",
                     null,
                 )
-            url.startsWith("data:") -> Thread({ saveDataUrl(url, name, mimeType) }, "andchamber-save").start()
-            else -> enqueueDownload(url, userAgent, mimeType, name)
+            }
+            scheme == "data" -> {
+                if (mainTrusted) Thread({ saveDataUrl(url, name, mimeType) }, "andchamber-save").start()
+            }
+            scheme == "http" || scheme == "https" -> enqueueDownload(url, userAgent, mimeType, name)
+            else -> Unit
         }
     }
 
@@ -550,6 +628,10 @@ internal class ChamberWebView(
 
     /** JavaScript side channel. Calls need the per-WebView token, which other frames can't read. */
     private inner class Bridge {
+        // Called on the JavaScript interface thread; both flags are volatile and re-checked on the
+        // UI thread before any state changes.
+        private fun trusted(token: String?): Boolean = mainTrusted && !destroyed && token == bridgeToken
+
         @JavascriptInterface
         fun saveFile(
             token: String?,
@@ -557,7 +639,7 @@ internal class ChamberWebView(
             fileName: String?,
             mimeType: String?,
         ) {
-            if (token != bridgeToken) return
+            if (!trusted(token)) return
             if (dataUrl.isNullOrEmpty() || dataUrl.length > MAX_BRIDGE_CHARS) {
                 main.post { toast(Strings.downloadFailed) }
                 return
@@ -570,8 +652,8 @@ internal class ChamberWebView(
             token: String?,
             rgb: Int,
         ) {
-            if (token != bridgeToken) return
-            main.post { if (!destroyed) pageColor = rgb and 0xFFFFFF }
+            if (!trusted(token)) return
+            main.post { if (!destroyed && mainTrusted) pageColor = rgb and 0xFFFFFF }
         }
     }
 
@@ -664,6 +746,7 @@ internal class ChamberWebView(
         const val BRIDGE_NAME = "AndChamberBridge"
         const val CRASH_WINDOW_MS = 60_000L
         const val MAX_AUTO_RELOADS = 2
+        const val MAX_FOREIGN_RECOVERIES = 2
         const val MAX_BRIDGE_CHARS = 96 * 1024 * 1024
     }
 }

@@ -91,6 +91,12 @@ interface LocalRuntimeController {
 
     /** Remove the whole runtime directory. */
     fun uninstall()
+
+    /**
+     * Runs one operation inside the foreground service. Called by RuntimeService only, after it has
+     * started in the foreground. UI code uses install/start/stop/repair/uninstall above.
+     */
+    fun perform(operation: RuntimeOperation)
 }
 
 /** A server the WebView can open. */
@@ -110,6 +116,11 @@ sealed interface ServerTarget {
         override val baseUrl: String,
         /** OpenChamber UI password, if the remote server requires one. Stored encrypted. */
         val uiPassword: String?,
+        /**
+         * Allow sending the password over plain http to a non-loopback host. Off by default; R3's
+         * confirm UI sets it. Without it a password is never sent in cleartext.
+         */
+        val allowInsecureHttp: Boolean = false,
     ) : ServerTarget
 
     companion object {

@@ -1,6 +1,7 @@
 package io.andchamber.app.runtime.install
 
 import io.andchamber.app.runtime.RuntimePaths
+import io.andchamber.app.runtime.fs.deleteTreeOrThrow
 import io.andchamber.app.runtime.manifest.RuntimeManifest
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import kotlinx.serialization.json.Json
@@ -27,13 +28,11 @@ class RuntimeInstallerImpl(
         OpenChamberInstaller(paths, abi, manifest, downloader, shimAsset, dnsProvider, nowMillis)
     }
 
-    override fun recoverInterruptedActivation() {
+    override fun recover(): Boolean =
         recoverInterruptedRuntimeEnvironment(
             active = paths.environment,
             rollback = paths.rollback,
-            topLevelMetadata = paths.metadataFile,
         )
-    }
 
     override fun installedRuntime(): InstalledRuntime? {
         val metadataFile = paths.metadataFile
@@ -48,23 +47,20 @@ class RuntimeInstallerImpl(
 
     override suspend fun install(report: InstallReporter): InstalledRuntime {
         paths.root.mkdirs()
-        recoverInterruptedActivation()
+        recover()
         val proot = suite()
         return installer.install(report, proot)
     }
 
     override fun discardEnvironment() {
-        paths.environment.deleteRecursively()
-        paths.metadataFile.delete()
+        // Only the environment; /root (home) and the workspace are user data and are kept.
+        deleteTreeOrThrow(paths.environment)
+        deleteTreeOrThrow(paths.rollback)
     }
 
     override fun removeAll() {
-        paths.root.deleteRecursively()
+        deleteTreeOrThrow(paths.root)
     }
-
-    /** The metadata file exists only after a successful activation. */
-    internal fun metadataOrNull(): RuntimeMetadata? =
-        runCatching { json.decodeFromString<RuntimeMetadata>(paths.metadataFile.readText()) }.getOrNull()
 
     internal fun root(): File = paths.root
 }

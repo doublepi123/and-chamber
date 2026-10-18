@@ -1,53 +1,123 @@
 package io.andchamber.app.runtime.process
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
 
 class ProcessTreeTest {
     @get:Rule val folder = TemporaryFolder()
 
-    @Test
-    fun `process tree termination order is children before parent`() {
-        val children =
-            mapOf(
-                10L to listOf(11L, 12L),
-                11L to listOf(13L),
-                12L to emptyList(),
-                13L to emptyList(),
-            )
+    private val proot = "/data/app/x/lib/arm64/libandchamber_android_proot.so"
+    private val rootfs = "/data/user/0/io.andchamber.app/files/runtime/environment/rootfs"
+    private val uid = 10123
 
-        assertEquals(listOf(13L, 11L, 12L, 10L), processTreePostOrder(10L) { children[it].orEmpty() })
+    /** Writes a fake /proc/<pid> entry. Fields mirror the real layout closely enough for the parser. */
+    private fun proc(
+        root: File,
+        pid: Long,
+        ppid: Long,
+        argv: List<String>,
+        uid: Int = this.uid,
+        start: Long = 1000L + pid,
+        comm: String = "proot",
+    ) {
+        val dir = root.resolve(pid.toString()).apply { mkdirs() }
+        dir.resolve("status").writeText("Name:\t$comm\nUid:\t$uid\t$uid\t$uid\t$uid\n")
+        // Fields after ")", index 0 = state, 1 = ppid, 19 = starttime (field 22). Built by index so the
+        // position of starttime is exact: 2..18 are filler (pgrp .. itrealvalue).
+        val fields = listOf("S", "$ppid") + List(17) { "0" } + listOf("$start", "0", "0")
+        val after = fields.joinToString(" ")
+        dir.resolve("stat").writeText("$pid ($comm) $after")
+        dir.resolve("cmdline").writeText(argv.joinToString("\u0000", postfix = "\u0000"))
     }
 
     @Test
-    fun `finds managed proot roots by runtime directory marker only`() {
+    fun `post-order walk lists children before their parent`() {
         val procRoot = folder.newFolder("proc")
-        val runtimeDirectory = folder.newFolder("runtime")
-        procRoot.resolve("100").mkdirs()
-        procRoot.resolve("100/cmdline").writeText(
-            "${EmbeddedCommandSuite.PROOT_LIBRARY_NAME}\u0000-r\u0000${runtimeDirectory.resolve("environment/rootfs").path}",
-        )
-        procRoot.resolve("101").mkdirs()
-        procRoot.resolve("101/cmdline").writeText("node\u0000cli.js")
-        procRoot.resolve("200").mkdirs()
-        procRoot.resolve("200/cmdline").writeText("unrelated")
+        val s = ProcessScanner(procRoot, uid, myPid = 1L)
+        proc(procRoot, 10, 1, listOf(proot, "-r", rootfs))
+        proc(procRoot, 11, 10, listOf("node"))
+        proc(procRoot, 12, 10, listOf("sh"))
+        proc(procRoot, 13, 11, listOf("npm"))
 
-        assertEquals(listOf(100L), findManagedRuntimeRootPids(runtimeDirectory, procRoot))
+        val root = OwnedProcess(10, 1, 1010L)
+        assertEquals(listOf(13L, 11L, 12L, 10L), s.treePostOrder(root).map { it.pid })
     }
 
     @Test
-    fun `direct children are read from proc stat ignoring spaces in the command name`() {
-        val procRoot = folder.newFolder("proc2")
-        procRoot.resolve("50").mkdirs()
-        procRoot.resolve("50/stat").writeText("50 (proot launcher) S 42 50 50 0 -1 0")
-        procRoot.resolve("51").mkdirs()
-        procRoot.resolve("51/stat").writeText("51 (node) S 99 51 51 0 -1 0")
+    fun `a process is owned only with our uid, exact launcher argv0 and our rootfs`() {
+        val procRoot = folder.newFolder("proc-own")
+        proc(procRoot, 100, 1, listOf(proot, "-0", "-r", rootfs, "/bin/node"))
+        proc(procRoot, 101, 1, listOf(proot, "-r", rootfs), uid = 999) // other uid
+        proc(procRoot, 102, 1, listOf("sh", "-c", rootfs)) // argv0 is not our launcher
+        proc(procRoot, 103, 1, listOf(proot, "-r", "/data/other/rootfs")) // other runtime
+        proc(procRoot, 104, 1, listOf("$proot-evil", "-r", rootfs)) // lookalike path
 
-        assertEquals(listOf(50L), readDirectChildPids(42L, procRoot))
-        assertEquals(42L, parentPidOf(procRoot.resolve("50/stat")))
+        val owned = ProcessScanner(procRoot, uid, myPid = 1L).ownedRoots(proot, rootfs)
+
+        assertEquals(listOf(100L), owned.map { it.pid })
+    }
+
+    @Test
+    fun `our own pid is never owned`() {
+        val procRoot = folder.newFolder("proc-self")
+        proc(procRoot, 77, 1, listOf(proot, "-r", rootfs))
+
+        assertTrue(ProcessScanner(procRoot, uid, myPid = 77L).ownedRoots(proot, rootfs).isEmpty())
+    }
+
+    @Test
+    fun `a shell with the runtime path in argv is not ours`() {
+        val procRoot = folder.newFolder("proc-sh")
+        proc(procRoot, 50, 1, listOf("/system/bin/sh", "-c", "cd $rootfs && ls"))
+
+        assertTrue(ProcessScanner(procRoot, uid, myPid = 1L).ownedRoots(proot, rootfs).isEmpty())
+    }
+
+    @Test
+    fun `kill is skipped when the start time changed (recycled pid)`() {
+        val procRoot = folder.newFolder("proc-recycle")
+        proc(procRoot, 200, 1, listOf(proot, "-r", rootfs), start = 5555L)
+        val scanner = ProcessScanner(procRoot, uid, myPid = 1L)
+        val recorded = OwnedProcess(200, 1, startTime = 1111L)
+
+        val signalled = mutableListOf<Long>()
+        scanner.killOwned(listOf(recorded)) { signalled += it }
+
+        assertTrue(signalled.isEmpty())
+    }
+
+    @Test
+    fun `kill signals when the start time matches`() {
+        val procRoot = folder.newFolder("proc-match")
+        proc(procRoot, 201, 1, listOf(proot, "-r", rootfs), start = 4242L)
+        val scanner = ProcessScanner(procRoot, uid, myPid = 1L)
+
+        val signalled = mutableListOf<Long>()
+        scanner.killOwned(listOf(OwnedProcess(201, 1, startTime = 4242L))) { signalled += it }
+
+        assertEquals(listOf(201L), signalled)
+    }
+
+    @Test
+    fun `stat parsing handles a command name containing spaces and a closing paren`() {
+        // Name is "weird ) name": parsing must start after the LAST ')'.
+        // state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime cutime
+        // cstime priority nice num_threads itrealvalue starttime  (starttime is field 22 = index 19)
+        // Fields after ')' by index: 0 state, 1 ppid(42), 2..18 filler, 19 starttime(7777).
+        val fields = listOf("S", "42") + List(17) { "0" } + listOf("7777")
+        val stat = "300 (weird ) name) " + fields.joinToString(" ")
+        assertEquals(42L to 7777L, ProcessScanner.parseStat(stat))
+    }
+
+    @Test
+    fun `real uid is the first Uid field`() {
+        assertEquals(10123, ProcessScanner.parseRealUid("Name:\tx\nUid:\t10123\t10123\t10123\t10123\n"))
+        assertFalse(ProcessScanner.parseRealUid("Name:\tx\n") != null)
     }
 
     @Test

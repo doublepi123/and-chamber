@@ -3,11 +3,16 @@ package io.andchamber.app.runtime.install
 import android.system.Os
 import io.andchamber.app.runtime.InstallStep
 import io.andchamber.app.runtime.RuntimePaths
+import io.andchamber.app.runtime.fs.copyTreeNoFollow
+import io.andchamber.app.runtime.fs.deleteTree
+import io.andchamber.app.runtime.fs.deleteTreeOrThrow
 import io.andchamber.app.runtime.manifest.RuntimeManifest
-import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.network.SystemDnsProvider
+import io.andchamber.app.runtime.process.EmbeddedCommandSuite
+import io.andchamber.app.runtime.process.ProcessScanner
 import io.andchamber.app.runtime.process.ProotCommands
+import io.andchamber.app.runtime.process.terminateProcessTree
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -19,6 +24,10 @@ import java.util.concurrent.TimeUnit
  * Builds the Alpine + Node + OpenChamber environment in staging and activates it. Each guest
  * command's output is streamed to [InstallReporter.log] and to `logs/install.log`.
  * Ported and trimmed from AndCode's LocalRuntimeInstaller (MIT).
+ *
+ * The active environment is never touched until the staged one is complete and verified: the
+ * swap in [activateRuntimeEnvironment] is the only mutation of it. The guest `/root` lives outside
+ * the environment (see [RuntimePaths.home]), so a rebuild does not delete user data.
  */
 class OpenChamberInstaller(
     private val paths: RuntimePaths,
@@ -28,6 +37,7 @@ class OpenChamberInstaller(
     private val shimAsset: () -> String,
     private val dnsProvider: SystemDnsProvider = SystemDnsProvider { emptyList() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val killPid: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -41,8 +51,10 @@ class OpenChamberInstaller(
             paths.cache.mkdirs()
             paths.logs.mkdirs()
             paths.prootTmp.mkdirs()
+            paths.home.mkdirs()
             paths.installLog.writeText("")
-            val staging = paths.staging.apply { deleteRecursively(); mkdirs() }
+            deleteTreeOrThrow(paths.staging)
+            val staging = paths.staging.apply { mkdirs() }
             try {
                 val archive = File(paths.cache, "alpine-${manifest.alpineVersion}-$abi.tar.gz")
                 report.step(InstallStep.DownloadRootfs, 0f, "Alpine ${manifest.alpineVersion}")
@@ -58,9 +70,10 @@ class OpenChamberInstaller(
                 val rootfs = File(staging, "rootfs").apply { mkdirs() }
                 archive.inputStream().use { RuntimeArchive.extractTarGz(it, rootfs) }
                 configureRootfs(rootfs)
+                seedHome(rootfs)
 
                 val env = ProotCommands.installEnvironment(proot.environment(), paths.prootTmp)
-                val runner = GuestRunner(paths, proot, rootfs, env, report)
+                val runner = GuestRunner(paths, proot, rootfs, env, report, killPid = killPid)
 
                 report.step(InstallStep.InstallPackages, null, "apk add nodejs npm git ...")
                 // set -e: any failing command fails the step, even inside a chain.
@@ -87,22 +100,23 @@ class OpenChamberInstaller(
                     timeoutMinutes = NPM_TIMEOUT_MINUTES,
                 )
 
-                // The node-pty prebuild is glibc-linked and segfaults on musl; a source rebuild works.
-                // Failure only costs the terminal feature, so it is logged and the install continues.
+                // The node-pty prebuild is glibc-linked and segfaults on musl, so a source rebuild is
+                // required. A build failure fails the install (recoverable; the old environment stays).
                 report.step(InstallStep.BuildNativeModules, null, "Building node-pty for musl")
-                val ptyExit =
-                    runCatching {
-                        runner.run(
-                            "cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild",
-                            timeoutMinutes = NATIVE_TIMEOUT_MINUTES,
-                        )
-                    }.getOrElse { error ->
-                        report.log("node-pty rebuild error: ${error.message}")
-                        -1
-                    }
-                if (ptyExit != 0) {
-                    report.log("Warning: node-pty did not build; the terminal feature will be unavailable.")
+                runner.mustSucceed(
+                    "set -e; cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild",
+                    "Unable to build node-pty for the terminal feature. Check the network and retry.",
+                    timeoutMinutes = NATIVE_TIMEOUT_MINUTES,
+                )
+                File(rootfs, PTY_SMOKE_GUEST_PATH.removePrefix("/")).apply {
+                    parentFile?.mkdirs()
+                    writeText(PTY_SMOKE_SCRIPT)
                 }
+                runner.mustSucceed(
+                    "set -e; node $PTY_SMOKE_GUEST_PATH",
+                    "The rebuilt node-pty does not work in the guest. The install is incomplete.",
+                    timeoutMinutes = PTY_SMOKE_TIMEOUT_MINUTES,
+                )
 
                 report.step(InstallStep.Verify, null, "Checking node, opencode and the web bundle")
                 val nodeVersion = runner.output("node --version").trim()
@@ -125,6 +139,7 @@ class OpenChamberInstaller(
                         nodeVersion = nodeVersion.removePrefix("v"),
                         installedAt = nowMillis(),
                     )
+                // Metadata is written inside the environment, so the directory rename commits it too.
                 File(staging, RuntimePaths.METADATA_FILE_NAME).writeText(json.encodeToString(metadata))
 
                 report.step(InstallStep.Verify, null, "Activating the environment")
@@ -132,20 +147,28 @@ class OpenChamberInstaller(
                     active = paths.environment,
                     staging = staging,
                     rollback = paths.rollback,
-                    finalizeActivation = { activated ->
-                        replaceFileAtomically(
-                            source = File(activated, RuntimePaths.METADATA_FILE_NAME),
-                            destination = paths.metadataFile,
-                        )
-                    },
                 )
                 report.step(InstallStep.Verify, 1f, "Done")
                 InstalledRuntime(metadata = metadata, rootfs = paths.rootfs)
             } catch (error: Throwable) {
-                staging.deleteRecursively()
+                // Best effort: a leftover staging tree is removed before the next install anyway.
+                deleteTree(staging)
                 throw error
             }
         }
+
+    /**
+     * Copies the previous /root (legacy layout, inside the environment) into the persistent home,
+     * or the fresh Alpine skeleton, the first time. Runs before activation, while the old
+     * environment is still in place. Never overwrites a home that already has content.
+     */
+    private fun seedHome(rootfs: File) {
+        if (paths.home.list()?.isNotEmpty() == true) return
+        val legacy = File(paths.rootfs, "root")
+        val skeleton = File(rootfs, "root")
+        val source = listOf(legacy, skeleton).firstOrNull { it.isDirectory } ?: return
+        copyTreeNoFollow(source, paths.home)
+    }
 
     private fun configureRootfs(rootfs: File) {
         File(rootfs, "root").mkdirs()
@@ -171,8 +194,13 @@ class OpenChamberInstaller(
         private val rootfs: File,
         private val environment: Map<String, String>,
         private val report: InstallReporter,
+        private val procRoot: File = File("/proc"),
+        private val killPid: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
     ) {
-        /** Returns the exit code; throws when the command exceeds [timeoutMinutes]. */
+        /**
+         * Returns the exit code. When [timeoutMinutes] passes, or the calling thread is interrupted,
+         * the whole PRoot tree is killed and the call throws only after the process has exited.
+         */
         fun run(
             script: String,
             timeoutMinutes: Long = DEFAULT_TIMEOUT_MINUTES,
@@ -184,6 +212,7 @@ class OpenChamberInstaller(
                 ProotCommands.guestShellCommand(
                     proot = proot.proot,
                     rootfs = rootfs,
+                    home = paths.home,
                     extraBinds = listOf("${apkCache.absolutePath}:/var/cache/apk"),
                     script = script,
                 )
@@ -197,10 +226,7 @@ class OpenChamberInstaller(
                     }
                 }, "openchamber-install-output").apply { isDaemon = true }
             reader.start()
-            val completed = process.waitFor(timeoutMinutes, TimeUnit.MINUTES)
-            if (!completed) {
-                process.destroyForcibly()
-                process.waitFor(5, TimeUnit.SECONDS)
+            if (!awaitExit(process, timeoutMinutes, TimeUnit.MINUTES)) {
                 error("Command timed out after $timeoutMinutes minutes: ${script.take(120)}")
             }
             reader.join(2_000)
@@ -223,17 +249,50 @@ class OpenChamberInstaller(
             error("$reason (exit $exit)")
         }
 
-        /** Captures stdout of a short, quiet guest command. */
+        /** Captures stdout of a short, quiet guest command. Timeouts kill the tree, like [run]. */
         fun output(script: String): String {
             val capture = File.createTempFile("verify-", ".out", paths.logs)
             try {
-                val command = ProotCommands.guestShellCommand(proot.proot, rootfs, emptyList(), script)
+                val command =
+                    ProotCommands.guestShellCommand(proot.proot, rootfs, paths.home, emptyList(), script)
                 val process = start(command, redirectToLog = false, out = capture)
-                require(process.waitFor(2, TimeUnit.MINUTES)) { "Verification timed out: $script" }
+                require(awaitExit(process, VERIFY_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
+                    "Verification timed out: $script"
+                }
                 require(process.exitValue() == 0) { "Verification failed: $script" }
                 return capture.readText()
             } finally {
                 capture.delete()
+            }
+        }
+
+        /**
+         * Waits for [process]. If it does not exit in time, or waiting is interrupted, kills its whole
+         * tree first, so no guest process is left writing into a directory the caller then deletes.
+         */
+        private fun awaitExit(
+            process: Process,
+            timeout: Long,
+            unit: TimeUnit,
+        ): Boolean {
+            var exited = false
+            try {
+                exited = process.waitFor(timeout, unit)
+                return exited
+            } finally {
+                if (!exited) {
+                    // Owned launchers for this rootfs (uid + argv guarded by the scanner). The start time
+                    // comes from /proc, so a recycled pid is never signalled. terminateProcessTree waits
+                    // for the kills to land before returning.
+                    val scanner =
+                        ProcessScanner(
+                            procRoot = procRoot,
+                            myUid = android.os.Process.myUid(),
+                            myPid = android.os.Process.myPid().toLong(),
+                        )
+                    val roots = scanner.ownedRoots(proot.proot.absolutePath, rootfs.absolutePath)
+                    terminateProcessTree(process, scanner, roots, killPid)
+                }
             }
         }
 
@@ -265,11 +324,33 @@ class OpenChamberInstaller(
 
         const val OPENCHAMBER_MODULE_ROOT = "/usr/local/lib/node_modules/@openchamber/web"
         const val SHIM_GUEST_PATH = "/opt/andchamber/android-shim.cjs"
+        const val PTY_SMOKE_GUEST_PATH = "/opt/andchamber/pty-smoke.cjs"
         const val MIN_OPENCODE_VERSION = "2.0.20"
         const val DEFAULT_TIMEOUT_MINUTES = 20L
         const val APK_TIMEOUT_MINUTES = 20L
         const val NPM_TIMEOUT_MINUTES = 30L
         const val NATIVE_TIMEOUT_MINUTES = 15L
+        const val PTY_SMOKE_TIMEOUT_MINUTES = 2L
+        const val VERIFY_TIMEOUT_MINUTES = 2L
+
+        /**
+         * Spawns `/bin/sh -c 'echo PTYOK'` through the rebuilt node-pty and requires the output and
+         * exit 0. Its own timer bounds the run so a hung PTY cannot stall the install.
+         */
+        val PTY_SMOKE_SCRIPT =
+            """
+            const pty = require('$OPENCHAMBER_MODULE_ROOT/node_modules/node-pty');
+            let out = '';
+            const timer = setTimeout(() => { console.error('PTY smoke timed out: ' + out); process.exit(1); }, 20000);
+            const term = pty.spawn('/bin/sh', ['-c', 'echo PTYOK'], { cols: 80, rows: 24, cwd: '/root', env: process.env });
+            term.onData((data) => { out += data; });
+            term.onExit(({ exitCode }) => {
+              clearTimeout(timer);
+              if (exitCode === 0 && out.includes('PTYOK')) { console.log('PTYOK'); process.exit(0); }
+              console.error('PTY smoke failed: exit ' + exitCode + ' output ' + out);
+              process.exit(1);
+            });
+            """.trimIndent() + "\n"
 
         /** Dotted numeric comparison; non-numeric segments count as 0. */
         fun compareVersions(

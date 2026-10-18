@@ -3,132 +3,135 @@ package io.andchamber.app.runtime.process
 import java.io.File
 import java.util.concurrent.TimeUnit
 
-/** Process bookkeeping for PRoot children, ported from AndCode's LocalRuntimeProcessLauncher (MIT). */
-
-internal fun processTreePostOrder(
-    rootPid: Long,
-    childrenReader: (Long) -> List<Long>,
-): List<Long> {
-    val visited = mutableSetOf<Long>()
-    val result = mutableListOf<Long>()
-
-    fun visit(pid: Long) {
-        if (!visited.add(pid)) return
-        childrenReader(pid).forEach(::visit)
-        result += pid
-    }
-
-    visit(rootPid)
-    return result
-}
-
-/** Root pids of PRoot processes whose command line mentions [runtimeDirectory]. */
-internal fun findManagedRuntimeRootPids(
-    runtimeDirectory: File,
-    procRoot: File = File("/proc"),
-    prootMarker: String = EmbeddedCommandSuite.PROOT_LIBRARY_NAME,
-): List<Long> {
-    val runtimeMarker = runtimeDirectory.absolutePath
-    return procRoot.listFiles()
-        .orEmpty()
-        .asSequence()
-        .filter(File::isDirectory)
-        .mapNotNull { directory ->
-            val pid = directory.name.toLongOrNull() ?: return@mapNotNull null
-            val commandLine =
-                runCatching {
-                    File(directory, "cmdline")
-                        .readBytes()
-                        .toString(Charsets.UTF_8)
-                        .replace('\u0000', ' ')
-                }.getOrNull() ?: return@mapNotNull null
-            pid.takeIf { commandLine.contains(prootMarker) && commandLine.contains(runtimeMarker) }
-        }
-        .sorted()
-        .toList()
-}
-
-/** Direct children of [parentPid], read from `/proc/<pid>/stat` (field 4 is the ppid). */
-internal fun readDirectChildPids(
-    parentPid: Long,
-    procRoot: File = File("/proc"),
-): List<Long> =
-    procRoot.listFiles()
-        .orEmpty()
-        .asSequence()
-        .filter(File::isDirectory)
-        .mapNotNull { directory ->
-            val pid = directory.name.toLongOrNull() ?: return@mapNotNull null
-            pid.takeIf { parentPidOf(File(directory, "stat")) == parentPid }
-        }
-        .sorted()
-        .toList()
-
-/** The parent pid from a `stat` line. The command name is parenthesised and may contain spaces. */
-internal fun parentPidOf(statFile: File): Long? =
-    runCatching {
-        statFile.readText()
-            .substringAfterLast(')')
-            .trim()
-            .split(' ')
-            .getOrNull(1)
-            ?.toLongOrNull()
-    }.getOrNull()
-
-internal fun processId(process: Process): Long? {
-    val methodValue =
-        runCatching {
-            process.javaClass.methods
-                .firstOrNull { it.name == "pid" && it.parameterCount == 0 }
-                ?.invoke(process)
-        }.getOrNull()
-    when (methodValue) {
-        is Long -> return methodValue
-        is Int -> return methodValue.toLong()
-    }
-
-    return sequenceOf("pid", "id")
-        .mapNotNull { fieldName ->
-            runCatching {
-                process.javaClass.getDeclaredField(fieldName).apply { isAccessible = true }.get(process)
-            }.getOrNull()
-        }
-        .mapNotNull { value ->
-            when (value) {
-                is Long -> value
-                is Int -> value.toLong()
-                else -> null
-            }
-        }
-        .firstOrNull()
-}
-
 /**
- * Kills [process] and its descendants, children first. [signal] delivers the kill to a pid; on
- * Android that is `Process.killProcess`, which is why the default is injected rather than hard-wired.
+ * The single place that scans /proc for this app's runtime processes.
+ *
+ * A process is "ours" only when all of these hold:
+ *  - its real uid (from /proc/<pid>/status) is this app's uid,
+ *  - argv[0] is exactly our PRoot launcher path, and argv contains our runtime rootfs path,
+ *  - it is not this process.
+ * Kills are guarded by the process start time (/proc/<pid>/stat field 22), recorded at scan and
+ * rechecked just before signalling, so a recycled pid is never signalled.
  */
+data class OwnedProcess(
+    val pid: Long,
+    val parentPid: Long,
+    val startTime: Long,
+)
+
+class ProcessScanner(
+    private val procRoot: File = File("/proc"),
+    private val myUid: Int,
+    private val myPid: Long,
+) {
+    /** Owned PRoot roots (launcher processes) for this runtime, with their start times. */
+    fun ownedRoots(prootPath: String, rootfsPath: String): List<OwnedProcess> =
+        allProcesses()
+            .filter { it.pid != myPid && it.uid == myUid }
+            .filter { it.argv.firstOrNull() == prootPath && it.argv.any { arg -> arg.contains(rootfsPath) } }
+            .map { OwnedProcess(it.pid, it.ppid, it.startTime) }
+            .sortedBy { it.pid }
+
+    /** Children of [parentPid] (any process, used to walk a tree we already own). */
+    fun childrenOf(parentPid: Long): List<Long> =
+        allProcesses().filter { it.ppid == parentPid }.map { it.pid }.sorted()
+
+    /** Post-order list of [root] and all its descendants, children first. */
+    fun treePostOrder(root: OwnedProcess): List<OwnedProcess> {
+        val all = allProcesses().associateBy { it.pid }
+        val childrenByParent = all.values.groupBy { it.ppid }
+        val result = mutableListOf<OwnedProcess>()
+        val visited = mutableSetOf<Long>()
+        fun visit(pid: Long) {
+            if (!visited.add(pid)) return
+            childrenByParent[pid].orEmpty().map { it.pid }.sorted().forEach(::visit)
+            all[pid]?.let { result += OwnedProcess(it.pid, it.ppid, it.startTime) }
+        }
+        visit(root.pid)
+        return result
+    }
+
+    /**
+     * Signals each owned process after confirming its start time is unchanged (not a recycled pid).
+     * [signal] is injected: Android uses Process.killProcess, tests record the calls.
+     */
+    fun killOwned(
+        processes: List<OwnedProcess>,
+        signal: (Long) -> Unit,
+    ) {
+        processes.distinctBy { it.pid }.forEach { process ->
+            val now = snapshot(process.pid)
+            if (now != null && now.startTime == process.startTime) runCatching { signal(process.pid) }
+        }
+    }
+
+    private fun snapshot(pid: Long): ProcInfo? = readProc(File(procRoot, pid.toString()))
+
+    private fun allProcesses(): List<ProcInfo> =
+        procRoot.listFiles().orEmpty()
+            .asSequence()
+            .filter(File::isDirectory)
+            .mapNotNull { dir -> dir.name.toLongOrNull()?.let { readProc(dir) } }
+            .toList()
+
+    private data class ProcInfo(
+        val pid: Long,
+        val ppid: Long,
+        val uid: Int,
+        val startTime: Long,
+        val argv: List<String>,
+    )
+
+    private fun readProc(dir: File): ProcInfo? {
+        val pid = dir.name.toLongOrNull() ?: return null
+        val status = runCatching { File(dir, "status").readText() }.getOrNull() ?: return null
+        val stat = runCatching { File(dir, "stat").readText() }.getOrNull() ?: return null
+        val cmdline = runCatching { File(dir, "cmdline").readBytes() }.getOrNull() ?: return null
+        val uid = parseRealUid(status) ?: return null
+        val (ppid, startTime) = parseStat(stat) ?: return null
+        val argv = cmdline.toString(Charsets.UTF_8).split('\u0000').filter(String::isNotEmpty)
+        return ProcInfo(pid, ppid, uid, startTime, argv)
+    }
+
+    companion object {
+        /** The real uid: first field of the `Uid:` line in /proc/<pid>/status. */
+        internal fun parseRealUid(status: String): Int? =
+            status.lineSequence()
+                .firstOrNull { it.startsWith("Uid:") }
+                ?.removePrefix("Uid:")
+                ?.trim()
+                ?.split(Regex("\\s+"))
+                ?.firstOrNull()
+                ?.toIntOrNull()
+
+        /**
+         * ppid (field 4) and starttime (field 22) from /proc/<pid>/stat. The command name is in
+         * parentheses and may contain spaces or ')', so parsing starts after the last ')'.
+         */
+        internal fun parseStat(stat: String): Pair<Long, Long>? {
+            val fields = stat.substringAfterLast(')').trim().split(' ')
+            // After ')': field 3 (state) is index 0, so ppid (4) is index 1, starttime (22) is index 19.
+            val ppid = fields.getOrNull(1)?.toLongOrNull() ?: return null
+            val start = fields.getOrNull(19)?.toLongOrNull() ?: return null
+            return ppid to start
+        }
+    }
+}
+
+/** Kills [root]'s tree (children first) through the scanner, then waits for the launcher to exit. */
 internal fun terminateProcessTree(
-    process: Process,
-    extraRootPids: List<Long>,
-    procRoot: File,
+    process: Process?,
+    scanner: ProcessScanner,
+    roots: List<OwnedProcess>,
     signal: (Long) -> Unit,
 ) {
-    val roots =
-        linkedSetOf<Long>().apply {
-            processId(process)?.let(::add)
-            addAll(extraRootPids)
-        }
-    val order =
-        roots
-            .flatMap { root -> processTreePostOrder(root) { pid -> readDirectChildPids(pid, procRoot) } }
-            .distinct()
-
-    if (process.isAlive) {
+    val targets = roots.flatMap(scanner::treePostOrder).distinctBy { it.pid }
+    if (process?.isAlive == true) {
         process.destroy()
         process.waitFor(750, TimeUnit.MILLISECONDS)
     }
-    order.forEach { pid -> runCatching { signal(pid) } }
-    if (process.isAlive && !process.waitFor(2, TimeUnit.SECONDS)) {
+    scanner.killOwned(targets, signal)
+    if (process?.isAlive == true && !process.waitFor(2, TimeUnit.SECONDS)) {
         process.destroyForcibly()
         process.waitFor(1, TimeUnit.SECONDS)
     }

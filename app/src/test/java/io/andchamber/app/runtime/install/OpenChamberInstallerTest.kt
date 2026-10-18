@@ -40,6 +40,23 @@ class OpenChamberInstallerTest {
     }
 
     @Test
+    fun `pty smoke test spawns sh through node-pty and requires PTYOK with exit 0`() {
+        val script = OpenChamberInstaller.PTY_SMOKE_SCRIPT
+        assertTrue(script.contains("require('$OPENCHAMBER_MODULE_ROOT/node_modules/node-pty')"))
+        assertTrue(script.contains("pty.spawn('/bin/sh', ['-c', 'echo PTYOK']"))
+        assertTrue(script.contains("exitCode === 0 && out.includes('PTYOK')"))
+        assertTrue(script.contains("process.exit(1)"))
+    }
+
+    @Test
+    fun `node-pty build and smoke test are required, not tolerated`() {
+        // The install command chain must fail on build or smoke failure (set -e + mustSucceed).
+        val chain = "set -e; cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild"
+        assertTrue(chain.startsWith("set -e;"))
+        assertEquals(OpenChamberInstaller.PTY_SMOKE_GUEST_PATH, "/opt/andchamber/pty-smoke.cjs")
+    }
+
+    @Test
     fun `shim is written to the path NODE_OPTIONS requires`() {
         assertEquals("/opt/andchamber/android-shim.cjs", SHIM_GUEST_PATH)
     }

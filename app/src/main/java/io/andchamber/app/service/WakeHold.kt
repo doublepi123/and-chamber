@@ -11,12 +11,14 @@ import android.os.PowerManager
 object WakeHold {
     private const val TAG = "AndChamber:runtime"
 
-    /** Safety valve so a lost release cannot keep the device awake indefinitely. */
-    const val MAX_HOLD_MILLIS = 60 * 60 * 1000L
-
     private val lock = Any()
     private var wakeLock: PowerManager.WakeLock? = null
 
+    /**
+     * No timeout: while Running the lock is held for the server's lifetime, and every end of work
+     * (terminal state, exception, service destroy) calls [release]. A timed lock would silently lose
+     * the CPU guarantee in the middle of a long-running server.
+     */
     fun acquire(context: Context) {
         synchronized(lock) {
             if (wakeLock?.isHeld == true) return
@@ -24,7 +26,7 @@ object WakeHold {
             wakeLock =
                 power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG).apply {
                     setReferenceCounted(false)
-                    acquire(MAX_HOLD_MILLIS)
+                    acquire()
                 }
         }
     }

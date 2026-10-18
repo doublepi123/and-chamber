@@ -2,23 +2,33 @@ package io.andchamber.app.runtime.process
 
 import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.install.InstalledRuntime
-import io.andchamber.app.runtime.storage.DeviceStorage
+import kotlinx.coroutines.CancellationException
 import java.io.File
 import java.io.FileOutputStream
 
 /** Runs and stops the OpenChamber server process. */
 interface OpenChamberServer {
-    /** Blocks until the server answers its health check. Throws if it exits or never becomes ready. */
+    /**
+     * Launches the server and waits until it is ready (see [Readiness]). Throws on any failure and
+     * whenever [isCancelled] returns true, so a Stop never queues behind the readiness wait.
+     */
     fun start(
         runtime: InstalledRuntime,
         uiPassword: String,
         onLog: (String) -> Unit,
+        isCancelled: () -> Boolean = { false },
     )
 
+    /** Stops every process of this server, owned or from our handle. Idempotent. */
     fun stop()
 
     fun isAlive(): Boolean
 }
+
+/** Thrown when the port is held by something other than our server. Never launch/login then. */
+class PortInUseException(
+    port: Int,
+) : IllegalStateException("Port $port is in use by another app")
 
 /**
  * Launches `node cli.js serve` inside PRoot. Ported from AndCode's LocalRuntimeProcessLauncher (MIT),
@@ -28,14 +38,17 @@ class ProotOpenChamberServer(
     private val paths: RuntimePaths,
     private val suite: () -> EmbeddedCommandSuite.Paths,
     private val health: HealthProbe,
+    private val scanner: ProcessScanner,
+    private val signal: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
     private val readyTimeoutMillis: Long = READY_TIMEOUT_MILLIS,
-    private val processSignal: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
-    private val procRoot: File = File("/proc"),
+    private val pollMillis: Long = POLL_MILLIS,
     private val maxLogBytes: Long = 1_048_576L,
+    private val sleep: (Long) -> Unit = Thread::sleep,
+    private val now: () -> Long = System::nanoTime,
     /** Rewrites the guest resolv.conf from the current network; networks change between runs. */
     private val refreshDns: (InstalledRuntime) -> Unit = {},
-    /** Clears leftovers of a crashed run before launch (see [ProotStaleServerCleaner]). */
-    private val staleCleaner: (port: Int, guestRunDir: File, prootLibraryPath: String) -> Unit = { _, _, _ -> },
+    /** Pre-start cleanup; returns true when the port is free afterwards. */
+    private val cleanBeforeStart: (port: Int, guestRunDir: File, prootPath: String) -> Boolean = { _, _, _ -> true },
 ) : OpenChamberServer {
     private val lock = Any()
     private var process: Process? = null
@@ -44,14 +57,20 @@ class ProotOpenChamberServer(
         runtime: InstalledRuntime,
         uiPassword: String,
         onLog: (String) -> Unit,
+        isCancelled: () -> Boolean,
     ) {
         stop()
+        val port = runtime.metadata.port
+        // OpenChamber's own data dir inside the guest: /root/.config/openchamber (cli-paths.js).
+        val guestRunDir = File(runtime.rootfs, "root/.config/openchamber/run")
+        // Port ownership is decided before anything is spawned: a foreign listener that survives our
+        // cleanup means we must not launch, and must never send the password to it.
+        val prootPath = runCatching { suite().proot.absolutePath }.getOrNull()
+            ?: error("Embedded PRoot is unavailable")
+        if (!cleanBeforeStart(port, guestRunDir, prootPath)) throw PortInUseException(port)
         runCatching { refreshDns(runtime) }
         val resolved = suite()
-        // OpenChamber's own data dir inside the guest: /root/.config/openchamber (see cli-paths.js).
-        val guestRunDir = File(runtime.rootfs, "root/.config/openchamber/run")
-        staleCleaner(runtime.metadata.port, guestRunDir, resolved.proot.absolutePath)
-        val port = runtime.metadata.port
+
         paths.logs.mkdirs()
         paths.workspace.mkdirs()
         paths.prootTmp.mkdirs()
@@ -61,8 +80,10 @@ class ProotOpenChamberServer(
             ProotCommands.serverCommand(
                 proot = resolved.proot,
                 rootfs = runtime.rootfs,
+                home = paths.home,
                 workspace = paths.workspace,
-                storageArguments = DeviceStorage.bindArguments(),
+                // No device-storage binds: MANAGE_EXTERNAL_STORAGE was removed (YAGNI for v1).
+                storageArguments = emptyList(),
                 port = port,
             )
         val builder =
@@ -76,18 +97,22 @@ class ProotOpenChamberServer(
         val started = builder.start()
         synchronized(lock) { process = started }
         pumpOutput(started, onLog)
-        waitUntilReady(started, port)
+        try {
+            waitUntilReady(started, port, isCancelled)
+        } catch (error: Throwable) {
+            stop()
+            throw error
+        }
     }
 
     override fun stop() {
         val current = synchronized(lock) { process.also { process = null } }
-        current?.let { terminateProcessTree(it, emptyList(), procRoot, processSignal) }
-        // Also reap PRoot trees left by an earlier app process that we no longer hold a handle to.
-        // Matching on the runtime directory keeps this away from any other PRoot on the device.
-        findManagedRuntimeRootPids(paths.root, procRoot)
-            .flatMap { root -> processTreePostOrder(root) { pid -> readDirectChildPids(pid, procRoot) } }
-            .distinct()
-            .forEach { pid -> runCatching { processSignal(pid) } }
+        // Owned-only: our handle's tree plus every runtime PRoot tree we can prove is ours. Uses the
+        // proot path from the suite when available; stop must still work if the suite is missing.
+        val proot = runCatching { suite().proot.absolutePath }.getOrNull()
+        val roots =
+            proot?.let { scanner.ownedRoots(prootPath = it, rootfsPath = paths.rootfs.absolutePath) }.orEmpty()
+        terminateProcessTree(current, scanner, roots, signal)
     }
 
     override fun isAlive(): Boolean = synchronized(lock) { process?.isAlive == true }
@@ -113,21 +138,37 @@ class ProotOpenChamberServer(
         }, "openchamber-output").apply { isDaemon = true }.start()
     }
 
+    /**
+     * Readiness: our child is alive, /health reports ok and OpenCode ready, and the serverId stays
+     * the same across polls. Cancellation is checked between polls so Stop is never blocked.
+     */
     private fun waitUntilReady(
         started: Process,
         port: Int,
+        isCancelled: () -> Boolean,
     ) {
-        val deadline = System.nanoTime() + readyTimeoutMillis * 1_000_000L
+        val deadline = now() + readyTimeoutMillis * 1_000_000L
+        val serverIds = mutableListOf<String?>()
         while (true) {
+            if (isCancelled()) throw CancellationException("Start cancelled")
             if (!started.isAlive) {
                 error("OpenChamber exited during startup (exit ${started.exitValue()}): ${tail()}")
             }
-            if (health.isHealthy(port)) return
-            if (System.nanoTime() >= deadline) {
-                stop()
+            val report = health.read(port)
+            serverIds += report?.serverId
+            check(Readiness.identityStable(serverIds)) {
+                "Another OpenChamber answered on port $port during startup; refusing to continue"
+            }
+            when (val verdict = Readiness.verdict(report)) {
+                Readiness.Verdict.Ready -> return
+                is Readiness.Verdict.OpenCodeFailed ->
+                    error("OpenCode backend failed to start: ${verdict.error}")
+                Readiness.Verdict.Waiting -> Unit
+            }
+            if (now() >= deadline) {
                 error("OpenChamber did not become ready on port $port within ${readyTimeoutMillis / 1000}s: ${tail()}")
             }
-            Thread.sleep(500)
+            sleep(pollMillis)
         }
     }
 
@@ -137,5 +178,6 @@ class ProotOpenChamberServer(
 
     companion object {
         const val READY_TIMEOUT_MILLIS = 90_000L
+        const val POLL_MILLIS = 500L
     }
 }

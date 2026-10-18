@@ -42,6 +42,13 @@ internal sealed interface AddressCheck {
 }
 
 private val schemePrefix = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://")
+private val ipv4Loopback = Regex("127(\\.\\d{1,3}){3}")
+
+/** True for localhost, 127.0.0.0/8 and ::1 (with or without brackets). */
+internal fun isLoopbackHost(host: String): Boolean {
+    val h = host.lowercase(Locale.ROOT).removePrefix("[").removeSuffix("]")
+    return h == "localhost" || h == "::1" || ipv4Loopback.matches(h)
+}
 
 /**
  * Normalizes what the user typed into a base URL: trims, adds http:// when no scheme is given,

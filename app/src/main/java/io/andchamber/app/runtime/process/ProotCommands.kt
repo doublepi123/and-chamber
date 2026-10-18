@@ -37,20 +37,32 @@ object ProotCommands {
     /** `-b host:guest` pairs for each spec. */
     fun bindArguments(specs: List<String>): List<String> = specs.flatMap { listOf("-b", it) }
 
+    /**
+     * Bind spec that maps the persistent [home] (outside the environment) over the guest /root.
+     * Applied to every guest command, so config, sessions and credentials survive a rebuild.
+     */
+    fun homeBindSpec(home: File): String = "${home.absolutePath}:$GUEST_HOME"
+
     /** A non-interactive `/bin/sh -lc <script>` inside the rootfs, used by the installer. */
     fun guestShellCommand(
         proot: File,
         rootfs: File,
+        home: File,
         extraBinds: List<String>,
         script: String,
     ): List<String> =
-        prootArguments(proot, rootfs, bindArguments(extraBinds) + listOf("-w", GUEST_HOME)) +
+        prootArguments(
+            proot,
+            rootfs,
+            bindArguments(listOf(homeBindSpec(home)) + extraBinds) + listOf("-w", GUEST_HOME),
+        ) +
             listOf("/bin/sh", "-lc", script)
 
     /** The OpenChamber server, bound to loopback and running in the foreground. */
     fun serverCommand(
         proot: File,
         rootfs: File,
+        home: File,
         workspace: File,
         storageArguments: List<String>,
         port: Int,
@@ -58,7 +70,7 @@ object ProotCommands {
         prootArguments(
             proot,
             rootfs,
-            bindArguments(listOf("${workspace.absolutePath}:/workspace")) +
+            bindArguments(listOf(homeBindSpec(home), "${workspace.absolutePath}:/workspace")) +
                 storageArguments +
                 listOf("-w", "/workspace"),
         ) +

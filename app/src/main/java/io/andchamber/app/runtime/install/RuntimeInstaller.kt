@@ -36,18 +36,29 @@ interface InstallReporter {
 
 /** Provisions and inspects the Linux environment. Implementations must do blocking I/O on IO. */
 interface RuntimeInstaller {
-    /** Finishes or rolls back an environment swap interrupted by a process death. */
-    fun recoverInterruptedActivation()
+    /**
+     * Settles a swap that a process death interrupted. Cheap when nothing is pending (one stat), so
+     * it is safe to call at every detection. Returns true when a pre-commit swap was rolled back.
+     * Throws only when a rollback itself fails.
+     */
+    fun recover(): Boolean
 
     /** The active environment, or null when nothing usable is installed. */
     fun installedRuntime(): InstalledRuntime?
 
-    /** Builds a fresh environment in staging and atomically activates it. Throws on failure. */
+    /**
+     * Builds a fresh environment in staging, verifies it, then atomically activates it. The active
+     * environment is untouched until that swap, so a failed install or repair keeps the old one.
+     * Throws on failure.
+     */
     suspend fun install(report: InstallReporter): InstalledRuntime
 
-    /** Removes the environment and metadata but keeps the workspace and secrets. */
+    /**
+     * Removes the environment (rootfs + metadata) but keeps the guest home, workspace and secrets.
+     * Not for repair: a repair needs no pre-delete, [install] swaps the environment in place.
+     */
     fun discardEnvironment()
 
-    /** Removes the whole runtime directory. */
+    /** Removes the whole runtime directory, including the guest home and workspace. */
     fun removeAll()
 }

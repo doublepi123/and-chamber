@@ -341,9 +341,8 @@ private fun UnsupportedBody() {
         color = MaterialTheme.colorScheme.onSurface,
     )
     Spacer(Modifier.height(6.dp))
-    val abi = remember { android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty().ifEmpty { "unknown" } }
     Text(
-        text = Strings.unsupportedBody(abi),
+        text = Strings.unsupportedBody,
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

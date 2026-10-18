@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -64,6 +66,7 @@ import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ConfirmDialog
 import io.andchamber.app.ui.components.IconTile
 import io.andchamber.app.ui.displayAddress
+import io.andchamber.app.ui.isLoopbackHost
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import io.andchamber.app.ui.theme.ChamberTheme
 import java.util.UUID
@@ -251,6 +254,7 @@ internal fun ServerEditorDialog(
     var password by remember { mutableStateOf(initial?.uiPassword.orEmpty()) }
     var passwordVisible by remember { mutableStateOf(false) }
     var showErrors by rememberSaveable { mutableStateOf(false) }
+    var allowInsecure by rememberSaveable { mutableStateOf(initial?.allowInsecureHttp == true) }
 
     val check = remember(address) { checkServerAddress(address) }
     val addressError: String? =
@@ -259,6 +263,9 @@ internal fun ServerEditorDialog(
             AddressCheck.Empty -> if (showErrors) Strings.addressRequired else null
             is AddressCheck.Valid -> null
         }
+    // Plain http to a non-loopback host sends the UI password (and session) unencrypted.
+    val insecureRemote = (check as? AddressCheck.Valid)?.let { it.url.startsWith("http://") && !isLoopbackHost(it.host) } == true
+    val insecureBlocked = insecureRemote && password.isNotEmpty() && !allowInsecure
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         if (initial == null) runCatching { focus.requestFocus() }
@@ -266,7 +273,7 @@ internal fun ServerEditorDialog(
 
     fun submit() {
         val valid = check as? AddressCheck.Valid
-        if (valid == null) {
+        if (valid == null || insecureBlocked) {
             showErrors = true
             return
         }
@@ -276,6 +283,7 @@ internal fun ServerEditorDialog(
                 displayName = name.trim().ifEmpty { valid.host },
                 baseUrl = valid.url,
                 uiPassword = password.takeIf { it.isNotEmpty() },
+                allowInsecureHttp = insecureRemote && allowInsecure,
             ),
         )
     }
@@ -319,6 +327,38 @@ internal fun ServerEditorDialog(
                             capitalization = KeyboardCapitalization.None,
                         ),
                 )
+                if (insecureRemote) {
+                    Column {
+                        Text(
+                            Strings.insecureWarning,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { allowInsecure = !allowInsecure }
+                                    .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = allowInsecure, onCheckedChange = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                Strings.allowInsecure,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                        if (insecureBlocked && showErrors) {
+                            Text(
+                                Strings.insecureNeedsConfirm,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },

@@ -54,12 +54,13 @@ class EncryptedRemoteServerStore(
         val displayName: String,
         val baseUrl: String,
         val uiPassword: String? = null,
+        val allowInsecureHttp: Boolean = false,
     ) {
-        fun toTarget() = ServerTarget.Remote(id, displayName, baseUrl, uiPassword)
+        fun toTarget() = ServerTarget.Remote(id, displayName, baseUrl, uiPassword, allowInsecureHttp)
 
         companion object {
             fun from(target: ServerTarget.Remote) =
-                StoredServer(target.id, target.displayName, target.baseUrl, target.uiPassword)
+                StoredServer(target.id, target.displayName, target.baseUrl, target.uiPassword, target.allowInsecureHttp)
         }
     }
 

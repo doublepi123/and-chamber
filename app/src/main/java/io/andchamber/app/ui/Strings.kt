@@ -64,11 +64,10 @@ internal object Strings {
     const val tryAgain = "Try again"
     const val repair = "Repair"
     const val repairExplain = "Repair reinstalls the Linux system. Your projects are kept when possible."
-    const val unsupportedTitle = "This phone can't run the local server"
-
-    fun unsupportedBody(abi: String) =
-        "The local server needs a 64-bit ARM (arm64-v8a) or x86_64 processor, and this device reports $abi. " +
-            "You can still connect to OpenChamber running on another computer."
+    const val unsupportedTitle = "Not available on this device"
+    const val unsupportedBody =
+        "Running OpenChamber on the device needs an ARM64 (arm64-v8a) phone or tablet. " +
+            "You can still connect to OpenChamber on your computer below."
 
     const val showLog = "Log"
     const val details = "Details"
@@ -127,6 +126,9 @@ internal object Strings {
     const val fieldName = "Name (optional)"
     const val fieldPassword = "UI password (optional)"
     const val passwordHint = "Only needed if the server asks for a password"
+    const val insecureWarning = "Passwords and traffic are sent unencrypted over this network."
+    const val allowInsecure = "Allow unencrypted connection"
+    const val insecureNeedsConfirm = "Turn on \"Allow unencrypted connection\" to save a password for this address."
     const val showPassword = "Show password"
     const val hidePassword = "Hide password"
     const val save = "Save"
