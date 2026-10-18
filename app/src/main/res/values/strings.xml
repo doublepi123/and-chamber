@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- All user-visible copy. Keep keys in sync with values-zh/strings.xml (checked by StringResourcesTest). -->
 <resources>
     <string name="app_name">AndChamber</string>
+    <string name="tagline">OpenChamber on this phone, or on your computer</string>
+
+    <!-- Runtime notification (foreground service) -->
     <string name="runtime_notification_channel">OpenChamber runtime</string>
     <string name="runtime_notification_channel_description">Keeps the on-device OpenChamber server running</string>
     <string name="runtime_notification_title">OpenChamber</string>
@@ -9,6 +13,11 @@
     <string name="runtime_notification_running">Running at %1$s</string>
     <string name="runtime_notification_stopping">Stopping OpenChamber</string>
     <string name="runtime_notification_stop">Stop</string>
+    <string name="runtime_notification_not_installed">Not installed</string>
+    <string name="runtime_notification_stopped">Stopped</string>
+    <string name="runtime_notification_unsupported">Unsupported device</string>
+
+    <!-- Notification channels and actions -->
     <string name="channel_agent_finished">Agent finished</string>
     <string name="channel_needs_input">Needs your input</string>
     <string name="channel_errors">Errors</string>
@@ -20,4 +29,222 @@
     <string name="reply_sent">Sent</string>
     <string name="reply_failed">Couldn\'t send: %1$s</string>
     <string name="permission_done">Permission answered</string>
+
+    <!-- AndChamber runtime alerts (notifications) -->
+    <string name="alert_setup_failed">Setup failed</string>
+    <string name="alert_start_failed">OpenChamber didn\'t start</string>
+    <string name="alert_stopped">OpenChamber stopped</string>
+    <string name="alert_opencode_error">OpenCode backend error</string>
+
+    <!-- Launch -->
+    <string name="launch_checking">Checking…</string>
+    <string name="auto_open_label">Open OpenChamber when the app starts</string>
+    <string name="auto_open_hint">Starts the server first if it isn\'t running.</string>
+
+    <!-- Sections -->
+    <string name="section_this_device">On this phone</string>
+    <string name="section_servers">On other computers</string>
+
+    <!-- Local runtime card -->
+    <string name="local_title">OpenChamber</string>
+    <string name="local_subtitle">Local server</string>
+    <string name="status_checking">Checking</string>
+    <string name="status_not_set_up">Not set up</string>
+    <string name="status_setting_up">Setting up</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_starting">Starting</string>
+    <string name="status_running">Running</string>
+    <string name="status_stopping">Stopping</string>
+    <string name="status_problem">Problem</string>
+    <string name="status_unsupported">Not supported</string>
+
+    <string name="setup_intro">Installs a small Linux system on this phone and runs OpenChamber and OpenCode inside it. Your projects and sessions stay on the device.</string>
+    <string name="setup_fact_contents">Alpine Linux, Node.js, Git, OpenCode and OpenChamber</string>
+    <string name="setup_fact_size">About 1.2 GB to download and store</string>
+    <string name="setup_fact_wifi">Wi-Fi recommended</string>
+    <string name="setup_fact_time">Takes a few minutes and keeps going in the background</string>
+    <string name="setup_fact_free">%1$s free on this phone</string>
+    <string name="setup_low_space">That may not be enough space.</string>
+    <string name="set_up">Set up</string>
+    <string name="step_of">Step %1$d of %2$d</string>
+    <string name="setup_background_note">You can leave the app. Setup keeps going in the background and shows its progress in a notification.</string>
+    <string name="stopped_body">OpenChamber is installed. Start the server to open it.</string>
+    <string name="start">Start</string>
+    <string name="starting_title">Starting OpenChamber…</string>
+    <string name="stopping_title">Stopping OpenChamber…</string>
+    <string name="open">Open</string>
+    <string name="stop">Stop</string>
+    <string name="uptime">Up %1$s</string>
+    <string name="port">Port %1$d</string>
+    <string name="just_started">Just started</string>
+    <string name="copy_address">Copy address</string>
+    <string name="copied">Copied</string>
+    <string name="failed_title">OpenChamber ran into a problem</string>
+    <string name="try_again">Try again</string>
+    <string name="repair">Repair</string>
+    <string name="repair_explain">Repair reinstalls the Linux system. Your projects are kept when possible.</string>
+    <string name="unsupported_title">Not available on this device</string>
+    <string name="unsupported_body">Running OpenChamber on the device needs an ARM64 (arm64-v8a) phone or tablet. You can still connect to OpenChamber on your computer below.</string>
+    <string name="show_log">Log</string>
+    <string name="details">Details</string>
+    <string name="log_title">Log</string>
+    <plurals name="log_lines">
+        <item quantity="one">%1$d line</item>
+        <item quantity="other">%1$d lines</item>
+    </plurals>
+    <string name="log_empty">No output yet.</string>
+    <string name="copy_log">Copy log</string>
+
+    <!-- Details -->
+    <string name="detail_abi">Processor</string>
+    <string name="detail_alpine">Alpine Linux</string>
+    <string name="detail_node">Node.js</string>
+    <string name="detail_open_code">OpenCode</string>
+    <string name="detail_open_chamber">OpenChamber</string>
+    <string name="detail_disk_used">Disk used</string>
+    <string name="detail_free_space">Free space</string>
+    <string name="unknown_value">—</string>
+    <string name="uninstall">Uninstall</string>
+
+    <!-- Shared storage -->
+    <string name="storage_title">Projects and settings folder</string>
+    <string name="storage_off">Off</string>
+    <string name="storage_needs_access">Needs access</string>
+    <string name="storage_on">On</string>
+    <string name="storage_folder_name">AndChamber/</string>
+    <string name="storage_intro">Keep projects and OpenCode settings in AndChamber/ on your phone\'s storage, so you can edit them with a file manager or over USB.</string>
+    <string name="storage_needs_all_files">AndChamber needs all-files access to use this folder. You can turn it on in system settings.</string>
+    <string name="storage_needs_legacy">AndChamber needs access to your phone\'s storage to use this folder.</string>
+    <string name="allow_access">Allow access</string>
+    <string name="storage_others_all_files">Other apps with all-files access can read this folder.</string>
+    <string name="storage_others_legacy">Other apps with storage access can read this folder.</string>
+    <string name="storage_projects_dir">projects/</string>
+    <string name="storage_opencode_dir">opencode/</string>
+    <string name="guest_workspace">/workspace</string>
+    <string name="guest_private_workspace">/workspace-private</string>
+    <string name="storage_opencode_target">OpenCode settings</string>
+    <string name="storage_private">Private: sessions, sign-ins, plugins, /workspace-private</string>
+    <string name="storage_unavailable">AndChamber has access, but can\'t create AndChamber/ on your phone\'s storage. Make sure the storage is available.</string>
+    <string name="check_again">Check again</string>
+    <string name="storage_caveat">Shared storage doesn\'t keep symlinks or executable bits — use /workspace-private for projects that need node_modules.</string>
+    <string name="copy_folder_path">Copy folder path</string>
+    <string name="restart_to_apply">Restart the server to apply</string>
+    <string name="restart">Restart</string>
+    <string name="storage_off_dialog_title">Stop using the shared folder?</string>
+    <string name="storage_off_dialog_body">Your files stay in AndChamber/ on your phone\'s storage. From the next server start, OpenChamber uses its private folders again and won\'t see them.</string>
+    <string name="turn_off">Turn off</string>
+    <string name="cant_open_settings">Couldn\'t open system settings</string>
+
+    <!-- Runtime dialogs -->
+    <string name="repair_dialog_title">Repair the Linux system?</string>
+    <string name="repair_dialog_body">This stops OpenChamber, deletes the Linux system and installs it again, which downloads about 1.2 GB. Your projects are kept when possible.</string>
+    <string name="uninstall_dialog_title">Uninstall the local server?</string>
+    <string name="uninstall_dialog_body">This stops OpenChamber and deletes the Linux system from this phone, including projects, sessions and settings stored inside it. Saved servers are not affected.</string>
+    <string name="uninstall_dialog_body_shared">This stops OpenChamber and deletes the Linux system from this phone, including everything stored inside it. The AndChamber/ folder on your phone\'s storage is kept. Saved servers are not affected.</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Remote servers -->
+    <string name="add_server">Add server</string>
+    <string name="add">Add</string>
+    <string name="edit_server">Edit server</string>
+    <string name="empty_servers_title">Connect to your computer</string>
+    <string name="empty_servers_body">Add the address of an OpenChamber server on your computer or network, for example 192.168.1.20:3000.</string>
+    <string name="edit">Edit</string>
+    <string name="remove">Remove</string>
+    <string name="more_options">More options</string>
+    <string name="password_saved">Password saved</string>
+    <string name="remove_server_title">Remove %1$s?</string>
+    <string name="remove_server_body">The saved address and password are deleted from this phone. The server itself isn\'t changed.</string>
+
+    <!-- Server dialog -->
+    <string name="field_address">Address</string>
+    <string name="field_address_placeholder">192.168.1.20:3000</string>
+    <string name="address_preview">Connects to %1$s</string>
+    <string name="address_hint">Host name or IP address, with the port if needed</string>
+    <string name="field_name">Name (optional)</string>
+    <string name="field_password">UI password (optional)</string>
+    <string name="password_hint">Only needed if the server asks for a password</string>
+    <string name="insecure_warning">Passwords and traffic are sent unencrypted over this network.</string>
+    <string name="allow_insecure">Allow unencrypted connection</string>
+    <string name="insecure_needs_confirm">Turn on \"Allow unencrypted connection\" to save a password for this address.</string>
+    <string name="show_password">Show password</string>
+    <string name="hide_password">Hide password</string>
+    <string name="save">Save</string>
+    <string name="address_required">Enter the server address</string>
+    <string name="address_no_spaces">The address can\'t contain spaces</string>
+    <string name="address_scheme">Use an http:// or https:// address</string>
+    <string name="address_invalid">This doesn\'t look like a valid address</string>
+    <string name="address_no_host">Add a host name or IP address</string>
+
+    <!-- Web screen -->
+    <string name="connecting_to">Connecting to %1$s</string>
+    <string name="opening_local">Opening OpenChamber</string>
+    <string name="cant_reach">Can\'t reach %1$s</string>
+    <string name="cant_reach_local">Can\'t open OpenChamber</string>
+    <string name="server_fallback_name">the server</string>
+    <string name="connection_failed">The connection failed</string>
+    <string name="repair_from_home">Open the home screen to repair the Linux system.</string>
+    <string name="unreachable_hint_remote">Make sure the server is running and this phone can reach it, for example on the same Wi-Fi.</string>
+    <string name="unreachable_hint_local">The server on this device didn\'t answer.</string>
+    <string name="back">Back</string>
+    <string name="home">Home</string>
+    <string name="reload">Reload</string>
+    <string name="open_in_browser">Open in browser</string>
+    <string name="page_failed_title">The page didn\'t load</string>
+    <string name="local_stopped_title">OpenChamber stopped</string>
+    <string name="local_stopped_body">The server on this device isn\'t running.</string>
+    <string name="local_failed_title">OpenChamber stopped unexpectedly</string>
+    <string name="local_start_failed_title">OpenChamber didn\'t start</string>
+    <string name="local_setup_failed_title">Setup didn\'t finish</string>
+    <string name="start_again">Start again</string>
+    <string name="local_not_set_up_title">The local server isn\'t set up</string>
+    <string name="local_not_set_up_body">Set it up from the home screen first.</string>
+    <string name="setting_up_title">Setting up…</string>
+    <string name="server_removed_title">This server is no longer saved</string>
+    <string name="menu_description">AndChamber menu</string>
+    <string name="page_crashed">The page stopped working and was reloaded</string>
+    <string name="page_crashed_repeatedly">The page keeps stopping. Reload to try again.</string>
+    <string name="no_app_for_link">No app can open this link</string>
+    <string name="certificate_not_trusted">The server\'s certificate isn\'t trusted</string>
+    <string name="downloading">Downloading %1$s</string>
+    <string name="saved_to_downloads">Saved %1$s to Downloads</string>
+    <string name="download_failed">Couldn\'t save the file</string>
+
+    <!-- Install steps -->
+    <string name="step_download_rootfs">Download the Linux base</string>
+    <string name="step_extract_rootfs">Unpack the Linux base</string>
+    <string name="step_install_packages">Install system packages</string>
+    <string name="step_install_openchamber">Install OpenChamber and OpenCode</string>
+    <string name="step_build_native_modules">Build terminal support</string>
+    <string name="step_verify">Check the installation</string>
+
+    <!-- Cancel and confirm -->
+    <string name="confirm">Confirm</string>
+    <string name="cancel_action">Cancel</string>
+
+    <!-- Runtime message headlines (MessageKey) -->
+    <string name="msg_mirrors_unreachable">This device can\'t reach the package mirrors (Alpine, npm). Check the network or VPN, then try again.</string>
+    <string name="msg_packages_failed">Unable to install Linux packages. Check the network and retry.</string>
+    <string name="msg_openchamber_install_failed">Unable to install OpenChamber from npm.</string>
+    <string name="msg_native_build_failed">Unable to build node-pty for the terminal feature. Check the network and retry.</string>
+    <string name="msg_pty_smoke_failed">The rebuilt node-pty does not work in the guest. The install is incomplete.</string>
+    <string name="msg_port_in_use">Port %1$s is in use by another app</string>
+    <string name="msg_opencode_start_failed">OpenCode backend failed to start</string>
+    <string name="msg_exited_during_start">OpenChamber exited during startup</string>
+    <string name="msg_not_listening_in_time">OpenChamber did not start listening in time</string>
+    <string name="msg_not_ready_in_time">OpenChamber did not become ready in time</string>
+    <string name="msg_kept_stopping">OpenChamber kept stopping; tap Start to try again</string>
+    <string name="msg_stopped_unexpectedly">OpenChamber stopped unexpectedly</string>
+    <string name="msg_restart_failed">Restarting OpenChamber failed</string>
+    <string name="msg_embedded_proot_missing">The embedded Linux launcher is missing from the app</string>
+    <string name="msg_generic">Something went wrong</string>
+
+    <!-- Install progress sub-steps -->
+    <string name="msg_progress_unpacking">Unpacking the Linux userland</string>
+    <string name="msg_progress_installing_packages">Installing system packages</string>
+    <string name="msg_progress_installing_openchamber">Installing OpenChamber and OpenCode</string>
+    <string name="msg_progress_building_native">Building terminal support</string>
+    <string name="msg_progress_verifying">Checking node, opencode and the web bundle</string>
+    <string name="msg_progress_activating">Activating the environment</string>
+    <string name="msg_progress_done">Done</string>
 </resources>

@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.components
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -47,7 +49,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import io.andchamber.app.ui.theme.ChamberTheme
 
@@ -265,7 +266,7 @@ internal fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     destructive: Boolean = false,
-    dismissLabel: String = Strings.cancel,
+    dismissLabel: String = stringResource(R.string.cancel),
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,

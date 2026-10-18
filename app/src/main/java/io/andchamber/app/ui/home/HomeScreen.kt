@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.home
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -53,7 +55,6 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.ChamberMark
 import io.andchamber.app.ui.components.SectionHeader
 import io.andchamber.app.ui.rememberLastNonNull
@@ -139,7 +140,7 @@ internal fun HomeScreen(
                     HomeHeader(modifier = Modifier.revealOnEnter(0, animate))
 
                     SectionHeader(
-                        text = Strings.sectionThisDevice,
+                        text = stringResource(R.string.section_this_device),
                         modifier = Modifier.padding(top = 28.dp, bottom = 10.dp).revealOnEnter(1, animate),
                     )
                     LocalRuntimeCard(
@@ -179,7 +180,7 @@ internal fun HomeScreen(
                     }
 
                     SectionHeader(
-                        text = Strings.sectionServers,
+                        text = stringResource(R.string.section_servers),
                         modifier =
                             Modifier
                                 .padding(top = 28.dp, bottom = if (servers.isEmpty()) 10.dp else 2.dp)
@@ -190,7 +191,7 @@ internal fun HomeScreen(
                                     TextButton(onClick = { editingId = NEW_SERVER }) {
                                         Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                                         Spacer(Modifier.width(4.dp))
-                                        Text(Strings.add)
+                                        Text(stringResource(R.string.add))
                                     }
                                 }
                             } else {
@@ -252,12 +253,12 @@ private fun HomeHeader(modifier: Modifier = Modifier) {
         Spacer(Modifier.width(14.dp))
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
-                text = Strings.appName,
+                text = stringResource(R.string.app_name),
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = Strings.tagline,
+                text = stringResource(R.string.tagline),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

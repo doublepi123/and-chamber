@@ -1,5 +1,6 @@
 package io.andchamber.app.ui.web
 
+import io.andchamber.app.R
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
@@ -41,7 +42,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import io.andchamber.app.ui.Strings
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -327,7 +327,7 @@ internal class ChamberWebView(
                 main.post { if (isCurrent(view)) view.loadUrl(back) }
             } else {
                 progress = 100
-                pageError = Strings.pageFailedTitle
+                pageError = context().getString(R.string.page_failed_title)
             }
         }
 
@@ -382,7 +382,7 @@ internal class ChamberWebView(
             error: SslError,
         ) {
             handler.cancel()
-            if (isCurrent(view) && originOf(error.url) == origin) pageError = Strings.certificateNotTrusted
+            if (isCurrent(view) && originOf(error.url) == origin) pageError = context().getString(R.string.certificate_not_trusted)
         }
 
         override fun onRenderProcessGone(
@@ -474,10 +474,10 @@ internal class ChamberWebView(
             themedContext.startActivity(intent)
             true
         } catch (_: ActivityNotFoundException) {
-            if (!quiet) toast(Strings.noAppForLink)
+            if (!quiet) toast(context().getString(R.string.no_app_for_link))
             false
         } catch (_: SecurityException) {
-            if (!quiet) toast(Strings.noAppForLink)
+            if (!quiet) toast(context().getString(R.string.no_app_for_link))
             false
         }
     }
@@ -498,10 +498,10 @@ internal class ChamberWebView(
             progress = 0
             committed = false
             view.loadUrl(url)
-            toast(Strings.pageCrashed)
+            toast(context().getString(R.string.page_crashed))
         } else {
             progress = 100
-            pageError = Strings.pageCrashedRepeatedly
+            pageError = context().getString(R.string.page_crashed_repeatedly)
         }
     }
 
@@ -555,7 +555,7 @@ internal class ChamberWebView(
                     }
                 }
             appContext.getSystemService(DownloadManager::class.java).enqueue(request)
-            toast(Strings.downloading(name))
+            toast(context().getString(R.string.downloading, name))
         } catch (_: Exception) {
             openExternally(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         }
@@ -587,7 +587,7 @@ internal class ChamberWebView(
                 writeToDownloads(name, mime, bytes)
                 name
             }
-        main.post { toast(saved.fold({ Strings.savedToDownloads(it) }, { Strings.downloadFailed })) }
+        main.post { toast(saved.fold({ context().getString(R.string.saved_to_downloads, it) }, { context().getString(R.string.download_failed) })) }
     }
 
     private fun writeToDownloads(
@@ -640,6 +640,9 @@ internal class ChamberWebView(
         Toast.makeText(appContext, text, Toast.LENGTH_SHORT).show()
     }
 
+    /** Localised text outside composition (WebView callbacks), from the app context. */
+    private fun context(): Context = appContext
+
     /** JavaScript side channel. Calls need the per-WebView token, which other frames can't read. */
     private inner class Bridge {
         // Called on the JavaScript interface thread; both flags are volatile and re-checked on the
@@ -655,7 +658,7 @@ internal class ChamberWebView(
         ) {
             if (!trusted(token)) return
             if (dataUrl.isNullOrEmpty() || dataUrl.length > MAX_BRIDGE_CHARS) {
-                main.post { toast(Strings.downloadFailed) }
+                main.post { toast(context().getString(R.string.download_failed)) }
                 return
             }
             saveDataUrl(dataUrl, fileName.orEmpty(), mimeType)

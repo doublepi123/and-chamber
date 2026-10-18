@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.web
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -54,7 +56,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.StatusDot
 import io.andchamber.app.ui.components.StatusTone
 import io.andchamber.app.ui.theme.ChamberTextStyles
@@ -128,7 +129,7 @@ internal fun EdgeHandle(
                         interactionSource = interaction,
                         indication = null,
                         role = Role.Button,
-                        onClickLabel = Strings.menuDescription,
+                        onClickLabel = stringResource(R.string.menu_description),
                     ) { menuOpen = true }
                     .alpha(alpha),
             contentAlignment = Alignment.CenterEnd,
@@ -183,7 +184,7 @@ internal fun EdgeHandle(
                 }
                 HorizontalDivider(color = ChamberTheme.colors.cardBorder)
                 DropdownMenuItem(
-                    text = { Text(Strings.home) },
+                    text = { Text(stringResource(R.string.home)) },
                     leadingIcon = { Icon(Icons.Rounded.Home, contentDescription = null) },
                     onClick = {
                         menuOpen = false
@@ -191,7 +192,7 @@ internal fun EdgeHandle(
                     },
                 )
                 DropdownMenuItem(
-                    text = { Text(Strings.reload) },
+                    text = { Text(stringResource(R.string.reload)) },
                     leadingIcon = { Icon(Icons.Rounded.Refresh, contentDescription = null) },
                     onClick = {
                         menuOpen = false
@@ -200,7 +201,7 @@ internal fun EdgeHandle(
                 )
                 if (onOpenInBrowser != null) {
                     DropdownMenuItem(
-                        text = { Text(Strings.openInBrowser) },
+                        text = { Text(stringResource(R.string.open_in_browser)) },
                         leadingIcon = { Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null) },
                         onClick = {
                             menuOpen = false

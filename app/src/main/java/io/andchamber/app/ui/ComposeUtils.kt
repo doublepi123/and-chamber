@@ -1,5 +1,7 @@
 package io.andchamber.app.ui
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -62,7 +64,7 @@ internal fun rememberCopyAction(): (String) -> Unit {
         { text: String ->
             clipboard.setText(AnnotatedString(text))
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                Toast.makeText(context, Strings.copied, Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.copied), Toast.LENGTH_SHORT).show()
             }
         }
     }

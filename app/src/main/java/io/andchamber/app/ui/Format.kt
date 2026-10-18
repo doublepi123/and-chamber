@@ -1,5 +1,6 @@
 package io.andchamber.app.ui
 
+import io.andchamber.app.R
 import java.net.URI
 import java.util.Locale
 
@@ -16,17 +17,22 @@ internal fun formatBytes(bytes: Long): String {
     return String.format(Locale.US, pattern, value, units[index])
 }
 
-/** "Up 12m", "Up 2h 5m", "Up 3d 4h"; [Strings.justStarted] under a minute. */
+/**
+ * The uptime text. Pure: the caller passes the localised "just started" and "Up %1$s" texts, so this is
+ * unit-tested without a Context. Duration units (m, h, d) are kept as the short English form.
+ */
 internal fun uptimeLabel(
     sinceEpochMs: Long,
     nowEpochMs: Long,
+    justStarted: String,
+    upTemplate: (String) -> String,
 ): String {
     val minutes = (nowEpochMs - sinceEpochMs).coerceAtLeast(0L) / 60_000L
     return when {
-        minutes < 1 -> Strings.justStarted
-        minutes < 60 -> Strings.uptime("${minutes}m")
-        minutes < 60 * 24 -> Strings.uptime("${minutes / 60}h ${minutes % 60}m")
-        else -> Strings.uptime("${minutes / (60 * 24)}d ${(minutes / 60) % 24}h")
+        minutes < 1 -> justStarted
+        minutes < 60 -> upTemplate("${minutes}m")
+        minutes < 60 * 24 -> upTemplate("${minutes / 60}h ${minutes % 60}m")
+        else -> upTemplate("${minutes / (60 * 24)}d ${(minutes / 60) % 24}h")
     }
 }
 
@@ -38,7 +44,8 @@ internal sealed interface AddressCheck {
 
     data class Valid(val url: String, val host: String) : AddressCheck
 
-    data class Invalid(val message: String) : AddressCheck
+    /** [messageRes] is the string resource that explains the problem; the UI resolves it. */
+    data class Invalid(@androidx.annotation.StringRes val messageRes: Int) : AddressCheck
 }
 
 private val schemePrefix = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://")
@@ -57,17 +64,17 @@ internal fun isLoopbackHost(host: String): Boolean {
 internal fun checkServerAddress(raw: String): AddressCheck {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return AddressCheck.Empty
-    if (trimmed.any { it.isWhitespace() }) return AddressCheck.Invalid(Strings.addressNoSpaces)
+    if (trimmed.any { it.isWhitespace() }) return AddressCheck.Invalid(R.string.address_no_spaces)
     val withScheme = if (schemePrefix.containsMatchIn(trimmed)) trimmed else "http://$trimmed"
-    val uri = runCatching { URI(withScheme) }.getOrNull() ?: return AddressCheck.Invalid(Strings.addressInvalid)
+    val uri = runCatching { URI(withScheme) }.getOrNull() ?: return AddressCheck.Invalid(R.string.address_invalid)
     val scheme = uri.scheme?.lowercase(Locale.ROOT)
-    if (scheme != "http" && scheme != "https") return AddressCheck.Invalid(Strings.addressScheme)
-    val authority = uri.rawAuthority ?: return AddressCheck.Invalid(Strings.addressNoHost)
+    if (scheme != "http" && scheme != "https") return AddressCheck.Invalid(R.string.address_scheme)
+    val authority = uri.rawAuthority ?: return AddressCheck.Invalid(R.string.address_no_host)
     // java.net.URI rejects some valid names (e.g. with "_"); fall back to the raw authority.
     val host =
         uri.host?.takeIf { it.isNotBlank() }
             ?: authority.substringAfterLast('@').substringBefore(':').takeIf { it.isNotBlank() }
-            ?: return AddressCheck.Invalid(Strings.addressNoHost)
+            ?: return AddressCheck.Invalid(R.string.address_no_host)
     val path = uri.rawPath.orEmpty().trimEnd('/')
     return AddressCheck.Valid(url = "$scheme://$authority$path", host = host)
 }

@@ -1,5 +1,8 @@
 package io.andchamber.app.ui.web
 
+import io.andchamber.app.i18n.UserMessages
+import io.andchamber.app.R
+import androidx.compose.ui.res.stringResource
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
@@ -69,10 +72,8 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.WebSessionResult
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.displayAddress
 import io.andchamber.app.ui.findActivity
-import io.andchamber.app.ui.label
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.withSessionPath
 import kotlinx.coroutines.CancellationException
@@ -173,7 +174,7 @@ internal fun WebScreen(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                WebSessionResult.Unreachable(error.message ?: Strings.connectionFailed)
+                WebSessionResult.Unreachable(error.message ?: context.getString(R.string.connection_failed))
             }
         phase =
             when (result) {
@@ -327,23 +328,23 @@ private fun OverlayContent(
     onReload: () -> Unit,
     onStartLocal: () -> Unit,
 ) {
-    val home = PanelAction(Strings.home, onExit)
+    val home = PanelAction(stringResource(R.string.home), onExit)
     when (overlay) {
         WebOverlay.Missing ->
             StatusPanel(
                 icon = Icons.Rounded.LinkOff,
-                title = Strings.serverRemovedTitle,
+                title = stringResource(R.string.server_removed_title),
                 primary = home,
             )
         is WebOverlay.Local -> LocalServerPanel(state = overlay.state, onStart = onStartLocal, onHome = onExit)
         is WebOverlay.Unreachable ->
             StatusPanel(
                 icon = Icons.Rounded.CloudOff,
-                title = if (isLocal) Strings.cantReachLocal else Strings.cantReach(target?.displayName ?: Strings.serverFallbackName),
-                body = if (isLocal) Strings.unreachableHintLocal else Strings.unreachableHintRemote,
+                title = if (isLocal) stringResource(R.string.cant_reach_local) else stringResource(R.string.cant_reach, target?.displayName ?: stringResource(R.string.server_fallback_name)),
+                body = if (isLocal) stringResource(R.string.unreachable_hint_local) else stringResource(R.string.unreachable_hint_remote),
                 detail = overlay.reason,
-                primary = PanelAction(Strings.tryAgain, onRetry),
-                secondary = PanelAction(Strings.back, onExit),
+                primary = PanelAction(stringResource(R.string.try_again), onRetry),
+                secondary = PanelAction(stringResource(R.string.back), onExit),
             )
         WebOverlay.Connecting ->
             ConnectingPanel(
@@ -354,9 +355,9 @@ private fun OverlayContent(
         is WebOverlay.PageError ->
             StatusPanel(
                 icon = Icons.Rounded.ErrorOutline,
-                title = Strings.pageFailedTitle,
+                title = stringResource(R.string.page_failed_title),
                 detail = overlay.message,
-                primary = PanelAction(Strings.reload, onReload),
+                primary = PanelAction(stringResource(R.string.reload), onReload),
                 secondary = home,
             )
     }
@@ -369,11 +370,11 @@ internal fun LocalServerPanel(
     onStart: () -> Unit,
     onHome: () -> Unit,
 ) {
-    val home = PanelAction(Strings.home, onHome)
+    val home = PanelAction(stringResource(R.string.home), onHome)
     when (state) {
         is RuntimeState.Starting ->
             StatusPanel(
-                title = Strings.startingTitle,
+                title = stringResource(R.string.starting_title),
                 detail = state.detail,
                 progress = Float.NaN,
                 breathingMark = true,
@@ -381,7 +382,7 @@ internal fun LocalServerPanel(
             )
         is RuntimeState.Stopping ->
             StatusPanel(
-                title = Strings.stoppingTitle,
+                title = stringResource(R.string.stopping_title),
                 detail = state.detail,
                 progress = Float.NaN,
                 tertiary = home,
@@ -389,18 +390,18 @@ internal fun LocalServerPanel(
         RuntimeState.Stopped ->
             StatusPanel(
                 icon = Icons.Rounded.PowerSettingsNew,
-                title = Strings.localStoppedTitle,
-                body = Strings.localStoppedBody,
-                primary = PanelAction(Strings.startAgain, onStart),
+                title = stringResource(R.string.local_stopped_title),
+                body = stringResource(R.string.local_stopped_body),
+                primary = PanelAction(stringResource(R.string.start_again), onStart),
                 secondary = home,
             )
         is RuntimeState.Failed -> {
             // Say what actually went wrong: a start that never came up reads differently from a crash.
             val title =
                 when (state.phase) {
-                    FailurePhase.Install -> Strings.localSetupFailedTitle
-                    FailurePhase.Start -> Strings.localStartFailedTitle
-                    FailurePhase.Runtime -> Strings.localFailedTitle
+                    FailurePhase.Install -> stringResource(R.string.local_setup_failed_title)
+                    FailurePhase.Start -> stringResource(R.string.local_start_failed_title)
+                    FailurePhase.Runtime -> stringResource(R.string.local_failed_title)
                 }
             StatusPanel(
                 icon = Icons.Rounded.ErrorOutline,
@@ -408,23 +409,23 @@ internal fun LocalServerPanel(
                 title = title,
                 detail =
                     state.reason.takeUnless {
-                        it.equals(title, ignoreCase = true) || it.equals(Strings.localFailedTitle, ignoreCase = true)
+                        it.equals(title, ignoreCase = true) || it.equals(stringResource(R.string.local_failed_title), ignoreCase = true)
                     },
-                body = if (state.recoverable) null else Strings.repairFromHome,
-                primary = if (state.recoverable) PanelAction(Strings.tryAgain, onStart) else home,
+                body = if (state.recoverable) null else stringResource(R.string.repair_from_home),
+                primary = if (state.recoverable) PanelAction(stringResource(R.string.try_again), onStart) else home,
                 secondary = if (state.recoverable) home else null,
             )
         }
         is RuntimeState.Installing ->
             StatusPanel(
-                title = Strings.settingUpTitle,
-                body = state.step.label(),
+                title = stringResource(R.string.setting_up_title),
+                body = stringResource(UserMessages.stepLabel(state.step)),
                 progress = state.progress ?: Float.NaN,
                 tertiary = home,
             )
         RuntimeState.Detecting ->
             StatusPanel(
-                title = Strings.startingTitle,
+                title = stringResource(R.string.starting_title),
                 progress = Float.NaN,
                 breathingMark = true,
                 tertiary = home,
@@ -432,8 +433,8 @@ internal fun LocalServerPanel(
         RuntimeState.NotInstalled, RuntimeState.UnsupportedAbi ->
             StatusPanel(
                 icon = Icons.Rounded.PowerSettingsNew,
-                title = Strings.localNotSetUpTitle,
-                body = Strings.localNotSetUpBody,
+                title = stringResource(R.string.local_not_set_up_title),
+                body = stringResource(R.string.local_not_set_up_body),
                 primary = home,
             )
         is RuntimeState.Running -> Unit

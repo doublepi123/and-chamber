@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import io.andchamber.app.MainActivity
 import io.andchamber.app.R
+import io.andchamber.app.i18n.UserMessages
 import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RuntimeOperation
 import io.andchamber.app.runtime.RuntimeState
@@ -171,10 +172,10 @@ class RuntimeService : Service() {
 
     private fun RuntimeState.label(): String =
         when (this) {
-            is RuntimeState.Failed -> reason
-            RuntimeState.NotInstalled -> "Not installed"
-            RuntimeState.Stopped -> "Stopped"
-            RuntimeState.UnsupportedAbi -> "Unsupported device"
+            is RuntimeState.Failed -> UserMessages.failureText(this@RuntimeService, this)
+            RuntimeState.NotInstalled -> getString(R.string.runtime_notification_not_installed)
+            RuntimeState.Stopped -> getString(R.string.runtime_notification_stopped)
+            RuntimeState.UnsupportedAbi -> getString(R.string.runtime_notification_unsupported)
             else -> ""
         }
 
@@ -201,17 +202,24 @@ class RuntimeService : Service() {
             }
         }
 
+        /** Re-applied on every start so a language change renames the channel in system settings. */
         private fun ensureChannel(context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val manager = context.getSystemService(NotificationManager::class.java)
-            if (manager.getNotificationChannel(CHANNEL_ID) != null) return
+            val name = context.getString(R.string.runtime_notification_channel)
+            val description = context.getString(R.string.runtime_notification_channel_description)
+            val existing = manager.getNotificationChannel(CHANNEL_ID)
+            if (existing != null) {
+                if (existing.name != name || existing.description != description) {
+                    existing.name = name
+                    existing.description = description
+                    manager.createNotificationChannel(existing)
+                }
+                return
+            }
             manager.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    context.getString(R.string.runtime_notification_channel),
-                    NotificationManager.IMPORTANCE_LOW,
-                ).apply {
-                    description = context.getString(R.string.runtime_notification_channel_description)
+                NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_LOW).apply {
+                    this.description = description
                     setShowBadge(false)
                 },
             )

@@ -8,7 +8,9 @@ import io.andchamber.app.data.EncryptedRemoteServerStore
 import io.andchamber.app.data.LocalReadiness
 import io.andchamber.app.data.LocalApiClient
 import io.andchamber.app.data.WebCookieSink
+import io.andchamber.app.R
 import io.andchamber.app.notify.NotificationBootstrapStore
+import io.andchamber.app.notify.RuntimeErrorWatch
 import io.andchamber.app.notify.NotificationObserver
 import io.andchamber.app.notify.NotificationSettingsBootstrap
 import io.andchamber.app.notify.NotificationSink
@@ -88,11 +90,21 @@ val appModule =
         single { NotificationSink(get(), ProcessForeground, get()) }
 
         single {
+            val context = get<Context>()
             NotificationObserver(
                 runtime = get(),
                 notifier = get(),
                 api = get(),
                 bootstrap = NotificationSettingsBootstrap(get(), get()),
+                watch =
+                    RuntimeErrorWatch(
+                        RuntimeErrorWatch.Titles(
+                            setupFailed = context.getString(R.string.alert_setup_failed),
+                            startFailed = context.getString(R.string.alert_start_failed),
+                            stopped = context.getString(R.string.alert_stopped),
+                            opencodeError = context.getString(R.string.alert_opencode_error),
+                        ),
+                    ),
             )
         }
 

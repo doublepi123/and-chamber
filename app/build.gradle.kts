@@ -76,6 +76,9 @@ android {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
 
+        // Only the shipped languages are packaged; third-party AARs bring many more locale folders.
+        resourceConfigurations += listOf("en", "zh")
+
         vectorDrawables {
             useSupportLibrary = true
         }

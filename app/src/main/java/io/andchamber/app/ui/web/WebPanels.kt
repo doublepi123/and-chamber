@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.web
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -43,7 +45,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.ChamberMark
 import io.andchamber.app.ui.theme.ChamberTextStyles
 
@@ -188,11 +189,11 @@ internal fun ConnectingPanel(
     modifier: Modifier = Modifier,
 ) {
     StatusPanel(
-        title = if (name == null) Strings.openingLocal else Strings.connectingTo(name),
+        title = if (name == null) stringResource(R.string.opening_local) else stringResource(R.string.connecting_to, name),
         body = address,
         progress = Float.NaN,
         breathingMark = true,
-        tertiary = PanelAction(Strings.back, onBack),
+        tertiary = PanelAction(stringResource(R.string.back), onBack),
         modifier = modifier,
     )
 }

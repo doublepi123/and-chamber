@@ -1,5 +1,8 @@
 package io.andchamber.app.ui.components
 
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.rememberCopyAction
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import io.andchamber.app.ui.theme.ChamberTheme
@@ -73,7 +75,7 @@ internal fun LogConsole(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = Strings.logLines(lines.size),
+                    text = pluralStringResource(R.plurals.log_lines, lines.size, lines.size),
                     style = ChamberTextStyles.codeSmall,
                     color = colors.terminalMuted,
                     modifier = Modifier.weight(1f),
@@ -85,7 +87,7 @@ internal fun LogConsole(
                 ) {
                     Icon(
                         Icons.Rounded.ContentCopy,
-                        contentDescription = Strings.copyLog,
+                        contentDescription = stringResource(R.string.copy_log),
                         tint = colors.terminalMuted,
                         modifier = Modifier.size(16.dp),
                     )
@@ -93,7 +95,7 @@ internal fun LogConsole(
             }
             if (lines.isEmpty()) {
                 Text(
-                    text = Strings.logEmpty,
+                    text = stringResource(R.string.log_empty),
                     style = ChamberTextStyles.log,
                     color = colors.terminalMuted,
                     modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),

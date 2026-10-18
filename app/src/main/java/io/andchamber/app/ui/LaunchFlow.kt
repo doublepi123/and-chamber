@@ -1,5 +1,7 @@
 package io.andchamber.app.ui
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -130,7 +132,7 @@ internal fun LaunchCoverContent(
         )
         // Placed below the centred cube, so the cube never moves when the caption appears.
         Text(
-            text = Strings.launchChecking,
+            text = stringResource(R.string.launch_checking),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier =

@@ -1,5 +1,8 @@
 package io.andchamber.app.ui.home
 
+import io.andchamber.app.i18n.UserMessages
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -82,7 +85,6 @@ import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.InstallStep
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ConfirmDialog
 import io.andchamber.app.ui.components.DetailRow
@@ -92,7 +94,6 @@ import io.andchamber.app.ui.components.StatusPill
 import io.andchamber.app.ui.components.StatusTone
 import io.andchamber.app.ui.components.color
 import io.andchamber.app.ui.formatBytes
-import io.andchamber.app.ui.label
 import io.andchamber.app.ui.rememberCopyAction
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.theme.ChamberTextStyles
@@ -120,17 +121,18 @@ internal val RuntimeState.phase: RuntimePhase
 private val RuntimePhase.isBusy: Boolean
     get() = this == RuntimePhase.Installing || this == RuntimePhase.Starting || this == RuntimePhase.Stopping
 
+@Composable
 private fun RuntimePhase.statusLabel(): String =
     when (this) {
-        RuntimePhase.Checking -> Strings.statusChecking
-        RuntimePhase.Unsupported -> Strings.statusUnsupported
-        RuntimePhase.NotInstalled -> Strings.statusNotSetUp
-        RuntimePhase.Installing -> Strings.statusSettingUp
-        RuntimePhase.Stopped -> Strings.statusStopped
-        RuntimePhase.Starting -> Strings.statusStarting
-        RuntimePhase.Running -> Strings.statusRunning
-        RuntimePhase.Stopping -> Strings.statusStopping
-        RuntimePhase.Failed -> Strings.statusProblem
+        RuntimePhase.Checking -> stringResource(R.string.status_checking)
+        RuntimePhase.Unsupported -> stringResource(R.string.status_unsupported)
+        RuntimePhase.NotInstalled -> stringResource(R.string.status_not_set_up)
+        RuntimePhase.Installing -> stringResource(R.string.status_setting_up)
+        RuntimePhase.Stopped -> stringResource(R.string.status_stopped)
+        RuntimePhase.Starting -> stringResource(R.string.status_starting)
+        RuntimePhase.Running -> stringResource(R.string.status_running)
+        RuntimePhase.Stopping -> stringResource(R.string.status_stopping)
+        RuntimePhase.Failed -> stringResource(R.string.status_problem)
     }
 
 private fun RuntimePhase.tone(): StatusTone =
@@ -202,7 +204,7 @@ internal fun LocalRuntimeCard(
                     RuntimePhase.Stopped -> StoppedBody(onStart = onStart)
                     RuntimePhase.Starting ->
                         TransitionBody(
-                            title = Strings.startingTitle,
+                            title = stringResource(R.string.starting_title),
                             detail = (live as? RuntimeState.Starting)?.detail,
                         )
                     RuntimePhase.Running ->
@@ -211,7 +213,7 @@ internal fun LocalRuntimeCard(
                         } ?: Spacer(Modifier.height(96.dp))
                     RuntimePhase.Stopping ->
                         TransitionBody(
-                            title = Strings.stoppingTitle,
+                            title = stringResource(R.string.stopping_title),
                             detail = (live as? RuntimeState.Stopping)?.detail,
                         )
                     RuntimePhase.Failed ->
@@ -245,7 +247,7 @@ internal fun LocalRuntimeCard(
             ) {
                 if (showLogToggle) {
                     FooterToggle(
-                        label = Strings.showLog,
+                        label = stringResource(R.string.show_log),
                         icon = Icons.AutoMirrored.Rounded.ReceiptLong,
                         expanded = logOpen,
                         onClick = { logOpen = !logOpen },
@@ -253,7 +255,7 @@ internal fun LocalRuntimeCard(
                 }
                 if (showDetailsToggle) {
                     FooterToggle(
-                        label = Strings.details,
+                        label = stringResource(R.string.details),
                         icon = Icons.Rounded.Tune,
                         expanded = detailsOpen,
                         onClick = { detailsOpen = !detailsOpen },
@@ -292,17 +294,17 @@ internal fun LocalRuntimeCard(
     when (confirm) {
         PendingConfirm.Repair ->
             ConfirmDialog(
-                title = Strings.repairDialogTitle,
-                body = Strings.repairDialogBody,
-                confirmLabel = Strings.repair,
+                title = stringResource(R.string.repair_dialog_title),
+                body = stringResource(R.string.repair_dialog_body),
+                confirmLabel = stringResource(R.string.repair),
                 onConfirm = onRepair,
                 onDismiss = { confirm = null },
             )
         PendingConfirm.Uninstall ->
             ConfirmDialog(
-                title = Strings.uninstallDialogTitle,
-                body = if (sharedFolderInUse) Strings.uninstallDialogBodyShared else Strings.uninstallDialogBody,
-                confirmLabel = Strings.uninstall,
+                title = stringResource(R.string.uninstall_dialog_title),
+                body = if (sharedFolderInUse) stringResource(R.string.uninstall_dialog_body_shared) else stringResource(R.string.uninstall_dialog_body),
+                confirmLabel = stringResource(R.string.uninstall),
                 onConfirm = onUninstall,
                 onDismiss = { confirm = null },
                 destructive = true,
@@ -326,12 +328,12 @@ private fun CardHeader(phase: RuntimePhase) {
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = Strings.localTitle,
+                text = stringResource(R.string.local_title),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = Strings.localSubtitle,
+                text = stringResource(R.string.local_subtitle),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -346,13 +348,13 @@ private fun CardHeader(phase: RuntimePhase) {
 @Composable
 private fun UnsupportedBody() {
     Text(
-        text = Strings.unsupportedTitle,
+        text = stringResource(R.string.unsupported_title),
         style = MaterialTheme.typography.titleSmall,
         color = MaterialTheme.colorScheme.onSurface,
     )
     Spacer(Modifier.height(6.dp))
     Text(
-        text = Strings.unsupportedBody,
+        text = stringResource(R.string.unsupported_body),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -368,21 +370,21 @@ private fun NotInstalledBody(onSetUp: () -> Unit) {
         }
 
     Text(
-        text = Strings.setupIntro,
+        text = stringResource(R.string.setup_intro),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Spacer(Modifier.height(14.dp))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        FactRow(Icons.Rounded.Inventory2, Strings.setupFactContents)
-        FactRow(Icons.Rounded.Download, Strings.setupFactSize)
-        FactRow(Icons.Rounded.Wifi, Strings.setupFactWifi)
-        FactRow(Icons.Rounded.Schedule, Strings.setupFactTime)
+        FactRow(Icons.Rounded.Inventory2, stringResource(R.string.setup_fact_contents))
+        FactRow(Icons.Rounded.Download, stringResource(R.string.setup_fact_size))
+        FactRow(Icons.Rounded.Wifi, stringResource(R.string.setup_fact_wifi))
+        FactRow(Icons.Rounded.Schedule, stringResource(R.string.setup_fact_time))
         freeBytes?.let { free ->
             val low = free < LOW_SPACE_BYTES
             FactRow(
                 icon = Icons.Rounded.SdStorage,
-                text = Strings.setupFactFree(formatBytes(free)) + if (low) ". " + Strings.setupLowSpace else "",
+                text = stringResource(R.string.setup_fact_free, formatBytes(free)) + if (low) ". " + stringResource(R.string.setup_low_space) else "",
                 warn = low,
             )
         }
@@ -395,7 +397,7 @@ private fun NotInstalledBody(onSetUp: () -> Unit) {
     ) {
         Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text(Strings.setUp)
+        Text(stringResource(R.string.set_up))
     }
 }
 
@@ -425,7 +427,7 @@ private fun InstallingBody(state: RuntimeState.Installing?) {
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text = Strings.stepOf(currentIndex + 1, steps.size),
+            text = stringResource(R.string.step_of, currentIndex + 1, steps.size),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.primary,
             modifier = Modifier.weight(1f),
@@ -450,7 +452,7 @@ private fun InstallingBody(state: RuntimeState.Installing?) {
     }
     Spacer(Modifier.height(10.dp))
     Text(
-        text = Strings.setupBackgroundNote,
+        text = stringResource(R.string.setup_background_note),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -526,7 +528,7 @@ private fun InstallStepRow(
         Column(modifier = Modifier.weight(1f).padding(top = 2.dp, bottom = if (isLast) 0.dp else 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = step.label(),
+                    text = stringResource(UserMessages.stepLabel(step)),
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = if (status == StepStatus.Active) FontWeight.SemiBold else FontWeight.Normal,
                     color =
@@ -590,7 +592,7 @@ private fun StepProgressBar(progress: Float?) {
 @Composable
 private fun StoppedBody(onStart: () -> Unit) {
     Text(
-        text = Strings.stoppedBody,
+        text = stringResource(R.string.stopped_body),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -602,7 +604,7 @@ private fun StoppedBody(onStart: () -> Unit) {
     ) {
         Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
-        Text(Strings.start)
+        Text(stringResource(R.string.start))
     }
 }
 
@@ -660,8 +662,18 @@ private fun RunningBody(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                // Resolve the localised pieces in composition; the pure uptime formatter gets plain strings.
+                val justStarted = stringResource(R.string.just_started)
+                val upTemplate = stringResource(R.string.uptime, "%1\$s")
+                val portText = stringResource(R.string.port, running.port)
                 Text(
-                    text = uptimeLabel(running.sinceEpochMs, now) + "  ·  " + Strings.port(running.port),
+                    text =
+                        uptimeLabel(
+                            sinceEpochMs = running.sinceEpochMs,
+                            nowEpochMs = now,
+                            justStarted = justStarted,
+                            upTemplate = { value -> upTemplate.replace("%1\$s", value) },
+                        ) + "  ·  " + portText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -669,7 +681,7 @@ private fun RunningBody(
             IconButton(onClick = { copy(running.url) }) {
                 Icon(
                     Icons.Rounded.ContentCopy,
-                    contentDescription = Strings.copyAddress,
+                    contentDescription = stringResource(R.string.copy_address),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
@@ -683,7 +695,7 @@ private fun RunningBody(
             modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             shape = MaterialTheme.shapes.medium,
         ) {
-            Text(Strings.open, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(stringResource(R.string.open), maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.width(8.dp))
             Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
         }
@@ -695,7 +707,7 @@ private fun RunningBody(
         ) {
             Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text(Strings.stop)
+            Text(stringResource(R.string.stop))
         }
     }
 }
@@ -716,7 +728,7 @@ private fun FailedBody(
             Icon(Icons.Rounded.ErrorOutline, contentDescription = null, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
             Column {
-                Text(Strings.failedTitle, style = MaterialTheme.typography.titleSmall)
+                Text(stringResource(R.string.failed_title), style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(2.dp))
                 Text(failed.reason, style = ChamberTextStyles.codeSmall)
             }
@@ -732,7 +744,7 @@ private fun FailedBody(
             ) {
                 Icon(Icons.Rounded.Replay, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(Strings.tryAgain)
+                Text(stringResource(R.string.try_again))
             }
             OutlinedButton(
                 onClick = onRepair,
@@ -742,7 +754,7 @@ private fun FailedBody(
             ) {
                 Icon(Icons.Rounded.Build, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text(Strings.repair)
+                Text(stringResource(R.string.repair))
             }
         }
     } else {
@@ -753,11 +765,11 @@ private fun FailedBody(
         ) {
             Icon(Icons.Rounded.Build, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
-            Text(Strings.repair)
+            Text(stringResource(R.string.repair))
         }
         Spacer(Modifier.height(8.dp))
         Text(
-            text = Strings.repairExplain,
+            text = stringResource(R.string.repair_explain),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -812,13 +824,13 @@ internal fun AutoOpenRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = Strings.autoOpenLabel,
+                    text = stringResource(R.string.auto_open_label),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = Strings.autoOpenHint,
+                    text = stringResource(R.string.auto_open_hint),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -854,13 +866,14 @@ private fun DetailsSection(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    DetailRow(Strings.detailOpenChamber, info.openChamberVersion ?: Strings.unknownValue)
-                    DetailRow(Strings.detailOpenCode, info.openCodeVersion ?: Strings.unknownValue)
-                    DetailRow(Strings.detailNode, info.nodeVersion ?: Strings.unknownValue)
-                    DetailRow(Strings.detailAlpine, info.alpineVersion)
-                    DetailRow(Strings.detailAbi, info.abi)
-                    DetailRow(Strings.detailDiskUsed, info.diskUsageBytes?.let(::formatBytes) ?: Strings.unknownValue)
-                    DetailRow(Strings.detailFreeSpace, info.freeSpaceBytes?.let(::formatBytes) ?: Strings.unknownValue)
+                    val unknown = stringResource(R.string.unknown_value)
+                    DetailRow(stringResource(R.string.detail_open_chamber), info.openChamberVersion ?: unknown)
+                    DetailRow(stringResource(R.string.detail_open_code), info.openCodeVersion ?: unknown)
+                    DetailRow(stringResource(R.string.detail_node), info.nodeVersion ?: unknown)
+                    DetailRow(stringResource(R.string.detail_alpine), info.alpineVersion)
+                    DetailRow(stringResource(R.string.detail_abi), info.abi)
+                    DetailRow(stringResource(R.string.detail_disk_used), info.diskUsageBytes?.let(::formatBytes) ?: unknown)
+                    DetailRow(stringResource(R.string.detail_free_space), info.freeSpaceBytes?.let(::formatBytes) ?: unknown)
                 }
             }
         }
@@ -871,7 +884,7 @@ private fun DetailsSection(
             TextButton(onClick = onRepair, enabled = actionsEnabled) {
                 Icon(Icons.Rounded.Build, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text(Strings.repair)
+                Text(stringResource(R.string.repair))
             }
             TextButton(
                 onClick = onUninstall,
@@ -880,7 +893,7 @@ private fun DetailsSection(
             ) {
                 Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text(Strings.uninstall)
+                Text(stringResource(R.string.uninstall))
             }
         }
     }

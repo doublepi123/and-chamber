@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.home
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,7 +62,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.ui.AddressCheck
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.checkServerAddress
 import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ConfirmDialog
@@ -110,13 +111,13 @@ private fun EmptyServersCard(
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = Strings.emptyServersTitle,
+                    text = stringResource(R.string.empty_servers_title),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = Strings.emptyServersBody,
+                    text = stringResource(R.string.empty_servers_body),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -124,7 +125,7 @@ private fun EmptyServersCard(
                 FilledTonalButton(onClick = onAdd, shape = MaterialTheme.shapes.medium) {
                     Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text(Strings.addServer)
+                    Text(stringResource(R.string.add_server))
                 }
             }
         }
@@ -166,7 +167,7 @@ private fun RemoteServerRow(
                         Spacer(Modifier.width(6.dp))
                         Icon(
                             Icons.Rounded.Lock,
-                            contentDescription = Strings.passwordSaved,
+                            contentDescription = stringResource(R.string.password_saved),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(14.dp),
                         )
@@ -184,7 +185,7 @@ private fun RemoteServerRow(
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(
                         Icons.Rounded.MoreVert,
-                        contentDescription = Strings.moreOptions,
+                        contentDescription = stringResource(R.string.more_options),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -194,7 +195,7 @@ private fun RemoteServerRow(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                 ) {
                     DropdownMenuItem(
-                        text = { Text(Strings.edit) },
+                        text = { Text(stringResource(R.string.edit)) },
                         leadingIcon = { Icon(Icons.Rounded.Edit, contentDescription = null) },
                         onClick = {
                             menuOpen = false
@@ -202,7 +203,7 @@ private fun RemoteServerRow(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text(Strings.remove, color = MaterialTheme.colorScheme.error) },
+                        text = { Text(stringResource(R.string.remove), color = MaterialTheme.colorScheme.error) },
                         leadingIcon = {
                             Icon(
                                 Icons.Rounded.DeleteOutline,
@@ -229,9 +230,9 @@ internal fun RemoveServerDialog(
     onDismiss: () -> Unit,
 ) {
     ConfirmDialog(
-        title = Strings.removeServerTitle(server.displayName),
-        body = Strings.removeServerBody,
-        confirmLabel = Strings.remove,
+        title = stringResource(R.string.remove_server_title, server.displayName),
+        body = stringResource(R.string.remove_server_body),
+        confirmLabel = stringResource(R.string.remove),
         onConfirm = onConfirm,
         onDismiss = onDismiss,
         destructive = true,
@@ -259,8 +260,8 @@ internal fun ServerEditorDialog(
     val check = remember(address) { checkServerAddress(address) }
     val addressError: String? =
         when (check) {
-            is AddressCheck.Invalid -> check.message
-            AddressCheck.Empty -> if (showErrors) Strings.addressRequired else null
+            is AddressCheck.Invalid -> stringResource(check.messageRes)
+            AddressCheck.Empty -> if (showErrors) stringResource(R.string.address_required) else null
             is AddressCheck.Valid -> null
         }
     // Plain http to a non-loopback host sends the UI password (and session) unencrypted.
@@ -293,7 +294,7 @@ internal fun ServerEditorDialog(
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         title = {
             Text(
-                if (initial == null) Strings.addServer else Strings.editServer,
+                if (initial == null) stringResource(R.string.add_server) else stringResource(R.string.edit_server),
                 style = MaterialTheme.typography.titleLarge,
             )
         },
@@ -307,16 +308,16 @@ internal fun ServerEditorDialog(
                     value = address,
                     onValueChange = { address = it },
                     modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                    label = { Text(Strings.fieldAddress) },
-                    placeholder = { Text(Strings.fieldAddressPlaceholder, style = ChamberTextStyles.code) },
+                    label = { Text(stringResource(R.string.field_address)) },
+                    placeholder = { Text(stringResource(R.string.field_address_placeholder), style = ChamberTextStyles.code) },
                     textStyle = ChamberTextStyles.code.copy(color = MaterialTheme.colorScheme.onSurface),
                     singleLine = true,
                     isError = addressError != null,
                     supportingText = {
                         val text =
                             addressError
-                                ?: (check as? AddressCheck.Valid)?.let { Strings.addressPreview(it.url) }
-                                ?: Strings.addressHint
+                                ?: (check as? AddressCheck.Valid)?.let { stringResource(R.string.address_preview, it.url) }
+                                ?: stringResource(R.string.address_hint)
                         Text(text, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     },
                     keyboardOptions =
@@ -330,7 +331,7 @@ internal fun ServerEditorDialog(
                 if (insecureRemote) {
                     Column {
                         Text(
-                            Strings.insecureWarning,
+                            stringResource(R.string.insecure_warning),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
@@ -345,14 +346,14 @@ internal fun ServerEditorDialog(
                             Checkbox(checked = allowInsecure, onCheckedChange = null)
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                Strings.allowInsecure,
+                                stringResource(R.string.allow_insecure),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
                         }
                         if (insecureBlocked && showErrors) {
                             Text(
-                                Strings.insecureNeedsConfirm,
+                                stringResource(R.string.insecure_needs_confirm),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
                             )
@@ -363,7 +364,7 @@ internal fun ServerEditorDialog(
                     value = name,
                     onValueChange = { name = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text(Strings.fieldName) },
+                    label = { Text(stringResource(R.string.field_name)) },
                     placeholder = {
                         (check as? AddressCheck.Valid)?.let { Text(it.host) }
                     },
@@ -378,8 +379,8 @@ internal fun ServerEditorDialog(
                     value = password,
                     onValueChange = { password = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text(Strings.fieldPassword) },
-                    supportingText = { Text(Strings.passwordHint) },
+                    label = { Text(stringResource(R.string.field_password)) },
+                    supportingText = { Text(stringResource(R.string.password_hint)) },
                     singleLine = true,
                     visualTransformation =
                         if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
@@ -387,7 +388,7 @@ internal fun ServerEditorDialog(
                         IconButton(onClick = { passwordVisible = !passwordVisible }) {
                             Icon(
                                 if (passwordVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                                contentDescription = if (passwordVisible) Strings.hidePassword else Strings.showPassword,
+                                contentDescription = if (passwordVisible) stringResource(R.string.hide_password) else stringResource(R.string.show_password),
                             )
                         }
                     },
@@ -403,7 +404,7 @@ internal fun ServerEditorDialog(
         },
         confirmButton = {
             TextButton(onClick = { submit() }) {
-                Text(if (initial == null) Strings.add else Strings.save, fontWeight = FontWeight.SemiBold)
+                Text(if (initial == null) stringResource(R.string.add) else stringResource(R.string.save), fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
@@ -411,7 +412,7 @@ internal fun ServerEditorDialog(
                 onClick = onDismiss,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
             ) {
-                Text(Strings.cancel)
+                Text(stringResource(R.string.cancel))
             }
         },
     )

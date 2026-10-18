@@ -1,5 +1,6 @@
 package io.andchamber.app.ui
 
+import io.andchamber.app.R
 import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -92,5 +93,5 @@ private fun Context.openFirst(candidates: List<Intent>) {
             // Try the next one.
         }
     }
-    Toast.makeText(this, Strings.cantOpenSettings, Toast.LENGTH_SHORT).show()
+    Toast.makeText(this, getString(R.string.cant_open_settings), Toast.LENGTH_SHORT).show()
 }

@@ -20,7 +20,25 @@ data class RuntimeAlert(
  * - While Running, a non-null OpenCode error with OpenCode not running → "OpenCode backend error".
  *   Repeats are suppressed until the error clears.
  */
-class RuntimeErrorWatch {
+class RuntimeErrorWatch(
+    /**
+     * Localised titles and bodies, given by the notifier from resources. The default keeps the
+     * English technical text, for logic tests that do not need a Context.
+     */
+    private val titles: Titles = Titles.English,
+) {
+    /** The alert titles, keyed by what went wrong. */
+    data class Titles(
+        val setupFailed: String,
+        val startFailed: String,
+        val stopped: String,
+        val opencodeError: String,
+    ) {
+        companion object {
+            val English = Titles("Setup failed", "OpenChamber didn't start", "OpenChamber stopped", "OpenCode backend error")
+        }
+    }
+
     private var shownKeys = mutableSetOf<String>()
 
     /** Alerts to show for a state change. Empty when the state is not an error or was already shown. */
@@ -29,11 +47,11 @@ class RuntimeErrorWatch {
             (state as? RuntimeState.Failed)?.let { failed ->
                 when (failed.phase) {
                     FailurePhase.Install ->
-                        RuntimeAlert("install:${failed.reason}", "Setup failed", failed.reason)
+                        RuntimeAlert("install:${failed.reason}", titles.setupFailed, failed.reason)
                     FailurePhase.Start ->
-                        RuntimeAlert("start:${failed.reason}", "OpenChamber didn't start", failed.reason)
+                        RuntimeAlert("start:${failed.reason}", titles.startFailed, failed.reason)
                     FailurePhase.Runtime ->
-                        RuntimeAlert("runtime:${failed.reason}", "OpenChamber stopped", failed.reason)
+                        RuntimeAlert("runtime:${failed.reason}", titles.stopped, failed.reason)
                 }
             }
         return listOfNotNull(alert).filter { shownKeys.add(it.key) }
@@ -53,7 +71,7 @@ class RuntimeErrorWatch {
             return emptyList()
         }
         val key = "opencode:$openCodeError"
-        val alert = RuntimeAlert(key, "OpenCode backend error", openCodeError!!)
+        val alert = RuntimeAlert(key, titles.opencodeError, openCodeError!!)
         return if (shownKeys.add(key)) listOf(alert) else emptyList()
     }
 

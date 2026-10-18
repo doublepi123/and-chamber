@@ -25,6 +25,11 @@ import io.andchamber.app.notify.NotificationPayload.notificationId
 class OpenChamberNotifier(
     private val context: Context,
 ) {
+    /**
+     * Creates the channels, and re-applies their names on every call. A channel's name is fixed when it
+     * is created, so a change of system language would otherwise leave the old name shown in settings.
+     * Call this on every app start (see AndChamberApplication).
+     */
     fun ensureChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -34,8 +39,14 @@ class OpenChamberNotifier(
             Triple(Channel.Errors, R.string.channel_errors, NotificationManager.IMPORTANCE_HIGH),
             Triple(Channel.Other, R.string.channel_other, NotificationManager.IMPORTANCE_DEFAULT),
         ).forEach { (channel, name, importance) ->
-            if (manager.getNotificationChannel(channel.id) == null) {
-                manager.createNotificationChannel(NotificationChannel(channel.id, context.getString(name), importance))
+            val label = context.getString(name)
+            val existing = manager.getNotificationChannel(channel.id)
+            if (existing == null) {
+                manager.createNotificationChannel(NotificationChannel(channel.id, label, importance))
+            } else if (existing.name != label) {
+                // Same id, new name: the user's importance and mute settings are kept.
+                existing.name = label
+                manager.createNotificationChannel(existing)
             }
         }
     }

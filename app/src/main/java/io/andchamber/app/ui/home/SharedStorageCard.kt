@@ -1,5 +1,7 @@
 package io.andchamber.app.ui.home
 
+import androidx.compose.ui.res.stringResource
+import io.andchamber.app.R
 import android.os.Build
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -67,7 +69,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
-import io.andchamber.app.ui.Strings
 import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ConfirmDialog
 import io.andchamber.app.ui.components.IconTile
@@ -145,9 +146,9 @@ internal fun SharedStorageCard(
 
     if (confirmOff) {
         ConfirmDialog(
-            title = Strings.storageOffDialogTitle,
-            body = Strings.storageOffDialogBody,
-            confirmLabel = Strings.turnOff,
+            title = stringResource(R.string.storage_off_dialog_title),
+            body = stringResource(R.string.storage_off_dialog_body),
+            confirmLabel = stringResource(R.string.turn_off),
             onConfirm = { onEnabledChange(false) },
             onDismiss = { confirmOff = false },
         )
@@ -186,16 +187,16 @@ private fun StorageHeader(
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = Strings.storageTitle,
+                text = stringResource(R.string.storage_title),
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
                 text =
                     when (status) {
-                        SharedStorageStatus.Off -> Strings.storageOff
-                        SharedStorageStatus.NeedsPermission -> Strings.storageNeedsAccess
-                        SharedStorageStatus.Active -> Strings.storageOn
+                        SharedStorageStatus.Off -> stringResource(R.string.storage_off)
+                        SharedStorageStatus.NeedsPermission -> stringResource(R.string.storage_needs_access)
+                        SharedStorageStatus.Active -> stringResource(R.string.storage_on)
                     },
                 style = MaterialTheme.typography.bodySmall,
                 color = tone,
@@ -226,7 +227,7 @@ private fun RestartNotice(
             Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(10.dp))
             Text(
-                text = Strings.restartToApply,
+                text = stringResource(R.string.restart_to_apply),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f).padding(vertical = 10.dp),
             )
@@ -238,7 +239,7 @@ private fun RestartNotice(
                 enabled = !requested,
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
             ) {
-                Text(Strings.restart)
+                Text(stringResource(R.string.restart))
             }
         }
     }
@@ -247,7 +248,7 @@ private fun RestartNotice(
 @Composable
 private fun OffBody() {
     Text(
-        text = codeSpans(Strings.storageIntro, Strings.storageFolderName),
+        text = codeSpans(stringResource(R.string.storage_intro), stringResource(R.string.storage_folder_name)),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -255,7 +256,7 @@ private fun OffBody() {
     Spacer(Modifier.height(10.dp))
     NoteRow(
         icon = Icons.Rounded.Info,
-        text = codeSpans(Strings.storageCaveat, Strings.guestPrivateWorkspace, "node_modules"),
+        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_workspace), "node_modules"),
     )
 }
 
@@ -284,7 +285,7 @@ private fun NeedsPermissionBody(
     }
     if (unavailable) {
         Text(
-            text = codeSpans(Strings.storageUnavailable, Strings.storageFolderName),
+            text = codeSpans(stringResource(R.string.storage_unavailable), stringResource(R.string.storage_folder_name)),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -294,7 +295,7 @@ private fun NeedsPermissionBody(
             shape = MaterialTheme.shapes.medium,
             modifier = Modifier.heightIn(min = 44.dp),
         ) {
-            Text(Strings.checkAgain)
+            Text(stringResource(R.string.check_again))
         }
         return
     }
@@ -302,7 +303,7 @@ private fun NeedsPermissionBody(
     // Android 11+ grants "All files access" in system settings; older versions show a dialog.
     val allFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     Text(
-        text = if (allFiles) Strings.storageNeedsAllFiles else Strings.storageNeedsLegacy,
+        text = if (allFiles) stringResource(R.string.storage_needs_all_files) else stringResource(R.string.storage_needs_legacy),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -312,7 +313,7 @@ private fun NeedsPermissionBody(
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier.heightIn(min = 44.dp),
     ) {
-        Text(Strings.allowAccess)
+        Text(stringResource(R.string.allow_access))
         if (allFiles) {
             Spacer(Modifier.width(8.dp))
             Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -321,7 +322,7 @@ private fun NeedsPermissionBody(
     Spacer(Modifier.height(12.dp))
     NoteRow(
         icon = Icons.Rounded.Shield,
-        text = AnnotatedString(if (allFiles) Strings.storageOthersAllFiles else Strings.storageOthersLegacy),
+        text = AnnotatedString(if (allFiles) stringResource(R.string.storage_others_all_files) else stringResource(R.string.storage_others_legacy)),
     )
 }
 
@@ -329,11 +330,11 @@ private fun NeedsPermissionBody(
 private fun ActiveBody(hostRoot: String) {
     FolderLayout(hostRoot = hostRoot)
     Spacer(Modifier.height(12.dp))
-    NoteRow(icon = Icons.Rounded.Lock, text = codeSpans(Strings.storagePrivate, Strings.guestPrivateWorkspace))
+    NoteRow(icon = Icons.Rounded.Lock, text = codeSpans(stringResource(R.string.storage_private), stringResource(R.string.guest_private_workspace)))
     Spacer(Modifier.height(6.dp))
     NoteRow(
         icon = Icons.Rounded.Info,
-        text = codeSpans(Strings.storageCaveat, Strings.guestPrivateWorkspace, "node_modules"),
+        text = codeSpans(stringResource(R.string.storage_caveat), stringResource(R.string.guest_private_workspace), "node_modules"),
     )
 }
 
@@ -366,22 +367,22 @@ private fun FolderLayout(hostRoot: String) {
                 IconButton(onClick = { copy(hostRoot) }, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Rounded.ContentCopy,
-                        contentDescription = Strings.copyFolderPath,
+                        contentDescription = stringResource(R.string.copy_folder_path),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
                 }
             }
-            FolderRow(name = Strings.storageProjectsDir, railColor = rail, first = true, last = false) {
+            FolderRow(name = stringResource(R.string.storage_projects_dir), railColor = rail, first = true, last = false) {
                 Text(
-                    text = Strings.guestWorkspace,
+                    text = stringResource(R.string.guest_workspace),
                     style = ChamberTextStyles.code,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            FolderRow(name = Strings.storageOpencodeDir, railColor = rail, first = false, last = true) {
+            FolderRow(name = stringResource(R.string.storage_opencode_dir), railColor = rail, first = false, last = true) {
                 Text(
-                    text = Strings.storageOpencodeTarget,
+                    text = stringResource(R.string.storage_opencode_target),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
