@@ -4,89 +4,188 @@ import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.install.InstalledRuntime
 import io.andchamber.app.runtime.install.RuntimeMetadata
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.ServerSocket
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Regression for the wrong-instance risk: a foreign process holds the OpenChamber port. The server
- * must refuse to start, must not spawn anything, and so must never receive the UI password.
+ * Port identity. A foreign process may hold the OpenChamber port. Trust order in readiness is:
+ * our child's own output (listen line) first, then /health. These tests prove a foreign answer is
+ * never trusted and the password is never sent.
  */
 class ForeignListenerTest {
     @get:Rule val folder = TemporaryFolder()
 
-    private fun runtime(root: File) =
+    private val port = 3000
+
+    private fun runtime() =
         InstalledRuntime(
             metadata =
                 RuntimeMetadata(
                     runtimeVersion = "r",
                     alpineVersion = "3.24.1",
                     abi = "arm64-v8a",
-                    port = 3000,
+                    port = port,
                     openChamberVersion = "2.4.0",
                     openCodeVersion = "2.0.32",
                     installedAt = 1L,
                 ),
-            rootfs = File(root, "rootfs"),
+            rootfs = File(folder.root, "rootfs"),
         )
 
+    /** A stand-in for our PRoot child: fixed output, then an exit code. */
+    private class FakeChild(
+        private val output: String,
+        private val exitCode: Int,
+        private val lifetimeMillis: Long = 0L,
+    ) : Process() {
+        private val alive = java.util.concurrent.atomic.AtomicBoolean(true)
+        private val startedAt = System.nanoTime()
+
+        init {
+            // Exits after its lifetime; checked lazily so isAlive reflects the schedule.
+        }
+
+        override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+
+        override fun getInputStream(): InputStream = ByteArrayInputStream(output.toByteArray())
+
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+        override fun waitFor(): Int {
+            while (isAlive) Thread.sleep(5)
+            return exitValue()
+        }
+
+        override fun exitValue(): Int {
+            if (isAlive) throw IllegalThreadStateException("still running")
+            return exitCode
+        }
+
+        override fun destroy() {
+            alive.set(false)
+        }
+
+        override fun isAlive(): Boolean {
+            val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+            if (elapsed >= lifetimeMillis) alive.set(false)
+            return alive.get()
+        }
+    }
+
+    /** Health probe that records every call; a foreign server answering counts as a call. */
+    private class RecordingHealth(
+        private val report: HealthReport?,
+    ) : HealthProbe {
+        var calls = 0
+
+        override fun read(port: Int): HealthReport? {
+            calls++
+            return report
+        }
+    }
+
+    private fun foreignOk() = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "foreign")
+
+    private fun server(
+        child: Process,
+        health: HealthProbe,
+        spawned: MutableList<Boolean>,
+        precheckFree: Boolean = true,
+    ) = ProotOpenChamberServer(
+        paths = RuntimePaths(folder.root),
+        suite = {
+            EmbeddedCommandSuite.Paths(
+                home = folder.root,
+                tmp = folder.root,
+                nativeLibraryDirectory = folder.root,
+                proot = File(folder.root, "libandchamber_android_proot.so"),
+                loader = folder.root,
+                loader32 = folder.root,
+            )
+        },
+        health = health,
+        scanner = ProcessScanner(folder.newFolder("proc"), myUid = 1, myPid = 2L),
+        cleanBeforeStart = { _, _, _ -> precheckFree },
+        readyTimeoutMillis = 2_000L,
+        pollMillis = 1L,
+        sleep = { Thread.sleep(1) },
+        spawn = { _, _, _ ->
+            spawned += true
+            child
+        },
+    )
+
     @Test
-    fun `port held by a foreign listener is refused before spawn`() {
+    fun `port taken after the precheck - our child exits with EADDRINUSE and no password is sent`() {
         ServerSocket(0).use { foreign ->
-            // The foreign listener answers on its own port; the cleaner reports our port still busy.
-            val spawnSuite = AtomicInteger(0)
-            val paths = RuntimePaths(folder.root)
-            val server =
-                ProotOpenChamberServer(
-                    paths = paths,
-                    suite = {
-                        spawnSuite.incrementAndGet()
-                        EmbeddedCommandSuite.Paths(
-                            home = folder.root,
-                            tmp = folder.root,
-                            nativeLibraryDirectory = folder.root,
-                            proot = File(folder.root, "libandchamber_android_proot.so"),
-                            loader = folder.root,
-                            loader32 = folder.root,
-                        )
-                    },
-                    health = HealthProbe.Loopback,
-                    scanner = ProcessScanner(folder.newFolder("proc"), myUid = 1, myPid = 2L),
-                    cleanBeforeStart = { _, _, _ -> false },
-                )
+            // Precheck passed (port looked free), a foreign listener binds, then our child fails.
+            val child = FakeChild(output = "Error: listen EADDRINUSE: address already in use 127.0.0.1:$port\n", exitCode = 1)
+            val health = RecordingHealth(foreignOk())
+            val spawned = mutableListOf<Boolean>()
 
             val error =
                 runCatching {
-                    server.start(runtime(folder.root), "ui-secret", {}, { false })
+                    server(child, health, spawned).start(runtime(), "ui-secret", {}, { false })
                 }.exceptionOrNull()
 
             assertTrue("expected PortInUseException, got $error", error is PortInUseException)
             assertEquals("Port 3000 is in use by another app", error?.message)
-            // The suite is resolved for the proot path (cleanup) and never for a launch: the refusal
-            // happens before the spawn, so the server's launch step is not reached.
+            assertEquals(1, spawned.size)
+            assertTrue("foreign /health must never be trusted without our listen line", health.calls == 0)
             assertTrue(foreign.isBound)
-            assertTrue("suite may be resolved at most for the cleanup", spawnSuite.get() <= 2)
         }
     }
 
     @Test
-    fun `cleaner reports busy when the port never frees`() {
-        val freed =
-            StaleServerCleanup.awaitPortFree(
-                port = 3000,
-                timeoutMillis = 1_000L,
-                isPortFree = { false },
-                sleep = {},
-                now = run {
-                    var t = 0L
-                    return@run { t += 300L; t }
-                },
-            )
-        assertFalse(freed)
+    fun `a foreign server answering ok is not trusted when our child printed no listen line`() {
+        // Our child is alive but silent (never printed the listen line); a foreign /health answers ok.
+        val child = FakeChild(output = "", exitCode = 0, lifetimeMillis = 10_000L)
+        val health = RecordingHealth(foreignOk())
+        val spawned = mutableListOf<Boolean>()
+
+        val error =
+            runCatching {
+                server(child, health, spawned).start(runtime(), "ui-secret", {}, { false })
+            }.exceptionOrNull()
+
+        assertTrue("start must fail, got $error", error != null)
+        assertEquals("/health must not be consulted before our listen line", 0, health.calls)
+    }
+
+    @Test
+    fun `our child listening and healthy is trusted and returns a launch id`() {
+        val child = FakeChild(output = "OpenChamber server listening on 127.0.0.1:$port\n", exitCode = 0, lifetimeMillis = 10_000L)
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val spawned = mutableListOf<Boolean>()
+
+        val launchId = server(child, RecordingHealth(ok), spawned).start(runtime(), "ui-secret", {}, { false })
+
+        assertTrue(launchId > 0)
+    }
+
+    @Test
+    fun `the listen marker must match our port`() {
+        assertTrue(Readiness.childListening(listOf("OpenChamber server listening on 127.0.0.1:3000"), 3000))
+        assertTrue(!Readiness.childListening(listOf("OpenChamber server listening on 127.0.0.1:3001"), 3000))
+    }
+
+    @Test
+    fun `precheck failure never spawns the child`() {
+        val spawned = mutableListOf<Boolean>()
+        val error =
+            runCatching {
+                server(FakeChild("", 0), RecordingHealth(null), spawned, precheckFree = false)
+                    .start(runtime(), "ui-secret", {}, { false })
+            }.exceptionOrNull()
+
+        assertTrue(error is PortInUseException)
+        assertEquals(0, spawned.size)
     }
 }

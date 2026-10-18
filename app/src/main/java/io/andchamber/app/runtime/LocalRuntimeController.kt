@@ -40,9 +40,12 @@ fun interface ForegroundStarter {
 /**
  * Owns the Linux runtime lifecycle: install, start, stop, repair, uninstall and crash recovery.
  *
- * Public actions queue behind [operationLock]; the watchdog and internal helpers take the same lock.
- * [Running] means OpenCode is ready (see [Readiness]), not just the web listener. Stop never waits
- * behind a start: it sets [cancelRequested], which the readiness wait checks between polls.
+ * Public actions queue behind [operationLock]; the watchdog's recovery takes the same lock. [busy]
+ * is true from the moment an action is queued until it has finished, so the service can tell "work
+ * in progress" from "resting" without guessing from intermediate states.
+ *
+ * Intent: [wantsRunning] records what the user asked for. Start, Install and Repair (which ends in a
+ * start) set it; Stop and Uninstall clear it. Only a set intent allows automatic crash recovery.
  */
 class DefaultLocalRuntimeController(
     private val paths: RuntimePaths,
@@ -73,11 +76,17 @@ class DefaultLocalRuntimeController(
     private val mutableState = MutableStateFlow<RuntimeState>(RuntimeState.Detecting)
     override val state: StateFlow<RuntimeState> = mutableState.asStateFlow()
 
+    private val mutableBusy = MutableStateFlow(false)
+    override val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
+
     private val mutableLog = MutableStateFlow<List<String>>(emptyList())
     override val logTail: StateFlow<List<String>> = mutableLog.asStateFlow()
 
     private val mutableInfo = MutableStateFlow<RuntimeInfo?>(null)
     override val info: StateFlow<RuntimeInfo?> = mutableInfo.asStateFlow()
+
+    /** Operations queued or running, counted so [busy] stays true across overlapping requests. */
+    private var pendingWork = 0
 
     // Guarded by operationLock, except cancelRequested which Stop sets without the lock.
     @Volatile private var cancelRequested = false
@@ -113,7 +122,7 @@ class DefaultLocalRuntimeController(
      */
     override fun perform(operation: RuntimeOperation) {
         when (operation) {
-            RuntimeOperation.Install -> launch(FailurePhase.Install) { installLocked() }
+            RuntimeOperation.Install -> launch(FailurePhase.Install) { installLocked(thenStart = true) }
             RuntimeOperation.Start -> {
                 cancelRequested = false
                 launch(FailurePhase.Start) { startLocked(manual = true) }
@@ -128,11 +137,11 @@ class DefaultLocalRuntimeController(
             }
             RuntimeOperation.Repair ->
                 launch(FailurePhase.Runtime) {
+                    // Repair never deletes the live environment first: stop what runs, then install
+                    // into staging and swap atomically. A failed repair leaves the old runtime intact.
                     stopLocked()
-                    // A failure from here on is an install failure: Retry must reinstall.
                     currentPhase = FailurePhase.Install
-                    withContext(ioDispatcher) { installer.discardEnvironment() }
-                    installLocked()
+                    installLocked(thenStart = true)
                 }
             RuntimeOperation.Uninstall ->
                 launch(FailurePhase.Runtime) {
@@ -153,20 +162,31 @@ class DefaultLocalRuntimeController(
         phase: FailurePhase,
         block: suspend () -> Unit,
     ) {
+        pendingWork++
+        mutableBusy.value = true
         scope.launch {
-            operationLock.withLock {
-                currentPhase = phase
-                try {
-                    block()
-                } catch (error: CancellationException) {
-                    publishTerminalAfterCancel()
-                    throw error
-                } catch (error: Throwable) {
-                    // currentPhase, not the launch argument: install hands over to Start mid-operation.
-                    failed(error.message ?: "Runtime operation failed", currentPhase, error)
+            try {
+                operationLock.withLock {
+                    currentPhase = phase
+                    try {
+                        block()
+                    } catch (error: CancellationException) {
+                        publishTerminalAfterCancel()
+                        throw error
+                    } catch (error: Throwable) {
+                        // currentPhase, not the launch argument: install hands over to Start mid-operation.
+                        failed(error.message ?: "Runtime operation failed", currentPhase, error)
+                    }
                 }
+            } finally {
+                finishWork()
             }
         }
+    }
+
+    private fun finishWork() {
+        pendingWork--
+        mutableBusy.value = pendingWork > 0 || restartJob?.isActive == true
     }
 
     // --- All helpers below run with operationLock held. ---
@@ -187,7 +207,8 @@ class DefaultLocalRuntimeController(
         }
     }
 
-    private suspend fun installLocked() {
+    /** Install, then optionally start (Install and Repair both end running, as the user asked for it). */
+    private suspend fun installLocked(thenStart: Boolean) {
         if (abi !in supportedAbis) {
             publish(RuntimeState.UnsupportedAbi)
             return
@@ -208,10 +229,11 @@ class DefaultLocalRuntimeController(
             }
         val installed = installer.install(reporter)
         refreshInfo(installed)
-        // Intermediate Stopped: the service must not stop here, the start follows immediately.
+        // Intermediate Stopped: the service keeps running because busy is still true here.
         publish(RuntimeState.Stopped)
+        if (!thenStart) return
         currentPhase = FailurePhase.Start
-        startLocked(manual = false)
+        startLocked(manual = true)
     }
 
     private suspend fun startLocked(manual: Boolean) {
@@ -228,7 +250,7 @@ class DefaultLocalRuntimeController(
         publish(RuntimeState.Starting("Starting OpenChamber on port $port"))
         val password = withContext(ioDispatcher) { uiPassword(paths) }
         withContext(ioDispatcher) {
-            server.start(runtime, password, ::appendLog, isCancelled = { cancelRequested })
+            server.start(runtime, password, ::appendLog) { cancelRequested }
         }
         if (cancelRequested) throw CancellationException("Start cancelled by Stop")
         publish(RuntimeState.Running("http://127.0.0.1:$port", port, nowMillis()))
@@ -277,8 +299,8 @@ class DefaultLocalRuntimeController(
     }
 
     /**
-     * Probes while Running and restarts a dead server with backoff. Every iteration is inside one
-     * error boundary: an exception is logged and treated as a failed probe, never escapes the scope.
+     * Probes while Running. A dead or unhealthy server starts a recovery job that owns the restart
+     * budget. Probe errors are logged and count as unhealthy; they never escape the scope.
      */
     private fun scheduleWatchdog() {
         watchdog?.cancel()
@@ -298,45 +320,68 @@ class DefaultLocalRuntimeController(
                         restartPolicy.onHealthy(nowMillis())
                         continue
                     }
-                    // The crash is handled in its own job: its backoff must not hold the lock, so a
-                    // Stop arriving during the wait can cancel it and proceed immediately.
-                    restartJob = scope.launch {
-                        operationLock.withLock {
-                            if (!wantsRunning || mutableState.value !is RuntimeState.Running) return@withLock
-                            restartAfterCrash()
-                        }
-                    }
+                    startRecovery()
                     return@launch
                 }
             }
     }
 
+    /** One recovery job for one crash. Counted in [busy] so the service stays up while it runs. */
+    private fun startRecovery() {
+        pendingWork++
+        mutableBusy.value = true
+        restartJob =
+            scope.launch {
+                try {
+                    operationLock.withLock {
+                        if (!wantsRunning || mutableState.value !is RuntimeState.Running) return@withLock
+                        restartAfterCrash()
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    failed(error.message ?: "Recovery failed", FailurePhase.Runtime, error)
+                } finally {
+                    finishWork()
+                }
+            }
+    }
+
     /**
-     * One crash recovery: wait the backoff, restart, and repeat through the watchdog on success. The
-     * whole attempt is in one boundary, so a failing start becomes a Failed state, not a crash.
+     * Automatic recovery. Each attempt consumes one budget step: a failed attempt goes around again
+     * (after its own backoff) until the budget runs out, and only then is the state Failed(Runtime).
+     * A successful attempt returns to the watchdog, which refills the budget after a healthy window.
      */
     private suspend fun restartAfterCrash() {
         publish(RuntimeState.Failed("OpenChamber stopped unexpectedly", recoverable = true, phase = FailurePhase.Runtime))
-        val delayMillis = restartPolicy.nextDelayMillis()
-        if (delayMillis == null) {
-            wantsRunning = false
-            publish(RuntimeState.Failed("OpenChamber kept stopping; tap Start to try again", recoverable = true, phase = FailurePhase.Runtime))
-            return
-        }
-        publish(RuntimeState.Starting("OpenChamber stopped; restarting in ${delayMillis / 1000}s"))
-        appendLog("Restarting OpenChamber in ${delayMillis / 1000}s")
-        delay(delayMillis)
-        if (!wantsRunning) return
-        try {
-            withContext(ioDispatcher) { server.stop() }
-            startLocked(manual = false)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            // A failed automatic restart feeds the same budget; the next attempt is a new watchdog cycle.
-            appendLog("Restart failed: ${error.message}")
-            wantsRunning = false
-            publish(RuntimeState.Failed(error.message ?: "Restart failed", recoverable = true, phase = FailurePhase.Start))
+        while (true) {
+            val delayMillis = restartPolicy.nextDelayMillis()
+            if (delayMillis == null) {
+                wantsRunning = false
+                publish(
+                    RuntimeState.Failed(
+                        "OpenChamber kept stopping; tap Start to try again",
+                        recoverable = true,
+                        phase = FailurePhase.Runtime,
+                    ),
+                )
+                return
+            }
+            publish(RuntimeState.Starting("OpenChamber stopped; restarting in ${delayMillis / 1000}s"))
+            appendLog("Restarting OpenChamber in ${delayMillis / 1000}s")
+            delay(delayMillis)
+            if (!wantsRunning) return
+            try {
+                withContext(ioDispatcher) { server.stop() }
+                startLocked(manual = false)
+                return
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // This attempt failed: log it and loop, so the remaining budget is actually used.
+                appendLog("Restart attempt failed: ${error.message}")
+                publish(RuntimeState.Failed("Restart failed: ${error.message}", recoverable = true, phase = FailurePhase.Start))
+            }
         }
     }
 

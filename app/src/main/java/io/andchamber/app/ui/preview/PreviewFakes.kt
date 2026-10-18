@@ -23,6 +23,8 @@ internal class FakeRuntimeController(
     private val mutableState = MutableStateFlow(initial)
     override val state: StateFlow<RuntimeState> = mutableState.asStateFlow()
 
+    override val busy: StateFlow<Boolean> = MutableStateFlow(false).asStateFlow()
+
     private val mutableLog = MutableStateFlow(log)
     override val logTail: StateFlow<List<String>> = mutableLog.asStateFlow()
 

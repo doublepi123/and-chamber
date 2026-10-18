@@ -11,18 +11,22 @@ interface OpenChamberServer {
     /**
      * Launches the server and waits until it is ready (see [Readiness]). Throws on any failure and
      * whenever [isCancelled] returns true, so a Stop never queues behind the readiness wait.
+     * Returns the launch id of the child that became ready; the authenticator checks it before POST.
      */
     fun start(
         runtime: InstalledRuntime,
         uiPassword: String,
         onLog: (String) -> Unit,
         isCancelled: () -> Boolean = { false },
-    )
+    ): Long
 
     /** Stops every process of this server, owned or from our handle. Idempotent. */
     fun stop()
 
     fun isAlive(): Boolean
+
+    /** Incremented for every launch. A login must be tied to the launch id it was checked against. */
+    fun currentLaunchId(): Long
 }
 
 /** Thrown when the port is held by something other than our server. Never launch/login then. */
@@ -49,20 +53,37 @@ class ProotOpenChamberServer(
     private val refreshDns: (InstalledRuntime) -> Unit = {},
     /** Pre-start cleanup; returns true when the port is free afterwards. */
     private val cleanBeforeStart: (port: Int, guestRunDir: File, prootPath: String) -> Boolean = { _, _, _ -> true },
+    /** Spawns the guest command. Injected so tests can stand in a fake child process. */
+    private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
+        ProcessBuilder(command)
+            .directory(dir)
+            .redirectErrorStream(true)
+            .apply {
+                environment().clear()
+                environment().putAll(env)
+            }
+            .start()
+    },
 ) : OpenChamberServer {
     private val lock = Any()
     private var process: Process? = null
+    private var launchId = 0L
+
+    /** Our child's own output, in order. Readiness trusts only this, never the network alone. */
+    private val childOutput = mutableListOf<String>()
+
+    override fun currentLaunchId(): Long = synchronized(lock) { launchId }
 
     override fun start(
         runtime: InstalledRuntime,
         uiPassword: String,
         onLog: (String) -> Unit,
         isCancelled: () -> Boolean,
-    ) {
+    ): Long {
         stop()
         val port = runtime.metadata.port
-        // OpenChamber's own data dir inside the guest: /root/.config/openchamber (cli-paths.js).
-        val guestRunDir = File(runtime.rootfs, "root/.config/openchamber/run")
+        // OpenChamber's own data dir inside the guest. home is bind-mounted to /root (see ProotCommands).
+        val guestRunDir = File(paths.home, ".config/openchamber/run")
         // Port ownership is decided before anything is spawned: a foreign listener that survives our
         // cleanup means we must not launch, and must never send the password to it.
         val prootPath = runCatching { suite().proot.absolutePath }.getOrNull()
@@ -86,23 +107,21 @@ class ProotOpenChamberServer(
                 storageArguments = emptyList(),
                 port = port,
             )
-        val builder =
-            ProcessBuilder(command)
-                .directory(paths.root)
-                .redirectErrorStream(true)
-        builder.environment().apply {
-            clear()
-            putAll(ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword))
-        }
-        val started = builder.start()
-        synchronized(lock) { process = started }
-        pumpOutput(started, onLog)
+        val started = spawn(command, ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword), paths.root)
+        val id =
+            synchronized(lock) {
+                process = started
+                childOutput.clear()
+                ++launchId
+            }
+        val pump = pumpOutput(started, onLog)
         try {
-            waitUntilReady(started, port, isCancelled)
+            waitUntilReady(started, port, isCancelled, pump)
         } catch (error: Throwable) {
             stop()
             throw error
         }
+        return id
     }
 
     override fun stop() {
@@ -120,11 +139,12 @@ class ProotOpenChamberServer(
     private fun pumpOutput(
         process: Process,
         onLog: (String) -> Unit,
-    ) {
+    ): Thread =
         Thread({
             val writer = runCatching { FileOutputStream(paths.serverLog, true).bufferedWriter() }.getOrNull()
             try {
                 process.inputStream.bufferedReader().forEachLine { line ->
+                    synchronized(lock) { if (this.process === process) childOutput += line }
                     runCatching {
                         writer?.write(line)
                         writer?.newLine()
@@ -135,24 +155,40 @@ class ProotOpenChamberServer(
             } finally {
                 runCatching { writer?.close() }
             }
-        }, "openchamber-output").apply { isDaemon = true }.start()
-    }
+        }, "openchamber-output").apply { isDaemon = true; start() }
 
     /**
-     * Readiness: our child is alive, /health reports ok and OpenCode ready, and the serverId stays
-     * the same across polls. Cancellation is checked between polls so Stop is never blocked.
+     * Readiness in trust order: our child is alive; our child printed the listen line for [port];
+     * only then /health is believed (ok, OpenCode ready, serverId stable across polls). A child that
+     * exits (EADDRINUSE when a foreign process won the port after our precheck) fails as port in use.
      */
     private fun waitUntilReady(
         started: Process,
         port: Int,
         isCancelled: () -> Boolean,
+        pump: Thread,
     ) {
         val deadline = now() + readyTimeoutMillis * 1_000_000L
         val serverIds = mutableListOf<String?>()
+        var listening = false
         while (true) {
             if (isCancelled()) throw CancellationException("Start cancelled")
             if (!started.isAlive) {
+                // Node exits on EADDRINUSE: someone took the port after our precheck. That is a port
+                // conflict, not a server failure, and is reported as such (no password is ever sent).
+                // Let the output pump drain the exited child's remaining output before deciding.
+                pump.join(2_000)
+                val output = synchronized(lock) { childOutput.toList() }
+                if (!listening && output.any { it.contains("EADDRINUSE") }) throw PortInUseException(port)
                 error("OpenChamber exited during startup (exit ${started.exitValue()}): ${tail()}")
+            }
+            if (!listening) {
+                listening = synchronized(lock) { Readiness.childListening(childOutput.toList(), port) }
+            }
+            if (!listening) {
+                if (now() >= deadline) error("OpenChamber did not start listening on port $port: ${tail()}")
+                sleep(pollMillis)
+                continue
             }
             val report = health.read(port)
             serverIds += report?.serverId

@@ -36,16 +36,25 @@ class ProcessScanner(
     fun childrenOf(parentPid: Long): List<Long> =
         allProcesses().filter { it.ppid == parentPid }.map { it.pid }.sorted()
 
-    /** Post-order list of [root] and all its descendants, children first. */
+    /**
+     * Post-order list of [root] and its descendants, children first. The root must still be the very
+     * process that was recorded (same pid, start time and our uid); otherwise the pid was reused and
+     * the whole tree is skipped. Every node must be ours (uid, not self) and is recorded with its
+     * start time so [killOwned] can recheck it.
+     */
     fun treePostOrder(root: OwnedProcess): List<OwnedProcess> {
         val all = allProcesses().associateBy { it.pid }
+        val rootNow = all[root.pid] ?: return emptyList()
+        if (rootNow.startTime != root.startTime || rootNow.uid != myUid || rootNow.pid == myPid) return emptyList()
         val childrenByParent = all.values.groupBy { it.ppid }
         val result = mutableListOf<OwnedProcess>()
         val visited = mutableSetOf<Long>()
         fun visit(pid: Long) {
             if (!visited.add(pid)) return
             childrenByParent[pid].orEmpty().map { it.pid }.sorted().forEach(::visit)
-            all[pid]?.let { result += OwnedProcess(it.pid, it.ppid, it.startTime) }
+            val node = all[pid] ?: return
+            // Children of a verified root are ours unless their uid says otherwise.
+            if (node.uid == myUid && node.pid != myPid) result += OwnedProcess(node.pid, node.ppid, node.startTime)
         }
         visit(root.pid)
         return result
@@ -60,8 +69,10 @@ class ProcessScanner(
         signal: (Long) -> Unit,
     ) {
         processes.distinctBy { it.pid }.forEach { process ->
-            val now = snapshot(process.pid)
-            if (now != null && now.startTime == process.startTime) runCatching { signal(process.pid) }
+            if (process.pid == myPid) return@forEach
+            // Recheck right before the signal: same pid, same start time, still our uid.
+            val now = snapshot(process.pid) ?: return@forEach
+            if (now.startTime == process.startTime && now.uid == myUid) runCatching { signal(process.pid) }
         }
     }
 

@@ -5,11 +5,13 @@ import android.os.Build
 import android.webkit.CookieManager
 import io.andchamber.app.data.DefaultWebSessionAuthenticator
 import io.andchamber.app.data.EncryptedRemoteServerStore
+import io.andchamber.app.data.LocalReadiness
 import io.andchamber.app.data.WebCookieSink
 import io.andchamber.app.runtime.DefaultLocalRuntimeController
 import android.system.Os
 import io.andchamber.app.runtime.ForegroundStarter
 import io.andchamber.app.runtime.process.ProcessScanner
+import io.andchamber.app.runtime.process.OpenChamberServer
 import io.andchamber.app.runtime.process.killOwnedRuntime
 import io.andchamber.app.runtime.LocalRuntimeController
 import io.andchamber.app.runtime.RemoteServerStore
@@ -59,6 +61,30 @@ val appModule =
 
         single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
 
+        single<OpenChamberServer> {
+            val context = get<Context>()
+            val paths = RuntimePaths.under(context.filesDir)
+            val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+            val suite = { EmbeddedCommandSuite(nativeDir, paths).resolve() }
+            val scanner = ProcessScanner(myUid = Os.getuid(), myPid = Os.getpid().toLong())
+            ProotOpenChamberServer(
+                paths = paths,
+                suite = suite,
+                health = HealthProbe.Loopback,
+                scanner = scanner,
+                signal = { pid -> android.os.Process.killProcess(pid.toInt()) },
+                refreshDns = { runtime -> ResolvConf.write(runtime.rootfs, AndroidSystemDnsProvider(context).dnsServers()) },
+                cleanBeforeStart = { port, guestRunDir, proot ->
+                    ProotStaleServerCleaner(
+                        paths = paths,
+                        scanner = scanner,
+                        signal = { pid -> android.os.Process.killProcess(pid.toInt()) },
+                        isPortFree = HealthProbe.Companion::isPortFree,
+                    ).cleanBeforeStart(port, guestRunDir, proot)
+                },
+            )
+        }
+
         single<LocalRuntimeController> {
             val context = get<Context>()
             val paths = RuntimePaths.under(context.filesDir)
@@ -84,28 +110,11 @@ val appModule =
                 )
             val scanner = ProcessScanner(myUid = Os.getuid(), myPid = Os.getpid().toLong())
             val prootPath = { suite().proot.absolutePath }
-            val server =
-                ProotOpenChamberServer(
-                    paths = paths,
-                    suite = suite,
-                    health = HealthProbe.Loopback,
-                    scanner = scanner,
-                    signal = { pid -> android.os.Process.killProcess(pid.toInt()) },
-                    refreshDns = { runtime -> ResolvConf.write(runtime.rootfs, dnsProvider.dnsServers()) },
-                    cleanBeforeStart = { port, guestRunDir, proot ->
-                        ProotStaleServerCleaner(
-                            paths = paths,
-                            scanner = scanner,
-                            signal = { pid -> android.os.Process.killProcess(pid.toInt()) },
-                            isPortFree = HealthProbe.Companion::isPortFree,
-                        ).cleanBeforeStart(port, guestRunDir, proot)
-                    },
-                )
             DefaultLocalRuntimeController(
                 paths = paths,
                 abi = abi,
                 installer = installer,
-                server = server,
+                server = get<OpenChamberServer>(),
                 health = HealthProbe.Loopback,
                 uiPassword = RuntimeSecrets::uiPassword,
                 foregroundStarter = ForegroundStarter { op -> RuntimeService.request(context, op) },
@@ -123,7 +132,11 @@ val appModule =
                 client = get(),
                 cookies = get(),
                 localPassword = { RuntimeSecrets.existingUiPassword(paths) },
-                localReady = { get<LocalRuntimeController>().state.value is RuntimeState.Running },
+                localReady =
+                    LocalReadiness {
+                        val running = get<LocalRuntimeController>().state.value is RuntimeState.Running
+                        if (running) get<OpenChamberServer>().currentLaunchId() else null
+                    },
             )
         }
     }

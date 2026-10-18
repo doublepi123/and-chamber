@@ -27,9 +27,14 @@ interface WebCookieSink {
     fun flush()
 }
 
-/** Reports whether the local runtime is Running for the launch the password belongs to. */
+/**
+ * The local runtime's readiness for a login. [launchId] identifies the launch that is Running now;
+ * the password may be sent only while that same launch is still the Running one, checked again
+ * right before the POST, so a launch that died between the check and the request sends nothing.
+ */
 fun interface LocalReadiness {
-    fun isRunning(): Boolean
+    /** The current launch id when Running, or null when not Running. */
+    fun runningLaunchId(): Long?
 }
 
 /**
@@ -51,7 +56,7 @@ class DefaultWebSessionAuthenticator(
     client: OkHttpClient,
     private val cookies: WebCookieSink,
     private val localPassword: () -> String?,
-    private val localReady: LocalReadiness = LocalReadiness { true },
+    private val localReady: LocalReadiness = LocalReadiness { 1L },
     private val remoteStoredPassword: (ServerTarget.Remote) -> String? = { it.uiPassword },
 ) : WebSessionAuthenticator {
     /** Health and session probes may follow redirects; they never carry a password. */
@@ -68,15 +73,24 @@ class DefaultWebSessionAuthenticator(
                 return@withContext WebSessionResult.Unreachable("No OpenChamber server answered at $base")
             }
 
+            // The local password is released only for a Running launch, and that launch is checked again
+            // right before the POST: a launch that changed or died in between sends nothing.
+            val launchId = if (target is ServerTarget.Local) localReady.runningLaunchId() else null
+            if (target is ServerTarget.Local && launchId == null) {
+                return@withContext WebSessionResult.Unreachable("The local OpenChamber is not running")
+            }
             val password =
                 when (target) {
-                    is ServerTarget.Local -> if (localReady.isRunning()) localPassword() else null
+                    is ServerTarget.Local -> localPassword()
                     is ServerTarget.Remote -> remoteStoredPassword(target)
                 }
 
             if (password.isNullOrEmpty()) {
                 // No password to use: only a session that is already signed in counts as Ready.
                 return@withContext if (isAuthenticated(base)) WebSessionResult.Ready(base) else WebSessionResult.NeedsLogin(base)
+            }
+            if (target is ServerTarget.Local && localReady.runningLaunchId() != launchId) {
+                return@withContext WebSessionResult.Unreachable("The local OpenChamber restarted; try again")
             }
 
             val allowed = target !is ServerTarget.Remote || target.allowInsecureHttp || url.isTransportSafe()

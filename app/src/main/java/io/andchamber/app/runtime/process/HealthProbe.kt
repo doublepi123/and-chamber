@@ -72,10 +72,20 @@ fun interface HealthProbe {
 }
 
 /**
- * Readiness rules, pure: the server is Running only when it reports ok AND OpenCode is ready.
- * [Verdict.OpenCodeFailed] means the backend reported a concrete error and is not running.
+ * Readiness rules, pure. Trust order matters:
+ *  1. Our own child printed the listen line (the pipe is private to us, so no foreign process can
+ *     print it on our behalf). Node prints it only after a successful listen; EADDRINUSE exits.
+ *  2. Only then is /health believed: web server ok AND OpenCode ready.
+ *  3. A concrete OpenCode error while not running fails the start.
  */
 object Readiness {
+    /** The line OpenChamber prints after listening, e.g. `OpenChamber server listening on 127.0.0.1:3000`. */
+    fun listenMarker(port: Int): String = "OpenChamber server listening on 127.0.0.1:$port"
+
+    /** True when our child's own output contains the listen line for [port]. */
+    fun childListening(output: List<String>, port: Int): Boolean =
+        output.any { it.contains(listenMarker(port)) }
+
     sealed interface Verdict {
         data object Waiting : Verdict
 

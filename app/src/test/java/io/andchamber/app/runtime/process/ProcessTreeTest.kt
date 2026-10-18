@@ -79,6 +79,31 @@ class ProcessTreeTest {
     }
 
     @Test
+    fun `a pid reused between the owned scan and the tree walk is not walked`() {
+        val procRoot = folder.newFolder("proc-reuse")
+        proc(procRoot, 300, 1, listOf(proot, "-r", rootfs), start = 1000L)
+        proc(procRoot, 301, 300, listOf("node"), start = 1001L)
+        val s = ProcessScanner(procRoot, uid, myPid = 1L)
+        val owned = s.ownedRoots(proot, rootfs).single()
+
+        // Between the scan and the walk the original launcher exits and pid 300 is reused by an
+        // unrelated process of ours (different start time).
+        proc(procRoot, 300, 1, listOf("sh", "-c", "sleep 1"), start = 9999L)
+
+        assertTrue(s.treePostOrder(owned).isEmpty())
+    }
+
+    @Test
+    fun `tree nodes owned by another uid are never collected`() {
+        val procRoot = folder.newFolder("proc-uid-node")
+        proc(procRoot, 400, 1, listOf(proot, "-r", rootfs))
+        proc(procRoot, 401, 400, listOf("node"), uid = 999)
+        val s = ProcessScanner(procRoot, uid, myPid = 1L)
+
+        assertEquals(listOf(400L), s.treePostOrder(OwnedProcess(400, 1, 1400L)).map { it.pid })
+    }
+
+    @Test
     fun `kill is skipped when the start time changed (recycled pid)`() {
         val procRoot = folder.newFolder("proc-recycle")
         proc(procRoot, 200, 1, listOf(proot, "-r", rootfs), start = 5555L)

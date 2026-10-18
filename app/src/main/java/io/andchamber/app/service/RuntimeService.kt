@@ -21,35 +21,34 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
 /**
- * Hosts runtime work in the foreground.
+ * Hosts runtime work in the foreground for the whole life of the service.
  *
- * Lifetime is the operation's, not the state's: the service is started with an operation intent,
- * calls [startForeground] first, then hands the operation to the controller. It stops only when
- * the controller reaches a terminal state after that operation. Intermediate states (Stopped between
- * install and start, Detecting, progress ticks) never stop it. The wake lock is held while work runs
- * and released on terminal states, on exceptions, and in onDestroy.
+ * The service is started with an operation intent and calls [startForegroundCompat] first, then
+ * hands the operation to the controller. It then observes the controller for its entire life and
+ * applies [RuntimeServicePolicy] to (busy, state) on every change: it stays foreground while work is
+ * queued or running, or while the server is Running or Starting, and stops itself otherwise.
+ *
+ * The wake lock is held exactly while the service is foreground ([WakeHold] is released on every
+ * path that leaves the foreground, including onDestroy).
  */
 class RuntimeService : Service() {
     private val runtime: LocalRuntimeController by inject()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var observer: Job? = null
-
-    /** True between an operation intent and its terminal state. Read on the main thread only. */
-    private var operationActive = false
+    private var foreground = false
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel(this)
         observer =
             scope.launch {
-                runtime.state.collectLatest { state ->
-                    if (operationActive) updateNotification(state)
-                    if (operationActive && state.isTerminal()) finishOperation()
+                combine(runtime.busy, runtime.state) { busy, state -> busy to state }.collect { (busy, state) ->
+                    apply(RuntimeServicePolicy.decide(busy, state), state)
                 }
             }
     }
@@ -60,20 +59,12 @@ class RuntimeService : Service() {
         startId: Int,
     ): Int {
         // Barrier: foreground first, always, before anything touches the controller.
-        startForegroundCompat(buildNotification(runtime.state.value))
-        WakeHold.acquire(this)
+        enterForeground(buildNotification(runtime.state.value))
         when (intent?.action) {
             ACTION_OPERATION -> {
-                val operation = intent.getStringExtra(EXTRA_OPERATION)?.let(RuntimeOperation::valueOf)
-                if (operation != null) {
-                    operationActive = true
-                    runtime.perform(operation)
-                }
+                intent.getStringExtra(EXTRA_OPERATION)?.let(RuntimeOperation::valueOf)?.let(runtime::perform)
             }
-            ACTION_STOP_NOTIFICATION -> {
-                operationActive = true
-                runtime.perform(RuntimeOperation.Stop)
-            }
+            ACTION_STOP_NOTIFICATION -> runtime.perform(RuntimeOperation.Stop)
             else -> Unit
         }
         return START_NOT_STICKY
@@ -88,37 +79,41 @@ class RuntimeService : Service() {
         super.onDestroy()
     }
 
-    /** Terminal states end the operation; the service then stops itself. */
-    private fun RuntimeState.isTerminal(): Boolean =
-        this is RuntimeState.Stopped ||
-            this is RuntimeState.NotInstalled ||
-            this is RuntimeState.Failed ||
-            this is RuntimeState.UnsupportedAbi ||
-            this is RuntimeState.Running
-
-    private fun finishOperation() {
-        operationActive = false
-        // Running keeps the service (and its notification) alive as the server's lifetime.
-        if (runtime.state.value is RuntimeState.Running) {
-            WakeHold.acquire(this)
-            return
+    /** Applies the policy: the notification follows the state, the foreground follows the policy. */
+    private fun apply(
+        action: RuntimeServicePolicy.Action,
+        state: RuntimeState,
+    ) {
+        when (action) {
+            RuntimeServicePolicy.Action.KeepRunning -> {
+                if (foreground) {
+                    getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(state))
+                } else {
+                    enterForeground(buildNotification(state))
+                }
+                WakeHold.acquire(this)
+            }
+            RuntimeServicePolicy.Action.Finish -> leaveForeground()
         }
-        WakeHold.release()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
-    private fun startForegroundCompat(notification: Notification) {
+    private fun enterForeground(notification: Notification) {
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         )
+        foreground = true
     }
 
-    private fun updateNotification(state: RuntimeState) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(state))
+    private fun leaveForeground() {
+        WakeHold.release()
+        if (foreground) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            foreground = false
+        }
+        stopSelf()
     }
 
     private fun buildNotification(state: RuntimeState): Notification {

@@ -95,18 +95,28 @@ class LocalRuntimeControllerTest {
         var startError: Throwable? = null,
     ) : OpenChamberServer {
         val starts = mutableListOf<String>()
+        var startAttempts = 0
+        /** The next N start calls fail (simulates a restart that does not come up). */
+        var failNextStarts = 0
         var alive = false
         var stops = 0
+        private var launch = 0L
 
         override fun start(
             runtime: InstalledRuntime,
             uiPassword: String,
             onLog: (String) -> Unit,
             isCancelled: () -> Boolean,
-        ) {
+        ): Long {
+            startAttempts++
             startError?.let { throw it }
+            if (failNextStarts > 0) {
+                failNextStarts--
+                error("restart did not come up")
+            }
             starts += uiPassword
             alive = true
+            return ++launch
         }
 
         override fun stop() {
@@ -115,6 +125,8 @@ class LocalRuntimeControllerTest {
         }
 
         override fun isAlive(): Boolean = alive
+
+        override fun currentLaunchId(): Long = launch
     }
 
     /** Health answers from a mutable flag so a test can flip the server dead and alive. */
@@ -346,7 +358,7 @@ class LocalRuntimeControllerTest {
         }
 
     @Test
-    fun `repair kills owned processes before discarding files`() =
+    fun `repair stops owned processes and never discards the live environment first`() =
         runTest {
             val root = folder.root
             val killed = mutableListOf<Int>()
@@ -358,8 +370,93 @@ class LocalRuntimeControllerTest {
             step()
 
             assertTrue(killed.isNotEmpty())
-            assertEquals(1, installer.discarded)
+            assertEquals("repair must not pre-delete the environment", 0, installer.discarded)
             assertTrue(controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `repair whose install fails leaves the old runtime installed and startable`() =
+        runTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = fakeRuntime(root))
+            val controller = controller(installer, FakeServer())
+            controller.initialize()
+            step()
+            // The install of the replacement fails; the staged build is discarded by the installer,
+            // and the previously active environment must still be what is installed.
+            installer.installFails = true
+            controller.perform(RuntimeOperation.Repair)
+            step()
+
+            assertEquals(0, installer.discarded)
+            assertTrue("old runtime is still recorded as installed", installer.installedRuntime() != null)
+            assertEquals(
+                RuntimeState.Failed("network down", recoverable = true, phase = FailurePhase.Install),
+                controller.state.value,
+            )
+            // Retry (Start) is possible because the old runtime is intact.
+            installer.installFails = false
+            controller.perform(RuntimeOperation.Start)
+            step()
+            assertTrue(controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `install sets the run intent so a crash after the auto-start is recovered`() =
+        runTest {
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller = controller(FakeInstaller(folder.root), server, health = health, watchdogPollMillis = 500L)
+            controller.perform(RuntimeOperation.Install)
+            step()
+            assertTrue(controller.state.value is RuntimeState.Running)
+
+            // Server dies right after the auto-start; the watchdog must restart it.
+            health.ok = false
+            step(500L)
+            health.ok = true
+            step(1_500L)
+
+            assertEquals(2, server.starts.size)
+            assertTrue(controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `a failed automatic restart is retried within the budget and succeeds on the next attempt`() =
+        runTest {
+            val root = folder.root
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller =
+                controller(
+                    FakeInstaller(root, installed = fakeRuntime(root)),
+                    server,
+                    health = health,
+                    watchdogPollMillis = 500L,
+                    policy = RestartPolicy(listOf(1_000L, 1_000L, 1_000L), healthyResetMillis = 120_000L),
+                )
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            // Crash. The first automatic restart does not come up; the server is still dead during that
+            // attempt, so the loop must consume another budget step (not give up) and try again.
+            server.failNextStarts = 1
+            health.ok = false
+            step(500L) // death seen; restart begins: backoff 1 s, attempt fails
+            step(1_500L) // second backoff 1 s, second attempt
+            health.ok = true // the server comes up on the second attempt
+            step(1_000L)
+
+            assertTrue("expected Running after the retry, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            assertEquals("one failed attempt plus one successful one after the crash", 3, server.startAttempts)
             controller.perform(RuntimeOperation.Stop)
             step()
         }
@@ -391,7 +488,7 @@ class LocalRuntimeControllerTest {
                         uiPassword: String,
                         onLog: (String) -> Unit,
                         isCancelled: () -> Boolean,
-                    ) {
+                    ): Long {
                         sawCancel = isCancelled()
                         throw kotlinx.coroutines.CancellationException("Start cancelled by Stop")
                     }
@@ -399,6 +496,8 @@ class LocalRuntimeControllerTest {
                     override fun stop() {}
 
                     override fun isAlive(): Boolean = false
+
+                    override fun currentLaunchId(): Long = 0L
                 }
             val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server)
             controller.initialize()

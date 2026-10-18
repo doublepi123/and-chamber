@@ -3,10 +3,13 @@ package io.andchamber.app.runtime.fs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+
 
 class SafeFilesTest {
     @get:Rule
@@ -55,6 +58,14 @@ class SafeFilesTest {
         assertFalse(tree.exists())
     }
 
+    /** Sets a POSIX mode string like "r-x------". Tests that need it are skipped on non-POSIX hosts. */
+    private fun setPosix(
+        file: java.io.File,
+        mode: String,
+    ) {
+        Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(mode))
+    }
+
     @Test
     fun `deleteTree returns true for a missing path`() {
         assertTrue(deleteTree(temporaryFolder.root.resolve("never-existed")))
@@ -72,6 +83,67 @@ class SafeFilesTest {
         }
 
         assertEquals(123L, treeSize(tree))
+    }
+
+    @Test
+    fun `deleteTree removes a nested mode 000 directory tree`() {
+        val tree = temporaryFolder.newFolder("mode000-nested")
+        val locked = tree.resolve("a/b").apply { mkdirs(); resolve("f.txt").writeText("x") }
+        setPosix(tree.resolve("a/b"), "---------")
+        setPosix(tree.resolve("a"), "---------")
+        assumeTrue(!locked.canRead() && !locked.canExecute())
+
+        assertTrue(deleteTree(tree))
+        assertFalse(tree.exists())
+    }
+
+    @Test
+    fun `deleteTree removes a mode 000 directory and leaves an outside symlink target intact`() {
+        val sentinel = temporaryFolder.newFolder("sentinel-mode000").apply {
+            resolve("keep.txt").writeText("precious")
+        }
+        val tree = temporaryFolder.newFolder("mode000-link")
+        val locked = tree.resolve("locked").apply { mkdirs() }
+        Files.createSymbolicLink(locked.resolve("escape").toPath(), sentinel.toPath().toAbsolutePath())
+        setPosix(locked, "---------")
+        assumeTrue(!locked.canRead() && !locked.canExecute())
+
+        assertTrue(deleteTree(tree))
+        assertFalse(tree.exists())
+        assertEquals("precious", sentinel.resolve("keep.txt").readText())
+    }
+
+    @Test
+    fun `deleteTree removes a read-only 0500 directory full of files`() {
+        val tree = temporaryFolder.newFolder("readonly")
+        val dir = tree.resolve("ro").apply { mkdirs() }
+        dir.resolve("one.txt").writeText("1")
+        dir.resolve("two.txt").writeText("2")
+        dir.resolve("sub").mkdirs()
+        dir.resolve("sub/three.txt").writeText("3")
+        setPosix(dir.resolve("sub"), "r-x------")
+        setPosix(dir, "r-x------")
+        assumeTrue(!dir.canWrite())
+
+        assertTrue(deleteTree(tree))
+        assertFalse(tree.exists())
+    }
+
+    @Test
+    fun `deleteTree adds only owner bits to a parent and never adds group or other bits`() {
+        val tree = temporaryFolder.newFolder("parent-mode")
+        val dir = tree.resolve("victim").apply { mkdirs(); resolve("f").writeText("x") }
+        setPosix(tree, "r-xr-x---")
+        setPosix(dir, "r-x------")
+        assumeTrue(!dir.canWrite())
+        val parentBefore = Files.getPosixFilePermissions(tree.toPath())
+
+        assertTrue(deleteTree(dir))
+
+        val parentAfter = Files.getPosixFilePermissions(tree.toPath())
+        assertTrue(parentAfter.containsAll(parentBefore))
+        assertFalse(parentAfter.any { it.name.startsWith("GROUP") && it !in parentBefore })
+        assertFalse(parentAfter.any { it.name.startsWith("OTHERS") && it !in parentBefore })
     }
 
     @Test

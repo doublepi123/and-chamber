@@ -75,6 +75,13 @@ data class RuntimeInfo(
 interface LocalRuntimeController {
     val state: StateFlow<RuntimeState>
 
+    /**
+     * True while an operation (install, start, stop, repair, uninstall) or an automatic crash
+     * recovery is queued or running. The foreground service uses it to decide when work has ended,
+     * instead of inferring that from [state].
+     */
+    val busy: StateFlow<Boolean>
+
     /** Rolling tail of runtime/installer log lines (most recent last, bounded). */
     val logTail: StateFlow<List<String>>
 

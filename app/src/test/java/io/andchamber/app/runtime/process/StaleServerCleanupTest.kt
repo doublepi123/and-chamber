@@ -29,6 +29,16 @@ class StaleServerCleanupTest {
     }
 
     @Test
+    fun `stale pid file under the bind-mounted home is found at the new layout`() {
+        // home is bind-mounted to /root, so OpenChamber's run dir lives under paths.home.
+        val home = folder.newFolder("home")
+        val run = File(home, ".config/openchamber/run").apply { mkdirs() }
+        val stale = run.resolve("openchamber-3000.pid").apply { writeText("6837") }
+
+        assertEquals(listOf(stale), StaleServerCleanup.staleFiles(run, 3000))
+    }
+
+    @Test
     fun `no run dir means nothing to delete`() {
         assertTrue(StaleServerCleanup.staleFiles(File(folder.root, "missing"), 3000).isEmpty())
     }
