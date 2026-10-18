@@ -15,7 +15,7 @@ Runs, probes and stops the OpenChamber server inside PRoot. Covers the PRoot com
 - `StaleServerCleanup.kt`: `ProotStaleServerCleaner` kills owned runtime processes, deletes `run/openchamber-<port>.pid`, then waits up to 5 s for the port to be free. `killOwnedRuntime` is shared with Stop, Repair and Uninstall.
 - `ProotCommands` (pure builders): `prootArguments`, `guestShellCommand` (installer, `/bin/sh -lc`), `serverCommand` (server, `-w /root`), `serverEnvironment`, `installEnvironment`.
 - `EmbeddedCommandSuite`: resolves the PRoot binaries from `nativeLibraryDirectory`. Names: `libandchamber_android_proot.so`, `libandchamber_android_proot_loader.so`, `libandchamber_android_proot_loader32.so`. Also creates `command-suite/{home,tmp}`.
-- `truncateLogFile`: keeps the newest half of an oversized log, cut at a line boundary.
+- `truncateLogFile`: keeps the newest half of an oversized log, preferring a line boundary, using a bounded tail read rather than loading the whole file. The output pump also uses `BoundedLogWriter` to cap bytes on every append; only non-notification lines are written to the log.
 
 Invariants:
 - Port ownership is decided before spawning. If the port stays held by a foreign listener, the launch refuses (`PortInUseException`), and the password is never sent to it.
@@ -32,7 +32,7 @@ Start (`ProotOpenChamberServer.start`):
 4. `bindsForStart()` → `GuestBinds`. `ProotCommands.serverCommand(proot, rootfs, binds, [], port)`.
 5. `serverEnvironment(suite.env, prootTmp, uiPassword)`. `spawn(command, env, paths.root)`.
 6. Store `process`, reset `recentOutput`, set `readyId = null`, `listenSignal = new`, `++launchId`.
-7. `pumpOutput` thread: reads lines from the child's stdout. Writes `openchamber.log`, keeps the last 200 lines, and completes `listenSignal` on the listen marker.
+7. `pumpOutput` thread: reads lines from the child's stdout. Sends non-notification lines to `BoundedLogWriter` (which enforces a byte limit on each append), keeps the last 200 lines, and completes `listenSignal` on the listen marker. `truncateLogFile` retains the newest half of an oversized log.
 8. `waitUntilReady` (deadline 90 s, poll 500 ms): cancel check, child death check (`EADDRINUSE` maps to PortInUse), wait for the listen signal, then poll `/health` with `identityStable` and `Readiness.verdict`.
 9. On failure: `stop()` and rethrow. On success: if still the current child, `readyId = id`, then `onStarted(binds)`.
 
