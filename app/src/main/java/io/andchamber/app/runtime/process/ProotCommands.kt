@@ -109,6 +109,8 @@ object ProotCommands {
             put("OPENCHAMBER_UI_PASSWORD", uiPassword)
             // The relay phones home to a hosted service; this app never uses it.
             put("OPENCHAMBER_RELAY_HOST", "off")
+            // Native notifications: the server writes one `[OpenChamberDesktopNotify] {json}` line per event.
+            put("OPENCHAMBER_DESKTOP_NOTIFY", "true")
             put("OPENCODE_DISABLE_AUTOUPDATE", "true")
             put("OPENCHAMBER_OPENCODE_BIN", GUEST_OPENCODE)
             // First boot can be slow (cold node + opencode); the 10 s default timed out while Dozing.

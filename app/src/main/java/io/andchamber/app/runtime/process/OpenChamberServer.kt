@@ -1,6 +1,7 @@
 package io.andchamber.app.runtime.process
 
 import io.andchamber.app.runtime.RuntimePaths
+import io.andchamber.app.notify.NotificationPayload
 import io.andchamber.app.runtime.install.InstalledRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -67,6 +68,8 @@ class ProotOpenChamberServer(
     private val onStarted: (io.andchamber.app.runtime.storage.GuestBinds) -> Unit = {},
     /** Told when the server stops, so nothing is marked as needing a restart. */
     private val onStopped: () -> Unit = {},
+    /** Receives raw `[OpenChamberDesktopNotify] ` lines, which carry user text and never reach the log. */
+    private val notificationSink: (line: String) -> Unit = {},
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -191,6 +194,12 @@ class ProotOpenChamberServer(
             val writer = runCatching { FileOutputStream(paths.serverLog, true).bufferedWriter() }.getOrNull()
             try {
                 process.inputStream.bufferedReader().forEachLine { line ->
+                    // Desktop-notify lines carry user text: hand them to the sink, keep them out of the
+                    // log, the diagnostic tail and the readiness signal.
+                    if (line.startsWith(NotificationPayload.PREFIX)) {
+                        runCatching { notificationSink(line) }
+                        return@forEachLine
+                    }
                     synchronized(lock) {
                         recentOutput.addLast(line)
                         while (recentOutput.size > DIAGNOSTIC_LINES) recentOutput.removeFirst()

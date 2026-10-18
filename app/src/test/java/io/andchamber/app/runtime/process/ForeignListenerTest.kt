@@ -4,6 +4,7 @@ import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.install.InstalledRuntime
 import io.andchamber.app.runtime.install.RuntimeMetadata
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -231,6 +232,58 @@ class ForeignListenerTest {
 
         assertEquals("no uncaught exception may escape the output thread", null, uncaught.get())
     }
+
+    /**
+     * Desktop-notify lines go to the sink and nowhere else: not the log callback, not the diagnostic
+     * tail. Other lines still reach the log callback.
+     */
+    @Test
+    fun `desktop-notify lines are routed to the sink and kept out of the log and the tail`() {
+        val notifyLine = "[OpenChamberDesktopNotify] {\"kind\":\"ready\",\"title\":\"t\",\"tag\":\"ready-ses_1\"}"
+        val child =
+            FakeChild(
+                output = "booting\n$notifyLine\nOpenChamber server listening on 127.0.0.1:$port\n",
+                exitCode = 0,
+                lifetimeMillis = 10_000L,
+            )
+        val sunk = mutableListOf<String>()
+        val logged = mutableListOf<String>()
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val srv = serverWithSink(child, RecordingHealth(ok), sunk)
+
+        srv.start(runtime(), "ui-secret", { logged += it }, { false })
+        Thread.sleep(100)
+
+        assertEquals(listOf(notifyLine), sunk)
+        assertFalse("the raw notify line must not be logged", logged.any { it.startsWith("[OpenChamberDesktopNotify]") })
+        assertTrue(logged.contains("booting"))
+    }
+
+    private fun serverWithSink(
+        child: Process,
+        health: HealthProbe,
+        sunk: MutableList<String>,
+    ) = ProotOpenChamberServer(
+        paths = RuntimePaths(folder.root),
+        suite = {
+            EmbeddedCommandSuite.Paths(
+                home = folder.root,
+                tmp = folder.root,
+                nativeLibraryDirectory = folder.root,
+                proot = File(folder.root, "libandchamber_android_proot.so"),
+                loader = folder.root,
+                loader32 = folder.root,
+            )
+        },
+        health = health,
+        scanner = ProcessScanner(folder.newFolder("proc-sink"), myUid = 1, myPid = 2L),
+        cleanBeforeStart = { _, _, _ -> true },
+        readyTimeoutMillis = 2_000L,
+        pollMillis = 1L,
+        sleep = { Thread.sleep(1) },
+        spawn = { _, _, _ -> child },
+        notificationSink = { sunk += it },
+    )
 
     @Test
     fun `the listen marker must match our port`() {

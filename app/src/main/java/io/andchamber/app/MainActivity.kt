@@ -15,6 +15,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        offerSessionFrom(intent)
         setContent {
             AndChamberApp(
                 runtime = get<LocalRuntimeController>(),
@@ -23,5 +24,19 @@ class MainActivity : ComponentActivity() {
                 storage = get<SharedStorageController>(),
             )
         }
+    }
+
+    /** singleTop: a notification tap while the app is open arrives here instead of onCreate. */
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        offerSessionFrom(intent)
+    }
+
+    private fun offerSessionFrom(intent: android.content.Intent?) {
+        if (intent?.action != io.andchamber.app.notify.OpenChamberNotifier.ACTION_OPEN_SESSION) return
+        io.andchamber.app.notify.OpenSessionLink.offer(
+            sessionId = intent.getStringExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_SESSION_ID),
+            directory = intent.getStringExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_DIRECTORY),
+        )
     }
 }

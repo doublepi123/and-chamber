@@ -6,7 +6,14 @@ import android.webkit.CookieManager
 import io.andchamber.app.data.DefaultWebSessionAuthenticator
 import io.andchamber.app.data.EncryptedRemoteServerStore
 import io.andchamber.app.data.LocalReadiness
+import io.andchamber.app.data.LocalApiClient
 import io.andchamber.app.data.WebCookieSink
+import io.andchamber.app.notify.NotificationBootstrapStore
+import io.andchamber.app.notify.NotificationObserver
+import io.andchamber.app.notify.NotificationSettingsBootstrap
+import io.andchamber.app.notify.NotificationSink
+import io.andchamber.app.notify.OpenChamberNotifier
+import io.andchamber.app.notify.ProcessForeground
 import io.andchamber.app.runtime.DefaultLocalRuntimeController
 import android.system.Os
 import io.andchamber.app.runtime.ForegroundStarter
@@ -66,6 +73,40 @@ val appModule =
 
         single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
 
+        single { OpenChamberNotifier(get<Context>()) }
+
+        single {
+            val context = get<Context>()
+            val paths = RuntimePaths.under(context.filesDir)
+            LocalApiClient(
+                // The base URL is the live server's, so a stopped or restarting server is never called.
+                baseUrl = { (get<LocalRuntimeController>().state.value as? RuntimeState.Running)?.url },
+                password = { RuntimeSecrets.existingUiPassword(paths) },
+            )
+        }
+
+        single { NotificationSink(get(), ProcessForeground, get()) }
+
+        single {
+            NotificationObserver(
+                runtime = get(),
+                notifier = get(),
+                api = get(),
+                bootstrap = NotificationSettingsBootstrap(get(), get()),
+            )
+        }
+
+        single<NotificationBootstrapStore> {
+            val prefs = get<Context>().getSharedPreferences("andchamber_notify", Context.MODE_PRIVATE)
+            object : NotificationBootstrapStore {
+                override fun bootstrapped(): Boolean = prefs.getBoolean(KEY_BOOTSTRAPPED, false)
+
+                override fun markBootstrapped() {
+                    prefs.edit().putBoolean(KEY_BOOTSTRAPPED, true).apply()
+                }
+            }
+        }
+
         single<SharedStorageControllerImpl> {
             val context = get<Context>()
             SharedStorageControllerImpl(
@@ -100,6 +141,7 @@ val appModule =
                         isPortFree = HealthProbe.Companion::isPortFree,
                     ).cleanBeforeStart(port, guestRunDir, proot)
                 },
+                notificationSink = { line -> get<NotificationSink>().accept(line) },
                 bindsForStart = { storage.prepareForStart() },
                 onStarted = { binds -> storage.recordStarted(binds) },
                 onStopped = { storage.recordStopped() },
@@ -159,3 +201,5 @@ val appModule =
     }
 
 private fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+
+private const val KEY_BOOTSTRAPPED = "notifications_bootstrapped"

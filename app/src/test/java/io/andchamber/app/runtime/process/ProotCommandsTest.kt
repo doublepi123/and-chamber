@@ -95,6 +95,8 @@ class ProotCommandsTest {
         assertEquals("127.0.0.1", env["OPENCHAMBER_HOST"])
         assertEquals("secret-password", env["OPENCHAMBER_UI_PASSWORD"])
         assertEquals("off", env["OPENCHAMBER_RELAY_HOST"])
+        // Native notifications: the server writes its one-line desktop-notify protocol to stdout.
+        assertEquals("true", env["OPENCHAMBER_DESKTOP_NOTIFY"])
         assertEquals("true", env["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("/usr/local/bin/opencode", env["OPENCHAMBER_OPENCODE_BIN"])
         assertEquals("--require /opt/andchamber/android-shim.cjs", env["NODE_OPTIONS"])
