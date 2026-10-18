@@ -12,12 +12,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
 import io.andchamber.app.ui.AndChamberApp
+import io.andchamber.app.ui.LaunchCoverContent
+import io.andchamber.app.ui.home.AutoOpenRow
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.home.LocalRuntimeCard
@@ -196,6 +199,47 @@ private fun WebUnreachablePreview() {
                 primary = PanelAction("Try again") {},
                 secondary = PanelAction("Back") {},
             )
+        }
+    }
+}
+
+@Preview(name = "Launch cover", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun LaunchCoverPreview() {
+    AndChamberTheme { LaunchCoverContent(markShown = true, slow = false) }
+}
+
+@Preview(name = "Launch cover · slow check (light)", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_NO)
+@Composable
+private fun LaunchCoverSlowPreview() {
+    AndChamberTheme { LaunchCoverContent(markShown = true, slow = true) }
+}
+
+@Preview(name = "Web · start failed after launch", showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun WebStartFailedPreview() {
+    AndChamberTheme {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            LocalServerPanel(
+                state =
+                    RuntimeState.Failed(
+                        reason = "OpenChamber did not answer on port 3000 within 90 s",
+                        recoverable = true,
+                        phase = FailurePhase.Start,
+                    ),
+                onStart = {},
+                onHome = {},
+            )
+        }
+    }
+}
+
+@Preview(name = "Details · open on launch", uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun AutoOpenRowPreview() {
+    AndChamberTheme {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            AutoOpenRow(checked = true, onCheckedChange = {}, modifier = Modifier.padding(16.dp))
         }
     }
 }

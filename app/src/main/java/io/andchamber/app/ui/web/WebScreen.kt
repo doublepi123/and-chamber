@@ -63,6 +63,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.WebSessionAuthenticator
@@ -367,16 +368,27 @@ internal fun LocalServerPanel(
                 primary = PanelAction(Strings.startAgain, onStart),
                 secondary = home,
             )
-        is RuntimeState.Failed ->
+        is RuntimeState.Failed -> {
+            // Say what actually went wrong: a start that never came up reads differently from a crash.
+            val title =
+                when (state.phase) {
+                    FailurePhase.Install -> Strings.localSetupFailedTitle
+                    FailurePhase.Start -> Strings.localStartFailedTitle
+                    FailurePhase.Runtime -> Strings.localFailedTitle
+                }
             StatusPanel(
                 icon = Icons.Rounded.ErrorOutline,
                 iconTint = MaterialTheme.colorScheme.error,
-                title = Strings.localFailedTitle,
-                detail = state.reason.takeUnless { it.equals(Strings.localFailedTitle, ignoreCase = true) },
+                title = title,
+                detail =
+                    state.reason.takeUnless {
+                        it.equals(title, ignoreCase = true) || it.equals(Strings.localFailedTitle, ignoreCase = true)
+                    },
                 body = if (state.recoverable) null else Strings.repairFromHome,
                 primary = if (state.recoverable) PanelAction(Strings.tryAgain, onStart) else home,
                 secondary = if (state.recoverable) home else null,
             )
+        }
         is RuntimeState.Installing ->
             StatusPanel(
                 title = Strings.settingUpTitle,

@@ -76,6 +76,7 @@ internal class HomeActions(
     val onCheckStorageAgain: () -> Unit = {},
     /** Stops the local server and starts it again, so new folder settings apply. */
     val onRestartLocal: () -> Unit = {},
+    val onAutoOpenChange: (Boolean) -> Unit = {},
 )
 
 /** The storage card only makes sense where the local server can exist at all. */
@@ -98,6 +99,8 @@ internal fun HomeScreen(
     actions: HomeActions,
     checking: Boolean = false,
     storage: SharedStorageState? = null,
+    /** "Open OpenChamber when the app starts"; null hides the setting. */
+    autoOpenLocal: Boolean? = null,
 ) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -152,6 +155,8 @@ internal fun HomeScreen(
                         onRepair = actions.onRepair,
                         onUninstall = actions.onUninstall,
                         sharedFolderInUse = storage?.status == SharedStorageStatus.Active,
+                        autoOpenLocal = autoOpenLocal,
+                        onAutoOpenChange = actions.onAutoOpenChange,
                         modifier = Modifier.revealOnEnter(1, animate),
                     )
                     AnimatedVisibility(

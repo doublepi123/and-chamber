@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -52,6 +53,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -73,6 +75,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -159,6 +162,9 @@ internal fun LocalRuntimeCard(
     checking: Boolean = false,
     /** True when projects live in the shared folder, which uninstall leaves in place. */
     sharedFolderInUse: Boolean = false,
+    /** Open-on-launch setting shown in Details; null hides it. */
+    autoOpenLocal: Boolean? = null,
+    onAutoOpenChange: (Boolean) -> Unit = {},
 ) {
     val phase = if (checking || state == RuntimeState.Detecting) RuntimePhase.Checking else state.phase
     var logOpen by rememberSaveable { mutableStateOf(false) }
@@ -275,6 +281,8 @@ internal fun LocalRuntimeCard(
             DetailsSection(
                 info = info,
                 actionsEnabled = !phase.isBusy,
+                autoOpen = autoOpenLocal,
+                onAutoOpenChange = onAutoOpenChange,
                 onRepair = { confirm = PendingConfirm.Repair },
                 onUninstall = { confirm = PendingConfirm.Uninstall },
             )
@@ -780,14 +788,65 @@ private fun FooterToggle(
     }
 }
 
+/**
+ * "Open OpenChamber when the app starts": a quiet switch row in the same box as the details
+ * table below it; the whole row toggles.
+ */
+@Composable
+internal fun AutoOpenRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier =
+                Modifier
+                    .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = Strings.autoOpenLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = Strings.autoOpenHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(checked = checked, onCheckedChange = null)
+        }
+    }
+}
+
 @Composable
 private fun DetailsSection(
     info: RuntimeInfo?,
     actionsEnabled: Boolean,
+    autoOpen: Boolean?,
+    onAutoOpenChange: (Boolean) -> Unit,
     onRepair: () -> Unit,
     onUninstall: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp)) {
+        // Only meaningful once something is installed to open.
+        if (autoOpen != null && info != null) {
+            AutoOpenRow(
+                checked = autoOpen,
+                onCheckedChange = onAutoOpenChange,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
         if (info != null) {
             Surface(
                 shape = MaterialTheme.shapes.medium,

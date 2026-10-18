@@ -1,12 +1,18 @@
 package io.andchamber.app.ui
 
+import android.content.Intent
 import android.net.Uri
+import androidx.activity.ComponentActivity
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -16,12 +22,20 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.core.util.Consumer
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavHostController
@@ -43,9 +57,14 @@ import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.theme.AndChamberTheme
 import io.andchamber.app.ui.web.WebScreen
 import io.andchamber.app.ui.web.WebViewPool
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal object Routes {
     const val HOME = "home"
@@ -67,6 +86,13 @@ private class LocalActions(
     /** True while the most recent work was setup, so a failure there retries the setup. */
     private var inSetup = false
 
+    /**
+     * The state a start was requested from, until the runtime reports back. Screens show such a
+     * start as Starting right away (see [shownLocalState]) instead of the old Stopped or failure.
+     */
+    var pendingStartFrom by mutableStateOf<RuntimeState?>(null)
+        private set
+
     fun observe(state: RuntimeState) {
         when (state) {
             is RuntimeState.Installing -> inSetup = true
@@ -74,6 +100,12 @@ private class LocalActions(
             // Setup finished (the controller starts the server right after it).
             else -> inSetup = false
         }
+        val from = pendingStartFrom
+        if (from != null && state != from) pendingStartFrom = null
+    }
+
+    fun clearPendingStart(from: RuntimeState) {
+        if (pendingStartFrom == from) pendingStartFrom = null
     }
 
     fun install() {
@@ -85,7 +117,10 @@ private class LocalActions(
     fun start() {
         askForNotifications()
         inSetup = false
+        val from = runtime.state.value
         runtime.start()
+        // The request only reaches the runtime through the service, a moment later.
+        if (from is RuntimeState.Stopped || from is RuntimeState.Failed) pendingStartFrom = from
     }
 
     /** Retry redoes exactly what failed: setup failures reinstall, server failures start again. */
@@ -127,6 +162,9 @@ private class LocalActions(
 /**
  * Root of the UI: a control-room home screen and a full-screen OpenChamber web screen per server.
  *
+ * Once the local server is set up, a launch goes straight to it (see [openLocalOnLaunch]); Home
+ * is where setup, problems and the other servers live.
+ *
  * Runtime and server flows are collected inside each destination rather than here, so the
  * navigation graph isn't rebuilt every time a log line arrives.
  */
@@ -145,6 +183,16 @@ fun AndChamberApp(
         val askForNotifications = rememberNotificationPermissionRequest()
         val local = remember(runtime, askForNotifications, pool) { LocalActions(runtime, askForNotifications, pool) }
         LaunchedEffect(local) { runtime.state.collect(local::observe) }
+        // Last resort, in case the runtime never reports back on a start. Read in a flow, not in
+        // composition, so the root doesn't recompose for it.
+        LaunchedEffect(local) {
+            snapshotFlow { local.pendingStartFrom }.collectLatest { from ->
+                if (from != null) {
+                    delay(PENDING_START_TIMEOUT_MS)
+                    local.clearPendingStart(from)
+                }
+            }
+        }
 
         // Shared-storage calls touch the disk: run them in order, off the main thread.
         val storageJobs = remember { Channel<() -> Unit>(Channel.UNLIMITED) }
@@ -164,6 +212,44 @@ fun AndChamberApp(
         // Until the runtime has looked at the disk it reports Detecting; no "Set up" offer before then.
         val checking = runtime.state.collectAsState().value == RuntimeState.Detecting
 
+        // --- Launch: decide once per launch whether to open the local OpenChamber directly. ---
+        val uiPrefs = rememberUiPrefs()
+        val inspection = LocalInspectionMode.current
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
+        // Saved, so recreation never runs the decision again; Back to Home then stays on Home.
+        var launchPending by rememberSaveable { mutableStateOf(true) }
+        var stage by remember {
+            mutableStateOf(initialLaunchStage(launchPending, !inspection && uiPrefs.autoOpenLocal, runtime.state.value))
+        }
+        // A tap on the app icon while the app is open on Home counts as a new launch.
+        LauncherIntentEffect {
+            val onHome = nav.currentBackStackEntry?.destination?.route == Routes.HOME
+            if (onHome && stage == LaunchStage.Done) launchPending = true
+        }
+        LaunchedEffect(launchPending) {
+            if (!launchPending) return@LaunchedEffect
+            if (!inspection && uiPrefs.autoOpenLocal) {
+                try {
+                    openLocalOnLaunch(
+                        runtime = runtime,
+                        nav = nav,
+                        lifecycle = lifecycle,
+                        local = local,
+                        covered = stage != LaunchStage.Done,
+                        onOpening = { stage = LaunchStage.Opening },
+                        onReveal = { stage = LaunchStage.Done },
+                    )
+                } catch (error: CancellationException) {
+                    // Left composition mid-launch: stays pending, so a recreated activity decides again.
+                    throw error
+                } catch (_: Exception) {
+                    // Whatever went wrong, the user lands somewhere usable: Home, without the cover.
+                }
+            }
+            stage = LaunchStage.Done
+            launchPending = false
+        }
+
         var webBarColor by remember { mutableStateOf<Color?>(null) }
         val background = MaterialTheme.colorScheme.background
         val currentEntry by nav.currentBackStackEntryAsState()
@@ -171,93 +257,192 @@ fun AndChamberApp(
         WindowBackgroundEffect(background)
         SystemBarsEffect(darkIcons = ((if (onWeb) webBarColor else null) ?: background).luminance() > 0.5f)
 
-        NavHost(
-            navController = nav,
-            startDestination = Routes.HOME,
-            modifier = Modifier.fillMaxSize().background(background),
-            enterTransition = { fadeIn(tween(220)) + scaleIn(tween(220), initialScale = 0.985f) },
-            exitTransition = { fadeOut(tween(160)) },
-            popEnterTransition = { fadeIn(tween(220)) },
-            popExitTransition = { fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.985f) },
-        ) {
-            composable(Routes.HOME) { entry ->
-                val state by runtime.state.collectAsStateWithLifecycle()
-                val info by runtime.info.collectAsStateWithLifecycle()
-                val logLines by runtime.logTail.collectAsStateWithLifecycle()
-                val servers by remotes.servers.collectAsStateWithLifecycle()
-                val storageState by storage.state.collectAsStateWithLifecycle()
-                val actions =
-                    remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess) {
-                        HomeActions(
-                            onSetUp = local::install,
-                            onStart = local::start,
-                            onRetry = local::retry,
-                            onStop = local::stop,
-                            onRepair = local::repair,
-                            onUninstall = local::uninstall,
-                            onOpenLocal = { nav.openIfResumed(entry, Routes.web(ServerTarget.LOCAL_ID)) },
-                            onOpenRemote = { server -> nav.openIfResumed(entry, Routes.web(server.id)) },
-                            onSaveRemote = remotes::upsert,
-                            onRemoveRemote = { server ->
-                                pool.discard(server.id)
-                                remotes.remove(server.id)
-                            },
-                            onSharedStorageChange = { on -> storageJobs.trySend { storage.setEnabled(on) } },
-                            onAllowStorageAccess = requestStorageAccess,
-                            onCheckStorageAgain = refreshStorage,
-                            onRestartLocal = local::restart,
+        Box(modifier = Modifier.fillMaxSize().background(background)) {
+            // Nothing but the cover until the launch is decided, so Home never flashes by. Under the
+            // cover, screen changes are instant; the cover's fade is the only transition.
+            if (stage != LaunchStage.Waiting) {
+                NavHost(
+                    navController = nav,
+                    startDestination = Routes.HOME,
+                    modifier = Modifier.fillMaxSize(),
+                    enterTransition = {
+                        if (stage != LaunchStage.Done) {
+                            EnterTransition.None
+                        } else {
+                            fadeIn(tween(220)) + scaleIn(tween(220), initialScale = 0.985f)
+                        }
+                    },
+                    exitTransition = { if (stage != LaunchStage.Done) ExitTransition.None else fadeOut(tween(160)) },
+                    popEnterTransition = { fadeIn(tween(220)) },
+                    popExitTransition = { fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.985f) },
+                ) {
+                    composable(Routes.HOME) { entry ->
+                        val state by runtime.state.collectAsStateWithLifecycle()
+                        val info by runtime.info.collectAsStateWithLifecycle()
+                        val logLines by runtime.logTail.collectAsStateWithLifecycle()
+                        val servers by remotes.servers.collectAsStateWithLifecycle()
+                        val storageState by storage.state.collectAsStateWithLifecycle()
+                        val actions =
+                            remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess, uiPrefs) {
+                                HomeActions(
+                                    onSetUp = local::install,
+                                    onStart = local::start,
+                                    onRetry = local::retry,
+                                    onStop = local::stop,
+                                    onRepair = local::repair,
+                                    onUninstall = local::uninstall,
+                                    onOpenLocal = { nav.openIfResumed(entry, Routes.web(ServerTarget.LOCAL_ID)) },
+                                    onOpenRemote = { server -> nav.openIfResumed(entry, Routes.web(server.id)) },
+                                    onSaveRemote = remotes::upsert,
+                                    onRemoveRemote = { server ->
+                                        pool.discard(server.id)
+                                        remotes.remove(server.id)
+                                    },
+                                    onSharedStorageChange = { on -> storageJobs.trySend { storage.setEnabled(on) } },
+                                    onAllowStorageAccess = requestStorageAccess,
+                                    onCheckStorageAgain = refreshStorage,
+                                    onRestartLocal = local::restart,
+                                    onAutoOpenChange = uiPrefs::updateAutoOpenLocal,
+                                )
+                            }
+                        HomeScreen(
+                            state = shownLocalState(state, local.pendingStartFrom),
+                            checking = checking,
+                            info = info,
+                            logLines = logLines,
+                            servers = servers,
+                            actions = actions,
+                            storage = storageState,
+                            autoOpenLocal = uiPrefs.autoOpenLocal,
                         )
                     }
-                HomeScreen(
-                    state = state,
-                    checking = checking,
-                    info = info,
-                    logLines = logLines,
-                    servers = servers,
-                    actions = actions,
-                    storage = storageState,
-                )
+
+                    composable(
+                        route = Routes.WEB,
+                        arguments = listOf(navArgument(Routes.ARG_TARGET) { type = NavType.StringType }),
+                    ) { entry ->
+                        val state by runtime.state.collectAsStateWithLifecycle()
+                        val servers by remotes.servers.collectAsStateWithLifecycle()
+                        val targetId = entry.arguments?.getString(Routes.ARG_TARGET).orEmpty()
+                        val isLocal = targetId == ServerTarget.LOCAL_ID
+                        val running = state as? RuntimeState.Running
+                        val target: ServerTarget? =
+                            if (isLocal) {
+                                running?.let { ServerTarget.Local(it.url) }
+                            } else {
+                                servers.firstOrNull { it.id == targetId }
+                            }
+                        // A new key means a new server session: sign in again and reload the page.
+                        val sessionKey =
+                            when (target) {
+                                is ServerTarget.Local -> "local|${running?.sinceEpochMs}|${target.baseUrl}"
+                                is ServerTarget.Remote ->
+                                    "remote|${target.id}|${target.baseUrl}|${target.uiPassword.orEmpty().hashCode()}"
+                                null -> null
+                            }
+                        WebScreen(
+                            targetId = targetId,
+                            target = target,
+                            localState = if (isLocal) shownLocalState(state, local.pendingStartFrom) else null,
+                            checking = checking,
+                            sessionKey = sessionKey,
+                            auth = auth,
+                            pool = pool,
+                            onExit = { nav.closeIfResumed(entry) },
+                            onStartLocal = local::startOrRetry,
+                            onSystemBarColor = { webBarColor = it },
+                        )
+                    }
+                }
             }
 
-            composable(
-                route = Routes.WEB,
-                arguments = listOf(navArgument(Routes.ARG_TARGET) { type = NavType.StringType }),
-            ) { entry ->
-                val state by runtime.state.collectAsStateWithLifecycle()
-                val servers by remotes.servers.collectAsStateWithLifecycle()
-                val targetId = entry.arguments?.getString(Routes.ARG_TARGET).orEmpty()
-                val isLocal = targetId == ServerTarget.LOCAL_ID
-                val running = state as? RuntimeState.Running
-                val target: ServerTarget? =
-                    if (isLocal) {
-                        running?.let { ServerTarget.Local(it.url) }
-                    } else {
-                        servers.firstOrNull { it.id == targetId }
-                    }
-                // A new key means a new server session: sign in again and reload the page.
-                val sessionKey =
-                    when (target) {
-                        is ServerTarget.Local -> "local|${running?.sinceEpochMs}|${target.baseUrl}"
-                        is ServerTarget.Remote ->
-                            "remote|${target.id}|${target.baseUrl}|${target.uiPassword.orEmpty().hashCode()}"
-                        null -> null
-                    }
-                WebScreen(
-                    targetId = targetId,
-                    target = target,
-                    localState = if (isLocal) state else null,
-                    checking = checking,
-                    sessionKey = sessionKey,
-                    auth = auth,
-                    pool = pool,
-                    onExit = { nav.closeIfResumed(entry) },
-                    onStartLocal = local::startOrRetry,
-                    onSystemBarColor = { webBarColor = it },
-                )
+            AnimatedVisibility(
+                visible = stage != LaunchStage.Done,
+                enter = EnterTransition.None,
+                exit = fadeOut(tween(LAUNCH_COVER_FADE_MS)),
+            ) {
+                LaunchCover()
             }
         }
     }
 }
+
+/**
+ * The launch decision for an installed local server: open it, starting it first if it is stopped.
+ * Returns without navigating when Home is the right place (setup, problems, unsupported device)
+ * or when the user isn't on Home anymore.
+ *
+ * [covered]: the launch cover is up, so screens switch instantly underneath it and this waits for
+ * the web screen's first frame before the cover may fade. [onOpening] composes the screens under
+ * the cover; [onReveal] drops the cover early, when detection is slow.
+ */
+private suspend fun openLocalOnLaunch(
+    runtime: LocalRuntimeController,
+    nav: NavHostController,
+    lifecycle: Lifecycle,
+    local: LocalActions,
+    covered: Boolean,
+    onOpening: () -> Unit,
+    onReveal: () -> Unit,
+) {
+    var underCover = covered
+    val detected =
+        withTimeoutOrNull(LAUNCH_DETECT_TIMEOUT_MS) { runtime.state.first { it != RuntimeState.Detecting } }
+            ?: run {
+                // Slow (e.g. finishing an interrupted repair): show Home with its "Checking" card
+                // rather than a cover with no way out, and keep waiting for the answer.
+                if (underCover) onReveal()
+                underCover = false
+                runtime.state.first { it != RuntimeState.Detecting }
+            }
+    if (launchTarget(detected) == LaunchTarget.Home) return
+    if (underCover) onOpening()
+    // The navigation graph exists once the screens have been composed.
+    withTimeoutOrNull(NAV_READY_TIMEOUT_MS) { nav.currentBackStackEntryFlow.first() } ?: return
+    // Starting the foreground service needs the app in the foreground. Everything from here on runs
+    // without suspending, so the app is still resumed when the start is requested.
+    lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+    if (nav.currentBackStackEntry?.destination?.route != Routes.HOME) return
+    // Decide on the state as it is now; it may have moved on while the screens came up.
+    when (launchTarget(runtime.state.value)) {
+        LaunchTarget.StartAndOpenLocal -> {
+            // If the start can't even be requested, Home shows the server as stopped, with Start.
+            if (runCatching { local.start() }.isFailure) return
+        }
+        LaunchTarget.OpenLocal -> Unit
+        LaunchTarget.Home, LaunchTarget.Wait -> return
+    }
+    nav.navigate(Routes.web(ServerTarget.LOCAL_ID)) { launchSingleTop = true }
+    if (underCover) {
+        withTimeoutOrNull(NAV_READY_TIMEOUT_MS) {
+            nav.currentBackStackEntryFlow.first { it.destination.route == Routes.WEB }
+        }
+        // Two frames: the web screen is composed, then drawn, before the cover fades.
+        withFrameNanos { }
+        withFrameNanos { }
+    }
+}
+
+/**
+ * Calls [onLauncherTap] when the app icon is tapped while this activity is alive. Android only
+ * delivers that tap to an existing activity when it is declared `launchMode="singleTop"`.
+ */
+@Composable
+private fun LauncherIntentEffect(onLauncherTap: () -> Unit) {
+    val activity = LocalContext.current.findActivity() as? ComponentActivity ?: return
+    val current by rememberUpdatedState(onLauncherTap)
+    DisposableEffect(activity) {
+        val listener = Consumer<Intent> { intent -> if (intent.isLauncherLaunch()) current() }
+        activity.addOnNewIntentListener(listener)
+        onDispose { activity.removeOnNewIntentListener(listener) }
+    }
+}
+
+/** A start request the runtime hasn't acknowledged after this long shows its real state again. */
+private const val PENDING_START_TIMEOUT_MS = 8_000L
+
+/** Upper bound for the navigation graph and the web screen to come up under the launch cover. */
+private const val NAV_READY_TIMEOUT_MS = 2_000L
 
 /** Ignores repeated taps while a transition is already running. */
 private fun NavHostController.openIfResumed(

@@ -7,6 +7,11 @@ internal object Strings {
     const val appName = "AndChamber"
     const val tagline = "OpenChamber on this phone, or on your computer"
 
+    // Launch
+    const val launchChecking = "Checking…"
+    const val autoOpenLabel = "Open OpenChamber when the app starts"
+    const val autoOpenHint = "Starts the server first if it isn't running."
+
     // Sections
     const val sectionThisDevice = "On this phone"
     const val sectionServers = "On other computers"
@@ -202,6 +207,8 @@ internal object Strings {
     const val localStoppedTitle = "OpenChamber stopped"
     const val localStoppedBody = "The server on this device isn't running."
     const val localFailedTitle = "OpenChamber stopped unexpectedly"
+    const val localStartFailedTitle = "OpenChamber didn't start"
+    const val localSetupFailedTitle = "Setup didn't finish"
     const val startAgain = "Start again"
     const val localNotSetUpTitle = "The local server isn't set up"
     const val localNotSetUpBody = "Set it up from the home screen first."
