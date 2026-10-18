@@ -60,13 +60,18 @@ class SharedStorageControllerImpl(
                 status = SharedStorageStatus.NeedsPermission
             }
         }
-        val binds = SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot)
-        // Placeholders must exist before PRoot binds a file onto them, in any status that binds them.
-        if (binds.nestedConfig.isNotEmpty()) {
-            SharedStorageDecision.placeholdersNeeded(paths.home).forEach { it.parentFile?.mkdirs(); it.createNewFile() }
+        val binds = bindsFor(status)
+        // Private exceptions must exist before PRoot nests binds on them, in the Active status only.
+        if (binds.sharedOpencodeHostPath != null) {
+            SharedStorageDecision.prepareExceptions(privateExceptionsDir())
         }
         return binds
     }
+
+    private fun bindsFor(status: SharedStorageStatus): GuestBinds =
+        SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot, privateExceptionsDir())
+
+    private fun privateExceptionsDir(): File = File(paths.root, "home-private/opencode")
 
     /** Called by the server once a start has been issued with [binds]. */
     fun recordStarted(binds: GuestBinds) {
@@ -87,7 +92,7 @@ class SharedStorageControllerImpl(
 
     private fun compute(startedBinds: Pair<SharedStorageStatus, List<String>>?): SharedStorageState {
         val status = decideStatus()
-        val current = status to SharedStorageDecision.binds(status, paths.home, paths.workspace, hostRoot).specs()
+        val current = status to bindsFor(status).specs()
         return SharedStorageState(
             status = status,
             hostRoot = hostRoot.absolutePath,
@@ -109,13 +114,18 @@ class SharedStorageControllerImpl(
             hostRoot.isDirectory && hostRoot.canWrite()
         }.getOrDefault(false)
 
+    /**
+     * One-time migration and folder setup for Active. Private config is copied into the shared folder
+     * (never overwriting, skipping secrets and placeholders); the folder always ends with a usable config
+     * entry point. The private home is then the source of nothing: the shared folder is authoritative.
+     */
     private fun prepareShared() {
         val projects = SharedStorageLayout.projectsDir(hostRoot).apply { mkdirs() }
         check(projects.isDirectory) { "cannot create ${projects.path}" }
-        SharedStorageLayout.seedShared(
-            sharedDir = SharedStorageLayout.opencodeDir(hostRoot),
-            privateDir = File(paths.home, ".config/opencode"),
-        )
+        val sharedOpencode = SharedStorageLayout.opencodeDir(hostRoot)
+        val privateOpencode = File(paths.home, ".config/opencode")
+        SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(privateOpencode, sharedOpencode))
+        SharedStorageLayout.ensureMinimal(sharedOpencode)
         File(hostRoot, SharedStorageLayout.README).writeText(SharedStorageLayout.readme(hostRoot))
     }
 }

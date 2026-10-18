@@ -26,6 +26,7 @@ object SharedStorageDecision {
         home: File,
         privateWorkspace: File,
         hostRoot: File,
+        privateExceptionsDir: File,
     ): GuestBinds =
         when (status) {
             SharedStorageStatus.Active ->
@@ -34,18 +35,32 @@ object SharedStorageDecision {
                     privateWorkspace = privateWorkspace,
                     sharedProjects = SharedStorageLayout.projectsDir(hostRoot),
                     sharedOpencode = SharedStorageLayout.opencodeDir(hostRoot),
+                    privateExceptionsDir = privateExceptionsDir,
                 )
             SharedStorageStatus.Off, SharedStorageStatus.NeedsPermission ->
                 GuestBinds.privateOnly(home = home, privateWorkspace = privateWorkspace)
         }
 
     /**
-     * Placeholders that must exist in the private home before a file bind (PRoot cannot bind onto a
-     * path that is absent). Returns the files to create; existing files are left alone.
+     * Private placeholders the Active binds need to exist before the start: the two secret files
+     * (empty, so the renames of `service.json.tmp` stay inside private storage) and the node_modules
+     * directory. Existing entries are left alone. Returns the paths that were created.
      */
-    fun placeholdersNeeded(home: File): List<File> =
-        SharedStorageLayout.SHARED_FILES.map { File(home, ".config/opencode/$it") }
-            .filter { !it.exists() }
+    fun prepareExceptions(privateExceptionsDir: File): List<File> {
+        val created = mutableListOf<File>()
+        privateExceptionsDir.mkdirs()
+        listOf(SharedStorageLayout.SERVICE_FILE, SharedStorageLayout.SERVICE_TMP).forEach { name ->
+            File(privateExceptionsDir, name).takeIf { !it.exists() }?.let {
+                it.createNewFile()
+                created += it
+            }
+        }
+        File(privateExceptionsDir, SharedStorageLayout.NODE_MODULES).takeIf { !it.exists() }?.let {
+            it.mkdirs()
+            created += it
+        }
+        return created
+    }
 
     /**
      * True when a running server was started with [started] binds but the current decision is

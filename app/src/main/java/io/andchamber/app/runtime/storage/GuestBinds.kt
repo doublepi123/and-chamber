@@ -3,11 +3,16 @@ package io.andchamber.app.runtime.storage
 import java.io.File
 
 /**
- * The effective bind mounts for one server launch. Pure data, built from the storage decision and
- * the host paths, and turned into PRoot `-b` arguments by ProotCommands.
+ * The effective bind mounts for one server launch. Pure data, turned into PRoot `-b` arguments by
+ * ProotCommands.
  *
- * Order matters: the home bind (`/root`) comes first, the nested OpenCode config binds after it, so
- * the nested mounts sit on top of the persistent home rather than being hidden by it.
+ * Order matters and is fixed:
+ *  1. the persistent private home over /root,
+ *  2. the workspace binds (/workspace, /workspace-private),
+ *  3. the whole shared OpenCode folder over /root/.config/opencode (Active only),
+ *  4. private exceptions nested on top of that folder: service.json, service.json.tmp, node_modules.
+ *
+ * Step 4 must come after step 3, otherwise the directory bind would hide the private files.
  */
 data class GuestBinds(
     /** Persistent private home, bound over /root. Always present. */
@@ -16,23 +21,23 @@ data class GuestBinds(
     val workspaceHostPath: File,
     /** The private workspace, always bound at /workspace-private. */
     val privateWorkspaceHostPath: File,
-    /** Nested OpenCode config binds (host path to guest path). Empty unless shared config is active. */
-    val nestedConfig: List<Pair<File, String>>,
+    /** Shared OpenCode config folder, bound over the guest config dir. Null when shared config is off. */
+    val sharedOpencodeHostPath: File?,
+    /** Private exceptions nested over the shared folder: (host path, guest path). Empty when off. */
+    val privateExceptions: List<Pair<File, String>>,
 ) {
-    /** Ordered `host:guest` specs for PRoot `-b`, home first. */
+    /** Ordered `host:guest` specs for PRoot `-b`, following the fixed order above. */
     fun specs(): List<String> =
         buildList {
             add("${homeHostPath.absolutePath}:/root")
             add("${workspaceHostPath.absolutePath}:${SharedStorageLayout.GUEST_WORKSPACE}")
             add("${privateWorkspaceHostPath.absolutePath}:${SharedStorageLayout.GUEST_PRIVATE_WORKSPACE}")
-            nestedConfig.forEach { (host, guest) -> add("${host.absolutePath}:$guest") }
+            sharedOpencodeHostPath?.let { add("${it.absolutePath}:${SharedStorageLayout.GUEST_OPENCODE_CONFIG}") }
+            privateExceptions.forEach { (host, guest) -> add("${host.absolutePath}:$guest") }
         }
 
     companion object {
-        /**
-         * The private-only binds: /workspace is the private workspace (current behaviour) and it is
-         * also at /workspace-private. No nested config binds.
-         */
+        /** Private-only: /workspace is the private workspace, also at /workspace-private, no config bind. */
         fun privateOnly(
             home: File,
             privateWorkspace: File,
@@ -40,33 +45,35 @@ data class GuestBinds(
             homeHostPath = home,
             workspaceHostPath = privateWorkspace,
             privateWorkspaceHostPath = privateWorkspace,
-            nestedConfig = emptyList(),
+            sharedOpencodeHostPath = null,
+            privateExceptions = emptyList(),
         )
 
         /**
-         * Shared binds: projects at /workspace, the private workspace at /workspace-private, and the
-         * shared opencode items individually inside the guest config folder. Each guest target is a
-         * single item, never the whole opencode directory.
+         * Shared: projects at /workspace, the whole shared opencode folder over the guest config dir, and
+         * the private exceptions on top. [privateExceptionsDir] holds the empty placeholder files and the
+         * node_modules directory, so renames of service.json and service.json.tmp stay in private storage.
          */
         fun shared(
             home: File,
             privateWorkspace: File,
             sharedProjects: File,
             sharedOpencode: File,
+            privateExceptionsDir: File,
         ): GuestBinds {
-            val files =
-                SharedStorageLayout.SHARED_FILES.map { name ->
-                    File(sharedOpencode, name) to "${SharedStorageLayout.GUEST_OPENCODE_CONFIG}/$name"
-                }
-            val dirs =
-                SharedStorageLayout.SHARED_DIRS.map { name ->
-                    File(sharedOpencode, name) to "${SharedStorageLayout.GUEST_OPENCODE_CONFIG}/$name"
-                }
+            val guestConfig = SharedStorageLayout.GUEST_OPENCODE_CONFIG
+            val exceptions =
+                listOf(SharedStorageLayout.SERVICE_FILE, SharedStorageLayout.SERVICE_TMP).map { name ->
+                    File(privateExceptionsDir, name) to "$guestConfig/$name"
+                } +
+                    (File(privateExceptionsDir, SharedStorageLayout.NODE_MODULES) to
+                        "$guestConfig/${SharedStorageLayout.NODE_MODULES}")
             return GuestBinds(
                 homeHostPath = home,
                 workspaceHostPath = sharedProjects,
                 privateWorkspaceHostPath = privateWorkspace,
-                nestedConfig = files + dirs,
+                sharedOpencodeHostPath = sharedOpencode,
+                privateExceptions = exceptions,
             )
         }
     }

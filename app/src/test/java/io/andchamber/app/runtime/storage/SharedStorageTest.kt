@@ -17,18 +17,27 @@ class SharedStorageTest {
     private val rootfs = File("/data/runtime/environment/rootfs")
     private val home = File("/data/runtime/home")
     private val privateWs = File("/data/runtime/workspace")
+    private val exceptions = File("/data/runtime/home-private/opencode")
     private val hostRoot = File("/storage/emulated/0/AndChamber")
 
     /** The `host:guest` binds we add. The fixed /dev /proc /sys /system mounts have no colon and are skipped. */
     private fun List<String>.bindPairs(): List<String> =
         zipWithNext().filter { it.first == "-b" && it.second.contains(':') }.map { it.second }
 
-    // --- ProotCommands binds ---
+    private fun activeBinds() =
+        GuestBinds.shared(
+            home = home,
+            privateWorkspace = privateWs,
+            sharedProjects = File(hostRoot, "projects"),
+            sharedOpencode = File(hostRoot, "opencode"),
+            privateExceptionsDir = exceptions,
+        )
+
+    // --- GuestBinds order and content ---
 
     @Test
     fun `off binds the private workspace at workspace and at workspace-private, home first`() {
-        val binds = GuestBinds.privateOnly(home, privateWs)
-        val cmd = ProotCommands.serverCommand(proot, rootfs, binds, emptyList(), 3000)
+        val cmd = ProotCommands.serverCommand(proot, rootfs, GuestBinds.privateOnly(home, privateWs), emptyList(), 3000)
 
         assertEquals(
             listOf(
@@ -42,114 +51,167 @@ class SharedStorageTest {
     }
 
     @Test
-    fun `active binds projects at workspace and each shared opencode item individually after the home bind`() {
-        val binds =
-            GuestBinds.shared(
-                home = home,
-                privateWorkspace = privateWs,
-                sharedProjects = File(hostRoot, "projects"),
-                sharedOpencode = File(hostRoot, "opencode"),
-            )
-        val pairs = ProotCommands.serverCommand(proot, rootfs, binds, emptyList(), 3000).bindPairs()
+    fun `active binds in the fixed order - home, workspaces, whole opencode dir, then the private exceptions`() {
+        val pairs = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs()
 
-        assertEquals("home is the first bind, so nested binds sit on top of it", "/data/runtime/home:/root", pairs.first())
-        assertEquals("/storage/emulated/0/AndChamber/projects:/workspace", pairs[1])
-        assertEquals("/data/runtime/workspace:/workspace-private", pairs[2])
-        val nested = pairs.drop(3)
-        assertTrue(nested.contains("/storage/emulated/0/AndChamber/opencode/opencode.jsonc:/root/.config/opencode/opencode.jsonc"))
-        assertTrue(nested.contains("/storage/emulated/0/AndChamber/opencode/AGENTS.md:/root/.config/opencode/AGENTS.md"))
-        assertTrue(nested.contains("/storage/emulated/0/AndChamber/opencode/skills:/root/.config/opencode/skills"))
-        assertTrue(nested.contains("/storage/emulated/0/AndChamber/opencode/agents:/root/.config/opencode/agents"))
-        assertTrue(nested.contains("/storage/emulated/0/AndChamber/opencode/commands:/root/.config/opencode/commands"))
+        assertEquals(
+            listOf(
+                "/data/runtime/home:/root",
+                "/storage/emulated/0/AndChamber/projects:/workspace",
+                "/data/runtime/workspace:/workspace-private",
+                "/storage/emulated/0/AndChamber/opencode:/root/.config/opencode",
+                "/data/runtime/home-private/opencode/service.json:/root/.config/opencode/service.json",
+                "/data/runtime/home-private/opencode/service.json.tmp:/root/.config/opencode/service.json.tmp",
+                "/data/runtime/home-private/opencode/node_modules:/root/.config/opencode/node_modules",
+            ),
+            pairs,
+        )
     }
 
     @Test
-    fun `the whole opencode directory is never bound, so node_modules and plugins stay private`() {
-        val binds =
-            GuestBinds.shared(home, privateWs, File(hostRoot, "projects"), File(hostRoot, "opencode"))
-        val pairs = ProotCommands.serverCommand(proot, rootfs, binds, emptyList(), 3000).bindPairs()
+    fun `the private exceptions come after the directory bind so they are not hidden by it`() {
+        val pairs = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs()
+        val dirIndex = pairs.indexOf("/storage/emulated/0/AndChamber/opencode:/root/.config/opencode")
+        val serviceIndex = pairs.indexOfFirst { it.endsWith(":/root/.config/opencode/service.json") }
 
-        assertFalse(pairs.any { it.endsWith(":/root/.config/opencode") })
-        assertFalse(pairs.any { it.contains("node_modules") || it.contains("plugins") })
+        assertTrue(dirIndex in 0 until serviceIndex)
     }
 
     @Test
-    fun `nested config binds come after the home bind in the final argv`() {
-        val binds = GuestBinds.shared(home, privateWs, File(hostRoot, "projects"), File(hostRoot, "opencode"))
-        val pairs = ProotCommands.serverCommand(proot, rootfs, binds, emptyList(), 3000).bindPairs()
-        val homeIndex = pairs.indexOf("/data/runtime/home:/root")
-        val firstNested = pairs.indexOfFirst { it.endsWith(":/root/.config/opencode/opencode.jsonc") }
+    fun `no single-file bind is made for any shared config item`() {
+        val pairs = ProotCommands.serverCommand(proot, rootfs, activeBinds(), emptyList(), 3000).bindPairs()
+        val shared = pairs.filter { it.startsWith("/storage/emulated/0/AndChamber/opencode") }
 
-        assertTrue(homeIndex in 0 until firstNested)
+        assertEquals(listOf("/storage/emulated/0/AndChamber/opencode:/root/.config/opencode"), shared)
     }
 
-    // --- Seeding ---
+    // --- Migration matrix ---
 
     @Test
-    fun `first activation creates the shared files and dirs with defaults when private has none`() {
-        val shared = folder.newFolder("shared-opencode")
-        val privateDir = folder.newFolder("private-opencode")
-        // the shared folder is created by seeding if missing
-        val sharedNew = File(shared, "fresh")
+    fun `migration copies regular config files and skips secrets and node_modules`() {
+        val priv = folder.newFolder("priv1")
+        File(priv, "oh-my-opencode-slim.json").writeText("{\"a\":1}")
+        File(priv, "service.json").writeText("{\"password\":\"x\"}")
+        File(priv, "service.json.tmp").writeText("{\"password\":\"y\"}")
+        File(priv, "node_modules/pkg").apply { mkdirs(); resolve("index.js").writeText("m") }
+        val shared = File(folder.root, "shared1")
 
-        SharedStorageLayout.seedShared(sharedNew, privateDir)
+        val copied = SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(priv, shared))
 
-        assertEquals(SharedStorageLayout.DEFAULT_CONFIG, File(sharedNew, "opencode.jsonc").readText())
-        assertEquals("", File(sharedNew, "AGENTS.md").readText())
-        listOf("skills", "agents", "commands").forEach { assertTrue(File(sharedNew, it).isDirectory) }
-    }
-
-    @Test
-    fun `first activation copies the private config, agents and dir contents`() {
-        val privateDir = folder.newFolder("private2")
-        File(privateDir, "opencode.jsonc").writeText("{\"model\":\"private\"}")
-        File(privateDir, "AGENTS.md").writeText("be terse")
-        File(privateDir, "skills/review").apply { mkdirs(); resolve("SKILL.md").writeText("skill") }
-        val sharedDir = File(folder.root, "shared2")
-
-        SharedStorageLayout.seedShared(sharedDir, privateDir)
-
-        assertEquals("{\"model\":\"private\"}", File(sharedDir, "opencode.jsonc").readText())
-        assertEquals("be terse", File(sharedDir, "AGENTS.md").readText())
-        assertEquals("skill", File(sharedDir, "skills/review/SKILL.md").readText())
+        assertEquals("{\"a\":1}", File(shared, "oh-my-opencode-slim.json").readText())
+        assertFalse(File(shared, "service.json").exists())
+        assertFalse(File(shared, "service.json.tmp").exists())
+        assertFalse(File(shared, "node_modules").exists())
+        assertEquals(listOf(File(shared, "oh-my-opencode-slim.json")), copied)
     }
 
     @Test
-    fun `seeding never overwrites an existing shared file`() {
-        val privateDir = folder.newFolder("private3")
-        File(privateDir, "opencode.jsonc").writeText("{\"model\":\"private\"}")
-        File(privateDir, "AGENTS.md").writeText("private agents")
-        val sharedDir = folder.newFolder("shared3")
-        File(sharedDir, "opencode.jsonc").writeText("{\"model\":\"user\"}")
-        File(sharedDir, "AGENTS.md").writeText("user agents")
+    fun `migration never overwrites an existing shared file`() {
+        val priv = folder.newFolder("priv2")
+        File(priv, "opencode.jsonc").writeText("private")
+        val shared = folder.newFolder("shared2")
+        File(shared, "opencode.jsonc").writeText("user")
 
-        val created = SharedStorageLayout.seedShared(sharedDir, privateDir)
+        SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(priv, shared))
 
-        assertEquals("{\"model\":\"user\"}", File(sharedDir, "opencode.jsonc").readText())
-        assertEquals("user agents", File(sharedDir, "AGENTS.md").readText())
-        assertTrue("nothing that existed is reported created", created.none { it.name == "opencode.jsonc" || it.name == "AGENTS.md" })
+        assertEquals("user", File(shared, "opencode.jsonc").readText())
     }
 
     @Test
-    fun `dir contents are copied only when the shared dir is empty, never merged into a non-empty one`() {
-        val privateDir = folder.newFolder("private4")
-        File(privateDir, "commands").apply { mkdirs(); resolve("private.md").writeText("p") }
-        val sharedDir = folder.newFolder("shared4")
-        File(sharedDir, "commands").apply { mkdirs(); resolve("mine.md").writeText("m") }
+    fun `a zero-byte private placeholder is skipped when the shared file exists`() {
+        val priv = folder.newFolder("priv3")
+        File(priv, "AGENTS.md").writeText("")
+        val shared = folder.newFolder("shared3")
+        File(shared, "AGENTS.md").writeText("real rules")
 
-        SharedStorageLayout.seedShared(sharedDir, privateDir)
+        SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(priv, shared))
 
-        assertFalse(File(sharedDir, "commands/private.md").exists())
-        assertEquals("m", File(sharedDir, "commands/mine.md").readText())
+        assertEquals("real rules", File(shared, "AGENTS.md").readText())
     }
 
     @Test
-    fun `README describes the layout and recommends workspace-private for symlink-heavy projects`() {
+    fun `a zero-byte private placeholder with no shared counterpart is also not copied`() {
+        val priv = folder.newFolder("priv4")
+        File(priv, "empty.json").writeText("")
+        val shared = File(folder.root, "shared4")
+
+        val steps = SharedStorageLayout.planMigration(priv, shared)
+
+        assertTrue(steps.any { it is SharedStorageLayout.Step.Skip && it.reason == "empty placeholder" })
+        assertFalse(File(shared, "empty.json").exists())
+    }
+
+    @Test
+    fun `directories merge recursively without overwriting existing files`() {
+        val priv = folder.newFolder("priv5")
+        File(priv, "skills/a").apply { mkdirs(); resolve("SKILL.md").writeText("private a") }
+        File(priv, "skills/b").apply { mkdirs(); resolve("SKILL.md").writeText("private b") }
+        val shared = folder.newFolder("shared5")
+        File(shared, "skills/a").apply { mkdirs(); resolve("SKILL.md").writeText("user a") }
+
+        SharedStorageLayout.applyMigration(SharedStorageLayout.planMigration(priv, shared))
+
+        assertEquals("user a", File(shared, "skills/a/SKILL.md").readText())
+        assertEquals("private b", File(shared, "skills/b/SKILL.md").readText())
+    }
+
+    @Test
+    fun `symbolic links in the private folder are skipped, never followed`() {
+        val priv = folder.newFolder("priv6")
+        val target = folder.newFile("outside.txt").apply { writeText("outside") }
+        java.nio.file.Files.createSymbolicLink(File(priv, "link.json").toPath(), target.toPath())
+        val shared = File(folder.root, "shared6")
+
+        val steps = SharedStorageLayout.planMigration(priv, shared)
+
+        assertTrue(steps.any { it is SharedStorageLayout.Step.Skip && it.reason == "symbolic link" })
+        assertFalse(File(shared, "link.json").exists())
+    }
+
+    @Test
+    fun `ensureMinimal adds a default config only when no opencode json or jsonc exists`() {
+        val shared = folder.newFolder("shared7")
+        File(shared, "opencode.json").writeText("{}")
+
+        SharedStorageLayout.ensureMinimal(shared)
+
+        assertFalse("an existing opencode.json means no default is created", File(shared, "opencode.jsonc").exists())
+        listOf("skills", "agents", "commands").forEach { assertTrue(File(shared, it).isDirectory) }
+
+        val empty = folder.newFolder("shared8")
+        SharedStorageLayout.ensureMinimal(empty)
+        assertEquals(SharedStorageLayout.DEFAULT_CONFIG, File(empty, "opencode.jsonc").readText())
+    }
+
+    // --- Private placeholders ---
+
+    @Test
+    fun `prepareExceptions creates empty service json and tmp, and a node_modules dir, keeping existing content`() {
+        val dir = folder.newFolder("home-private")
+        File(dir, "service.json").writeText("{\"password\":\"keep\"}")
+
+        SharedStorageDecision.prepareExceptions(dir)
+
+        assertEquals("{\"password\":\"keep\"}", File(dir, "service.json").readText())
+        assertTrue(File(dir, "service.json.tmp").isFile)
+        assertEquals(0L, File(dir, "service.json.tmp").length())
+        assertTrue(File(dir, "node_modules").isDirectory)
+    }
+
+    // --- README ---
+
+    @Test
+    fun `README describes the whole folder as global config and lists every private exception`() {
         val text = SharedStorageLayout.readme(File("/storage/emulated/0/AndChamber"))
 
-        assertTrue(text.contains("/workspace-private"))
-        assertTrue(text.contains("symlinks"))
+        assertTrue(text.contains("global config folder"))
+        assertTrue(text.contains("oh-my-opencode-slim.json"))
+        assertTrue(text.contains("service.json"))
+        assertTrue(text.contains("node_modules"))
         assertTrue(text.contains("auth.json"))
+        assertTrue(text.contains("session"))
+        assertTrue(text.contains("OpenChamber"))
+        assertTrue(text.contains("/workspace-private"))
     }
 
     // --- Decision and restartRequired ---
@@ -173,7 +235,22 @@ class SharedStorageTest {
         assertTrue("same status but different path: restart", SharedStorageDecision.restartRequired(active, SharedStorageStatus.Active to listOf("c")))
     }
 
-    private class MemPrefs(var on: Boolean) : io.andchamber.app.runtime.storage.SharedStoragePrefs {
+    /** An existing Active user (started on the per-item binds) must be asked to restart on the new bind list. */
+    @Test
+    fun `a server started on the old per-item bind list needs a restart under the new whole-dir list`() {
+        val oldSpecs =
+            listOf(
+                "/data/runtime/home:/root",
+                "/storage/emulated/0/AndChamber/projects:/workspace",
+                "/data/runtime/workspace:/workspace-private",
+                "/storage/emulated/0/AndChamber/opencode/opencode.jsonc:/root/.config/opencode/opencode.jsonc",
+            )
+        val current = SharedStorageStatus.Active to activeBinds().specs()
+
+        assertTrue(SharedStorageDecision.restartRequired(SharedStorageStatus.Active to oldSpecs, current))
+    }
+
+    private class MemPrefs(var on: Boolean) : SharedStoragePrefs {
         override fun enabled() = on
 
         override fun setEnabled(enabled: Boolean) {
@@ -181,61 +258,41 @@ class SharedStorageTest {
         }
     }
 
-    /** End to end on temp dirs: toggling on flips to NeedsPermission, then Active after a start; a toggle
-     * after the start asks for a restart; stopping clears it. */
+    /** End to end on temp dirs: toggling on, activation migrates, then toggling after a start needs a restart. */
     @Test
     fun `controller reports restartRequired after toggling on while a server runs`() {
-        val rootDir = folder.newFolder("runtime-root")
-        val paths = io.andchamber.app.runtime.RuntimePaths(rootDir)
-        val hostRoot = folder.newFolder("sdcard-AndChamber")
+        val paths = io.andchamber.app.runtime.RuntimePaths(folder.newFolder("runtime-root"))
+        val sdcard = folder.newFolder("sdcard-AndChamber")
         var granted = true
         val prefs = MemPrefs(on = false)
         val controller =
-            io.andchamber.app.runtime.storage.SharedStorageControllerImpl(
+            SharedStorageControllerImpl(
                 paths = paths,
-                hostRoot = hostRoot,
+                hostRoot = sdcard,
                 prefs = prefs,
-                permission = io.andchamber.app.runtime.storage.SharedStoragePermission { granted },
+                permission = SharedStoragePermission { granted },
             )
 
-        // Off: start with private binds.
-        val offBinds = controller.prepareForStart()
-        controller.recordStarted(offBinds)
+        controller.recordStarted(controller.prepareForStart())
         assertEquals(SharedStorageStatus.Off, controller.state.value.status)
         assertFalse(controller.state.value.restartRequired)
 
-        // Toggle on while running: active on the next start, so a restart is required.
         controller.setEnabled(true)
         assertTrue(controller.state.value.restartRequired)
 
-        // Restart with the active binds: the requirement clears.
-        val activeBinds = controller.prepareForStart()
-        controller.recordStarted(activeBinds)
+        controller.recordStarted(controller.prepareForStart())
         assertEquals(SharedStorageStatus.Active, controller.state.value.status)
         assertFalse(controller.state.value.restartRequired)
-        assertTrue("activation writes the README", File(hostRoot, "README.txt").isFile)
-        assertTrue(File(hostRoot, "opencode/opencode.jsonc").isFile)
-        assertTrue("the private home placeholder exists before the file bind", File(paths.home, ".config/opencode/opencode.jsonc").exists())
+        assertTrue(File(sdcard, "README.txt").isFile)
+        assertTrue(File(sdcard, "opencode/opencode.jsonc").isFile)
+        assertTrue("the private exception placeholder exists", File(paths.root, "home-private/opencode/service.json.tmp").isFile)
 
-        // Permission revoked: falls back to NeedsPermission without silently keeping the old binds.
         granted = false
         controller.refreshPermission()
         assertEquals(SharedStorageStatus.NeedsPermission, controller.state.value.status)
         assertTrue(controller.state.value.restartRequired)
 
-        // Stop clears the requirement.
         controller.recordStopped()
         assertFalse(controller.state.value.restartRequired)
-    }
-
-    @Test
-    fun `placeholders are created only for missing config files, and existing ones are kept`() {
-        val home = folder.newFolder("home")
-        File(home, ".config/opencode").mkdirs()
-        File(home, ".config/opencode/AGENTS.md").writeText("keep me")
-
-        val needed = SharedStorageDecision.placeholdersNeeded(home)
-
-        assertEquals(listOf("opencode.jsonc"), needed.map { it.name })
     }
 }
