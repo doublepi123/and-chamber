@@ -205,3 +205,30 @@ fun copyTreeNoFollow(
 }
 
 private fun Path.existsNoFollow(): Boolean = Files.exists(this, LinkOption.NOFOLLOW_LINKS)
+
+/**
+ * Replaces the regular file at [target] with [content], atomically (temp file in the same directory,
+ * then rename). Never follows a link: a symlink already at [target] is unlinked and replaced by the file
+ * itself, so the link's destination is left alone. Parent directories are created as needed.
+ */
+fun writeFileReplacing(
+    target: File,
+    content: String,
+) {
+    val path = target.toPath()
+    target.parentFile?.mkdirs()
+    if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+        check(deleteTree(target)) { "Cannot replace directory ${target.name}" }
+    }
+    if (path.existsNoFollow() && !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+        check(unlink(path)) { "Cannot replace ${target.name}" }
+    }
+    val temp = Files.createTempFile(path.parent, "." + path.fileName.toString(), ".tmp")
+    try {
+        Files.write(temp, content.toByteArray(Charsets.UTF_8))
+        // Same directory as the target, so the rename is atomic on the private filesystem.
+        Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING)
+    } finally {
+        Files.deleteIfExists(temp)
+    }
+}

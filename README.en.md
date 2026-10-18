@@ -67,7 +67,9 @@ Download `AndChamber-<version>.apk` from [Releases](https://github.com/doublepi1
 └── README.txt
 ```
 
-`~/projects-private` is always available in shared mode for projects that need symlinks, `node_modules` or executable bits. When shared storage is off, `~/projects` is the private workspace and `~/projects-private` is not mounted. `service.json` and `node_modules/` inside `opencode/` are placeholders for private binds — leave them alone. Other apps with all-files access can read this folder, so keep API keys out of config files.
+`~/projects-private` is always available in shared mode for projects that need symlinks, `node_modules` or executable bits. When shared storage is off, `~/projects` is the private workspace and `~/projects-private` is not mounted.
+
+Git repositories under `~/projects` work: AndChamber configures Git for shared storage (no symlinks, no executable bits). Run executable scripts with `sh script.sh`. `service.json` and `node_modules/` inside `opencode/` are placeholders for private binds — leave them alone. Other apps with all-files access can read this folder, so keep API keys out of config files.
 
 ## Build from source
 

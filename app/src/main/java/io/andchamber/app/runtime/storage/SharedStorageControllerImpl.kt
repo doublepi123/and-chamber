@@ -61,6 +61,10 @@ class SharedStorageControllerImpl(
             }
         }
         val binds = bindsFor(status)
+        // Git on shared storage needs its config before any repo is touched. Applied in every mode:
+        // harmless when shared storage is off, since the gitdir include matches only ~/projects.
+        runCatching { GitConfigWriter.apply(paths.home) }
+            .onFailure { android.util.Log.w("AndChamber", "Could not write the git config", it) }
         // PRoot can only bind onto paths that exist, so the mount points are created in the home first.
         // Both modes need them: ~/projects always, ~/projects-private and ~/.config/opencode in Active.
         ensureMountPoints(binds)
