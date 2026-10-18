@@ -76,8 +76,7 @@ class DefaultLocalRuntimeController(
     private val mutableState = MutableStateFlow<RuntimeState>(RuntimeState.Detecting)
     override val state: StateFlow<RuntimeState> = mutableState.asStateFlow()
 
-    private val mutableBusy = MutableStateFlow(false)
-    override val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
+    override val busy: StateFlow<Boolean> get() = work.busy
 
     private val mutableLog = MutableStateFlow<List<String>>(emptyList())
     override val logTail: StateFlow<List<String>> = mutableLog.asStateFlow()
@@ -85,8 +84,13 @@ class DefaultLocalRuntimeController(
     private val mutableInfo = MutableStateFlow<RuntimeInfo?>(null)
     override val info: StateFlow<RuntimeInfo?> = mutableInfo.asStateFlow()
 
-    /** Operations queued or running, counted so [busy] stays true across overlapping requests. */
-    private var pendingWork = 0
+    /** Operations and recovery jobs queued or running; count and [busy] change together (see WorkCounter). */
+    private val work = WorkCounter()
+
+
+    private fun beginWork() = work.begin()
+
+    private fun endWork() = work.end()
 
     // Guarded by operationLock, except cancelRequested which Stop sets without the lock.
     @Volatile private var cancelRequested = false
@@ -162,31 +166,23 @@ class DefaultLocalRuntimeController(
         phase: FailurePhase,
         block: suspend () -> Unit,
     ) {
-        pendingWork++
-        mutableBusy.value = true
+        beginWork()
+        // invokeOnCompletion, not finally: a job cancelled before it first runs never enters its body,
+        // but its completion handler always fires, so the counter cannot stay high.
         scope.launch {
-            try {
-                operationLock.withLock {
-                    currentPhase = phase
-                    try {
-                        block()
-                    } catch (error: CancellationException) {
-                        publishTerminalAfterCancel()
-                        throw error
-                    } catch (error: Throwable) {
-                        // currentPhase, not the launch argument: install hands over to Start mid-operation.
-                        failed(error.message ?: "Runtime operation failed", currentPhase, error)
-                    }
+            operationLock.withLock {
+                currentPhase = phase
+                try {
+                    block()
+                } catch (error: CancellationException) {
+                    publishTerminalAfterCancel()
+                    throw error
+                } catch (error: Throwable) {
+                    // currentPhase, not the launch argument: install hands over to Start mid-operation.
+                    failed(error.message ?: "Runtime operation failed", currentPhase, error)
                 }
-            } finally {
-                finishWork()
             }
-        }
-    }
-
-    private fun finishWork() {
-        pendingWork--
-        mutableBusy.value = pendingWork > 0 || restartJob?.isActive == true
+        }.invokeOnCompletion { endWork() }
     }
 
     // --- All helpers below run with operationLock held. ---
@@ -328,8 +324,7 @@ class DefaultLocalRuntimeController(
 
     /** One recovery job for one crash. Counted in [busy] so the service stays up while it runs. */
     private fun startRecovery() {
-        pendingWork++
-        mutableBusy.value = true
+        beginWork()
         restartJob =
             scope.launch {
                 try {
@@ -341,9 +336,10 @@ class DefaultLocalRuntimeController(
                     throw error
                 } catch (error: Throwable) {
                     failed(error.message ?: "Recovery failed", FailurePhase.Runtime, error)
-                } finally {
-                    finishWork()
                 }
+            }.also { job ->
+                // Fires even when the job is cancelled before it starts; busy never consults isActive.
+                job.invokeOnCompletion { endWork() }
             }
     }
 

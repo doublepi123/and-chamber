@@ -28,12 +28,10 @@ interface WebCookieSink {
 }
 
 /**
- * The local runtime's readiness for a login. [launchId] identifies the launch that is Running now;
- * the password may be sent only while that same launch is still the Running one, checked again
- * right before the POST, so a launch that died between the check and the request sends nothing.
+ * The local server's trust for a login: the launch id, or null when that launch is not trustworthy
+ * right now (child not confirmed listening, child dead, or stopped). See OpenChamberServer.readyLaunchId.
  */
 fun interface LocalReadiness {
-    /** The current launch id when Running, or null when not Running. */
     fun runningLaunchId(): Long?
 }
 
@@ -73,8 +71,8 @@ class DefaultWebSessionAuthenticator(
                 return@withContext WebSessionResult.Unreachable("No OpenChamber server answered at $base")
             }
 
-            // The local password is released only for a Running launch, and that launch is checked again
-            // right before the POST: a launch that changed or died in between sends nothing.
+            // The local password is released only while the same launch is trusted, checked before and
+            // right before the POST. A child that died (or was replaced) in between sends nothing.
             val launchId = if (target is ServerTarget.Local) localReady.runningLaunchId() else null
             if (target is ServerTarget.Local && launchId == null) {
                 return@withContext WebSessionResult.Unreachable("The local OpenChamber is not running")

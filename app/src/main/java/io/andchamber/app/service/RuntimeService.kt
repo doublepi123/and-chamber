@@ -42,13 +42,19 @@ class RuntimeService : Service() {
     private var observer: Job? = null
     private var foreground = false
 
+    /** True once an intent has been handled; the observer ignores resting states before that. */
+    private var startedOnce = false
+
+    /** The newest startId seen. Stopping uses it so an older request's completion cannot stop a newer one. */
+    private var latestStartId = 0
+
     override fun onCreate() {
         super.onCreate()
         ensureChannel(this)
         observer =
             scope.launch {
                 combine(runtime.busy, runtime.state) { busy, state -> busy to state }.collect { (busy, state) ->
-                    apply(RuntimeServicePolicy.decide(busy, state), state)
+                    apply(RuntimeServicePolicy.decide(busy, state, startedOnce), state)
                 }
             }
     }
@@ -60,6 +66,8 @@ class RuntimeService : Service() {
     ): Int {
         // Barrier: foreground first, always, before anything touches the controller.
         enterForeground(buildNotification(runtime.state.value))
+        latestStartId = startId
+        startedOnce = true
         when (intent?.action) {
             ACTION_OPERATION -> {
                 intent.getStringExtra(EXTRA_OPERATION)?.let(RuntimeOperation::valueOf)?.let(runtime::perform)
@@ -113,7 +121,8 @@ class RuntimeService : Service() {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             foreground = false
         }
-        stopSelf()
+        // Stop only if no newer start request arrived since the one this completion belongs to.
+        if (!stopSelfResult(latestStartId)) return
     }
 
     private fun buildNotification(state: RuntimeState): Notification {

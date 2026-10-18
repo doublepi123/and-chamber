@@ -3,15 +3,17 @@ package io.andchamber.app.runtime.process
 import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.install.InstalledRuntime
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 import java.io.FileOutputStream
+import java.util.ArrayDeque
 
 /** Runs and stops the OpenChamber server process. */
 interface OpenChamberServer {
     /**
      * Launches the server and waits until it is ready (see [Readiness]). Throws on any failure and
      * whenever [isCancelled] returns true, so a Stop never queues behind the readiness wait.
-     * Returns the launch id of the child that became ready; the authenticator checks it before POST.
+     * Returns the launch id of the child that became ready.
      */
     fun start(
         runtime: InstalledRuntime,
@@ -25,8 +27,12 @@ interface OpenChamberServer {
 
     fun isAlive(): Boolean
 
-    /** Incremented for every launch. A login must be tied to the launch id it was checked against. */
-    fun currentLaunchId(): Long
+    /**
+     * The launch id, but only while that launch is trustworthy right now: our child printed the listen
+     * line, the child process is alive, and nothing has stopped it. Null otherwise. A login may only
+     * proceed while this returns the same non-null id before and right before the POST.
+     */
+    fun readyLaunchId(): Long?
 }
 
 /** Thrown when the port is held by something other than our server. Never launch/login then. */
@@ -69,10 +75,26 @@ class ProotOpenChamberServer(
     private var process: Process? = null
     private var launchId = 0L
 
-    /** Our child's own output, in order. Readiness trusts only this, never the network alone. */
-    private val childOutput = mutableListOf<String>()
+    /** The current launch's listen signal: completed by the output pump when our child prints the line. */
+    private var listenSignal: CompletableDeferred<Unit> = CompletableDeferred()
 
-    override fun currentLaunchId(): Long = synchronized(lock) { launchId }
+    /** The last [DIAGNOSTIC_LINES] lines of our child's output, for error messages. Bounded. */
+    private val recentOutput = ArrayDeque<String>()
+
+    /** Set when our child for the current launch is known to be dead or stopped. Guarded by [lock]. */
+    private var readyId: Long? = null
+
+    override fun readyLaunchId(): Long? =
+        synchronized(lock) {
+            val id = readyId ?: return@synchronized null
+            if (process?.isAlive != true) {
+                readyId = null
+                return@synchronized null
+            }
+            id
+        }
+
+    override fun isAlive(): Boolean = synchronized(lock) { process?.isAlive == true }
 
     override fun start(
         runtime: InstalledRuntime,
@@ -107,25 +129,37 @@ class ProotOpenChamberServer(
                 storageArguments = emptyList(),
                 port = port,
             )
-        val started = spawn(command, ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword), paths.root)
+        val env = ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword)
+        val signal = CompletableDeferred<Unit>()
+        val started = spawn(command, env, paths.root)
         val id =
             synchronized(lock) {
                 process = started
-                childOutput.clear()
+                recentOutput.clear()
+                readyId = null
+                listenSignal = signal
                 ++launchId
             }
-        val pump = pumpOutput(started, onLog)
+        val pump = pumpOutput(started, port, signal, onLog)
         try {
-            waitUntilReady(started, port, isCancelled, pump)
+            waitUntilReady(started, port, isCancelled, signal, pump)
         } catch (error: Throwable) {
             stop()
             throw error
+        }
+        synchronized(lock) {
+            // Only the launch that is still the current child becomes trusted.
+            if (process === started) readyId = id
         }
         return id
     }
 
     override fun stop() {
-        val current = synchronized(lock) { process.also { process = null } }
+        val current =
+            synchronized(lock) {
+                readyId = null
+                process.also { process = null }
+            }
         // Owned-only: our handle's tree plus every runtime PRoot tree we can prove is ours. Uses the
         // proot path from the suite when available; stop must still work if the suite is missing.
         val proot = runCatching { suite().proot.absolutePath }.getOrNull()
@@ -134,17 +168,25 @@ class ProotOpenChamberServer(
         terminateProcessTree(current, scanner, roots, signal)
     }
 
-    override fun isAlive(): Boolean = synchronized(lock) { process?.isAlive == true }
-
+    /**
+     * Reads our child's output. The listen line completes [signal]; every line goes to the bounded
+     * diagnostic tail and the log. Nothing else is retained, so memory does not grow with uptime.
+     */
     private fun pumpOutput(
         process: Process,
+        port: Int,
+        signal: CompletableDeferred<Unit>,
         onLog: (String) -> Unit,
     ): Thread =
         Thread({
             val writer = runCatching { FileOutputStream(paths.serverLog, true).bufferedWriter() }.getOrNull()
             try {
                 process.inputStream.bufferedReader().forEachLine { line ->
-                    synchronized(lock) { if (this.process === process) childOutput += line }
+                    synchronized(lock) {
+                        recentOutput.addLast(line)
+                        while (recentOutput.size > DIAGNOSTIC_LINES) recentOutput.removeFirst()
+                    }
+                    if (line.contains(Readiness.listenMarker(port))) signal.complete(Unit)
                     runCatching {
                         writer?.write(line)
                         writer?.newLine()
@@ -154,18 +196,21 @@ class ProotOpenChamberServer(
                 }
             } finally {
                 runCatching { writer?.close() }
+                // The child's output ended: it has exited. Forget trust immediately.
+                synchronized(lock) { if (this.process === process) readyId = null }
             }
         }, "openchamber-output").apply { isDaemon = true; start() }
 
     /**
-     * Readiness in trust order: our child is alive; our child printed the listen line for [port];
-     * only then /health is believed (ok, OpenCode ready, serverId stable across polls). A child that
-     * exits (EADDRINUSE when a foreign process won the port after our precheck) fails as port in use.
+     * Readiness in trust order: the child printed the listen line (signal), the child is alive, then
+     * /health is believed (ok, OpenCode ready, serverId stable). A child that exits before listening
+     * because the port was taken fails as port in use.
      */
     private fun waitUntilReady(
         started: Process,
         port: Int,
         isCancelled: () -> Boolean,
+        signal: CompletableDeferred<Unit>,
         pump: Thread,
     ) {
         val deadline = now() + readyTimeoutMillis * 1_000_000L
@@ -174,17 +219,13 @@ class ProotOpenChamberServer(
         while (true) {
             if (isCancelled()) throw CancellationException("Start cancelled")
             if (!started.isAlive) {
-                // Node exits on EADDRINUSE: someone took the port after our precheck. That is a port
-                // conflict, not a server failure, and is reported as such (no password is ever sent).
-                // Let the output pump drain the exited child's remaining output before deciding.
+                // Let the pump drain the exited child's last lines before deciding.
                 pump.join(2_000)
-                val output = synchronized(lock) { childOutput.toList() }
+                val output = synchronized(lock) { recentOutput.toList() }
                 if (!listening && output.any { it.contains("EADDRINUSE") }) throw PortInUseException(port)
                 error("OpenChamber exited during startup (exit ${started.exitValue()}): ${tail()}")
             }
-            if (!listening) {
-                listening = synchronized(lock) { Readiness.childListening(childOutput.toList(), port) }
-            }
+            if (!listening) listening = signal.isCompleted
             if (!listening) {
                 if (now() >= deadline) error("OpenChamber did not start listening on port $port: ${tail()}")
                 sleep(pollMillis)
@@ -208,12 +249,14 @@ class ProotOpenChamberServer(
         }
     }
 
+    /** The last lines of our child's output, for error messages. */
     private fun tail(): String =
-        runCatching { paths.serverLog.readLines().takeLast(20).joinToString("\n") }
-            .getOrDefault("No server log was produced")
+        synchronized(lock) { recentOutput.toList() }.takeLast(20).joinToString("\n")
+            .ifEmpty { "No server output was produced" }
 
     companion object {
         const val READY_TIMEOUT_MILLIS = 90_000L
         const val POLL_MILLIS = 500L
+        const val DIAGNOSTIC_LINES = 200
     }
 }

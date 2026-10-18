@@ -90,6 +90,25 @@ class RuntimeServicePolicyTest {
     }
 
     @Test
+    fun `before the first intent a resting state does not stop the service`() {
+        // onCreate starts observing; the controller is Stopped and idle, but no intent has come yet.
+        assertEquals(Action.KeepRunning, RuntimeServicePolicy.decide(false, RuntimeState.Stopped, startedOnce = false))
+        assertEquals(Action.KeepRunning, RuntimeServicePolicy.decide(false, RuntimeState.NotInstalled, startedOnce = false))
+    }
+
+    @Test
+    fun `after the first intent the same resting state finishes the service`() {
+        assertEquals(Action.Finish, RuntimeServicePolicy.decide(false, RuntimeState.Stopped, startedOnce = true))
+    }
+
+    @Test
+    fun `an old completion cannot stop a newer request`() {
+        // startIds 1 (first op) and 2 (a newer request arrived while 1 was finishing).
+        assertFalse(RuntimeServicePolicy.mayStop(latestStartId = 2, requestedStartId = 1))
+        assertTrue(RuntimeServicePolicy.mayStop(latestStartId = 2, requestedStartId = 2))
+    }
+
+    @Test
     fun `queued work keeps the service even in a terminal state`() {
         assertEquals(Action.KeepRunning, RuntimeServicePolicy.decide(true, RuntimeState.Stopped))
     }

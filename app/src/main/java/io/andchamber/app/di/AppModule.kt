@@ -132,11 +132,7 @@ val appModule =
                 client = get(),
                 cookies = get(),
                 localPassword = { RuntimeSecrets.existingUiPassword(paths) },
-                localReady =
-                    LocalReadiness {
-                        val running = get<LocalRuntimeController>().state.value is RuntimeState.Running
-                        if (running) get<OpenChamberServer>().currentLaunchId() else null
-                    },
+                localReady = LocalReadiness { get<OpenChamberServer>().readyLaunchId() },
             )
         }
     }

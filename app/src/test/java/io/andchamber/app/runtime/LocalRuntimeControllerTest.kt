@@ -18,6 +18,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import io.andchamber.app.service.RuntimeServicePolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -126,7 +127,7 @@ class LocalRuntimeControllerTest {
 
         override fun isAlive(): Boolean = alive
 
-        override fun currentLaunchId(): Long = launch
+        override fun readyLaunchId(): Long? = if (alive) launch else null
     }
 
     /** Health answers from a mutable flag so a test can flip the server dead and alive. */
@@ -347,6 +348,60 @@ class LocalRuntimeControllerTest {
         }
 
     @Test
+    fun `busy clears after the budget is exhausted so the service can finish`() =
+        runTest {
+            val root = folder.root
+            val server = FakeServer()
+            val health = FakeHealth(ok = true)
+            val controller =
+                controller(
+                    FakeInstaller(root, installed = fakeRuntime(root)),
+                    server,
+                    health = health,
+                    watchdogPollMillis = 500L,
+                    policy = RestartPolicy(listOf(1_000L), healthyResetMillis = 120_000L),
+                )
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+            assertEquals(false, controller.busy.value)
+
+            // Every restart fails and the single budget step is spent.
+            server.failNextStarts = 10
+            health.ok = false
+            step(500L) // crash seen, recovery starts
+            step(10_000L) // backoff, failed attempt, budget exhausted
+
+            val failed = controller.state.value as RuntimeState.Failed
+            assertEquals(FailurePhase.Runtime, failed.phase)
+            assertEquals("busy must be false once the recovery job ends", false, controller.busy.value)
+            assertEquals(RuntimeServicePolicy.Action.Finish, RuntimeServicePolicy.decide(controller.busy.value, controller.state.value))
+        }
+
+    @Test
+    fun `a request arriving while the previous op finishes never publishes busy false while work is queued`() =
+        runTest {
+            val root = folder.root
+            val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), FakeServer())
+            controller.initialize()
+            // Two requests back to back: the first is still running when the second is queued.
+            controller.perform(RuntimeOperation.Start)
+            controller.perform(RuntimeOperation.Stop)
+            val seen = mutableListOf<Boolean>()
+            // Sample busy after every scheduler step while both operations drain.
+            repeat(20) {
+                seen += controller.busy.value
+                step(10L)
+            }
+
+            // Once both operations are queued busy is true; it must not drop to false between them.
+            val firstFalse = seen.indexOf(false)
+            assertTrue("busy must stay true until the queue drains: $seen", firstFalse < 0 || seen.drop(firstFalse).none { it })
+            assertEquals(false, controller.busy.value)
+        }
+
+    @Test
     fun `stop kills owned processes even when the server was never started`() =
         runTest {
             val killed = mutableListOf<Int>()
@@ -497,7 +552,7 @@ class LocalRuntimeControllerTest {
 
                     override fun isAlive(): Boolean = false
 
-                    override fun currentLaunchId(): Long = 0L
+                    override fun readyLaunchId(): Long? = null
                 }
             val controller = controller(FakeInstaller(root, installed = fakeRuntime(root)), server)
             controller.initialize()

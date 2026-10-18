@@ -171,6 +171,22 @@ class ForeignListenerTest {
     }
 
     @Test
+    fun `readyLaunchId is null as soon as our child is dead, without any watchdog tick`() {
+        // Ready: the listen line and a healthy answer. Then the child exits and nothing has polled yet.
+        val child = FakeChild(output = "OpenChamber server listening on 127.0.0.1:$port\n", exitCode = 0, lifetimeMillis = 300L)
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val srv = server(child, RecordingHealth(ok), mutableListOf())
+
+        val id = srv.start(runtime(), "ui-secret", {}, { false })
+        assertEquals(id, srv.readyLaunchId())
+
+        // Wait for the fake child to exit. No readyLaunchId() poll happens in between.
+        while (child.isAlive) Thread.sleep(5)
+
+        assertEquals(null, srv.readyLaunchId())
+    }
+
+    @Test
     fun `the listen marker must match our port`() {
         assertTrue(Readiness.childListening(listOf("OpenChamber server listening on 127.0.0.1:3000"), 3000))
         assertTrue(!Readiness.childListening(listOf("OpenChamber server listening on 127.0.0.1:3001"), 3000))

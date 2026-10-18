@@ -160,6 +160,68 @@ class DefaultWebSessionAuthenticatorTest {
             assertTrue(server.takeRequest().body.readUtf8().contains("\"password\":\"stored\""))
         }
 
+    /**
+     * Regression: our child was ready, then died. Before the watchdog ticks, a foreign server answers
+     * on the port with a healthy /health. The readiness seam must already report no trust, so the
+     * password is never POSTed to the foreign listener.
+     */
+    @Test
+    fun `a dead local child is not trusted even when a foreign server answers healthy`() =
+        runBlocking {
+            var childAlive = true
+            var trustedLaunch: Long? = 7L
+            val readiness =
+                LocalReadiness {
+                    // Trust is only the child's own state: alive and confirmed listening.
+                    if (childAlive) trustedLaunch else null
+                }
+            val auth =
+                DefaultWebSessionAuthenticator(
+                    client = client,
+                    cookies = cookies,
+                    localPassword = { "ui-secret" },
+                    localReady = readiness,
+                )
+            // The child dies now; the foreign listener is healthy and answers /health.
+            childAlive = false
+            trustedLaunch = null
+            server.enqueue(health())
+
+            val result = auth.prepare(ServerTarget.Local(base()))
+
+            assertTrue("expected Unreachable, got $result", result is WebSessionResult.Unreachable)
+            // The one request is the reachability probe; the password is never sent.
+            assertEquals("only the health probe, no login POST", 1, server.requestCount)
+            assertEquals("GET", server.takeRequest().method)
+            assertTrue(cookies.headers.isEmpty())
+        }
+
+    /** The launch may change between the check and the POST: the second check must catch it. */
+    @Test
+    fun `a launch replaced just before the POST sends no password`() =
+        runBlocking {
+            var calls = 0
+            val readiness =
+                LocalReadiness {
+                    calls++
+                    // Trusted for the first check, then the child changes before the second.
+                    if (calls == 1) 7L else 8L
+                }
+            server.enqueue(health())
+
+            val result =
+                DefaultWebSessionAuthenticator(
+                    client = client,
+                    cookies = cookies,
+                    localPassword = { "ui-secret" },
+                    localReady = readiness,
+                ).prepare(ServerTarget.Local(base()))
+
+            assertTrue("expected a refusal, got $result", result is WebSessionResult.Unreachable)
+            assertEquals("health only, no POST", 1, server.requestCount)
+            assertEquals("GET", server.takeRequest().method)
+        }
+
     @Test
     fun `unparseable base url is Unreachable without any request`() =
         runBlocking {
