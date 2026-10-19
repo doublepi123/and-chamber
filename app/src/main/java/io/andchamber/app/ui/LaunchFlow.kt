@@ -56,7 +56,7 @@ internal class UiPrefs(
 ) {
     private val autoOpen = mutableStateOf(prefs?.getBoolean(KEY_AUTO_OPEN_LOCAL, true) ?: true)
 
-    /** Open the local OpenChamber when the app starts. On by default. */
+    /** Open the last used OpenChamber when the app starts. On by default. */
     val autoOpenLocal: Boolean get() = autoOpen.value
 
     fun updateAutoOpenLocal(enabled: Boolean) {
@@ -64,9 +64,68 @@ internal class UiPrefs(
         prefs?.edit()?.putBoolean(KEY_AUTO_OPEN_LOCAL, enabled)?.apply()
     }
 
+    private var lastId = prefs?.getString(KEY_LAST_TARGET_ID, null)
+    private var lastPath = prefs?.getString(KEY_LAST_TARGET_PATH, null)
+    private var lastOrigin = prefs?.getString(KEY_LAST_TARGET_ORIGIN, null)
+
+    /** The instance the user last had open ([ServerTarget] id); null means they left from Home. */
+    val lastTargetId: String? get() = lastId
+
+    /** The last page of that instance, path and query only (`/?session=…`). */
+    val lastTargetPath: String? get() = lastPath
+
+    /** Canonical origin the remembered page belonged to; a re-pointed server drops the page. */
+    val lastTargetOrigin: String? get() = lastOrigin
+
+    fun setLastTargetId(targetId: String) {
+        if (lastId == targetId) return
+        lastId = targetId
+        // A different instance: its remembered page does not belong to this one.
+        lastPath = null
+        lastOrigin = null
+        prefs?.edit()
+            ?.putString(KEY_LAST_TARGET_ID, targetId)
+            ?.remove(KEY_LAST_TARGET_PATH)
+            ?.remove(KEY_LAST_TARGET_ORIGIN)
+            ?.apply()
+    }
+
+    /** Records [path] on [origin] as the last page of the current instance; null clears the page. */
+    fun setLastTargetPath(
+        path: String?,
+        origin: String?,
+    ) {
+        if (lastPath == path && lastOrigin == origin) return
+        lastPath = path
+        lastOrigin = origin
+        val editor = prefs?.edit() ?: return
+        if (path == null) {
+            editor.remove(KEY_LAST_TARGET_PATH).remove(KEY_LAST_TARGET_ORIGIN)
+        } else {
+            editor.putString(KEY_LAST_TARGET_PATH, path).putString(KEY_LAST_TARGET_ORIGIN, origin)
+        }
+        editor.apply()
+    }
+
+    /** Forgets the last instance and page (the user went Home). */
+    fun clearLastTarget() {
+        if (lastId == null && lastPath == null && lastOrigin == null) return
+        lastId = null
+        lastPath = null
+        lastOrigin = null
+        prefs?.edit()
+            ?.remove(KEY_LAST_TARGET_ID)
+            ?.remove(KEY_LAST_TARGET_PATH)
+            ?.remove(KEY_LAST_TARGET_ORIGIN)
+            ?.apply()
+    }
+
     companion object {
         const val FILE = "ui_prefs"
         const val KEY_AUTO_OPEN_LOCAL = "auto_open_local"
+        const val KEY_LAST_TARGET_ID = "last_target_id"
+        const val KEY_LAST_TARGET_PATH = "last_target_path"
+        const val KEY_LAST_TARGET_ORIGIN = "last_target_origin"
     }
 }
 

@@ -1,6 +1,8 @@
 package io.andchamber.app.ui
 
+import io.andchamber.app.data.canonicalWebOrigin
 import io.andchamber.app.runtime.RuntimeState
+import io.andchamber.app.runtime.ServerTarget
 
 /*
  * Pure launch rules, kept free of Android and Compose so they are unit-tested directly.
@@ -56,13 +58,74 @@ internal fun initialLaunchStage(
     launchPending: Boolean,
     autoOpenLocal: Boolean,
     state: RuntimeState,
+    remoteResume: Boolean = false,
 ): LaunchStage {
     if (!launchPending || !autoOpenLocal) return LaunchStage.Done
+    // A remote server doesn't depend on the runtime, so its resume is decided already.
+    if (remoteResume) return LaunchStage.Opening
     return when (launchTarget(state)) {
         LaunchTarget.Wait -> LaunchStage.Waiting
         LaunchTarget.Home -> LaunchStage.Done
         LaunchTarget.OpenLocal, LaunchTarget.StartAndOpenLocal -> LaunchStage.Opening
     }
+}
+
+/** Where a launch that remembers the last used instance goes. */
+internal sealed interface ResumeTarget {
+    /** The local OpenChamber: the existing local launch logic (with its state rules) applies. */
+    data object Local : ResumeTarget
+
+    /** This remote server, opened directly; the local runtime is not started for it. */
+    data class Remote(val targetId: String) : ResumeTarget
+}
+
+/**
+ * The instance a launch reopens. A pending notification link always means the local server.
+ * [rememberedId] is what the user last had open; a remote id that is no longer saved falls back
+ * to [ResumeTarget.Local] (the caller clears the stale record on its way).
+ */
+internal fun resumeTarget(
+    rememberedId: String?,
+    remoteIds: Set<String>,
+    linkPending: Boolean,
+): ResumeTarget =
+    when {
+        linkPending -> ResumeTarget.Local
+        rememberedId == null -> ResumeTarget.Local
+        rememberedId == ServerTarget.LOCAL_ID -> ResumeTarget.Local
+        rememberedId in remoteIds -> ResumeTarget.Remote(rememberedId)
+        else -> ResumeTarget.Local
+    }
+
+/** Longest page address the app remembers; longer ones are dropped rather than truncated. */
+internal const val MAX_PAGE_PATH_CHARS = 512
+
+/** Cloudflare Access' own URLs are login flow, never a page to come back to. */
+private const val GATEWAY_PATH_PREFIX = "/cdn-cgi/"
+
+/**
+ * The path+query of [pageUrl] (`/?session=…`), or null when it must not be remembered: different
+ * origin than [baseUrl] (the same canonical origin check profiles and the WebView use), anything
+ * under `/cdn-cgi/`, a fragment (dropped, so tokens in one never reach disk), or over the length
+ * cap. The result always starts with `/`.
+ */
+internal fun sanitizedPagePath(
+    pageUrl: String,
+    baseUrl: String,
+): String? {
+    val pageOrigin = canonicalWebOrigin(pageUrl) ?: return null
+    val baseOrigin = canonicalWebOrigin(baseUrl) ?: return null
+    if (pageOrigin != baseOrigin) return null
+    // canonicalWebOrigin rejected userinfo and non-http(s) URLs, so what follows "://" is the
+    // plain authority.
+    val schemeEnd = pageUrl.indexOf("://")
+    var rest = pageUrl.substring(schemeEnd + 3).substringAfter('/', "")
+    val fragment = rest.indexOf('#')
+    if (fragment >= 0) rest = rest.substring(0, fragment)
+    val path = "/$rest"
+    if (path.startsWith(GATEWAY_PATH_PREFIX, ignoreCase = true)) return null
+    if (path.length > MAX_PAGE_PATH_CHARS) return null
+    return path
 }
 
 /** [path] (`/?session=…`) on the server at [baseUrl], e.g. `http://127.0.0.1:3000/?session=…`. */

@@ -140,6 +140,10 @@ internal fun WebScreen(
     /** A path such as `/?session=…` to show instead of the start page; reported back once used. */
     deepLinkPath: String? = null,
     onDeepLinkUsed: () -> Unit = {},
+    /** The remembered page of this instance, for the first load only; a deep link wins over it. */
+    resumePath: String? = null,
+    /** Trusted main-frame locations of this instance's page, so the app can remember the page. */
+    onPageLocation: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val inspection = LocalInspectionMode.current
@@ -184,7 +188,16 @@ internal fun WebScreen(
     // Read when the page is actually loaded, which can be long after this screen appeared
     // (e.g. the local server was still starting).
     val latestDeepLink by rememberUpdatedState(deepLinkPath)
+    val latestResumePath by rememberUpdatedState(resumePath)
     val latestDeepLinkUsed by rememberUpdatedState(onDeepLinkUsed)
+    val latestOnPageLocation by rememberUpdatedState(onPageLocation)
+    DisposableEffect(web) {
+        val report = { url: String -> latestOnPageLocation(url) }
+        web?.onPageLocation = report
+        onDispose {
+            if (web?.onPageLocation === report) web?.onPageLocation = null
+        }
+    }
 
     LaunchedEffect(web, sessionKey, attempt) {
         val view = web ?: return@LaunchedEffect
@@ -221,18 +234,25 @@ internal fun WebScreen(
                         }
                     // A completed gateway round re-arms the bounded re-prepare for a later expiry.
                     if (!gateway) gatewayPreparations = 0
-                    // A session picked from a notification is the first page, not a second load.
-                    // Cloudflare Access returns to the requested path after its login, so the link survives it.
-                    val link = latestDeepLink
-                    view.load(link?.let { withSessionPath(start, it) } ?: start, key, gatewayLogin = gateway && gatewayPreparations < 2)
-                    if (link != null) latestDeepLinkUsed()
+                    // A session picked from a notification, or the remembered page of this instance,
+                    // is the first page, not a second load. The notification link wins over the
+                    // remembered page. Cloudflare Access returns to the requested path after its
+                    // login, so the path survives it.
+                    val startPath = latestDeepLink ?: latestResumePath
+                    view.load(
+                        startPath?.let { withSessionPath(start, it) } ?: start,
+                        key,
+                        gatewayLogin = gateway && gatewayPreparations < 2,
+                    )
+                    if (startPath != null) latestDeepLinkUsed()
                     SessionPhase.Loaded
                 }
                 is WebSessionResult.Unreachable -> SessionPhase.Unreachable(result.reason)
             }
     }
 
-    // A session picked while this server's page is already loaded: open it in place.
+    // A session picked while this server's page is already loaded: open it in place. The
+    // remembered page is not applied here — the pooled page already is that page.
     LaunchedEffect(web, deepLinkPath, phase, sessionKey) {
         val view = web ?: return@LaunchedEffect
         val link = deepLinkPath ?: return@LaunchedEffect

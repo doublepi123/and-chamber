@@ -42,8 +42,8 @@
 
     <!-- 启动 -->
     <string name="launch_checking">正在检查…</string>
-    <string name="auto_open_label">应用启动时打开 OpenChamber</string>
-    <string name="auto_open_hint">如果服务器未运行，会先启动它。</string>
+    <string name="auto_open_label">启动时打开上次使用的 OpenChamber</string>
+    <string name="auto_open_hint">会记住你上次打开的服务器和页面。本地服务器未运行时会先启动它。</string>
 
     <!-- 分区 -->
     <string name="section_this_device">本机</string>

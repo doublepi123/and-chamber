@@ -5,8 +5,8 @@
 Root of the Compose UI. Hosts the navigation graph (home and one web screen per server), the launch decision and launch cover, notification-tap deep linking, system bar styling, and storage and notification permission requests. Screens live in `home/` and `web/`, shared widgets in `components/`, tokens in `theme/`.
 
 Files:
-- `AndChamberApp.kt`: `AndChamberApp(...)` root, `Routes`, `LocalActions`, launch and link coroutines.
-- `LaunchDecision.kt`: pure rules (`launchTarget`, `initialLaunchStage`, `shownLocalState`, `withSessionPath`). No Android or Compose imports, so unit tests call them directly.
+- `AndChamberApp.kt`: `AndChamberApp(...)` root, `Routes`, `LocalActions`, launch, link and record-keeping coroutines.
+- `LaunchDecision.kt`: pure rules (`launchTarget`, `resumeTarget`, `initialLaunchStage`, `shownLocalState`, `withSessionPath`, `sanitizedPagePath`). No Android or Compose imports (okhttp only, via `canonicalWebOrigin`), so unit tests call them directly.
 - `LaunchFlow.kt`: launch timing constants, `UiPrefs`, `LaunchCover`, `isLauncherLaunch()`.
 - `SystemUi.kt`: `findActivity()`, `SystemBarsEffect`, `WindowBackgroundEffect`.
 - `StorageAccess.kt`: `rememberStorageAccessRequest`, `hasStorageAccess`.
@@ -22,15 +22,17 @@ Files:
 - `LocalActions` wraps `LocalRuntimeController` for UI intents. `pendingStartFrom` makes a start read as Starting until the runtime reports back, with an 8 s safety timeout (`PENDING_START_TIMEOUT_MS`). `retry()` reinstalls on `FailurePhase.Install` and restarts otherwise. `restart()` is one queued runtime call.
 - Flows are collected inside each destination, not at the root, so the graph is not rebuilt per log line. Shared-storage calls run in order on `Dispatchers.IO` through a `Channel`.
 - Saved state: `launchPending` (decide once per launch) and `sessionLink` (pending notification deep link).
-- `UiPrefs` stores `auto_open_local` (default true) in SharedPreferences `ui_prefs`.
+- `UiPrefs` stores `auto_open_local` (default true) and the last used instance (`last_target_id`, `last_target_path`, `last_target_origin`) in SharedPreferences `ui_prefs`.
+- The remembered instance: entering `web/{targetId}` records the id, going Home clears it (Back from local leaves the app, so it survives). Page navigations report the trusted main-frame URL; `sanitizedPagePath` keeps only same-origin path+query (never `/cdn-cgi/`, fragments or foreign URLs). The next launch reopens the instance and the page; a pending notification link wins over both.
 - Insets and bars: `SystemBarsEffect` sets bar icon appearance from background luminance. `WindowBackgroundEffect` syncs the window background with the theme.
 - While the cover is up, `NavHost` transitions are `EnterTransition.None`/`ExitTransition.None`. The cover fades out afterwards.
 - Theme: `AndChamberTheme` wraps the root once. Dynamic color is off.
 
 ## Flow
 
-Cold launch to local OpenChamber:
-1. `AndChamberApp` composes with `launchPending = true`. `initialLaunchStage` yields `Waiting` (Detecting, auto-open on), `Opening` (Running, Starting or Stopped, auto-open on), or `Done`.
+Cold launch to the last used OpenChamber:
+0. `resumeTarget(rememberedId, remoteIds, linkPending)` picks the instance: a pending notification link always means local; a remembered remote opens it directly (no detection wait, no local start); a remembered remote that no longer exists falls back to local; otherwise the local logic below runs. The launch cover covers a remote resume from frame one (`remoteResume`). The remembered page (`last_target_path`) is loaded only if the target's canonical origin still matches `last_target_origin`.
+1. `AndChamberApp` composes with `launchPending = true`. `initialLaunchStage` yields `Waiting` (Detecting, auto-open on), `Opening` (Running, Starting or Stopped, auto-open on, or a remembered remote), or `Done`.
 2. `Waiting` shows only `LaunchCover` (background plus `ChamberMark`). `NavHost` is not composed yet.
 3. `openLocalOnLaunch` waits for `state != Detecting`, up to `LAUNCH_DETECT_TIMEOUT_MS` (8 s). On timeout it reveals Home (stage `Done`) and keeps waiting.
 4. `launchTarget` returns `Home`: stage `Done`, return. Otherwise `onOpening()` sets `Opening`, composing `NavHost` under the cover.

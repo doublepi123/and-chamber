@@ -46,6 +46,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import io.andchamber.app.data.canonicalWebOrigin
 import io.andchamber.app.notify.OpenSessionLink
 import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.LocalRuntimeController
@@ -220,7 +221,7 @@ fun AndChamberApp(
         // Until the runtime has looked at the disk it reports Detecting; no "Set up" offer before then.
         val checking = runtime.state.collectAsState().value == RuntimeState.Detecting
 
-        // --- Launch: decide once per launch whether to open the local OpenChamber directly. ---
+        // --- Launch: decide once per launch whether to open the last used OpenChamber directly. ---
         val uiPrefs = rememberUiPrefs()
         val inspection = LocalInspectionMode.current
         val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -228,13 +229,30 @@ fun AndChamberApp(
         // Saved, so it survives recreation; cleared once used, so it never applies twice.
         var sessionLink by rememberSaveable { mutableStateOf<String?>(null) }
         // A notification tap asks for the local server even when opening it on launch is off.
-        val wantsLocal = {
+        val wantsOpen = {
             !inspection && (uiPrefs.autoOpenLocal || sessionLink != null || OpenSessionLink.pending.value != null)
+        }
+        // The instance the user last had open, read once on the first frame. A remembered remote
+        // needs no runtime detection, so its resume is decided already.
+        val rememberedId = remember { uiPrefs.lastTargetId }
+        val rememberedRemoteId =
+            remember {
+                val remoteIds = remotes.servers.value.mapTo(HashSet()) { it.id }
+                (resumeTarget(rememberedId, remoteIds, sessionLink != null || OpenSessionLink.pending.value != null) as? ResumeTarget.Remote)?.targetId
+            }
+        // The remembered page of that instance; only the one the launch actually opens. Kept until
+        // used (the deep-link callback clears both), until another instance is opened, or until Home.
+        var resumeLink by rememberSaveable {
+            mutableStateOf(
+                if (rememberedRemoteId != null || rememberedId == ServerTarget.LOCAL_ID) uiPrefs.lastTargetPath else null,
+            )
         }
         // Saved, so recreation never runs the decision again; Back to Home then stays on Home.
         var launchPending by rememberSaveable { mutableStateOf(true) }
         var stage by remember {
-            mutableStateOf(initialLaunchStage(launchPending, wantsLocal(), runtime.state.value))
+            mutableStateOf(
+                initialLaunchStage(launchPending, wantsOpen(), runtime.state.value, remoteResume = rememberedRemoteId != null),
+            )
         }
         // A tap on the app icon while the app is open on Home counts as a new launch.
         LauncherIntentEffect {
@@ -243,17 +261,31 @@ fun AndChamberApp(
         }
         LaunchedEffect(launchPending) {
             if (!launchPending) return@LaunchedEffect
-            if (wantsLocal()) {
+            if (wantsOpen()) {
                 try {
-                    openLocalOnLaunch(
-                        runtime = runtime,
-                        nav = nav,
-                        lifecycle = lifecycle,
-                        local = local,
-                        covered = stage != LaunchStage.Done,
-                        onOpening = { stage = LaunchStage.Opening },
-                        onReveal = { stage = LaunchStage.Done },
-                    )
+                    // Re-read at launch time: the frame-one values may have been overtaken by the
+                    // watcher below (e.g. the user opened a server and went Home).
+                    val linkNow = sessionLink != null || OpenSessionLink.pending.value != null
+                    when (val choice = resumeTarget(uiPrefs.lastTargetId, remotes.servers.value.mapTo(HashSet()) { it.id }, linkNow)) {
+                        is ResumeTarget.Remote ->
+                            openRemoteOnLaunch(
+                                nav = nav,
+                                lifecycle = lifecycle,
+                                targetId = choice.targetId,
+                                covered = stage != LaunchStage.Done,
+                                onOpening = { stage = LaunchStage.Opening },
+                            )
+                        ResumeTarget.Local ->
+                            openLocalOnLaunch(
+                                runtime = runtime,
+                                nav = nav,
+                                lifecycle = lifecycle,
+                                local = local,
+                                covered = stage != LaunchStage.Done,
+                                onOpening = { stage = LaunchStage.Opening },
+                                onReveal = { stage = LaunchStage.Done },
+                            )
+                    }
                 } catch (error: CancellationException) {
                     // Left composition mid-launch: stays pending, so a recreated activity decides again.
                     throw error
@@ -263,6 +295,31 @@ fun AndChamberApp(
             }
             stage = LaunchStage.Done
             launchPending = false
+        }
+
+        // Remember the instance being viewed, so the next launch can reopen it. Going Home (Back
+        // from a remote or an overlay, the edge handle's Home) forgets it — Home is never "last
+        // used". Back from the local page leaves the app instead, so the record survives.
+        LaunchedEffect(inspection) {
+            if (inspection) return@LaunchedEffect
+            // The launch owns the record while the cover is up; once settled, every navigation
+            // updates it (the entry flow replays the current entry when this re-subscribes).
+            snapshotFlow { stage }.collectLatest { settled ->
+                if (settled != LaunchStage.Done) return@collectLatest
+                nav.currentBackStackEntryFlow.collect { entry ->
+                    if (entry.destination.route == Routes.WEB) {
+                        val id = entry.arguments?.getString(Routes.ARG_TARGET) ?: return@collect
+                        if (uiPrefs.lastTargetId != id) {
+                            // A different instance: the remembered page belongs to the other one.
+                            resumeLink = null
+                            uiPrefs.setLastTargetId(id)
+                        }
+                    } else {
+                        resumeLink = null
+                        uiPrefs.clearLastTarget()
+                    }
+                }
+            }
         }
 
         // --- Notification taps: open the notified session in the local OpenChamber. ---
@@ -402,7 +459,22 @@ fun AndChamberApp(
                             onStartLocal = local::startOrRetry,
                             onSystemBarColor = { webBarColor = it },
                             deepLinkPath = if (isLocal) sessionLink else null,
-                            onDeepLinkUsed = { sessionLink = null },
+                            onDeepLinkUsed = {
+                                sessionLink = null
+                                resumeLink = null
+                            },
+                            // The remembered page is applied only if the server still answers at the
+                            // origin it was remembered on (a re-pointed remote drops its old page).
+                            resumePath =
+                                resumeLink?.takeIf {
+                                    val targetOrigin = target?.baseUrl?.let(::canonicalWebOrigin)
+                                    targetOrigin != null && targetOrigin == uiPrefs.lastTargetOrigin
+                                },
+                            onPageLocation = { url ->
+                                val base = target?.baseUrl ?: return@WebScreen
+                                val origin = canonicalWebOrigin(base) ?: return@WebScreen
+                                sanitizedPagePath(url, base)?.let { uiPrefs.setLastTargetPath(it, origin) }
+                            },
                         )
                     }
                 }
@@ -470,6 +542,32 @@ private suspend fun openLocalOnLaunch(
             nav.currentBackStackEntryFlow.first { it.destination.route == Routes.WEB }
         }
         // Two frames: the web screen is composed, then drawn, before the cover fades.
+        withFrameNanos { }
+        withFrameNanos { }
+    }
+}
+
+/**
+ * A remembered remote server on launch: open it right away (it needs no runtime), still from Home
+ * only. Its web screen shows the Connecting or Unreachable state itself. Under the launch cover the
+ * switch is instant and the cover fades once the web screen has drawn a frame.
+ */
+private suspend fun openRemoteOnLaunch(
+    nav: NavHostController,
+    lifecycle: Lifecycle,
+    targetId: String,
+    covered: Boolean,
+    onOpening: () -> Unit,
+) {
+    if (covered) onOpening()
+    withTimeoutOrNull(NAV_READY_TIMEOUT_MS) { nav.currentBackStackEntryFlow.first() } ?: return
+    lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+    if (nav.currentBackStackEntry?.destination?.route != Routes.HOME) return
+    nav.navigate(Routes.web(targetId)) { launchSingleTop = true }
+    if (covered) {
+        withTimeoutOrNull(NAV_READY_TIMEOUT_MS) {
+            nav.currentBackStackEntryFlow.first { it.destination.route == Routes.WEB }
+        }
         withFrameNanos { }
         withFrameNanos { }
     }

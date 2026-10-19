@@ -113,6 +113,7 @@ internal class ChamberWebView(
     private val crashTimes = ArrayDeque<Long>()
     private var targetUrl: String? = null
     private var lastTrustedUrl: String? = null
+    private var lastReportedLocation: String? = null
     private var foreignRecoveries = 0
     private var clearHistoryAfterLoad = false
     private var destroyed = false
@@ -123,6 +124,12 @@ internal class ChamberWebView(
     private var gatewayLeftOrigin = false
     private var gatewayReturnPending = false
     var onGatewayCompleted: (() -> Unit)? = null
+
+    /**
+     * The page's trusted main-frame location (page loads and history/pushState navigations), so the
+     * app can remember where the user was. Never called for foreign pages or in gateway login mode.
+     */
+    var onPageLocation: ((String) -> Unit)? = null
 
     var host: WebHost? = null
 
@@ -337,6 +344,16 @@ internal class ChamberWebView(
 
     private fun isCurrent(view: WebView?) = !destroyed && view != null && view === this.view
 
+    /** Reports a trusted same-origin main-frame location; suppresses repeats and foreign pages. */
+    private fun reportPageLocation(url: String?) {
+        if (url.isNullOrEmpty() || url == BLANK) return
+        if (!mainTrusted || gatewayLoginMode) return
+        if (originOf(url) != origin) return
+        if (url == lastReportedLocation) return
+        lastReportedLocation = url
+        main.post { onPageLocation?.invoke(url) }
+    }
+
     private inner class Client : WebViewClient() {
         override fun shouldOverrideUrlLoading(
             view: WebView,
@@ -419,14 +436,18 @@ internal class ChamberWebView(
                 view.clearHistory()
             }
             view.evaluateJavascript(pageHelperScript(), null)
+            reportPageLocation(url)
         }
 
+        // Fires for history-API navigations too (OpenChamber switches sessions via pushState).
         override fun doUpdateVisitedHistory(
             view: WebView,
             url: String?,
             isReload: Boolean,
         ) {
-            if (isCurrent(view) && !url.isNullOrEmpty() && url != BLANK) currentUrl = url
+            if (!isCurrent(view) || url.isNullOrEmpty() || url == BLANK) return
+            currentUrl = url
+            reportPageLocation(url)
         }
 
         override fun onReceivedError(

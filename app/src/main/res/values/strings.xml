@@ -42,8 +42,8 @@
 
     <!-- Launch -->
     <string name="launch_checking">Checking…</string>
-    <string name="auto_open_label">Open OpenChamber when the app starts</string>
-    <string name="auto_open_hint">Starts the server first if it isn\'t running.</string>
+    <string name="auto_open_label">Open last used OpenChamber when the app starts</string>
+    <string name="auto_open_hint">Remembers the server and page you had open. Starts the local server first if it isn\'t running.</string>
 
     <!-- Sections -->
     <string name="section_this_device">On this phone</string>
