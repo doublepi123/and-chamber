@@ -99,7 +99,9 @@ class DefaultWebSessionAuthenticator(
         url: HttpUrl,
         cookies: WebSessionCookies,
     ): WebSessionResult {
-        if (!isHealthy(base)) return WebSessionResult.Unreachable("No OpenChamber server answered at $base")
+        val health = health(base, cookies, target is ServerTarget.Remote)
+        if (health.gated && target is ServerTarget.Remote) return WebSessionResult.NeedsGatewayLogin(base)
+        if (!health.healthy) return WebSessionResult.Unreachable("No OpenChamber server answered at $base")
 
         // The local password is released only while the same launch is trusted, checked before and
         // right before the POST. A child that died (or was replaced) in between sends nothing.
@@ -115,7 +117,11 @@ class DefaultWebSessionAuthenticator(
 
         if (password.isNullOrEmpty()) {
             // No password: only a session the server already accepts (with this profile's cookies) counts.
-            return if (probeSession(base, cookies)) WebSessionResult.Ready(base) else WebSessionResult.NeedsLogin(base)
+            return when (val probe = probeSession(base, cookies, target is ServerTarget.Remote)) {
+                ProbeResult.Gateway -> if (target is ServerTarget.Remote) WebSessionResult.NeedsGatewayLogin(base) else WebSessionResult.NeedsLogin(base)
+                ProbeResult.Accepted -> WebSessionResult.Ready(base)
+                ProbeResult.Rejected -> WebSessionResult.NeedsLogin(base)
+            }
         }
         if (target is ServerTarget.Local && readyLaunchId() != launchId) {
             return WebSessionResult.Unreachable("The local OpenChamber restarted; try again")
@@ -130,33 +136,40 @@ class DefaultWebSessionAuthenticator(
         return login(base, password, cookies, target, launchId)
     }
 
-    private suspend fun isHealthy(base: String): Boolean =
-        fetch(default = false) {
-            val request = Request.Builder().url("$base/health").get().build()
+    private suspend fun health(base: String, cookies: WebSessionCookies, remote: Boolean): HealthResult {
+        val header = if (remote) cookies.cookieHeader(base) else null
+        return fetch(default = HealthResult(false, false)) {
+            val builder = Request.Builder().url("$base/health").get()
+            if (header != null) builder.header("Cookie", header)
+            val request = builder.build()
             authClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@use false
+                if (isCloudflareAccessGate(response.code, response.header("Location"), response.headers.toMultimap())) return@use HealthResult(false, true)
+                if (!response.isSuccessful) return@use HealthResult(false, false)
                 val body = response.body?.string().orEmpty()
-                json.parseToJsonElement(body).jsonObject["status"]?.jsonPrimitive?.content == "ok"
+                HealthResult(json.parseToJsonElement(body).jsonObject["status"]?.jsonPrimitive?.content == "ok", false)
             }
         }
+    }
 
     /** GET /auth/session with this profile's cookies. True when the server accepts them (its cookies are stored). */
     private suspend fun probeSession(
         base: String,
         cookies: WebSessionCookies,
-    ): Boolean {
+        remote: Boolean,
+    ): ProbeResult {
         val header = cookies.cookieHeader(base)
         val reply =
             fetch<SetCookieReply?>(default = null) {
                 val builder = Request.Builder().url("$base/auth/session").get()
                 if (header != null) builder.header("Cookie", header)
                 authClient.newCall(builder.build()).execute().use { response ->
-                    SetCookieReply(response.code, response.headers("Set-Cookie"))
+                    SetCookieReply(response.code, response.headers("Set-Cookie"), isCloudflareAccessGate(response.code, response.header("Location"), response.headers.toMultimap()))
                 }
-            } ?: return false
-        if (reply.code != 200) return false
+            } ?: return ProbeResult.Rejected
+        if (reply.gated) return ProbeResult.Gateway
+        if (reply.code != 200) return ProbeResult.Rejected
         commit(base, reply.setCookies, cookies)
-        return true
+        return ProbeResult.Accepted
     }
 
     private suspend fun login(
@@ -174,14 +187,16 @@ class DefaultWebSessionAuthenticator(
         val request =
             Request.Builder()
                 .url("$base/auth/session")
+                .apply { if (target is ServerTarget.Remote) cookies.cookieHeader(base)?.let { header("Cookie", it) } }
                 .post(body.toRequestBody(JSON_MEDIA))
                 .build()
         val reply =
             fetch<SetCookieReply?>(default = null) {
                 authClient.newCall(request).execute().use { response ->
-                    SetCookieReply(response.code, response.headers("Set-Cookie"))
+                    SetCookieReply(response.code, response.headers("Set-Cookie"), isCloudflareAccessGate(response.code, response.header("Location"), response.headers.toMultimap()))
                 }
             } ?: return WebSessionResult.Unreachable("Login request failed")
+        if (reply.gated && target is ServerTarget.Remote) return WebSessionResult.NeedsGatewayLogin(base)
         return when (reply.code) {
             in 200..299 -> {
                 // Launch may have changed while the POST was in flight: its cookies must not be stored.
@@ -231,11 +246,27 @@ class DefaultWebSessionAuthenticator(
     private class SetCookieReply(
         val code: Int,
         val setCookies: List<String>,
+        val gated: Boolean = false,
     )
+
+    private data class HealthResult(val healthy: Boolean, val gated: Boolean)
+    private enum class ProbeResult { Accepted, Rejected, Gateway }
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
+}
+
+/** Pure detector for Cloudflare Access redirects and authentication challenges. */
+internal fun isCloudflareAccessGate(code: Int, location: String?, headers: Map<String, List<String>>): Boolean {
+    if (code in 300..399 && location != null) {
+        val resolved = "https://placeholder.invalid".toHttpUrlOrNull()!!.resolve(location)
+        if (resolved?.host?.endsWith(".cloudflareaccess.com", ignoreCase = true) == true || resolved?.encodedPath?.startsWith("/cdn-cgi/access/") == true) return true
+    }
+    if (code == 401 || code == 403) return headers.any { (name, values) ->
+        name.startsWith("cf-access-", ignoreCase = true) || (name.equals("www-authenticate", true) && values.any { it.contains("Cloudflare-Access", true) })
+    }
+    return false
 }
 
 /** https, or http to a loopback host (the password never leaves the device). */

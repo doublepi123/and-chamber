@@ -237,6 +237,9 @@ sealed interface WebSessionResult {
      *  and let OpenChamber show its own login screen. */
     data class NeedsLogin(val url: String) : WebSessionResult
 
+    /** Remote server is protected by an interactive Cloudflare Access gateway. */
+    data class NeedsGatewayLogin(val url: String) : WebSessionResult
+
     data class Unreachable(val reason: String) : WebSessionResult
 }
 

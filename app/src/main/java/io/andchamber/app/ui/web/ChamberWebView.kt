@@ -116,6 +116,13 @@ internal class ChamberWebView(
     private var foreignRecoveries = 0
     private var clearHistoryAfterLoad = false
     private var destroyed = false
+    @Volatile var gatewayLoginMode = false
+        private set
+    // Set once the gateway flow actually left [origin] (redirect or navigation to the Access/IdP page).
+    // Gateway mode ends only on a return to [origin] after that, not on the initial request itself.
+    private var gatewayLeftOrigin = false
+    private var gatewayReturnPending = false
+    var onGatewayCompleted: (() -> Unit)? = null
 
     var host: WebHost? = null
 
@@ -167,6 +174,7 @@ internal class ChamberWebView(
     fun load(
         url: String,
         sessionKey: String,
+        gatewayLogin: Boolean = false,
     ) {
         if (destroyed) return
         val webView = view ?: return
@@ -177,6 +185,9 @@ internal class ChamberWebView(
             return
         }
         this.sessionKey = sessionKey
+        gatewayLoginMode = gatewayLogin
+        gatewayLeftOrigin = false
+        gatewayReturnPending = false
         rotateToken()
         mainTrusted = false
         targetUrl = url
@@ -352,12 +363,21 @@ internal class ChamberWebView(
                 return
             }
             if (origin.isNotEmpty() && originOf(url) == origin) {
+                if (gatewayLoginMode && gatewayLeftOrigin) {
+                    gatewayLoginMode = false
+                    gatewayLeftOrigin = false
+                    gatewayReturnPending = true
+                }
                 mainTrusted = true
                 view.addJavascriptInterface(bridge, BRIDGE_NAME)
                 return
             }
             // A foreign main-frame document (e.g. a POST or redirect that bypassed shouldOverrideUrlLoading).
             view.removeJavascriptInterface(BRIDGE_NAME)
+            if (gatewayLoginMode && url.startsWith("https://", true)) {
+                gatewayLeftOrigin = true
+                return
+            }
             view.stopLoading()
             val back = targetUrl
             if (back != null && foreignRecoveries < MAX_FOREIGN_RECOVERIES) {
@@ -373,7 +393,13 @@ internal class ChamberWebView(
             view: WebView,
             url: String?,
         ) {
-            if (isCurrent(view)) committed = true
+            if (isCurrent(view)) {
+                committed = true
+                if (gatewayReturnPending && originOf(url) == origin) {
+                    gatewayReturnPending = false
+                    main.post { onGatewayCompleted?.invoke() }
+                }
+            }
         }
 
         override fun onPageFinished(
@@ -481,6 +507,10 @@ internal class ChamberWebView(
         when (scheme) {
             "http", "https" -> {
                 if (origin.isNotEmpty() && originOf(text) == origin) return false
+                if (gatewayLoginMode && scheme == "https") {
+                    gatewayLeftOrigin = true
+                    return false
+                }
                 openExternally(Intent(Intent.ACTION_VIEW, uri))
             }
             "about" -> return text != BLANK

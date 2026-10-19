@@ -19,12 +19,12 @@ Network and persistence adapters for remote and local OpenChamber servers, used 
 ### WebSessionAuthenticatorImpl (`DefaultWebSessionAuthenticator`)
 
 - Constructor: `client`, `localPassword`, `localReady: LocalReadiness` (default denies everything), `remoteStoredPassword`. Cookies are not a constructor argument.
-- One OkHttp client, `authClient`, derived from `client` with `CookieJar.NO_COOKIES`, `followRedirects(false)` and `followSslRedirects(false)`. Health, session probe and login all use it, so no request carries a jar cookie or follows a redirect.
+- One OkHttp client, `authClient`, derived from `client` with `CookieJar.NO_COOKIES`, `followRedirects(false)` and `followSslRedirects(false)`. Remote health, probe and login explicitly use the bound profile cookie header; local behavior is unchanged.
 - `prepare(target, cookies: WebSessionCookies)`, in this order: (1) the cookie identity must match the target id and canonical origin, else `Unreachable` with no request and no secret read; (2) the target's URL must parse; (3) under a per-identity `Mutex`, `prepareLocked` runs. Cookies are stored only while the coroutine is still active, and the store itself is `NonCancellable`. `CancellationException` is never swallowed.
 - Local targets are checked against `LocalReadiness` three times: after health, before the POST, and after the POST and before cookies are stored.
 - Local targets are trusted only while `LocalReadiness.runningLaunchId()` returns the same non-null id before and right before the POST. A restart in between yields `Unreachable("...restarted; try again")`. Null id yields `Unreachable("not running")`.
 - Transport rule: a remote target without `allowInsecureHttp` is refused unless the URL is https or loopback (`HttpUrl.isTransportSafe`). Refusal happens before any login request.
-- Results: `WebSessionResult.Ready(base)`, `NeedsLogin(base)`, `Unreachable(reason)`.
+- Results include `NeedsGatewayLogin(base)` when Cloudflare Access gates health, probe or login; its pure detector recognizes Access redirects and challenge headers. This result never sends the UI password.
 - Set-Cookie headers are written through the bound profile's `WebSessionCookies.storeCookies` and flushed there. OpenChamber names the cookie `oc_ui_session_<port>`, which keeps two servers on one host apart.
 - Login body: `{"password": ..., "trustDevice": true}`. 401 and 3xx map to `NeedsLogin`; other non-2xx map to `Unreachable`.
 

@@ -140,6 +140,36 @@ class DefaultWebSessionAuthenticatorTest {
         }
 
     @Test
+    fun `remote Access health redirect needs gateway login and does not post password`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "https://team.cloudflareaccess.com/cdn-cgi/access/login/openchamber.example.com"))
+        val target = remote("secret")
+        val result = auth().prepare(target, cookiesFor(target))
+        assertEquals(WebSessionResult.NeedsGatewayLogin(base()), result)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `remote health forwards bound cookie and local health does not`() = runBlocking {
+        server.enqueue(health()); server.enqueue(loginOk())
+        val remoteTarget = remote("stored")
+        val remoteCookies = cookiesFor(remoteTarget).also { it.jar = "CF_Authorization=access" }
+        auth().prepare(remoteTarget, remoteCookies)
+        assertEquals("CF_Authorization=access", server.takeRequest().getHeader("Cookie"))
+        server.takeRequest()
+        server.enqueue(health()); server.enqueue(loginOk())
+        auth().prepare(local(), cookiesFor(local()))
+        assertNull(server.takeRequest().getHeader("Cookie"))
+    }
+
+    @Test
+    fun `Cloudflare gate detector recognizes redirect and challenge headers`() {
+        assertTrue(isCloudflareAccessGate(302, "https://team.cloudflareaccess.com/login", emptyMap()))
+        assertTrue(isCloudflareAccessGate(302, "/cdn-cgi/access/login", emptyMap()))
+        assertTrue(isCloudflareAccessGate(403, null, mapOf("cf-access-denied" to listOf("1"))))
+        assertFalse(isCloudflareAccessGate(302, "/ordinary", emptyMap()))
+    }
+
+    @Test
     fun `unparseable health body is Unreachable`() =
         runBlocking {
             server.enqueue(MockResponse().setBody("<html>not openchamber</html>"))

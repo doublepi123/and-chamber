@@ -48,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -170,6 +171,16 @@ internal fun WebScreen(
         )
     }
     var attempt by remember(web) { mutableIntStateOf(0) }
+    var gatewayPreparations by remember(web) { mutableIntStateOf(0) }
+    SideEffect {
+        web?.onGatewayCompleted = {
+            if (gatewayPreparations < 2) {
+                gatewayPreparations++
+                web.invalidateSession()
+                attempt++
+            }
+        }
+    }
     // Read when the page is actually loaded, which can be long after this screen appeared
     // (e.g. the local server was still starting).
     val latestDeepLink by rememberUpdatedState(deepLinkPath)
@@ -199,11 +210,21 @@ internal fun WebScreen(
         phase =
             when (result) {
                 // NeedsLogin: OpenChamber shows its own sign-in page at the same address.
-                is WebSessionResult.Ready, is WebSessionResult.NeedsLogin -> {
-                    val start = if (result is WebSessionResult.Ready) result.url else (result as WebSessionResult.NeedsLogin).url
+                is WebSessionResult.Ready, is WebSessionResult.NeedsLogin, is WebSessionResult.NeedsGatewayLogin -> {
+                    val gateway = result is WebSessionResult.NeedsGatewayLogin
+                    val start =
+                        when (result) {
+                            is WebSessionResult.Ready -> result.url
+                            is WebSessionResult.NeedsLogin -> result.url
+                            is WebSessionResult.NeedsGatewayLogin -> result.url
+                            is WebSessionResult.Unreachable -> error("unreachable")
+                        }
+                    // A completed gateway round re-arms the bounded re-prepare for a later expiry.
+                    if (!gateway) gatewayPreparations = 0
                     // A session picked from a notification is the first page, not a second load.
+                    // Cloudflare Access returns to the requested path after its login, so the link survives it.
                     val link = latestDeepLink
-                    view.load(link?.let { withSessionPath(start, it) } ?: start, key)
+                    view.load(link?.let { withSessionPath(start, it) } ?: start, key, gatewayLogin = gateway && gatewayPreparations < 2)
                     if (link != null) latestDeepLinkUsed()
                     SessionPhase.Loaded
                 }
@@ -243,7 +264,7 @@ internal fun WebScreen(
             isLocal && localState !is RuntimeState.Running -> WebOverlay.Local(localState ?: RuntimeState.NotInstalled)
             isolation != null -> WebOverlay.Isolation(isolation)
             phase is SessionPhase.Unreachable -> WebOverlay.Unreachable((phase as SessionPhase.Unreachable).reason)
-            phase == SessionPhase.Connecting -> WebOverlay.Connecting
+            phase == SessionPhase.Connecting && web?.gatewayLoginMode != true -> WebOverlay.Connecting
             pageError != null -> WebOverlay.PageError(pageError)
             web != null && !web.committed -> WebOverlay.Connecting
             inspection -> WebOverlay.Connecting

@@ -11,7 +11,7 @@ Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running Open
   - `WebSessionIdentity(targetId, origin)`: one server target at one canonical origin. A WebView profile is bound to exactly one identity.
   - `WebSessionCookies`: the cookie capability of that one bound profile. It exposes `identity`, `cookieHeader(url)` and `storeCookies(url, headers)`. Any URL outside `identity.origin` gets no cookie back, and nothing is written for it.
   - `WebSessionAuthenticator.prepare(target, cookies: WebSessionCookies): WebSessionResult`. There is no global cookie manager and no `prepare(target)` overload. The caller must pass the capability of the target's own profile.
-  - `WebSessionResult`: `Ready(url)`, `NeedsLogin(url)` or `Unreachable(reason)`.
+  - `WebSessionResult`: `Ready(url)`, `NeedsLogin(url)`, `NeedsGatewayLogin(url)` for interactive remote Access, or `Unreachable(reason)`.
   - Implementations live in `data/` (`WebSessionAuthenticatorImpl`, `WebSessionProfiles`). This package only defines the contract.
 - `LocalRuntimeController.kt`: `DefaultLocalRuntimeController`. Every operation runs under one `operationLock` (a Mutex). `wantsRunning` records user intent and gates automatic recovery. The watchdog and recovery jobs take the same lock.
 - `WorkCounter.kt`: counts queued and running work and publishes `busy = count > 0` under one lock. Decrement uses `invokeOnCompletion`, so a job cancelled before it starts still releases its count.
