@@ -6,7 +6,13 @@ Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running Open
 
 ## Design
 
-- `RuntimeContract.kt`: the UI-facing contract. `RuntimeState` is a sealed interface (Detecting, UnsupportedAbi, NotInstalled, Installing, Stopped, Starting, Running, Stopping, Failed). `FailurePhase` (Install, Start, Runtime) decides what Retry redoes. `MessageKey` names localised headlines; `UserFacingException` carries a key plus untranslated detail. Also `ServerTarget` (Local/Remote), `RemoteServerStore`, `WebSessionAuthenticator`, `RuntimeInfo`.
+- `RuntimeContract.kt`: the UI-facing contract. `RuntimeState` is a sealed interface (Detecting, UnsupportedAbi, NotInstalled, Installing, Stopped, Starting, Running, Stopping, Failed). `FailurePhase` (Install, Start, Runtime) decides what Retry redoes. `MessageKey` names localised headlines; `UserFacingException` carries a key plus untranslated detail. Also `ServerTarget` (Local/Remote), `RemoteServerStore`, `RuntimeInfo`.
+- Web session capability (`RuntimeContract.kt`, web session section):
+  - `WebSessionIdentity(targetId, origin)`: one server target at one canonical origin. A WebView profile is bound to exactly one identity.
+  - `WebSessionCookies`: the cookie capability of that one bound profile. It exposes `identity`, `cookieHeader(url)` and `storeCookies(url, headers)`. Any URL outside `identity.origin` gets no cookie back, and nothing is written for it.
+  - `WebSessionAuthenticator.prepare(target, cookies: WebSessionCookies): WebSessionResult`. There is no global cookie manager and no `prepare(target)` overload. The caller must pass the capability of the target's own profile.
+  - `WebSessionResult`: `Ready(url)`, `NeedsLogin(url)` or `Unreachable(reason)`.
+  - Implementations live in `data/` (`WebSessionAuthenticatorImpl`, `WebSessionProfiles`). This package only defines the contract.
 - `LocalRuntimeController.kt`: `DefaultLocalRuntimeController`. Every operation runs under one `operationLock` (a Mutex). `wantsRunning` records user intent and gates automatic recovery. The watchdog and recovery jobs take the same lock.
 - `WorkCounter.kt`: counts queued and running work and publishes `busy = count > 0` under one lock. Decrement uses `invokeOnCompletion`, so a job cancelled before it starts still releases its count.
 - `RestartPolicy.kt`: pure backoff budget (2 s, 5 s, 15 s, 30 s). The budget refills only after 120 s of continuous health. A manual start calls `reset()`. The clock is injected.
@@ -30,13 +36,15 @@ Invariants:
 5. Repair: `stopLocked()` → `installLocked(thenStart = true)`. Uninstall: `stopLocked()` → `installer.removeAll()` → NotInstalled.
 6. Restart: stop and start as one queued job, used to apply new storage binds.
 7. Watchdog (every 5 s while Running): a dead child starts recovery at once. A live child with a failed `/health` read counts a miss, and 3 consecutive misses start recovery.
-8. Recovery: `restartAfterCrash()` loops over the budget: delay, `server.stop()`, `startLocked(manual = false)`. When the budget is spent, `stopAfterExhaustion()` runs `server.stop()` and `killOwned()` under `NonCancellable` (a cancellation is rethrown after cleanup; other errors are logged), and only then does it publish Failed and clear `wantsRunning`. The service may finish only after this terminal state.
+8. Recovery: `restartAfterCrash()` loops over the budget: delay, `server.stop()`, `startLocked(manual = false)`. Budget exhaustion is ordered: `stopAfterExhaustion()` runs `server.stop()` and then `killOwned()`, both under `NonCancellable`. Each step runs in its own try, so a throwing `stop()` does not skip `killOwned()`. Errors are logged. Only after both steps does the controller clear `wantsRunning` and publish the terminal Failed. Because the service decides from `busy` and `state`, the foreground service may finish only after that terminal state with no pending work. A cancellation that arrives during cleanup is rethrown after both steps have run. Owned processes are never left behind when the child is still alive at exhaustion.
+9. Teardown ordering is covered by `RestartBudgetCleanupTest`, including a user Stop issued from inside the final `stop()`. That Stop runs after the cleanup, and the controller ends Stopped with busy false.
 
 ## Integration
 
 - `di/AppModule.kt` builds `DefaultLocalRuntimeController`, `RuntimeInstallerImpl`, `ProotOpenChamberServer`, `ProotStaleServerCleaner` and `SharedStorageControllerImpl`.
 - `di/AppModule.kt` wires `ForegroundStarter { op -> RuntimeService.request(context, op) }`, so the service is started only through this lambda. The service runs `perform(op)`, and reads `busy`. The UI observes `state`, `logTail` and `info`.
-- `data/WebSessionAuthenticatorImpl.kt` implements `WebSessionAuthenticator`.
+- `data/WebSessionAuthenticatorImpl.kt` implements `WebSessionAuthenticator.prepare(target, cookies)`. It receives the per-target `WebSessionCookies` from `data/WebSessionProfiles.kt` and never touches a global cookie store. The UI passes that capability from `ui/web/WebScreen.kt`.
+- Live DNS: `ProotOpenChamberServer` receives `DnsRefresherMonitor(DnsRefresher(AndroidSystemDnsProvider, AndroidNetworkEvents, reporter))` from `di/AppModule.kt`. The monitor starts after readiness and stops before teardown. See `network/codemap.md`.
 - Watchdog probes: `HealthProbe.Loopback` (GET `http://127.0.0.1:<port>/health`) and `OpenChamberServer.isAlive()`.
 - Subfolders:
   - `fs/`: symlink-safe tree operations.

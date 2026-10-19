@@ -43,10 +43,20 @@ AndChamber builds an Alpine Linux userland with PRoot inside the app's private s
 | x86_64 devices | Remote servers only (Android's x86_64 seccomp policy blocks `fork`, which PRoot cannot translate) |
 | Storage | about 1.2 GB (download + install) |
 | Network | first setup needs the Alpine mirrors and npm; Wi-Fi recommended |
+| WebView | embedded pages need a system WebView with multi-profile support (`MULTI_PROFILE`). If it is missing or binding fails, the page asks you to update the WebView provider (Android System WebView or Chrome) |
 
 ## Install
 
 Download `AndChamber-<version>.apk` from [Releases](https://github.com/doublepi123/and-chamber/releases). Each APK ships with a `.sha256` file.
+
+## Limits and upgrade notes
+
+- **Embedded pages need WebView multi-profile**: both the local server and remote servers require `MULTI_PROFILE`. Without it, the app does not fall back to shared cookies and the page does not load. The local background service, Home and notifications keep working.
+- **Remote servers can open in an external browser**: when embedding is not available, "Open in browser" opens the saved address after URL validation, without adding passwords, cookies or tokens.
+- **You may need to sign in again after upgrading**: each server uses its own WebView profile, so a new profile may ask you to sign in on first open. Server settings, passwords and old web data are kept; nothing is cleared or migrated.
+- **Native downloads follow the app process**: downloads run while the app process is alive. If the process is killed, there is no resume or automatic recovery.
+- **Check uncertain sends before resending**: if a notification reply or permission action ends with a timeout or interruption, the app does not resend it automatically. Open the session to check first, then resend manually if needed.
+- **Cross-origin navigation opens externally**: links handled as cross-origin top-level navigation still open in the browser; requests already handled by the native downloader follow its credential-isolation rules.
 
 ## Usage
 
@@ -78,6 +88,7 @@ JDK 17, Android SDK (platform 35, build-tools 35) and Python 3. No NDK: PRoot an
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # offline tests for the build scripts
 ```
 
 Release signing is enabled by `ANDCHAMBER_KEYSTORE_FILE`, `ANDCHAMBER_KEYSTORE_PASSWORD`, `ANDCHAMBER_KEY_ALIAS` and `ANDCHAMBER_KEY_PASSWORD` (all four required). Pushing a `v*` tag builds a signed APK on GitHub Actions and publishes a release.

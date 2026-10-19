@@ -17,7 +17,9 @@ Runs, probes and stops the OpenChamber server inside PRoot. Covers the PRoot com
 - `EmbeddedCommandSuite`: resolves the PRoot binaries from `nativeLibraryDirectory`. Names: `libandchamber_android_proot.so`, `libandchamber_android_proot_loader.so`, `libandchamber_android_proot_loader32.so`. Also creates `command-suite/{home,tmp}`.
 - `truncateLogFile`: keeps the newest half of an oversized log, preferring a line boundary, using a bounded tail read rather than loading the whole file. The output pump also uses `BoundedLogWriter` to cap bytes on every append; only non-notification lines are written to the log.
 
-- Live DNS: `ProotOpenChamberServer` takes a `RuntimeDnsMonitor` (default `None`). It calls `dnsMonitor.start(runtime.rootfs)` after the server is ready, and `dnsMonitor.stop()` at the top of `stop()`, before any process teardown. A failed start goes through `stop()`, so the watch is always released. A `start` that throws in `onStarted` also calls `stop()`.
+- DNS in this package has two hooks, both injected:
+  - `refreshDns(runtime)`: a synchronous rewrite of the guest `resolv.conf` before each launch. It is the only DNS write before readiness.
+  - `dnsMonitor: RuntimeDnsMonitor` (default `None`; production passes `DnsRefresherMonitor`): live refresh while the child runs. It starts after readiness and stops at the top of `stop()`. The monitor's own generation and sequence guards live in `network/`. This class only owns the start and stop ordering.
 
 Invariants:
 - Port ownership is decided before spawning. If the port stays held by a foreign listener, the launch refuses (`PortInUseException`), and the password is never sent to it.
@@ -36,12 +38,13 @@ Start (`ProotOpenChamberServer.start`):
 6. Store `process`, reset `recentOutput`, set `readyId = null`, `listenSignal = new`, `++launchId`.
 7. `pumpOutput` thread: reads lines from the child's stdout. Sends non-notification lines to `BoundedLogWriter` (which enforces a byte limit on each append), keeps the last 200 lines, and completes `listenSignal` on the listen marker. `truncateLogFile` retains the newest half of an oversized log.
 8. `waitUntilReady` (deadline 90 s, poll 500 ms): cancel check, child death check (`EADDRINUSE` maps to PortInUse), wait for the listen signal, then poll `/health` with `identityStable` and `Readiness.verdict`.
-9. On failure: `stop()` and rethrow. On success: if still the current child, `readyId = id`, then `onStarted(binds)`.
+9. On failure: `stop()` and rethrow. On success: if still the current child, `readyId = id`, then `dnsMonitor.start(runtime.rootfs)` (failures are swallowed here; the monitor reports them), then `onStarted(binds)`. If `onStarted` throws, `stop()` runs and the error is rethrown, so the monitor is always released.
 
 Stop (`stop`):
-1. Under the lock: `readyId = null`, detach `process`.
-2. `ownedRoots(prootPath, rootfs)` → `terminateProcessTree`.
-3. `onStopped()` (clears shared-storage `startedBinds`).
+1. `dnsMonitor.stop()` first (failures swallowed), so no live DNS write lands after teardown begins.
+2. Under the lock: `readyId = null`, detach `process`.
+3. `ownedRoots(prootPath, rootfs)` → `terminateProcessTree`.
+4. `onStopped()` (clears shared-storage `startedBinds`).
 
 Command (argv, from `ProotCommands`):
 `proot --kill-on-exit --link2symlink -0 -r <rootfs> -b /dev -b /proc -b /sys -b /system -b <binds...> -w /root /usr/bin/node /usr/local/lib/node_modules/@openchamber/web/bin/cli.js serve --foreground --port <port>`

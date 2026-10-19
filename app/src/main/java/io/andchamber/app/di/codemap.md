@@ -9,7 +9,7 @@ The only Koin composition root: `AppModule.kt` declares `val appModule = module 
 Koin graph (`single` declarations, all process-wide):
 
 - `OkHttpClient`: connect 5 s, read 10 s. Shared by `VerifiedRuntimeDownloader` and `DefaultWebSessionAuthenticator`.
-- `WebSessionProfiles()`: hands out one WebView profile binding per (target id, canonical origin). It replaces the former global `WebCookieSink` over `CookieManager`. There is no global cookie fallback.
+- `WebSessionProfiles()`: hands out one WebView profile binding per (target id, canonical origin). It is the only WebView cookie path; there is no global `CookieManager` fallback. Apps installed before this change keep their old default-profile data. Nothing is cleared or migrated.
 - `HttpDownloadStarter` → `AndroidHttpDownloadStarter(context)`: a single application-scoped starter, so a download keeps running after its page is gone. It has its own default scope.
 - `RemoteServerStore` → `EncryptedRemoteServerStore.create(context)`.
 - `OpenChamberNotifier(context)`.
@@ -25,7 +25,8 @@ Koin graph (`single` declarations, all process-wide):
   - `suite = EmbeddedCommandSuite(nativeDir, paths).resolve()`.
   - `scanner = ProcessScanner(myUid, myPid)`, `health = HealthProbe.Loopback`.
   - `signal = Process.killProcess`.
-  - `refreshDns = ResolvConf.write(rootfs, AndroidSystemDnsProvider.dnsServers())`.
+  - `refreshDns = ResolvConf.write(rootfs, AndroidSystemDnsProvider.dnsServers())`: one write before each launch.
+  - `dnsMonitor = DnsRefresherMonitor(DnsRefresher(AndroidSystemDnsProvider, AndroidNetworkEvents, reporter → Log.w("AndChamberDns")))`: live refresh while the server runs. The server calls `start(rootfs)` once ready and `stop()` first in its own `stop()`, before process teardown.
   - `cleanBeforeStart` → `ProotStaleServerCleaner`.
   - `notificationSink = { NotificationSink.accept(line) }`.
   - `bindsForStart` / `onStarted` / `onStopped` → `SharedStorageControllerImpl.prepareForStart` / `recordStarted` / `recordStopped`.

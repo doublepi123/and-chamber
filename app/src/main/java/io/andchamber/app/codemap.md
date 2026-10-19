@@ -9,7 +9,7 @@ Package root of the AndChamber Android app. Two top-level classes wire the proce
 
 Everything else lives in subpackages:
 
-- `data/`: local API client (`LocalApiClient`), WebView login (`WebSessionAuthenticatorImpl.kt`), encrypted remote server list (`EncryptedRemoteServerStore`).
+- `data/`: local API client (`LocalApiClient`), WebView login (`WebSessionAuthenticatorImpl.kt`), per-target WebView profiles (`WebSessionProfiles.kt`), native http(s) downloads (`HttpDownloads*.kt`), encrypted remote server list (`EncryptedRemoteServerStore`).
 - `di/`: Koin module `appModule` (the only composition root).
 - `i18n/`: `UserMessages`, maps runtime keys to string resources.
 - `notify/`: OpenChamber stdout notification bridge, native notifications, notification actions, runtime alerts.
@@ -20,7 +20,8 @@ Everything else lives in subpackages:
 ## Design
 
 - Composition root is `di/AppModule.kt`. Koin `single`s only. Runtime lookups via `get()`/`inject()` happen in `AndChamberApplication`, `MainActivity`, `service/RuntimeService` (`inject`), and `notify/NotificationActionReceiver` (`KoinComponent`).
-- Process-wide singletons: `OkHttpClient` (connect 5 s, read 10 s), `RemoteServerStore`, `OpenChamberNotifier`, `LocalApiClient`, `NotificationSink`, `NotificationObserver`, `SharedStorageControllerImpl`, `OpenChamberServer`, `LocalRuntimeController`, `WebSessionAuthenticator`.
+- Process-wide singletons: `OkHttpClient` (connect 5 s, read 10 s), `RemoteServerStore`, `OpenChamberNotifier`, `LocalApiClient`, `NotificationSink`, `NotificationObserver`, `SharedStorageControllerImpl`, `OpenChamberServer`, `LocalRuntimeController`, `WebSessionAuthenticator`, `WebSessionProfiles`, `HttpDownloadStarter`.
+- WebView session order: the page's profile is bound first (`WebSessionProfiles.acquire` → `WebViewPool.obtain`), and only then is `WebSessionAuthenticator.prepare(target, cookies)` called. A failed binding never reaches authentication.
 - `OpenSessionLink` is an `object` (process-wide `MutableStateFlow`) so a tap that launches a fresh activity still reaches the UI. It is consumed once via `take()`.
 - `MainActivity` reads a notification intent only when `savedInstanceState == null` (cold start) or in `onNewIntent` (singleTop). Intents with `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY` (Recents replay) are ignored.
 - Manifest (`app/src/main/AndroidManifest.xml`):

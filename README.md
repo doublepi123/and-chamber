@@ -43,10 +43,20 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 | x86_64 设备 | 只能连接远程服务器（Android 的 x86_64 seccomp 策略拦截 `fork`，PRoot 无法转换） |
 | 存储空间 | 约 1.2 GB（下载 + 安装） |
 | 网络 | 首次设置需要能访问 Alpine 软件源与 npm，建议使用 Wi-Fi |
+| WebView | 内嵌页面需要系统 WebView 支持多 Profile（`MULTI_PROFILE`）。不支持或绑定失败时，页面会提示更新 WebView 提供程序（Android System WebView 或 Chrome） |
 
 ## 安装
 
 从 [Releases](https://github.com/doublepi123/and-chamber/releases) 下载 `AndChamber-<版本>.apk` 并安装。每个 APK 都附带 `.sha256` 校验文件。
+
+## 限制与升级说明
+
+- **内嵌页面依赖 WebView 多 Profile**：本机和远程服务器的页面都要求 WebView 支持 `MULTI_PROFILE`。不支持时不会退回到共享 Cookie，页面不加载，本机后台服务、首页和通知仍可使用。
+- **远程服务器可在外部浏览器打开**：不支持内嵌时，可以用“在浏览器中打开”打开格式有效的已保存地址，不会附加密码、Cookie 或令牌。
+- **升级后可能需要重新登录**：每个服务器使用独立的 WebView Profile，新 Profile 首次打开时可能要求登录。服务器配置、密码和旧网页数据会保留，不会被清理或迁移。
+- **原生下载跟随应用进程**：下载在应用运行期间进行，进程被杀后不会断点续传或自动恢复。
+- **发送结果不确定时请先核对**：通知回复或权限操作返回超时、中断等不确定结果时，应用不会自动重发，请先打开会话确认，再决定是否手动重新发送。
+- **跨源导航交给外部浏览器**：作为顶层导航处理的跨源链接仍在浏览器打开；已经进入应用下载器的请求则遵循下载凭据隔离规则。
 
 ## 使用
 
@@ -95,6 +105,7 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 export ANDROID_HOME=$HOME/Android/Sdk
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 # 输出：app/build/outputs/apk/debug/app-debug.apk
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # 构建脚本的离线测试
 ```
 
 Release 签名通过环境变量启用：`ANDCHAMBER_KEYSTORE_FILE`、`ANDCHAMBER_KEYSTORE_PASSWORD`、`ANDCHAMBER_KEY_ALIAS`、`ANDCHAMBER_KEY_PASSWORD`。四个变量都提供时才会签名。
