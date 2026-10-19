@@ -2,6 +2,8 @@ package io.andchamber.app.notify
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 /** One OpenChamber desktop-notification event, parsed from a `[OpenChamberDesktopNotify] {json}` line. */
@@ -13,6 +15,12 @@ data class DesktopNotification(
     val tag: String,
     val sessionId: String?,
     val directory: String?,
+    /**
+     * OpenChamber's `requireHidden`: true (the default, "hidden-only" mode) means the event is meant
+     * for when the page isn't seen; false ("always" mode) means the user wants it even while the page
+     * is on screen. A WebView page can't raise a system notification itself, so false is always posted.
+     */
+    val requireHidden: Boolean = true,
 ) {
     /** The kinds OpenChamber emits (server/index.js:1521, notifications/runtime.js:566-884). */
     enum class Kind(val wire: String) {
@@ -52,6 +60,8 @@ object NotificationPayload {
             tag = tag,
             sessionId = obj.text("sessionId")?.takeIf { it.isNotBlank() },
             directory = obj.text("directory")?.takeIf { it.isNotBlank() },
+            // Only an explicit JSON false turns it off; missing, null or any other value keeps the default.
+            requireHidden = (obj["requireHidden"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: true,
         )
     }
 

@@ -11,6 +11,7 @@ import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
 import io.andchamber.app.runtime.WebSessionAuthenticator
+import io.andchamber.app.runtime.WebSessionCookies
 import io.andchamber.app.runtime.WebSessionResult
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,7 +102,11 @@ internal class FakeSharedStorageController(
 internal class FakeWebSessionAuthenticator(
     private val result: WebSessionResult? = null,
 ) : WebSessionAuthenticator {
-    override suspend fun prepare(target: ServerTarget): WebSessionResult = result ?: awaitCancellation()
+    @Suppress("UNUSED_PARAMETER")
+    override suspend fun prepare(
+        target: ServerTarget,
+        cookies: WebSessionCookies,
+    ): WebSessionResult = result ?: awaitCancellation()
 }
 
 internal object PreviewData {

@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.os.Build
+import android.os.Bundle
 import android.app.Notification
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -25,6 +26,10 @@ import io.andchamber.app.notify.NotificationPayload.notificationId
 class OpenChamberNotifier(
     private val context: Context,
 ) {
+    private val revisions: NotificationRevisionGate by lazy {
+        NotificationRevisionGate(readRevision = ::currentRevision, remove = { id -> NotificationManagerCompat.from(context).cancel(id) })
+    }
+
     /**
      * Creates the channels, and re-applies their names on every call. A channel's name is fixed when it
      * is created, so a change of system language would otherwise leave the old name shown in settings.
@@ -61,12 +66,18 @@ class OpenChamberNotifier(
         ensureChannels()
         val id = notificationId(event.tag)
         val builder = baseBuilder(channel, event.title, event.body, openIntent(event.sessionId, event.directory, id))
+        // The original text, so a later status line replaces the previous one instead of piling up.
+        builder.addExtras(Bundle().apply { putString(EXTRA_ORIGINAL_BODY, event.body) })
         if (questionAnswer != null) {
             addQuestionActions(builder, event, id, questionAnswer)
         } else {
             addActions(builder, event, id)
         }
-        notify(id, builder.build())
+        // A newer post on this id gets a new revision, so an older "Sent" clean-up no longer matches it.
+        revisions.publish(id, sent = false) { token ->
+            builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
+            notify(id, builder.build())
+        }
     }
 
     /** A classified single form: choice buttons, a text reply field, or nothing (tap to open). */
@@ -133,7 +144,10 @@ class OpenChamberNotifier(
         ensureChannels()
         val id = notificationId("alert:${alert.key}")
         val builder = baseBuilder(Channel.Errors, alert.title, alert.body, openIntent(null, null, id))
-        notify(id, builder.build())
+        revisions.publish(id, sent = false) { token ->
+            builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
+            notify(id, builder.build())
+        }
     }
 
     /**
@@ -144,14 +158,96 @@ class OpenChamberNotifier(
         id: Int,
         channel: Channel,
         text: String,
+    ): String? {
+        if (!canPost()) return null
+        return revisions.publish(id, sent = true) { token ->
+            val builder = baseBuilder(channel, context.getString(R.string.app_name), text, null).setOnlyAlertOnce(true)
+            builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
+            notify(id, builder.build())
+            token
+        }
+    }
+
+    /**
+     * Removes notification [id] only if [token] is still its current revision. A newer post, alert, status
+     * or kept draft on the same id has another token and is left alone. Read and removal share one lock
+     * with every write, so there is no gap in which a newer write could land.
+     */
+    fun cancelIfCurrent(
+        id: Int,
+        token: String,
+    ): Boolean = revisions.cancelIfCurrent(id, token)
+
+    /** Releases the pending "Sent" [token] of [id] without removing anything, when its clean-up did not run. */
+    fun forgetSent(
+        id: Int,
+        token: String,
+    ) = revisions.forget(id, token)
+
+    /** Reads the revision that the notification with [id] currently carries, or null when unavailable. */
+    private fun currentRevision(id: Int): String? =
+        activeNotification(id)?.extras?.getString(EXTRA_REVISION)
+
+    /**
+     * Keeps notification [id] after an action didn't go through, with [plan]'s status. Rebuilt from the
+     * system's own copy, so the title, channel, session tap and (if [KeepPlan.keepActions]) the original
+     * buttons and reply field stay. The status replaces any earlier one, never piles up. A reply that
+     * didn't go through is shown again (reply history and extras); nothing is sent again automatically.
+     * If the notification was swiped away meanwhile, a small one on Errors still opens the session.
+     */
+    fun keep(
+        id: Int,
+        plan: KeepPlan,
     ) {
         if (!canPost()) return
-        val builder = baseBuilder(channel, context.getString(R.string.app_name), text, null).setOnlyAlertOnce(true)
+        ensureChannels()
+        // Read the old notification and write the kept one under the same lock as every other write, so
+        // the copy cannot be stale by the time it is posted, and a concurrent cancelIfCurrent sees one state.
+        revisions.publish(id, sent = false) { token -> keepLocked(id, plan, token) }
+    }
+
+    private fun keepLocked(
+        id: Int,
+        plan: KeepPlan,
+        token: String,
+    ) {
+        val original = activeNotification(id)
+        val builder =
+            if (original != null) {
+                NotificationCompat.Builder(context, original).apply {
+                    if (!plan.keepActions) clearActions()
+                    // A tap must open the session, also if the original had no tap action.
+                    if (original.contentIntent == null) setContentIntent(openIntent(plan.sessionId, plan.directory, id))
+                }
+            } else {
+                baseBuilder(Channel.Errors, context.getString(R.string.app_name), "", openIntent(plan.sessionId, plan.directory, id))
+            }
+        val base = original?.extras?.getString(EXTRA_ORIGINAL_BODY).orEmpty()
+        val draftLine = plan.draft?.let { context.getString(R.string.notify_your_reply, it) }
+        val text = listOfNotNull(base.takeIf { it.isNotBlank() }, plan.status, draftLine).joinToString("\n\n")
+        builder
+            .setContentText(plan.status)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setOnlyAlertOnce(true)
+            .addExtras(Bundle().apply { putString(EXTRA_ORIGINAL_BODY, base) })
+        if (plan.draft != null) {
+            builder.setRemoteInputHistory(arrayOf<CharSequence>(plan.draft))
+            builder.addExtras(Bundle().apply { putString(EXTRA_DRAFT, plan.draft) })
+        }
+        // Kept notifications get a new revision too: an older "Sent" clean-up must not remove the draft.
+        builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
         notify(id, builder.build())
     }
 
+    /** The posted notification with [id], as the system holds it now; null when it is gone. */
+    private fun activeNotification(id: Int): Notification? =
+        runCatching {
+            context.getSystemService(NotificationManager::class.java).activeNotifications.firstOrNull { it.id == id }?.notification
+        }.getOrNull()
+
     fun cancel(id: Int) {
-        NotificationManagerCompat.from(context).cancel(id)
+        // Under the same lock as every write: a token given out earlier stops matching once this returns.
+        revisions.cancel(id)
     }
 
     private fun baseBuilder(
@@ -265,5 +361,12 @@ class OpenChamberNotifier(
         const val EXTRA_SESSION_ID = "andchamber.open_session"
         const val EXTRA_DIRECTORY = "andchamber.open_directory"
         private const val ACCENT = "#EDB449"
+
+        /** Notification extras: the event's own text, and the last reply that didn't go through. */
+        private const val EXTRA_ORIGINAL_BODY = "andchamber.original_body"
+        private const val EXTRA_DRAFT = "andchamber.draft"
+
+        /** The local revision of this notification (see [NotificationRevisionGate]). Not a protocol message id. */
+        private const val EXTRA_REVISION = "andchamber.revision"
     }
 }

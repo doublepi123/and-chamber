@@ -9,10 +9,14 @@ Turns OpenChamber's desktop-notification events and AndChamber's own runtime err
 Pipeline for OpenChamber events (stdout from the server):
 
 - `NotificationSink.accept(line)`: entry point, called by `ProotOpenChamberServer` through `notificationSink`. Runs off the pump thread on `Dispatchers.IO`.
-- `NotificationPayload.parseLine`: accepts only lines starting with `[OpenChamberDesktopNotify] `. The JSON must have a non-blank `tag`. Fields: `kind`, `title`, `body`, `tag`, `sessionId`, `directory`. Unknown kinds map to `Kind.Unknown`.
-- `NotifyPolicy.deliveryFor(kind, inForeground)`: `Suppressed` when the app is foreground (web UI already shows a toast); otherwise `Post(channel)`.
+- `NotificationPayload.parseLine`: accepts only lines starting with `[OpenChamberDesktopNotify] `. The JSON must have a non-blank `tag`. Fields: `kind`, `title`, `body`, `tag`, `sessionId`, `directory`, `requireHidden` (default true; only a JSON `false`, OpenChamber's "always" mode, turns it off). Unknown kinds map to `Kind.Unknown`.
+- Sink: `leaveToPage(requireHidden, ProcessForeground.isInForeground())` decides suppression, so "always" mode is posted even with the page on screen.
+- `NotifyPolicy.deliveryFor(kind, localPageShowing)`: `Suppressed` only while the local OpenChamber page is on screen (its web UI shows the event); otherwise `Post(channel)`. Home, a remote server's page, any overlay, an unpainted page and the background all post.
+  - `localPageShowing(isLocal, resumed, overlayShown)` = local && RESUMED && no overlay (pure).
   - `channelFor`: Ready/Goal → AgentFinished; Question/Permission → NeedsInput; Error/RestartInterrupted → Errors; Plugin/Unknown → Other.
-- `AppForeground` (`ForegroundState.kt`): `ProcessForeground` reads `ProcessLifecycleOwner` and is true at least at STARTED.
+- `AppForeground` (`ForegroundState.kt`): `ProcessForeground` (symbol kept for DI) = `LocalPageVisibility.isShowing()` && process ≥ STARTED.
+  - `PageVisibility`: synchronized single-owner report; `report(owner, true)` takes over, `report(owner, false)` clears only its own. Starts false, memory only, so a missed report or a restart posts (fail-open).
+  - Reported by `ui/web/NotifyVisibility.kt` `LocalPageVisibilityEffect`, called once from `WebScreen` after the overlay is decided.
 - `ActionPlan.forEvent(event)` decides the actions from the kind alone:
   - Ready, Goal, Error with a session → `Reply` (RemoteInput).
   - Permission with a session and a `permission-<sid>:<rid>` tag → `Permission`. Otherwise `OpenOnly`.
@@ -25,7 +29,8 @@ Pipeline for OpenChamber events (stdout from the server):
   - Tap intent: `MainActivity` with `ACTION_OPEN_SESSION`, extras `andchamber.open_session` and `andchamber.open_directory`.
   - Action intents: `NotificationActionReceiver` broadcasts with extras `session_id`, `directory`, `notification_id`, plus `request_id`/`decision` or `form_id`/`field_key`/`value`. RemoteInput key `reply_text`.
   - `postAlert(RuntimeAlert)`: Errors channel, id from `alert:<key>`, tap opens Home.
-  - `updateStatus(id, channel, text)`: in-place "Sent" or error text, `setOnlyAlertOnce`.
+  - `updateStatus(id, channel, text)`: in-place "Sent" (success path only), `setOnlyAlertOnce`.
+  - `keep(id, KeepPlan)`: after an action didn't go through. Rebuilds from `activeNotifications` (`NotificationCompat.Builder(context, original)`), so title, channel, session tap and, if `keepActions`, the original buttons and RemoteInput stay. Status replaces the previous one (base text kept in extras `andchamber.original_body` since `post()`). A draft goes to `setRemoteInputHistory` and extras `andchamber.draft`. Swiped away: a minimal Errors notification that still opens the session; lost buttons are never re-created. Never sends anything.
   - `canPost()`: POST_NOTIFICATIONS on API 33+.
 - Question path, `NotificationSink.postQuestion`:
   - Calls `LocalApiClient.pending()`. Requires exactly one form for the session (`PendingForms.singleFormFor`); with several, it opens the app.
@@ -35,9 +40,10 @@ Pipeline for OpenChamber events (stdout from the server):
     - `OpenOnly` (multi-field, `when`/`hidden`, non-string, `global` session, too many options, missing ids) → tap to open.
 - Action receiver, `NotificationActionReceiver` (`BroadcastReceiver` + `KoinComponent`, `exported=false`):
   - `onReceive` calls `goAsync()`, then runs `handle` on `Dispatchers.IO` and calls `finish()`.
-  - `ACTION_REPLY`: reads RemoteInput text, `POST /api/session/:sid/prompt`. On success shows "Sent", waits 3 s, cancels. On failure shows the reason (at most 120 chars) on the Errors channel and keeps the text.
-  - `ACTION_FORM`: checks the form is still pending and answerable (`PendingForms.classify`). If not, it cancels silently. Otherwise `POST /api/session/:sid/form/:fid/reply` with `{answer:{key:value}}`.
-  - `ACTION_PERMISSION`: checks `PendingPermission.find`. If gone, cancels silently. Otherwise `POST /api/session/:sid/permission/:rid/reply` with `{decision: once|always|reject}`.
+  - Serialized per notification id (bounded in-process `Mutex` table, at most 64 entries); correctness still comes from re-reading pending state.
+  - `ACTION_REPLY`: reads RemoteInput text, `POST /api/session/:sid/prompt` (body unchanged, no client id). 2xx: "Sent", 3 s, cancel. 3xx/4xx: `KeepSendFailed` (reason ≤ 120 chars). 0/5xx: `KeepResultUnknown` ("open the session and check before sending again"). The text is kept as a draft; it is never re-sent automatically.
+  - `ACTION_FORM` / `ACTION_PERMISSION`: `ActionDecisions.beforeSend(check(pending()))`: Pending → POST; Gone → cancel; NotAnswerable → keep, open-session only; Unknown (`pending()==null`) → keep buttons, "couldn't check, nothing was sent". After a failed POST, read again: Gone → cancel; else keep (failed or unknown). A typed form answer is kept as a draft.
+- Decisions, `ActionDecisions.kt` (pure): `PendingCheck`, `ActionStep`, `SendOutcome` (`outcomeOf(status)`), `FailureContext`, `KeepPlan`. No step after a failure is ever Send.
 - Request builders, `NotificationActions` (in `PendingPermissions.kt`): pure `ApiRequest(method, path, body)`. Path segments are URL-encoded with `%20` for spaces.
 - Pending-state parsing, `PendingPermissions.kt` and `PendingForms.kt`: read `GET /api/sessions/status` → `pending[sid].permissions[]` and `pending[sid].forms[]`. Parsing is pure and unit-tested.
 - Runtime alerts, `NotificationObserver` and `RuntimeErrorWatch`:
@@ -57,12 +63,12 @@ Pipeline for OpenChamber events (stdout from the server):
 OpenChamber event:
 1. Server prints `[OpenChamberDesktopNotify] {json}` → `NotificationSink.accept`.
 2. Parse. Null → drop.
-3. `deliveryFor(kind, foreground)`. Suppressed → drop.
+3. `deliveryFor(kind, ProcessForeground.isInForeground())`. Suppressed (local page on screen) → drop.
 4. `ActionPlan.forEvent`:
    - Question → `postQuestion` on IO: `pending()` → `singleFormFor` → `classifyForm` → `notifier.post(event, channel, questionAnswer)`.
    - Otherwise → `notifier.post(event, channel)` with Reply / Permission / OpenOnly actions.
 5. Tap → `MainActivity.onNewIntent`/`onCreate` → `OpenSessionLink.offer` → UI opens the session.
-6. Action tap → `NotificationActionReceiver.onReceive` → `goAsync` → `handle` → `LocalApiClient.send` → `updateStatus` or `cancel`.
+6. Action tap → `NotificationActionReceiver.onReceive` → `goAsync` → per-id lock → (`pending()` check) → `LocalApiClient.send` → `updateStatus` ("Sent"), `cancel`, or `keep(KeepPlan)`.
 
 Runtime alert:
 1. `RuntimeState` change → `NotificationObserver` → `RuntimeErrorWatch.onState` → `postAlert`.
@@ -76,7 +82,7 @@ Runtime alert:
 - Started by `AndChamberApplication.onCreate`.
 - Receives stdout from `runtime/process/ProotOpenChamberServer` through the `notificationSink` lambda.
 - Manifest: `NotificationActionReceiver` is declared with `exported="false"`. `POST_NOTIFICATIONS` is requested.
-- UI consumes `OpenSessionLink.pending` and `OpenSessionLink.pathFor` (`ui/`).
+- UI consumes `OpenSessionLink.pending` and `OpenSessionLink.pathFor` (`ui/`), and feeds `LocalPageVisibility` from `ui/web/NotifyVisibility.kt`.
 - OpenChamber HTTP endpoints used (loopback, via `LocalApiClient`):
   - `GET /health`: `NotificationObserver.watchHealth`.
   - `GET /auth/session` and `POST /auth/session`: login, inside `LocalApiClient.login`.

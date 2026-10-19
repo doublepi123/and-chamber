@@ -30,7 +30,7 @@ Invariants:
 5. Repair: `stopLocked()` → `installLocked(thenStart = true)`. Uninstall: `stopLocked()` → `installer.removeAll()` → NotInstalled.
 6. Restart: stop and start as one queued job, used to apply new storage binds.
 7. Watchdog (every 5 s while Running): a dead child starts recovery at once. A live child with a failed `/health` read counts a miss, and 3 consecutive misses start recovery.
-8. Recovery: `restartAfterCrash()` loops over the budget: delay, `server.stop()`, `startLocked(manual = false)`. When the budget is spent, it publishes Failed and clears `wantsRunning`.
+8. Recovery: `restartAfterCrash()` loops over the budget: delay, `server.stop()`, `startLocked(manual = false)`. When the budget is spent, `stopAfterExhaustion()` runs `server.stop()` and `killOwned()` under `NonCancellable` (a cancellation is rethrown after cleanup; other errors are logged), and only then does it publish Failed and clear `wantsRunning`. The service may finish only after this terminal state.
 
 ## Integration
 

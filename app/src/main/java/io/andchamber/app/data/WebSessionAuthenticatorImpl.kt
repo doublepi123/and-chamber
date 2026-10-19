@@ -2,128 +2,169 @@ package io.andchamber.app.data
 
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.WebSessionAuthenticator
+import io.andchamber.app.runtime.WebSessionCookies
 import io.andchamber.app.runtime.WebSessionResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import io.andchamber.app.runtime.WebSessionIdentity
+import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-
-/** Writes a cookie header into the WebView's cookie jar. Abstracted so tests need no Android. */
-interface WebCookieSink {
-    fun setCookie(
-        url: String,
-        header: String,
-    )
-
-    fun flush()
-}
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The local server's trust for a login: the launch id, or null when that launch is not trustworthy
  * right now (child not confirmed listening, child dead, or stopped). See OpenChamberServer.readyLaunchId.
+ * A provider that throws counts as null.
  */
 fun interface LocalReadiness {
     fun runningLaunchId(): Long?
 }
 
 /**
- * Prepares a session for the WebView: health-checks the server, logs in with the known UI password
- * (POST /auth/session) and copies every Set-Cookie into the WebView cookie jar.
+ * Prepares a session for the WebView: health-checks the server, logs in with the password when one is
+ * known (POST /auth/session), and stores the resulting Set-Cookie headers through the caller's
+ * [WebSessionCookies] (the capability of that target's own WebView profile).
  *
  * Rules:
- *  - The login client must not follow redirects. A 3xx on the login path is NeedsLogin, never a
- *    silent hop to another origin with the password attached.
+ *  - The cookies must belong to this target and its canonical origin. Otherwise: no HTTP request, no
+ *    password read, Unreachable.
+ *  - No request uses a cookie jar, and no request follows redirects. A 3xx on the login path is
+ *    NeedsLogin, its cookies are never stored, and nothing is re-sent with the password.
  *  - A password is never sent in cleartext to a non-loopback host unless the remote entry has
- *    allowInsecureHttp. Such a request is refused without any network call.
- *  - The local server is asked for login only while the controller reports Running.
- *
- * Cookies: OpenChamber names its session cookie `oc_ui_session_<port>` when the Host header has a
- * port. Browsers do not isolate cookies by port, so the names are what keeps two servers on one host
- * apart; this code passes each Set-Cookie header through unchanged.
+ *    allowInsecureHttp.
+ *  - Local targets are trusted only while [LocalReadiness] reports the same non-null launch id before
+ *    and right before the POST and again before cookies are stored. Default readiness denies.
+ *  - Auth for one identity is serialized. Cookies are stored only while the coroutine is still active,
+ *    and a started store is completed (NonCancellable), so a cancelled older attempt cannot write over
+ *    a newer login.
+ *  - CancellationException is never swallowed.
  */
 class DefaultWebSessionAuthenticator(
     client: OkHttpClient,
-    private val cookies: WebCookieSink,
     private val localPassword: () -> String?,
-    private val localReady: LocalReadiness = LocalReadiness { 1L },
+    private val localReady: LocalReadiness = LocalReadiness { null },
     private val remoteStoredPassword: (ServerTarget.Remote) -> String? = { it.uiPassword },
 ) : WebSessionAuthenticator {
-    /** Health and session probes may follow redirects; they never carry a password. */
-    private val probeClient = client
-    /** Login must never follow a redirect: a 3xx is reported, not re-sent with the password. */
-    private val loginClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    /** Shared by health, session probe and login: no cookie jar and no redirects, ever. */
+    private val authClient: OkHttpClient =
+        client.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
     private val json = Json { ignoreUnknownKeys = true }
+    private val locks = ConcurrentHashMap<WebSessionIdentity, Mutex>()
 
-    override suspend fun prepare(target: ServerTarget): WebSessionResult =
-        withContext(Dispatchers.IO) {
-            val base = target.baseUrl.trimEnd('/')
-            val url = base.toHttpUrlOrNull() ?: return@withContext WebSessionResult.Unreachable("Invalid server address: ${target.baseUrl}")
-            if (!isHealthy(base)) {
-                return@withContext WebSessionResult.Unreachable("No OpenChamber server answered at $base")
+    override suspend fun prepare(
+        target: ServerTarget,
+        cookies: WebSessionCookies,
+    ): WebSessionResult {
+        val identity = cookies.identity
+        val origin = canonicalWebOrigin(target.baseUrl)
+        // Identity is checked before anything else: a mismatch makes no request and reads no secret.
+        if (identity.targetId != target.id || origin == null || origin != identity.origin) {
+            return WebSessionResult.Unreachable("The web profile does not belong to this server")
+        }
+        val base = target.baseUrl.trimEnd('/')
+        val url = base.toHttpUrlOrNull() ?: return WebSessionResult.Unreachable("Invalid server address: ${target.baseUrl}")
+        val lock = locks.computeIfAbsent(identity) { Mutex() }
+        return try {
+            lock.withLock { prepareLocked(target, base, url, cookies) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            WebSessionResult.Unreachable("Could not prepare the session")
+        }
+    }
+
+    private suspend fun prepareLocked(
+        target: ServerTarget,
+        base: String,
+        url: HttpUrl,
+        cookies: WebSessionCookies,
+    ): WebSessionResult {
+        if (!isHealthy(base)) return WebSessionResult.Unreachable("No OpenChamber server answered at $base")
+
+        // The local password is released only while the same launch is trusted, checked before and
+        // right before the POST. A child that died (or was replaced) in between sends nothing.
+        val launchId = if (target is ServerTarget.Local) readyLaunchId() else null
+        if (target is ServerTarget.Local && launchId == null) {
+            return WebSessionResult.Unreachable("The local OpenChamber is not running")
+        }
+        val password =
+            when (target) {
+                is ServerTarget.Local -> localPassword()
+                is ServerTarget.Remote -> remoteStoredPassword(target)
             }
 
-            // The local password is released only while the same launch is trusted, checked before and
-            // right before the POST. A child that died (or was replaced) in between sends nothing.
-            val launchId = if (target is ServerTarget.Local) localReady.runningLaunchId() else null
-            if (target is ServerTarget.Local && launchId == null) {
-                return@withContext WebSessionResult.Unreachable("The local OpenChamber is not running")
-            }
-            val password =
-                when (target) {
-                    is ServerTarget.Local -> localPassword()
-                    is ServerTarget.Remote -> remoteStoredPassword(target)
-                }
-
-            if (password.isNullOrEmpty()) {
-                // No password to use: only a session that is already signed in counts as Ready.
-                return@withContext if (isAuthenticated(base)) WebSessionResult.Ready(base) else WebSessionResult.NeedsLogin(base)
-            }
-            if (target is ServerTarget.Local && localReady.runningLaunchId() != launchId) {
-                return@withContext WebSessionResult.Unreachable("The local OpenChamber restarted; try again")
-            }
-
-            val allowed = target !is ServerTarget.Remote || target.allowInsecureHttp || url.isTransportSafe()
-            if (!allowed) {
-                return@withContext WebSessionResult.Unreachable(
-                    "Refusing to send the password over plain http to ${url.host}. Enable insecure http for this server to allow it.",
-                )
-            }
-
-            login(base, password)
+        if (password.isNullOrEmpty()) {
+            // No password: only a session the server already accepts (with this profile's cookies) counts.
+            return if (probeSession(base, cookies)) WebSessionResult.Ready(base) else WebSessionResult.NeedsLogin(base)
+        }
+        if (target is ServerTarget.Local && readyLaunchId() != launchId) {
+            return WebSessionResult.Unreachable("The local OpenChamber restarted; try again")
         }
 
-    private fun isHealthy(base: String): Boolean =
-        runCatching {
+        val allowed = target !is ServerTarget.Remote || target.allowInsecureHttp || url.isTransportSafe()
+        if (!allowed) {
+            return WebSessionResult.Unreachable(
+                "Refusing to send the password over plain http to ${url.host}. Enable insecure http for this server to allow it.",
+            )
+        }
+        return login(base, password, cookies, target, launchId)
+    }
+
+    private suspend fun isHealthy(base: String): Boolean =
+        fetch(default = false) {
             val request = Request.Builder().url("$base/health").get().build()
-            probeClient.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use false
                 val body = response.body?.string().orEmpty()
                 json.parseToJsonElement(body).jsonObject["status"]?.jsonPrimitive?.content == "ok"
             }
-        }.getOrDefault(false)
+        }
 
-    private fun isAuthenticated(base: String): Boolean =
-        runCatching {
-            val request = Request.Builder().url("$base/auth/session").get().build()
-            probeClient.newCall(request).execute().use { response ->
-                val ok = response.code == 200
-                if (ok) storeCookies(base, response.headers("Set-Cookie"))
-                ok
-            }
-        }.getOrDefault(false)
+    /** GET /auth/session with this profile's cookies. True when the server accepts them (its cookies are stored). */
+    private suspend fun probeSession(
+        base: String,
+        cookies: WebSessionCookies,
+    ): Boolean {
+        val header = cookies.cookieHeader(base)
+        val reply =
+            fetch<SetCookieReply?>(default = null) {
+                val builder = Request.Builder().url("$base/auth/session").get()
+                if (header != null) builder.header("Cookie", header)
+                authClient.newCall(builder.build()).execute().use { response ->
+                    SetCookieReply(response.code, response.headers("Set-Cookie"))
+                }
+            } ?: return false
+        if (reply.code != 200) return false
+        commit(base, reply.setCookies, cookies)
+        return true
+    }
 
-    private fun login(
+    private suspend fun login(
         base: String,
         password: String,
+        cookies: WebSessionCookies,
+        target: ServerTarget,
+        launchId: Long?,
     ): WebSessionResult {
         val body =
             buildJsonObject {
@@ -135,30 +176,62 @@ class DefaultWebSessionAuthenticator(
                 .url("$base/auth/session")
                 .post(body.toRequestBody(JSON_MEDIA))
                 .build()
-        return runCatching {
-            loginClient.newCall(request).execute().use { response ->
-                when (response.code) {
-                    in 200..299 -> {
-                        storeCookies(base, response.headers("Set-Cookie"))
-                        WebSessionResult.Ready(base)
-                    }
-                    401 -> WebSessionResult.NeedsLogin(base)
-                    // A redirect means the server wants us elsewhere; never follow it with the password.
-                    in 300..399 -> WebSessionResult.NeedsLogin(base)
-                    else -> WebSessionResult.Unreachable("Login failed with HTTP ${response.code}")
+        val reply =
+            fetch<SetCookieReply?>(default = null) {
+                authClient.newCall(request).execute().use { response ->
+                    SetCookieReply(response.code, response.headers("Set-Cookie"))
+                }
+            } ?: return WebSessionResult.Unreachable("Login request failed")
+        return when (reply.code) {
+            in 200..299 -> {
+                // Launch may have changed while the POST was in flight: its cookies must not be stored.
+                if (target is ServerTarget.Local && readyLaunchId() != launchId) {
+                    WebSessionResult.Unreachable("The local OpenChamber restarted; try again")
+                } else {
+                    commit(base, reply.setCookies, cookies)
+                    WebSessionResult.Ready(base)
                 }
             }
-        }.getOrElse { WebSessionResult.Unreachable(it.message ?: "Login request failed") }
+            // 401 is a wrong password; a redirect means the server wants us elsewhere. Neither stores cookies.
+            401 -> WebSessionResult.NeedsLogin(base)
+            in 300..399 -> WebSessionResult.NeedsLogin(base)
+            else -> WebSessionResult.Unreachable("Login failed with HTTP ${reply.code}")
+        }
     }
 
-    private fun storeCookies(
+    /**
+     * Stores the cookies of one accepted response. Checks that the coroutine is still active first, then
+     * completes the whole batch (NonCancellable) so a started write is never left half done.
+     */
+    private suspend fun commit(
         base: String,
         headers: List<String>,
+        cookies: WebSessionCookies,
     ) {
+        currentCoroutineContext().ensureActive()
         if (headers.isEmpty()) return
-        headers.forEach { header -> cookies.setCookie(base, header) }
-        cookies.flush()
+        withContext(NonCancellable) { cookies.storeCookies(base, headers) }
     }
+
+    private fun readyLaunchId(): Long? = runCatching { localReady.runningLaunchId() }.getOrNull()
+
+    /** Blocking network work off the main thread. Ordinary failures become [default]; cancellation propagates. */
+    private suspend fun <T> fetch(
+        default: T,
+        block: () -> T,
+    ): T =
+        try {
+            withContext(Dispatchers.IO) { block() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            default
+        }
+
+    private class SetCookieReply(
+        val code: Int,
+        val setCookies: List<String>,
+    )
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()

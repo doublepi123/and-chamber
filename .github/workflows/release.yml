@@ -83,6 +83,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Python script tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
       - name: Test and build signed release
         env:
           ANDCHAMBER_KEYSTORE_PASSWORD: ${{ secrets.ANDCHAMBER_KEYSTORE_PASSWORD }}

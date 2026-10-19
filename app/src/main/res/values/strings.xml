@@ -29,6 +29,10 @@
     <string name="reply_sent">Sent</string>
     <string name="reply_failed">Couldn\'t send: %1$s</string>
     <string name="permission_done">Permission answered</string>
+    <string name="notify_check_failed">Couldn\'t check with OpenChamber, so nothing was sent. Make sure OpenChamber is running, then try again.</string>
+    <string name="notify_result_unknown">Not sure your answer arrived. Open the session and check before you send it again.</string>
+    <string name="notify_answer_in_app">This can only be answered in OpenChamber. Tap to open the session.</string>
+    <string name="notify_your_reply">Your reply: %1$s</string>
 
     <!-- AndChamber runtime alerts (notifications) -->
     <string name="alert_setup_failed">Setup failed</string>
@@ -209,6 +213,15 @@
     <string name="downloading">Downloading %1$s</string>
     <string name="saved_to_downloads">Saved %1$s to Downloads</string>
     <string name="download_failed">Couldn\'t save the file</string>
+
+    <!-- Web page isolation: every server's page needs its own WebView profile -->
+    <string name="web_update_webview_title">Update Android System WebView</string>
+    <string name="web_update_webview_body">This WebView can\'t keep each server\'s sign-in separate, so the page isn\'t opened. Update Android System WebView from your app store, then try again.</string>
+    <string name="web_isolation_failed_title">Couldn\'t open the page safely</string>
+    <string name="web_isolation_failed_body">AndChamber couldn\'t give this server its own separate storage, so the page isn\'t opened. Try again, or update Android System WebView.</string>
+    <string name="web_bad_address_title">Can\'t open this address</string>
+    <string name="web_bad_address_body">Edit the server\'s address on the home screen. It must start with http:// or https:// and can\'t include a user name or password.</string>
+    <string name="web_local_keeps_running">OpenChamber keeps running on this phone. Notifications and the home screen work as before.</string>
 
     <!-- Install steps -->
     <string name="step_download_rootfs">Download the Linux base</string>

@@ -29,8 +29,13 @@ class LocalApiClientTest {
         server.shutdown()
     }
 
+    /** The launch is trusted (id 1) for every test here; the readiness gate itself is covered in LocalApiSecurityTest. */
     private fun client(password: String? = "ui-secret") =
-        LocalApiClient(baseUrl = { server.url("/").toString().trimEnd('/') }, password = { password })
+        LocalApiClient(
+            baseUrl = { server.url("/").toString().trimEnd('/') },
+            password = { password },
+            localReady = LocalReadiness { 1L },
+        )
 
     private fun login(): MockResponse = MockResponse().setResponseCode(200).addHeader("Set-Cookie", "oc_ui_session_3000=tok; Path=/; HttpOnly")
 
@@ -118,7 +123,7 @@ class LocalApiClientTest {
     @Test
     fun `a non-loopback address is refused`() =
         runBlocking {
-            val remote = LocalApiClient(baseUrl = { "http://192.168.1.20:3000" }, password = { "pw" })
+            val remote = LocalApiClient(baseUrl = { "http://192.168.1.20:3000" }, password = { "pw" }, localReady = LocalReadiness { 1L })
             val result = remote.send(ApiRequest("GET", "/x", null))
             assertEquals(0, result.status)
         }

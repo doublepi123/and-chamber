@@ -2,12 +2,14 @@ package io.andchamber.app.di
 
 import android.content.Context
 import android.os.Build
-import android.webkit.CookieManager
+import android.util.Log
+import io.andchamber.app.data.AndroidHttpDownloadStarter
 import io.andchamber.app.data.DefaultWebSessionAuthenticator
 import io.andchamber.app.data.EncryptedRemoteServerStore
+import io.andchamber.app.data.HttpDownloadStarter
 import io.andchamber.app.data.LocalReadiness
 import io.andchamber.app.data.LocalApiClient
-import io.andchamber.app.data.WebCookieSink
+import io.andchamber.app.data.WebSessionProfiles
 import io.andchamber.app.R
 import io.andchamber.app.notify.NotificationBootstrapStore
 import io.andchamber.app.notify.RuntimeErrorWatch
@@ -35,7 +37,11 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.RuntimeStateListener
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.install.RuntimeInstallerImpl
+import io.andchamber.app.runtime.network.AndroidNetworkEvents
 import io.andchamber.app.runtime.network.AndroidSystemDnsProvider
+import io.andchamber.app.runtime.network.DnsRefresher
+import io.andchamber.app.runtime.network.DnsRefresherMonitor
+import io.andchamber.app.runtime.network.RuntimeDnsReporter
 import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.install.VerifiedRuntimeDownloader
 import io.andchamber.app.runtime.manifest.RuntimeManifestReader
@@ -58,20 +64,11 @@ val appModule =
                 .build()
         }
 
-        single<WebCookieSink> {
-            object : WebCookieSink {
-                override fun setCookie(
-                    url: String,
-                    header: String,
-                ) {
-                    CookieManager.getInstance().setCookie(url, header)
-                }
+        // Per-target WebView profiles. Replaces the old global CookieManager; there is no global fallback.
+        single { WebSessionProfiles() }
 
-                override fun flush() {
-                    CookieManager.getInstance().flush()
-                }
-            }
-        }
+        // One application-scoped starter, so downloads outlive the page that started them.
+        single<HttpDownloadStarter> { AndroidHttpDownloadStarter(get<Context>()) }
 
         single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
 
@@ -84,6 +81,8 @@ val appModule =
                 // The base URL is the live server's, so a stopped or restarting server is never called.
                 baseUrl = { (get<LocalRuntimeController>().state.value as? RuntimeState.Running)?.url },
                 password = { RuntimeSecrets.existingUiPassword(paths) },
+                // Without this, LocalApiClient denies every request by default.
+                localReady = LocalReadiness { get<OpenChamberServer>().readyLaunchId() },
             )
         }
 
@@ -145,6 +144,14 @@ val appModule =
                 scanner = scanner,
                 signal = { pid -> android.os.Process.killProcess(pid.toInt()) },
                 refreshDns = { runtime -> ResolvConf.write(runtime.rootfs, AndroidSystemDnsProvider(context).dnsServers()) },
+                dnsMonitor =
+                    DnsRefresherMonitor(
+                        DnsRefresher(
+                            dnsProvider = AndroidSystemDnsProvider(context),
+                            events = AndroidNetworkEvents(context),
+                            reporter = RuntimeDnsReporter { message -> Log.w("AndChamberDns", message) },
+                        ),
+                    ),
                 cleanBeforeStart = { port, guestRunDir, proot ->
                     ProotStaleServerCleaner(
                         paths = paths,
@@ -205,7 +212,6 @@ val appModule =
             val paths = RuntimePaths.under(get<Context>().filesDir)
             DefaultWebSessionAuthenticator(
                 client = get(),
-                cookies = get(),
                 localPassword = { RuntimeSecrets.existingUiPassword(paths) },
                 localReady = LocalReadiness { get<OpenChamberServer>().readyLaunchId() },
             )

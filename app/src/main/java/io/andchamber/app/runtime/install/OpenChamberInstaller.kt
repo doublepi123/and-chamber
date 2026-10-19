@@ -22,6 +22,9 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+/** Bounded wait for a guest command's output reader after its stream is closed. */
+internal const val OUTPUT_JOIN_MILLIS = 2_000L
+
 /**
  * Builds the Alpine + Node + OpenChamber environment in staging and activates it. Each guest
  * command's output is streamed to [InstallReporter.log] and to `logs/install.log`.
@@ -223,19 +226,28 @@ class OpenChamberInstaller(
                     script = script,
                 )
             val process = start(command, redirectToLog = true)
-            val reader =
-                Thread({
-                    process.inputStream.bufferedReader().forEachLine { line ->
+            val pump =
+                GuestOutputPump(
+                    input = process.inputStream,
+                    childAlive = { process.isAlive },
+                    onLine = { line ->
                         report.log(line)
                         observe(line)
                         runCatching { paths.installLog.appendText(line + "\n") }
-                    }
-                }, "openchamber-install-output").apply { isDaemon = true }
-            reader.start()
-            if (!awaitExit(process, timeoutMinutes, TimeUnit.MINUTES)) {
-                error("Command timed out after $timeoutMinutes minutes: ${script.take(120)}")
-            }
-            reader.join(2_000)
+                    },
+                )
+            pump.start()
+            // The teardown deadline starts inside awaitAndTearDown, after the command has finished.
+            pump.awaitAndTearDown(
+                awaitCommand = { awaitExit(process, timeoutMinutes, TimeUnit.MINUTES) },
+                teardownBudgetNanos = OUTPUT_JOIN_MILLIS * 1_000_000L,
+                timeoutFailure = {
+                    IllegalStateException("Command timed out after $timeoutMinutes minutes: ${script.take(120)}")
+                },
+                readerFailure = { cause ->
+                    IllegalStateException("Output reader failed: ${cause.message}", cause)
+                },
+            )
             return process.exitValue()
         }
 
@@ -249,14 +261,17 @@ class OpenChamberInstaller(
             failureText: String,
             timeoutMinutes: Long = DEFAULT_TIMEOUT_MINUTES,
         ) {
-            val lines = mutableListOf<String>()
+            // Lines arrive on the output reader thread. The reader may still be running (abandoned on a
+            // deadline), so the consumer works on a thread-safe snapshot, not the live list.
+            val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
             val exit = run(script, timeoutMinutes) { line -> lines += line }
             if (exit == 0) return
+            val snapshot = synchronized(lines) { lines.toList() }
             // Mirror problems are the common cause on a phone; name them instead of a generic failure.
-            val unreachable = lines.any(NetworkFailure::isNetworkOutput)
+            val unreachable = snapshot.any(NetworkFailure::isNetworkOutput)
             val key = if (unreachable) MessageKey.MirrorsUnreachable else failure
             val text = if (unreachable) NetworkFailure.MESSAGE else failureText
-            throw UserFacingException(key, "$text (exit $exit)", detail = lines.takeLast(MAX_DETAIL_LINES).joinToString("\n"))
+            throw UserFacingException(key, "$text (exit $exit)", detail = snapshot.takeLast(MAX_DETAIL_LINES).joinToString("\n"))
         }
 
         /** Captures stdout of a short, quiet guest command. Timeouts kill the tree, like [run]. */

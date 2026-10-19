@@ -184,6 +184,7 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("org.tukaani:xz:1.9")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.webkit:webkit:1.14.0")
 
     implementation("io.insert-koin:koin-android:4.0.1")
     implementation("io.insert-koin:koin-androidx-compose:4.0.1")

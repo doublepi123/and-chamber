@@ -189,12 +189,59 @@ class NotifyLogicTest {
         assertNull(PendingPermission.find(pending, "ses_2", "per_9"))
     }
 
-    // --- foreground suppression ---
+    // --- suppression only while the local page is on screen ---
 
     @Test
-    fun `OpenChamber events are dropped while the app is in the foreground`() {
-        assertEquals(Delivery.Suppressed, NotifyPolicy.deliveryFor(DesktopNotification.Kind.Ready, appInForeground = true))
-        assertEquals(Delivery.Suppressed, NotifyPolicy.deliveryFor(DesktopNotification.Kind.Permission, appInForeground = true))
+    fun `OpenChamber events are dropped while the local page is showing`() {
+        assertEquals(Delivery.Suppressed, NotifyPolicy.deliveryFor(DesktopNotification.Kind.Ready, localPageShowing = true))
+        assertEquals(Delivery.Suppressed, NotifyPolicy.deliveryFor(DesktopNotification.Kind.Permission, localPageShowing = true))
+    }
+
+    @Test
+    fun `only a resumed local page with nothing over it counts as showing`() {
+        assertTrue(NotifyPolicy.localPageShowing(isLocal = true, resumed = true, overlayShown = false))
+        // Remote server page (Home has no web screen at all, so it never reports).
+        assertFalse(NotifyPolicy.localPageShowing(isLocal = false, resumed = true, overlayShown = false))
+        // Paused: background, mid-transition, or a file picker or other activity on top.
+        assertFalse(NotifyPolicy.localPageShowing(isLocal = true, resumed = false, overlayShown = false))
+        // Any overlay: starting, stopped, errors, connecting, isolation, not painted yet.
+        assertFalse(NotifyPolicy.localPageShowing(isLocal = true, resumed = true, overlayShown = true))
+    }
+
+    @Test
+    fun `nothing reported means not showing, so events are posted`() {
+        assertFalse(PageVisibility().isShowing())
+    }
+
+    @Test
+    fun `a page reports showing and clears it when it stops showing`() {
+        val visibility = PageVisibility()
+        val page = Any()
+        visibility.report(page, showing = true)
+        assertTrue(visibility.isShowing())
+        visibility.report(page, showing = false)
+        assertFalse(visibility.isShowing())
+    }
+
+    @Test
+    fun `a leaving page cannot clear the report of the page that took over`() {
+        val visibility = PageVisibility()
+        val old = Any()
+        val new = Any()
+        visibility.report(old, showing = true)
+        visibility.report(new, showing = true)
+        visibility.report(old, showing = false)
+        assertTrue("the new page still shows", visibility.isShowing())
+        visibility.report(new, showing = false)
+        assertFalse(visibility.isShowing())
+    }
+
+    @Test
+    fun `the visibility source is not suppressing until a page reports`() {
+        // The production source starts from this report, so a fresh process posts everything.
+        val foreground = AppForeground { LocalPageVisibility.isShowing() }
+        val delivery = NotifyPolicy.deliveryFor(DesktopNotification.Kind.Ready, foreground.isInForeground())
+        assertEquals(Delivery.Post(Channel.AgentFinished), delivery)
     }
 
     @Test
@@ -291,7 +338,7 @@ class NotifyLogicTest {
     }
 
     @Test
-    fun `the foreground rule does not depend on the event being a question`() {
-        assertFalse(NotifyPolicy.deliveryFor(DesktopNotification.Kind.Goal, appInForeground = false) == Delivery.Suppressed)
+    fun `the visibility rule does not depend on the event being a question`() {
+        assertFalse(NotifyPolicy.deliveryFor(DesktopNotification.Kind.Goal, localPageShowing = false) == Delivery.Suppressed)
     }
 }

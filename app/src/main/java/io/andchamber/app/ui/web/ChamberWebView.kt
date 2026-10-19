@@ -2,7 +2,6 @@ package io.andchamber.app.ui.web
 
 import io.andchamber.app.R
 import android.annotation.SuppressLint
-import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Context
@@ -21,7 +20,6 @@ import android.util.Base64
 import android.view.ContextThemeWrapper
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
@@ -42,6 +40,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import io.andchamber.app.data.HttpDownloadRequest
+import io.andchamber.app.data.HttpDownloadResult
+import io.andchamber.app.data.HttpDownloadStarter
+import io.andchamber.app.data.WebIsolationException
+import io.andchamber.app.data.WebIsolationFailure
+import io.andchamber.app.data.WebProfileBinding
+import io.andchamber.app.data.canonicalWebOrigin
+import io.andchamber.app.runtime.WebSessionCookies
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -58,20 +64,13 @@ internal interface WebHost {
     fun requestMicrophone(onResult: (Boolean) -> Unit)
 }
 
-/** "scheme://host:port" with default ports filled in, for same-origin checks. */
+/**
+ * Canonical "scheme://host:port" of [url] (shared with the profile and auth identity), or "" when it
+ * is not a plain http(s) address. Same-origin checks compare against the binding's origin.
+ */
 internal fun originOf(url: String?): String {
     if (url.isNullOrEmpty()) return ""
-    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return ""
-    val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return ""
-    val host = uri.host?.lowercase(Locale.ROOT) ?: return ""
-    val port =
-        when {
-            uri.port != -1 -> uri.port
-            scheme == "http" -> 80
-            scheme == "https" -> 443
-            else -> -1
-        }
-    return "$scheme://$host:$port"
+    return canonicalWebOrigin(url) ?: ""
 }
 
 /**
@@ -81,10 +80,17 @@ internal fun originOf(url: String?): String {
 @SuppressLint("SetJavaScriptEnabled")
 internal class ChamberWebView(
     context: Context,
-    val targetId: String,
+    /** The profile this WebView is bound to; its origin is fixed for the life of this object. */
+    val binding: WebProfileBinding,
     darkTheme: Boolean,
     private val backgroundColor: Int,
+    private val downloads: HttpDownloadStarter,
 ) {
+    val targetId: String = binding.identity.targetId
+
+    /** The only origin this WebView may load. Never re-derived from a loaded URL. */
+    private val origin: String = binding.identity.origin
+
     // WebView derives prefers-color-scheme from the theme's isLightTheme, so match the app theme.
     private val themedContext =
         ContextThemeWrapper(
@@ -105,7 +111,6 @@ internal class ChamberWebView(
     // True only while the main frame shows a document from [origin]. Gates the bridge and helper.
     @Volatile private var mainTrusted = false
     private val crashTimes = ArrayDeque<Long>()
-    private var origin: String = ""
     private var targetUrl: String? = null
     private var lastTrustedUrl: String? = null
     private var foreignRecoveries = 0
@@ -113,6 +118,14 @@ internal class ChamberWebView(
     private var destroyed = false
 
     var host: WebHost? = null
+
+    /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
+    var sessionCookies: WebSessionCookies? = null
+        private set
+
+    /** Why the page cannot be shown in its isolated profile. Non-null means [view] is null. */
+    var isolationFailure by mutableStateOf<WebIsolationFailure?>(null)
+        private set
 
     /** Identifies the server session currently loaded; null until [load] is called. */
     var sessionKey: String? = null
@@ -142,19 +155,30 @@ internal class ChamberWebView(
     var generation by mutableIntStateOf(0)
         private set
 
-    var view: WebView = createView()
+    /** Null only when the profile could not be bound (see [isolationFailure]); nothing is loaded then. */
+    var view: WebView? = null
         private set
+
+    init {
+        // Bound before any other WebView operation, inside the constructor, so no caller sees an unbound view.
+        view = createBoundView()
+    }
 
     fun load(
         url: String,
         sessionKey: String,
     ) {
         if (destroyed) return
+        val webView = view ?: return
+        if (originOf(url) != origin) {
+            // Only the binding's own origin may be loaded into this profile.
+            progress = 100
+            pageError = context().getString(R.string.page_failed_title)
+            return
+        }
         this.sessionKey = sessionKey
-        val newOrigin = originOf(url)
-        if (newOrigin != origin) rotateToken()
+        rotateToken()
         mainTrusted = false
-        origin = newOrigin
         targetUrl = url
         lastTrustedUrl = null
         foreignRecoveries = 0
@@ -163,7 +187,7 @@ internal class ChamberWebView(
         committed = false
         progress = 0
         clearHistoryAfterLoad = true
-        view.loadUrl(url)
+        webView.loadUrl(url)
     }
 
     /** Forgets the loaded session so the next prepare() loads the page again. */
@@ -178,21 +202,23 @@ internal class ChamberWebView(
      */
     fun navigateWithinSession(url: String): Boolean {
         if (destroyed || sessionKey == null || origin.isEmpty() || originOf(url) != origin) return false
+        val webView = view ?: return false
         if (currentUrl == url && pageError == null) return true // Already showing it.
         pageError = null
         foreignRecoveries = 0
-        view.loadUrl(url)
+        webView.loadUrl(url)
         return true
     }
 
     fun reload() {
         if (destroyed) return
+        val webView = view ?: return
         pageError = null
-        val shown = view.url
+        val shown = webView.url
         if (shown.isNullOrEmpty() || shown == BLANK) {
-            currentUrl?.let { view.loadUrl(it) }
+            currentUrl?.let { webView.loadUrl(it) }
         } else {
-            view.reload()
+            webView.reload()
         }
     }
 
@@ -200,10 +226,10 @@ internal class ChamberWebView(
         bridgeToken = UUID.randomUUID().toString()
     }
 
-    fun canGoBack(): Boolean = !destroyed && view.canGoBack()
+    fun canGoBack(): Boolean = !destroyed && view?.canGoBack() == true
 
     fun goBack() {
-        if (!destroyed) view.goBack()
+        if (!destroyed) view?.goBack()
     }
 
     fun openInBrowser() {
@@ -211,18 +237,19 @@ internal class ChamberWebView(
         openExternally(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 
-    /** The WebView, detached from any previous holder so it can be attached again. */
-    fun attachableView(): WebView {
-        (view.parent as? ViewGroup)?.removeView(view)
-        return view
+    /** The WebView, detached from any previous holder so it can be attached again. Null when unbound. */
+    fun attachableView(): WebView? {
+        val webView = view ?: return null
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        return webView
     }
 
     fun onResume() {
-        if (!destroyed) view.onResume()
+        if (!destroyed) view?.onResume()
     }
 
     fun onPause() {
-        if (!destroyed) view.onPause()
+        if (!destroyed) view?.onPause()
     }
 
     fun destroy() {
@@ -230,17 +257,31 @@ internal class ChamberWebView(
         destroyed = true
         mainTrusted = false
         host = null
-        val old = view
+        val old = view ?: return
         (old.parent as? ViewGroup)?.removeView(old)
         old.stopLoading()
         old.destroy()
     }
 
+    /**
+     * Creates a WebView and binds it to this profile before anything else touches it (settings, JS,
+     * clients, navigation). On a bind failure the view is already destroyed by the binding: returns null
+     * and sets [isolationFailure]. Never falls back to another profile.
+     */
     @SuppressLint("JavascriptInterface")
-    private fun createView(): WebView {
+    private fun createBoundView(): WebView? {
         val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         WebView.setWebContentsDebuggingEnabled(debuggable)
         val webView = WebView(themedContext)
+        val cookies =
+            try {
+                binding.bindFreshWebView(webView)
+            } catch (e: WebIsolationException) {
+                isolationFailure = e.failure
+                return null
+            }
+        sessionCookies = cookies
+        isolationFailure = null
         webView.layoutParams =
             ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -272,10 +313,7 @@ internal class ChamberWebView(
             allowUniversalAccessFromFileURLs = false
             setSupportZoom(false)
         }
-        CookieManager.getInstance().let { cookies ->
-            cookies.setAcceptCookie(true)
-            cookies.setAcceptThirdPartyCookies(webView, false)
-        }
+        // Cookie policy is set on this profile's own CookieManager by bindFreshWebView, never globally.
         webView.webViewClient = Client()
         webView.webChromeClient = Chrome()
         webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -488,16 +526,26 @@ internal class ChamberWebView(
         while (crashTimes.isNotEmpty() && now - crashTimes.first() > CRASH_WINDOW_MS) crashTimes.removeFirst()
 
         val old = view
-        (old.parent as? ViewGroup)?.removeView(old)
-        old.destroy()
-        view = createView()
+        view = null
+        if (old != null) {
+            (old.parent as? ViewGroup)?.removeView(old)
+            old.destroy()
+        }
+        // Same binding, so the replacement stays in this server's profile. If that fails, no view is
+        // exposed; the UI shows [isolationFailure] instead.
+        val fresh = createBoundView()
+        view = fresh
         generation += 1
+        if (fresh == null) {
+            progress = 100
+            return
+        }
 
         val url = currentUrl
         if (url != null && crashTimes.size <= MAX_AUTO_RELOADS) {
             progress = 0
             committed = false
-            view.loadUrl(url)
+            fresh.loadUrl(url)
             toast(context().getString(R.string.page_crashed))
         } else {
             progress = 100
@@ -519,7 +567,7 @@ internal class ChamberWebView(
             // blob:/data: downloads only come from the trusted server page; anything else is dropped.
             scheme == "blob" -> {
                 if (!mainTrusted) return
-                view.evaluateJavascript(
+                view?.evaluateJavascript(
                     "window.__andchamber && window.__andchamber.fetchAndSave(" +
                         "${JSONObject.quote(url)}, ${JSONObject.quote(name)});",
                     null,
@@ -533,31 +581,26 @@ internal class ChamberWebView(
         }
     }
 
+    /**
+     * HTTP(S) downloads go through the app's own downloader with this profile's cookie capability; the
+     * downloader only sends cookies to the binding origin and strips them once a redirect leaves it. A
+     * failure is reported, never retried through another channel.
+     */
     private fun enqueueDownload(
         url: String,
         userAgent: String?,
         mimeType: String?,
         name: String,
     ) {
-        try {
-            val request =
-                DownloadManager.Request(Uri.parse(url)).apply {
-                    mimeType?.takeIf { it.isNotBlank() }?.let { setMimeType(it) }
-                    CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
-                    userAgent?.takeIf { it.isNotBlank() }?.let { addRequestHeader("User-Agent", it) }
-                    setTitle(name)
-                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
-                    } else {
-                        // Public Downloads needs a storage permission before Android 10.
-                        setDestinationInExternalFilesDir(appContext, Environment.DIRECTORY_DOWNLOADS, name)
-                    }
+        val cookies = sessionCookies ?: return
+        toast(context().getString(R.string.downloading, name))
+        downloads.start(cookies, HttpDownloadRequest(url, name, mimeType, userAgent)) { result ->
+            main.post {
+                when (result) {
+                    is HttpDownloadResult.Saved -> toast(context().getString(R.string.saved_to_downloads, result.fileName))
+                    is HttpDownloadResult.Failed -> toast(context().getString(R.string.download_failed))
                 }
-            appContext.getSystemService(DownloadManager::class.java).enqueue(request)
-            toast(context().getString(R.string.downloading, name))
-        } catch (_: Exception) {
-            openExternally(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
         }
     }
 
@@ -772,7 +815,7 @@ internal class ChamberWebView(
  * Keeps at most one live [ChamberWebView] (the last opened server), so coming back from Home is
  * instant and only one page uses memory.
  */
-internal class WebViewPool {
+internal class WebViewPool(private val downloads: HttpDownloadStarter) {
     private var current: ChamberWebView? = null
 
     /** Vertical position (0..1) of the page menu handle; shared by all servers. */
@@ -780,15 +823,20 @@ internal class WebViewPool {
 
     fun peek(targetId: String): ChamberWebView? = current?.takeIf { it.targetId == targetId }
 
+    /**
+     * Reuses the pooled WebView only for the same identity (target + canonical origin). A different
+     * identity, including the same target at a new origin, gets a new WebView in its own profile.
+     * May return a [ChamberWebView] whose [ChamberWebView.view] is null (isolation failure).
+     */
     fun obtain(
         context: Context,
-        targetId: String,
+        binding: WebProfileBinding,
         darkTheme: Boolean,
         backgroundColor: Int,
     ): ChamberWebView {
-        peek(targetId)?.let { return it }
+        current?.takeIf { it.binding.identity == binding.identity }?.let { return it }
         destroyAll()
-        return ChamberWebView(context, targetId, darkTheme, backgroundColor).also { current = it }
+        return ChamberWebView(context, binding, darkTheme, backgroundColor, downloads).also { current = it }
     }
 
     fun discard(targetId: String) {

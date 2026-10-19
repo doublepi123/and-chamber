@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -390,6 +391,10 @@ class DefaultLocalRuntimeController(
             val delayMillis = restartPolicy.nextDelayMillis()
             if (delayMillis == null) {
                 wantsRunning = false
+                // The budget is spent: the child may still be alive (health misses, not a death), so
+                // clean it up before the terminal Failed lets the service finish. Cancellation rethrows
+                // and an error is logged; either way the terminal state is still published.
+                stopAfterExhaustion()
                 publish(
                     RuntimeState.Failed(
                         "OpenChamber kept stopping; tap Start to try again",
@@ -415,6 +420,35 @@ class DefaultLocalRuntimeController(
                 publish(RuntimeState.Failed("Restart failed: ${error.message}", recoverable = true, phase = FailurePhase.Start))
             }
         }
+    }
+
+    /**
+     * Stops the server and every owned process before the terminal failure is published. Both steps
+     * run in [NonCancellable] and are independent: a throw from [server].stop must not skip [killOwned].
+     * Each error is logged; the terminal state is published by the caller either way. A cancellation
+     * that arrives during cleanup is still honoured after both steps have been attempted.
+     */
+    private suspend fun stopAfterExhaustion() {
+        var cancelled: CancellationException? = null
+        withContext(NonCancellable) {
+            withContext(ioDispatcher) {
+                try {
+                    server.stop()
+                } catch (error: CancellationException) {
+                    cancelled = error
+                } catch (error: Throwable) {
+                    appendLog("Server stop after restart budget failed: ${error.message}")
+                }
+                try {
+                    killOwned()
+                } catch (error: CancellationException) {
+                    cancelled = cancelled ?: error
+                } catch (error: Throwable) {
+                    appendLog("Owned process cleanup after restart budget failed: ${error.message}")
+                }
+            }
+        }
+        cancelled?.let { throw it }
     }
 
     private fun publish(next: RuntimeState) {

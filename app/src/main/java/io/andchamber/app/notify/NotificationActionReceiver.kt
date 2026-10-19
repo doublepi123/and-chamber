@@ -6,20 +6,24 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.RemoteInput
 import io.andchamber.app.R
+import io.andchamber.app.data.ApiResult
 import io.andchamber.app.data.LocalApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
 /**
  * Handles notification buttons and the reply field. Network work runs on [goAsync] so the broadcast
- * stays alive: each action posts its request, updates the notification with the outcome, and a short
- * "Sent" status clears itself. Failures keep the reply text in the notification so nothing is lost.
+ * stays alive. A sent reply shows "Sent" briefly; an answered button removes the notification. Anything
+ * that didn't go through keeps the notification (session tap, buttons, reply text) with a plain status,
+ * and is never sent again by itself (see [ActionDecisions]).
  */
 class NotificationActionReceiver : BroadcastReceiver(), KoinComponent {
     private val api: LocalApiClient by inject()
@@ -47,65 +51,106 @@ class NotificationActionReceiver : BroadcastReceiver(), KoinComponent {
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
         val directory = intent.getStringExtra(EXTRA_DIRECTORY)
         val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, 0)
+        // One action at a time per notification: a second tap waits, then reads the state the first left.
+        val sentToken = lockFor(notificationId).withLock { act(context, intent, sessionId, directory, notificationId) }
+        if (sentToken != null) {
+            // "Sent" stays a moment, outside the lock. Only this exact "Sent" revision is cleared: a newer
+            // event or a kept draft on the same id has a different revision and is left alone. The pending
+            // record is released on every exit, so an interrupted wait cannot leave it behind.
+            var cleaned = false
+            try {
+                delay(CLEAR_AFTER_MS)
+                notifier.cancelIfCurrent(notificationId, sentToken)
+                cleaned = true
+            } finally {
+                if (!cleaned) notifier.forgetSent(notificationId, sentToken)
+            }
+        }
+    }
+
+    /** Runs one action. The revision token of the "Sent" status when a reply was sent, otherwise null. */
+    private suspend fun act(
+        context: Context,
+        intent: Intent,
+        sessionId: String,
+        directory: String?,
+        notificationId: Int,
+    ): String? {
         when (intent.action) {
             ACTION_REPLY -> {
                 val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()?.trim()
-                if (text.isNullOrEmpty()) return
+                if (text.isNullOrEmpty()) return null
                 val result = api.send(NotificationActions.sendReply(sessionId, text), directory)
-                if (result.ok) {
-                    notifier.updateStatus(notificationId, Channel.AgentFinished, context.getString(R.string.reply_sent))
-                    delay(CLEAR_AFTER_MS)
-                    notifier.cancel(notificationId)
-                } else {
-                    // Keep the notification and the reply text visible; the user can try again.
-                    notifier.updateStatus(
-                        notificationId,
-                        Channel.Errors,
-                        context.getString(R.string.reply_failed, result.body.take(MAX_REASON)),
-                    )
+                val outcome = ActionDecisions.outcomeOf(result.status)
+                if (outcome == SendOutcome.Sent) {
+                    return notifier.updateStatus(notificationId, Channel.AgentFinished, context.getString(R.string.reply_sent))
                 }
+                // Never sent again by itself: the notification keeps the session, the reply field and the text.
+                settle(context, notificationId, ActionDecisions.afterReply(outcome), FailureContext(sessionId, directory, text), result.body)
             }
             ACTION_FORM -> {
-                val formId = intent.getStringExtra(EXTRA_FORM_ID) ?: return
-                val fieldKey = intent.getStringExtra(EXTRA_FIELD_KEY) ?: return
+                val formId = intent.getStringExtra(EXTRA_FORM_ID) ?: return null
+                val fieldKey = intent.getStringExtra(EXTRA_FIELD_KEY) ?: return null
                 // A tapped choice carries its value; a text reply carries what the user typed.
                 val value =
                     intent.getStringExtra(EXTRA_VALUE)
                         ?: RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)?.toString()?.trim()
-                if (value.isNullOrEmpty()) return
-                // The form must still be pending and still answerable from here; otherwise cancel silently.
-                val pending = api.pending()
-                val stillAnswerable =
-                    pending != null &&
-                        PendingForms.classify(pending, sessionId, formId).let { it is FormAnswer.Choice || it is FormAnswer.Text }
-                if (!stillAnswerable) {
-                    notifier.cancel(notificationId)
-                    return
-                }
-                val result = api.send(NotificationActions.formReply(sessionId, formId, fieldKey, value), directory)
-                if (result.ok) {
-                    notifier.cancel(notificationId)
-                } else {
-                    notifier.updateStatus(notificationId, Channel.Errors, context.getString(R.string.reply_failed, result.body.take(MAX_REASON)))
+                if (value.isNullOrEmpty()) return null
+                // A typed answer is kept as a draft; a tapped choice is still on its button.
+                val typed = value.takeIf { intent.getStringExtra(EXTRA_VALUE) == null }
+                answer(context, notificationId, FailureContext(sessionId, directory, typed), { ActionDecisions.checkForm(it, sessionId, formId) }) {
+                    api.send(NotificationActions.formReply(sessionId, formId, fieldKey, value), directory)
                 }
             }
             ACTION_PERMISSION -> {
-                val requestId = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return
-                val decision = PermissionDecision.entries.firstOrNull { it.wire == intent.getStringExtra(EXTRA_DECISION) } ?: return
-                // Confirm the request is still pending: a request answered elsewhere is cancelled silently.
-                val pending = api.pending()
-                if (pending == null || PendingPermission.find(pending, sessionId, requestId) == null) {
-                    notifier.cancel(notificationId)
-                    return
-                }
-                val result = api.send(NotificationActions.permissionReply(sessionId, requestId, decision), directory)
-                if (result.ok) {
-                    notifier.cancel(notificationId)
-                } else {
-                    notifier.updateStatus(notificationId, Channel.Errors, context.getString(R.string.reply_failed, result.body.take(MAX_REASON)))
+                val requestId = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return null
+                val decision = PermissionDecision.entries.firstOrNull { it.wire == intent.getStringExtra(EXTRA_DECISION) } ?: return null
+                answer(context, notificationId, FailureContext(sessionId, directory, null), { ActionDecisions.checkPermission(it, sessionId, requestId) }) {
+                    api.send(NotificationActions.permissionReply(sessionId, requestId, decision), directory)
                 }
             }
         }
+        return null
+    }
+
+    /**
+     * Answers a pending request: read the pending state first and send only if it is still pending.
+     * A failed read never removes the notification. A send that didn't go through is checked again
+     * and kept or removed; it is never sent a second time.
+     */
+    private suspend fun answer(
+        context: Context,
+        notificationId: Int,
+        failure: FailureContext,
+        check: (JsonObject?) -> PendingCheck,
+        send: suspend () -> ApiResult,
+    ) {
+        val step = ActionDecisions.beforeSend(check(api.pending()))
+        if (step != ActionStep.Send) return settle(context, notificationId, step, failure, null)
+        val result = send()
+        val outcome = ActionDecisions.outcomeOf(result.status)
+        if (outcome == SendOutcome.Sent) return notifier.cancel(notificationId)
+        settle(context, notificationId, ActionDecisions.afterButton(outcome, check(api.pending())), failure, result.body)
+    }
+
+    /** Applies a decided step: cancel, or keep the notification with a plain status for the user. */
+    private fun settle(
+        context: Context,
+        notificationId: Int,
+        step: ActionStep,
+        failure: FailureContext,
+        reason: String?,
+    ) {
+        val status =
+            when (step) {
+                ActionStep.Send -> return
+                ActionStep.Cancel -> return notifier.cancel(notificationId)
+                ActionStep.KeepCheckFailed -> context.getString(R.string.notify_check_failed)
+                ActionStep.KeepSendFailed -> context.getString(R.string.reply_failed, reason.orEmpty().take(MAX_REASON))
+                ActionStep.KeepResultUnknown -> context.getString(R.string.notify_result_unknown)
+                ActionStep.KeepOpenOnly -> context.getString(R.string.notify_answer_in_app)
+            }
+        ActionDecisions.keepPlan(step, failure, status)?.let { notifier.keep(notificationId, it) }
     }
 
     companion object {
@@ -123,5 +168,21 @@ class NotificationActionReceiver : BroadcastReceiver(), KoinComponent {
         const val KEY_REPLY = "reply_text"
         private const val CLEAR_AFTER_MS = 3_000L
         private const val MAX_REASON = 120
+
+        /**
+         * One lock per notification id, for this process only. Receivers are short-lived, so the
+         * table lives here; it is bounded (old idle entries are dropped), never grows without limit.
+         */
+        private val locks = LinkedHashMap<Int, Mutex>()
+        private const val MAX_LOCKS = 64
+
+        @Synchronized
+        private fun lockFor(id: Int): Mutex {
+            locks[id]?.let { return it }
+            if (locks.size >= MAX_LOCKS) {
+                locks.entries.firstOrNull { !it.value.isLocked }?.let { locks.remove(it.key) }
+            }
+            return Mutex().also { locks[id] = it }
+        }
     }
 }

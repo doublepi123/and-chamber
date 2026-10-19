@@ -16,6 +16,8 @@ Build-time tools that turn pinned Termux packages into Android-ready runtime inp
 - **Deterministic output.** Files are written with `sort_keys`, sorted iteration, normalized shebangs (`/data/data/com.termux/files/usr/bin/X` becomes `/usr/bin/env X`), and no timestamps. Symlinks and hardlinks are recorded in the manifest's `links` list instead of being recreated.
 - **Name-based native mapping.** `NATIVE_EXECUTABLES` maps `bin/proot`, `libexec/proot/loader` and `loader32` to `libandchamber_android_proot*.so`. `RUNTIME_LIBRARIES` matches `libtalloc.so.*` by glob because the SONAME changes with the version. `patch_needed` rewrites the proot binary's `libtalloc.so.2` NEEDED string to `libtalloc.so`, padding with NUL bytes.
 - **Fail closed.** Missing required executables or libraries raise `FileNotFoundError`. Unknown lock versions raise `ValueError`. A mirror health check that finds no healthy mirror exits 1.
+- **Mirror health check is self-contained.** `--check-mirrors` probes each `configured_termux_main_base_urls()` entry directly with `probe_termux_mirror`. It calls `download_bytes` without the fallback chain, so one mirror's result is never borrowed from another. A mirror is `ok` only when its Packages index validates (`_validate_termux_payload`, `parse_packages_index`) and contains the `ROOT_PACKAGES`. The report keeps `termux_arch`, `healthy_count`, `recommended_base_urls` and `mirrors` (per-mirror `base_url`, `url`, `status`, plus `package_count` or `error`). Healthy mirrors exit 0 and none exits 1.
+- **Argument rules.** `--output-dir` is required only for asset generation. `--check-mirrors`, `--lock-only` and `--build-package-archive` do not need it and write no asset tree.
 
 ## Flow
 
@@ -30,6 +32,8 @@ Stage 2: `prepare_android_runtime_native_libs.py --linux-assets-dir <gen>/runtim
 2. Copy and rename `bin/proot`, `libexec/proot/loader`, `loader32` to `libandchamber_android_proot.so`, `libandchamber_android_proot_loader.so`, `libandchamber_android_proot_loader32.so` (mode 0755).
 3. Copy `libandroid-shmem.so` (required), `libc++_shared.so` (optional) and `libtalloc.so.*` to `libtalloc.so` (required). Rewrite the proot NEEDED name.
 
+Mirror health (developer only): `prepare_android_runtime_assets.py --check-mirrors [--termux-arch x86_64] [--mirror-report <path>]`. It writes a JSON report and needs no `--output-dir`.
+
 Lock refresh (developer only): `prepare_android_runtime_assets.py --refresh-lock-file --lock-only`. This queries the Packages index for each arch, resolves the closure from `ROOT_PACKAGES=["proot"]`, and writes the lock. It does not extract anything.
 
 ## Integration
@@ -39,4 +43,6 @@ Lock refresh (developer only): `prepare_android_runtime_assets.py --refresh-lock
 - **CI** (`.github/workflows/ci.yml`): caches `build/generated/runtime-assets` and `build/generated/runtime-jni`, keyed by a hash of the lock, `termux_assets.py` and `prepare_android_runtime_*.py`. A key change means a fresh fetch.
 - **Release** (`.github/workflows/release.yml`): runs `./gradlew :app:assembleRelease`, which triggers the same Exec chain. The pinned lock gives reproducible native inputs.
 - **Runtime**: the Kotlin side loads the renamed libraries by name (`EmbeddedCommandSuite.kt`: `PROOT_LIBRARY_NAME`, `LOADER_LIBRARY_NAME`, `LOADER32_LIBRARY_NAME`). Nothing in this folder runs on device.
-- **Known gaps**: `prepare_android_runtime_assets.py` imports `scripts/android_visual_harness.py` (used by `--check-mirrors`) and references `scripts/build_android_runtime_native_debs.sh` (in the `--local-debs-dir` docs). Neither file exists in this checkout, so those paths fail if used.
+- **Tests**: `scripts/tests/test_prepare_android_runtime_assets.py` (stdlib `unittest`, offline, uses a fake `download_bytes`). Run with `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`. It covers per-mirror results, recommended order, exit codes, no asset output from `--check-mirrors`, and the `--output-dir` rule. A module-wide guard patches `urllib.request.urlopen`, `socket.create_connection` and `socket.getaddrinfo` to fail if any test touches the real network.
+- **`--local-debs-dir` contract**: the caller provides a directory with one subdirectory per Termux arch (`aarch64/`, `x86_64/`) holding `.deb` files. The exact locked filename is preferred. Otherwise the first sorted `<name>_*_<arch>.deb` match is used. No build script is bundled.
+- **Known gaps**: none specific to this lane. `--check-mirrors` no longer depends on `scripts/android_visual_harness.py`.

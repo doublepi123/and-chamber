@@ -9,12 +9,14 @@ The only Koin composition root: `AppModule.kt` declares `val appModule = module 
 Koin graph (`single` declarations, all process-wide):
 
 - `OkHttpClient`: connect 5 s, read 10 s. Shared by `VerifiedRuntimeDownloader` and `DefaultWebSessionAuthenticator`.
-- `WebCookieSink`: anonymous object over `android.webkit.CookieManager` (`setCookie`, `flush`).
+- `WebSessionProfiles()`: hands out one WebView profile binding per (target id, canonical origin). It replaces the former global `WebCookieSink` over `CookieManager`. There is no global cookie fallback.
+- `HttpDownloadStarter` → `AndroidHttpDownloadStarter(context)`: a single application-scoped starter, so a download keeps running after its page is gone. It has its own default scope.
 - `RemoteServerStore` → `EncryptedRemoteServerStore.create(context)`.
 - `OpenChamberNotifier(context)`.
 - `LocalApiClient`:
   - `baseUrl = { (LocalRuntimeController.state.value as? RuntimeState.Running)?.url }`. A stopped or restarting server is never called.
   - `password = { RuntimeSecrets.existingUiPassword(paths) }`.
+  - `localReady = LocalReadiness { OpenChamberServer.readyLaunchId() }`. Without it, every request is denied by default.
 - `NotificationSink(get(), ProcessForeground, get())`: notifier, foreground source, API.
 - `NotificationObserver(runtime, notifier, api, bootstrap = NotificationSettingsBootstrap(api, store), watch = RuntimeErrorWatch(Titles(...)))`. Titles come from `R.string.alert_*`.
 - `NotificationBootstrapStore`: SharedPreferences `andchamber_notify`, key `notifications_bootstrapped` (private const in this file).
@@ -32,7 +34,7 @@ Koin graph (`single` declarations, all process-wide):
   - `foregroundStarter = { RuntimeService.request(context, op) }`.
   - `killOwned = killOwnedRuntime(scanner, prootPath, rootfs)`.
   - Calls `.also { it.initialize() }`.
-- `WebSessionAuthenticator` → `DefaultWebSessionAuthenticator(client, cookies, localPassword, localReady = { OpenChamberServer.readyLaunchId() })`.
+- `WebSessionAuthenticator` → `DefaultWebSessionAuthenticator(client, localPassword, localReady = { OpenChamberServer.readyLaunchId() })`. Cookies are no longer a constructor argument: they arrive per call through `prepare(target, cookies)`, from the target's bound profile.
 
 Private helpers: `primaryAbi()` (first of `Build.SUPPORTED_ABIS`), `KEY_BOOTSTRAPPED`.
 
@@ -49,7 +51,7 @@ Note the lambda-based wiring: the controller and the notification sink reach eac
 
 ## Integration
 
-- Depends on every package under `io.andchamber.app`: `data/` (`LocalApiClient`, `DefaultWebSessionAuthenticator`, `EncryptedRemoteServerStore`, `WebCookieSink`, `LocalReadiness`), `notify/` (`NotificationObserver`, `NotificationSink`, `NotificationBootstrapStore`, `NotificationSettingsBootstrap`, `RuntimeErrorWatch`, `OpenChamberNotifier`, `ProcessForeground`), `service/RuntimeService.kt`, `runtime/` (`DefaultLocalRuntimeController`, `RuntimePaths`, `RuntimeSecrets`, `RuntimeState`, `ForegroundStarter`), `runtime/install/` (`RuntimeInstallerImpl`, `VerifiedRuntimeDownloader`), `runtime/process/` (`ProotOpenChamberServer`, `ProcessScanner`, `HealthProbe`, `EmbeddedCommandSuite`, `ProotStaleServerCleaner`, `killOwnedRuntime`), `runtime/network/` (`AndroidSystemDnsProvider`, `ResolvConf`), `runtime/manifest/RuntimeManifestReader.kt`, `runtime/storage/` (`SharedStorageControllerImpl`, `SharedStorageAccess`, `PrefsSharedStoragePrefs`, `SharedStoragePermission`).
+- Depends on every package under `io.andchamber.app`: `data/` (`LocalApiClient`, `DefaultWebSessionAuthenticator`, `EncryptedRemoteServerStore`, `LocalReadiness`, `WebSessionProfiles`, `AndroidHttpDownloadStarter`, `HttpDownloadStarter`), `notify/` (`NotificationObserver`, `NotificationSink`, `NotificationBootstrapStore`, `NotificationSettingsBootstrap`, `RuntimeErrorWatch`, `OpenChamberNotifier`, `ProcessForeground`), `service/RuntimeService.kt`, `runtime/` (`DefaultLocalRuntimeController`, `RuntimePaths`, `RuntimeSecrets`, `RuntimeState`, `ForegroundStarter`), `runtime/install/` (`RuntimeInstallerImpl`, `VerifiedRuntimeDownloader`), `runtime/process/` (`ProotOpenChamberServer`, `ProcessScanner`, `HealthProbe`, `EmbeddedCommandSuite`, `ProotStaleServerCleaner`, `killOwnedRuntime`), `runtime/network/` (`AndroidSystemDnsProvider`, `ResolvConf`, `AndroidNetworkEvents`, `DnsRefresher`, `DnsRefresherMonitor`, `RuntimeDnsReporter`), `runtime/manifest/RuntimeManifestReader.kt`, `runtime/storage/` (`SharedStorageControllerImpl`, `SharedStorageAccess`, `PrefsSharedStoragePrefs`, `SharedStoragePermission`).
 - Resources: `R.string.alert_setup_failed`, `alert_start_failed`, `alert_stopped`, `alert_opencode_error` (RuntimeErrorWatch titles).
 - Assets: `RuntimeManifestReader.ASSET_NAME`, `android-shim.cjs`.
 - Android: `nativeLibraryDir` (the bundled `proot` binary), `filesDir`, `Os.getuid/getpid`, `Process.killProcess`.

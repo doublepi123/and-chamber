@@ -17,6 +17,8 @@ Runs, probes and stops the OpenChamber server inside PRoot. Covers the PRoot com
 - `EmbeddedCommandSuite`: resolves the PRoot binaries from `nativeLibraryDirectory`. Names: `libandchamber_android_proot.so`, `libandchamber_android_proot_loader.so`, `libandchamber_android_proot_loader32.so`. Also creates `command-suite/{home,tmp}`.
 - `truncateLogFile`: keeps the newest half of an oversized log, preferring a line boundary, using a bounded tail read rather than loading the whole file. The output pump also uses `BoundedLogWriter` to cap bytes on every append; only non-notification lines are written to the log.
 
+- Live DNS: `ProotOpenChamberServer` takes a `RuntimeDnsMonitor` (default `None`). It calls `dnsMonitor.start(runtime.rootfs)` after the server is ready, and `dnsMonitor.stop()` at the top of `stop()`, before any process teardown. A failed start goes through `stop()`, so the watch is always released. A `start` that throws in `onStarted` also calls `stop()`.
+
 Invariants:
 - Port ownership is decided before spawning. If the port stays held by a foreign listener, the launch refuses (`PortInUseException`), and the password is never sent to it.
 - The password only reaches the child env, never a log line.

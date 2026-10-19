@@ -59,6 +59,7 @@ import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.theme.AndChamberTheme
 import io.andchamber.app.ui.web.WebScreen
 import io.andchamber.app.ui.web.WebViewPool
+import io.andchamber.app.ui.web.rememberWebDependencies
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -182,7 +183,9 @@ fun AndChamberApp(
 ) {
     AndChamberTheme {
         val nav = rememberNavController()
-        val pool = remember { WebViewPool() }
+        // Per-server WebView profiles and the app-wide downloader (both from di/AppModule.kt).
+        val webDeps = rememberWebDependencies()
+        val pool = remember(webDeps) { WebViewPool(webDeps.downloads) }
         DisposableEffect(pool) { onDispose { pool.destroyAll() } }
 
         val askForNotifications = rememberNotificationPermissionRequest()
@@ -389,6 +392,7 @@ fun AndChamberApp(
                             checking = checking,
                             sessionKey = sessionKey,
                             auth = auth,
+                            profiles = webDeps.profiles,
                             pool = pool,
                             onExit = {
                                 // Leaving on purpose: a session that never got to open isn't kept.

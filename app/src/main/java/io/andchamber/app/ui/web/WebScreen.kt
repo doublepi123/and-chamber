@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.view.View
 import android.webkit.MimeTypeMap
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -67,6 +68,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import io.andchamber.app.data.WebIsolationFailure
+import io.andchamber.app.data.WebSessionProfiles
 import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
@@ -98,6 +101,9 @@ private sealed interface WebOverlay {
     data object Connecting : WebOverlay
 
     data class PageError(val message: String) : WebOverlay
+
+    /** The page couldn't get its own WebView profile: nothing is loaded and no password is sent. */
+    data class Isolation(val failure: WebIsolationFailure) : WebOverlay
 }
 
 /** Overlays of the same kind share a key, so live progress updates don't restart the crossfade. */
@@ -124,6 +130,8 @@ internal fun WebScreen(
     checking: Boolean,
     sessionKey: String?,
     auth: WebSessionAuthenticator,
+    /** Per-server WebView profiles; null only in previews, where no WebView is created. */
+    profiles: WebSessionProfiles?,
     pool: WebViewPool,
     onExit: () -> Unit,
     onStartLocal: () -> Unit,
@@ -139,10 +147,18 @@ internal fun WebScreen(
     val isLocal = targetId == ServerTarget.LOCAL_ID
     val shownTarget = rememberLastNonNull(target)
 
-    val web: ChamberWebView? =
-        remember(targetId) {
-            if (inspection) null else pool.obtain(context, targetId, darkTheme, themeBackground.toArgb())
+    // The page gets its own WebView profile before anything else: no profile, no sign-in, no load.
+    // Keyed on the last known address, so a stopped local server keeps its page under the panel.
+    var bindAttempt by remember(targetId) { mutableIntStateOf(0) }
+    val bound =
+        remember(targetId, shownTarget?.baseUrl, bindAttempt) {
+            bindWeb(if (inspection) null else profiles, shownTarget) { binding ->
+                pool.obtain(context, binding, darkTheme, themeBackground.toArgb())
+            }
         }
+    val web: ChamberWebView? = bound.web
+    // Read as state, so a renderer that can't be bound again after a crash shows up here as well.
+    val isolation: WebIsolationFailure? = if (web != null) web.isolationFailure else bound.failure
 
     var phase by remember(web) {
         mutableStateOf<SessionPhase>(
@@ -163,6 +179,10 @@ internal fun WebScreen(
         val view = web ?: return@LaunchedEffect
         val current = target ?: return@LaunchedEffect
         val key = sessionKey ?: return@LaunchedEffect
+        // Only a WebView bound to this server's own profile may sign in; otherwise nothing is sent
+        // and the isolation panel stays up.
+        if (view.isolationFailure != null || view.view == null) return@LaunchedEffect
+        val cookies = view.sessionCookies ?: return@LaunchedEffect
         if (view.sessionKey == key) {
             phase = SessionPhase.Loaded
             return@LaunchedEffect
@@ -170,7 +190,7 @@ internal fun WebScreen(
         phase = SessionPhase.Connecting
         val result =
             try {
-                auth.prepare(current)
+                auth.prepare(current, cookies)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -204,6 +224,13 @@ internal fun WebScreen(
         web?.invalidateSession()
         attempt += 1
     }
+    // A WebView whose profile failed is never bound again: drop it and bind a fresh one.
+    val retryIsolation = {
+        if (web != null) pool.discard(targetId)
+        bindAttempt += 1
+    }
+    // Remote only: the saved address alone (no password, cookies or token), and only a valid one.
+    val browserAddress = (shownTarget as? ServerTarget.Remote)?.baseUrl?.let(::browserAddressFor)
 
     WebLifecycleEffect(web)
     WebHostEffect(web)
@@ -214,6 +241,7 @@ internal fun WebScreen(
             !isLocal && target == null -> WebOverlay.Missing
             isLocal && checking && localState == RuntimeState.NotInstalled -> WebOverlay.Connecting
             isLocal && localState !is RuntimeState.Running -> WebOverlay.Local(localState ?: RuntimeState.NotInstalled)
+            isolation != null -> WebOverlay.Isolation(isolation)
             phase is SessionPhase.Unreachable -> WebOverlay.Unreachable((phase as SessionPhase.Unreachable).reason)
             phase == SessionPhase.Connecting -> WebOverlay.Connecting
             pageError != null -> WebOverlay.PageError(pageError)
@@ -221,6 +249,8 @@ internal fun WebScreen(
             inspection -> WebOverlay.Connecting
             else -> null
         }
+    // OpenChamber's own notifications are left to the page only while the local page is on screen.
+    LocalPageVisibilityEffect(isLocal = isLocal && !inspection, overlayShown = overlay != null)
 
     BackHandler {
         when {
@@ -251,12 +281,17 @@ internal fun WebScreen(
                     .union(WindowInsets.imeAnimationTarget)
             Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(pageInsets)) {
                 key(web, web.generation) {
-                    AndroidView(
-                        factory = { web.attachableView() },
-                        modifier = Modifier.fillMaxSize().clipToBounds(),
-                        // The WebView outlives this screen in the pool; never destroy it here.
-                        onRelease = {},
-                    )
+                    // Only a WebView bound to this server's profile is ever attached; after a failed
+                    // rebind there is none, and the isolation panel covers the screen instead.
+                    if (web.view != null) {
+                        AndroidView(
+                            // Detached from any earlier holder only here, never during recomposition.
+                            factory = { viewContext -> web.attachableView() ?: View(viewContext) },
+                            modifier = Modifier.fillMaxSize().clipToBounds(),
+                            // The WebView outlives this screen in the pool; never destroy it here.
+                            onRelease = {},
+                        )
+                    }
                 }
 
                 AnimatedVisibility(
@@ -311,6 +346,8 @@ internal fun WebScreen(
                         onRetry = retry,
                         onReload = { web?.reload() },
                         onStartLocal = onStartLocal,
+                        onRetryIsolation = retryIsolation,
+                        onOpenInBrowser = browserAddress?.let { address -> { openAddressInBrowser(context, address) } },
                     )
                 }
             }
@@ -327,9 +364,20 @@ private fun OverlayContent(
     onRetry: () -> Unit,
     onReload: () -> Unit,
     onStartLocal: () -> Unit,
+    onRetryIsolation: () -> Unit,
+    /** Remote only: opens the saved address in the browser, without any credentials. */
+    onOpenInBrowser: (() -> Unit)?,
 ) {
     val home = PanelAction(stringResource(R.string.home), onExit)
     when (overlay) {
+        is WebOverlay.Isolation ->
+            IsolationPanel(
+                failure = overlay.failure,
+                isLocal = isLocal,
+                onRetry = onRetryIsolation,
+                onHome = onExit,
+                onOpenInBrowser = if (isLocal) null else onOpenInBrowser,
+            )
         WebOverlay.Missing ->
             StatusPanel(
                 icon = Icons.Rounded.LinkOff,

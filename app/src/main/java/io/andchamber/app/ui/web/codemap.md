@@ -9,6 +9,7 @@ Files:
 - `WebScreen.kt`: `WebScreen` (session prep, overlays, BackHandler, insets), `OverlayContent`, `LocalServerPanel`, `WebLifecycleEffect`, `WebHostEffect`.
 - `WebPanels.kt`: `StatusPanel`, `PanelAction`, `ConnectingPanel`.
 - `EdgeHandle.kt`: draggable edge tab with a menu (Home, Reload, Open in browser).
+- `NotifyVisibility.kt`: `LocalPageVisibilityEffect(isLocal, overlayShown)` reports to `notify.LocalPageVisibility` while the local page is RESUMED (this navigation entry) with no overlay; clears only its own report on dispose. Native OpenChamber notifications are suppressed only then.
 
 ## Design
 

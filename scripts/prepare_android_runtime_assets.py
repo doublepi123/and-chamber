@@ -41,6 +41,10 @@ from runtime_tools.termux_assets import (
 
 DEFAULT_LOCK_FILE = REPO_ROOT / "runtime_tools" / "termux_assets.lock.json"
 LOCK_FILE_VERSION = 1
+# Health probes use fewer retries than asset downloads (download_bytes default is 3).
+# Each attempt still uses download_bytes' 120s urlopen timeout, so a dead mirror can take
+# minutes to report.
+MIRROR_PROBE_ATTEMPTS = 2
 # Prefer mirrors that still host historical lock-file .deb paths. packages.termux.dev
 # and packages-cf frequently 404/403 from GitHub Actions IPs; keep multiple fallthroughs.
 TERMUX_MAIN_FALLBACK_BASE_URLS = (
@@ -222,10 +226,11 @@ def local_locked_package(
     local_debs_dir: Path,
     termux_arch: str,
 ) -> bytes:
-    """Read a package built from source by scripts/build_android_runtime_native_debs.sh.
+    """Read a .deb from a caller-provided local directory instead of the pinned mirror.
 
-    Resolved by package name and architecture because the locally built version may be
-    newer than the one pinned in the lock file (the lock only documents the mirror path).
+    Contract: `local_debs_dir/<termux_arch>/` holds the .deb files. The exact locked filename
+    is preferred. Otherwise the first `<name>_*_<termux_arch>.deb` match in sorted order is
+    used, because a locally built version may be newer than the one pinned in the lock file.
     """
     arch_dir = Path(local_debs_dir) / termux_arch
     exact = arch_dir / Path(package.filename).name
@@ -568,16 +573,33 @@ def prepare_assets(
             )
 
 
-def check_termux_mirror_health(termux_arch: str = "x86_64") -> dict:
-    import importlib.util
+def probe_termux_mirror(base_url: str, termux_arch: str) -> dict:
+    """Probe one mirror directly (no fallback to other mirrors) and validate its Packages index."""
+    relative_path = _packages_index_path(termux_arch)
+    url = _termux_main_url(base_url, relative_path)
+    result: dict = {"base_url": base_url, "url": url}
+    try:
+        payload = download_bytes(url, attempts=MIRROR_PROBE_ATTEMPTS)
+        _validate_termux_payload(relative_path, payload)
+        records = parse_packages_index(payload.decode("utf-8", "ignore"))
+        missing = [name for name in ROOT_PACKAGES if name not in records]
+        if not records:
+            raise ValueError("Packages index contains no package records")
+        if missing:
+            raise ValueError(f"Packages index lacks root package(s): {', '.join(missing)}")
+        result.update(status="ok", package_count=len(records))
+    except Exception as exc:
+        result.update(status="error", error=str(exc))
+    return result
 
-    harness_path = REPO_ROOT / "scripts" / "android_visual_harness.py"
-    spec = importlib.util.spec_from_file_location("android_visual_harness", harness_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load {harness_path}")
-    harness = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(harness)
-    mirrors = harness.check_termux_package_mirrors(termux_arch=termux_arch)
+
+def check_termux_mirror_health(termux_arch: str = "x86_64") -> dict:
+    """Probe every configured Termux main mirror in configured order.
+
+    Each mirror is fetched individually so a broken mirror is reported as such instead of
+    being masked by the download fallback chain used during asset builds.
+    """
+    mirrors = [probe_termux_mirror(base_url, termux_arch) for base_url in configured_termux_main_base_urls()]
     healthy = [item for item in mirrors if item["status"] == "ok"]
     return {
         "termux_arch": termux_arch,
@@ -589,7 +611,11 @@ def check_termux_mirror_health(termux_arch: str = "x86_64") -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare Android-native command assets for AndChamber builds")
-    parser.add_argument("--output-dir", required=True, help="Directory where generated assets should be written")
+    parser.add_argument(
+        "--output-dir",
+        help="Directory where generated assets should be written (required unless --check-mirrors, "
+        "--lock-only or --build-package-archive is used)",
+    )
     parser.add_argument(
         "--lock-file",
         default=str(DEFAULT_LOCK_FILE),
@@ -608,12 +634,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--local-debs-dir",
-        help="Extract .deb packages built from source here (one subdirectory per Termux "
-        "architecture) instead of downloading the pinned mirror packages",
+        help="Read .deb packages from this directory (one subdirectory per Termux architecture, "
+        "e.g. aarch64/ and x86_64/) instead of downloading the pinned mirror packages",
     )
     parser.add_argument("--mirror-report", help="Optional path to write the mirror health JSON report")
     parser.add_argument("--termux-arch", default="x86_64", help="Termux arch used for mirror health probes")
     args = parser.parse_args()
+    needs_output_dir = not (args.check_mirrors or args.lock_only or args.build_package_archive)
+    if needs_output_dir and not args.output_dir:
+        parser.error("--output-dir is required unless --check-mirrors, --lock-only or --build-package-archive is used")
     if args.check_mirrors:
         report = check_termux_mirror_health(termux_arch=args.termux_arch)
         encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
@@ -624,7 +653,7 @@ def main() -> None:
         if report["healthy_count"] == 0:
             raise SystemExit(1)
         return
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else None
     lock_file = Path(args.lock_file).expanduser().resolve() if args.lock_file else None
     local_debs_dir = Path(args.local_debs_dir).expanduser().resolve() if args.local_debs_dir else None
     if args.build_package_archive:
@@ -652,6 +681,7 @@ def main() -> None:
             raise ValueError("--lock-only requires --lock-file")
         write_lock_file(lock_file, build_lock_payload())
         return
+    assert output_dir is not None  # guaranteed by the --output-dir check above
     asset_root = output_dir / ANDROID_LINUX_ASSET_ROOT
     if asset_root.exists():
         shutil.rmtree(asset_root)

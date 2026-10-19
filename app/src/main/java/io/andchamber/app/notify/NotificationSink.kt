@@ -21,7 +21,9 @@ class NotificationSink(
     /** Entry point called for each raw line. Malformed lines are ignored. */
     fun accept(line: String) {
         val event = NotificationPayload.parseLine(line) ?: return
-        when (val delivery = NotifyPolicy.deliveryFor(event.kind, foreground.isInForeground())) {
+        // Left to the page only when the event asks for that (requireHidden) and the local page is on screen.
+        val leaveToPage = NotifyPolicy.leaveToPage(event.requireHidden, foreground.isInForeground())
+        when (val delivery = NotifyPolicy.deliveryFor(event.kind, leaveToPage)) {
             is Delivery.Suppressed -> Unit
             is Delivery.Post -> {
                 val actions = ActionPlan.forEvent(event)

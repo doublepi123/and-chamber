@@ -57,6 +57,9 @@ class ProotOpenChamberServer(
     private val now: () -> Long = System::nanoTime,
     /** Rewrites the guest resolv.conf from the current network; networks change between runs. */
     private val refreshDns: (InstalledRuntime) -> Unit = {},
+    /** Live DNS refresh while the server runs: started once it is ready, stopped before any teardown. */
+    private val dnsMonitor: io.andchamber.app.runtime.network.RuntimeDnsMonitor =
+        io.andchamber.app.runtime.network.RuntimeDnsMonitor.None,
     /** Pre-start cleanup; returns true when the port is free afterwards. */
     private val cleanBeforeStart: (port: Int, guestRunDir: File, prootPath: String) -> Boolean = { _, _, _ -> true },
     /** The bind set for this launch (shared storage decision). Defaults to private-only. */
@@ -160,7 +163,16 @@ class ProotOpenChamberServer(
             // Only the launch that is still the current child becomes trusted.
             if (process === started) readyId = id
         }
-        onStarted(binds)
+        // Watch the network only for a server that is ready. A failure here is reported by the monitor
+        // itself; it must not fail a start that already succeeded.
+        runCatching { dnsMonitor.start(runtime.rootfs) }
+        try {
+            onStarted(binds)
+        } catch (error: Throwable) {
+            // A failed post-start hook must not leave the network watch registered for a dead start.
+            stop()
+            throw error
+        }
         return id
     }
 
@@ -170,6 +182,9 @@ class ProotOpenChamberServer(
                 readyId = null
                 process.also { process = null }
             }
+        // Stop the DNS monitor first, so no network refresh can write after the server is torn down.
+        // It is idempotent, and a failed start (waitUntilReady throws) also comes through here.
+        runCatching { dnsMonitor.stop() }
         // Owned-only: our handle's tree plus every runtime PRoot tree we can prove is ours. Uses the
         // proot path from the suite when available; stop must still work if the suite is missing.
         val proot = runCatching { suite().proot.absolutePath }.getOrNull()

@@ -229,7 +229,8 @@ interface RemoteServerStore {
 }
 
 sealed interface WebSessionResult {
-    /** Session cookies were placed into android.webkit.CookieManager; load [url]. */
+    /** Session cookies (if any) were stored in the target's own WebView profile, returned by
+     *  [WebSessionCookies]; the UI may load [url]. */
     data class Ready(val url: String) : WebSessionResult
 
     /** Server reachable but no stored password / wrong password; UI may still load the page
@@ -239,8 +240,35 @@ sealed interface WebSessionResult {
     data class Unreachable(val reason: String) : WebSessionResult
 }
 
+/** The profile a WebView is bound to: one server target at one canonical origin (see canonicalWebOrigin). */
+data class WebSessionIdentity(
+    val targetId: String,
+    val origin: String,
+)
+
+/**
+ * Cookie capability of one bound WebView profile. Only ever valid for [identity]: a different
+ * origin gets no cookies back and nothing is written for it.
+ */
+interface WebSessionCookies {
+    val identity: WebSessionIdentity
+
+    /** The Cookie header the profile would send to [url], or null when [url] is not on [identity]'s origin. */
+    suspend fun cookieHeader(url: String): String?
+
+    /** Writes the Set-Cookie [headers] for [url] and returns only after the platform has finished
+     *  writing them. Throws when a write fails or [url] is not on [identity]'s origin. */
+    suspend fun storeCookies(
+        url: String,
+        headers: List<String>,
+    )
+}
+
 interface WebSessionAuthenticator {
-    /** Health-checks the target, logs in via POST /auth/session when a password is known,
-     *  and injects the session cookie into the WebView CookieManager. */
-    suspend fun prepare(target: ServerTarget): WebSessionResult
+    /** Health-checks the target, logs in via POST /auth/session when a password is known, and stores
+     *  the session cookies through [cookies] (the capability of the target's bound profile). */
+    suspend fun prepare(
+        target: ServerTarget,
+        cookies: WebSessionCookies,
+    ): WebSessionResult
 }

@@ -3,6 +3,8 @@ package io.andchamber.app.runtime.network
 import android.content.Context
 import android.net.ConnectivityManager
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /** Supplies the DNS servers of the device's active network. */
 fun interface SystemDnsProvider {
@@ -52,9 +54,27 @@ object ResolvConf {
         rootfs: File,
         system: List<String>,
     ) {
-        File(rootfs, "etc/resolv.conf").apply {
-            parentFile?.mkdirs()
-            writeText(render(system))
+        writeAtomically(File(rootfs, "etc/resolv.conf"), render(system))
+    }
+
+    /**
+     * Replaces [target] with [content] in one step: the bytes go to a temp file in the same
+     * directory, then an atomic move renames it over the target. A reader sees the old file or the
+     * new file, never a truncated mix. If the write fails, the temp file is removed and the original
+     * is left untouched.
+     */
+    fun writeAtomically(
+        target: File,
+        content: String,
+    ) {
+        val dir = target.parentFile ?: error("resolv.conf target has no parent: $target")
+        dir.mkdirs()
+        val temp = File.createTempFile(".${target.name}.", ".tmp", dir)
+        try {
+            temp.writeText(content)
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            if (temp.exists()) temp.delete()
         }
     }
 }
