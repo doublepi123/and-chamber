@@ -176,6 +176,7 @@ internal fun WebScreen(
     }
     var attempt by remember(web) { mutableIntStateOf(0) }
     var gatewayPreparations by remember(web) { mutableIntStateOf(0) }
+    var gatewayPending by remember(web, sessionKey) { mutableStateOf(web?.gatewayLoginMode == true) }
     SideEffect {
         web?.onGatewayCompleted = {
             if (gatewayPreparations < 2) {
@@ -225,6 +226,7 @@ internal fun WebScreen(
                 // NeedsLogin: OpenChamber shows its own sign-in page at the same address.
                 is WebSessionResult.Ready, is WebSessionResult.NeedsLogin, is WebSessionResult.NeedsGatewayLogin -> {
                     val gateway = result is WebSessionResult.NeedsGatewayLogin
+                    gatewayPending = gateway
                     val start =
                         when (result) {
                             is WebSessionResult.Ready -> result.url
@@ -236,15 +238,15 @@ internal fun WebScreen(
                     if (!gateway) gatewayPreparations = 0
                     // A session picked from a notification, or the remembered page of this instance,
                     // is the first page, not a second load. The notification link wins over the
-                    // remembered page. Cloudflare Access returns to the requested path after its
-                    // login, so the path survives it.
-                    val startPath = latestDeepLink ?: latestResumePath
+                    // remembered page. Keep it pending through gateway retries so the final
+                    // authenticated prepare still loads the requested page.
+                    val startPage = startPageDecision(latestDeepLink, latestResumePath, gateway)
                     view.load(
-                        startPath?.let { withSessionPath(start, it) } ?: start,
+                        startPage.path?.let { withSessionPath(start, it) } ?: start,
                         key,
                         gatewayLogin = gateway && gatewayPreparations < 2,
                     )
-                    if (startPath != null) latestDeepLinkUsed()
+                    if (startPage.consume) latestDeepLinkUsed()
                     SessionPhase.Loaded
                 }
                 is WebSessionResult.Unreachable -> SessionPhase.Unreachable(result.reason)
@@ -253,10 +255,12 @@ internal fun WebScreen(
 
     // A session picked while this server's page is already loaded: open it in place. The
     // remembered page is not applied here — the pooled page already is that page.
-    LaunchedEffect(web, deepLinkPath, phase, sessionKey) {
+    LaunchedEffect(web, deepLinkPath, phase, sessionKey, gatewayPending) {
         val view = web ?: return@LaunchedEffect
         val link = deepLinkPath ?: return@LaunchedEffect
         val base = target?.baseUrl ?: return@LaunchedEffect
+        // A retained notification path must not be consumed by the already-loaded shortcut either.
+        if (gatewayPending) return@LaunchedEffect
         if (phase != SessionPhase.Loaded || sessionKey == null || view.sessionKey != sessionKey) return@LaunchedEffect
         if (view.navigateWithinSession(withSessionPath(base, link))) latestDeepLinkUsed()
     }
