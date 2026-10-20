@@ -124,6 +124,12 @@ val resolvedApplicationId: String =
         }
     } ?: productionApplicationId
 val isTestIdRequested = testApplicationId != null
+val browserSmokeRunnerRequested = providers.gradleProperty("andchamber.browserSmokeRunner").orNull
+val useBrowserSmokeRunner = when (browserSmokeRunnerRequested) {
+    null, "false" -> false
+    "true" -> true
+    else -> error("andchamber.browserSmokeRunner must be true or false")
+}
 
 // Version: CI passes the tag-derived values as Gradle properties; local builds use the defaults.
 val appVersionName: String = providers.gradleProperty("andchamber.versionName").orNull ?: "0.0.1"
@@ -153,7 +159,11 @@ android {
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = if (useBrowserSmokeRunner) {
+            "io.andchamber.app.browser.BrowserSmokeInstrumentation"
+        } else {
+            "androidx.test.runner.AndroidJUnitRunner"
+        }
 
         // The on-device runtime only exists for these two ABIs (see prepare_android_runtime_native_libs.py).
         ndk {

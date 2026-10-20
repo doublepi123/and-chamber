@@ -43,6 +43,13 @@ jobs:
             command -v "$tool" > /dev/null || { echo "::error::Missing host tool: $tool"; exit 1; }
           done
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Browser MCP adapter tests
+        run: node --test scripts/tests/browser-mcp.test.cjs scripts/tests/verify_browser_mcp_emulator.test.cjs
+
       - uses: gradle/actions/setup-gradle@v4
 
       # Cache keys cover the source lock, the prepare/build scripts and the pinned NDK, so any change to

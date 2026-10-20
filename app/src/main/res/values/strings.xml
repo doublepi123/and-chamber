@@ -49,6 +49,7 @@
     <!-- Sections -->
     <string name="section_this_device">On this phone</string>
     <string name="section_servers">On other computers</string>
+    <string name="section_browser">Browser</string>
 
     <!-- Local runtime card -->
     <string name="local_title">OpenChamber</string>
@@ -261,4 +262,22 @@
     <string name="msg_progress_verifying">Checking node, opencode and the web bundle</string>
     <string name="msg_progress_activating">Activating the environment</string>
     <string name="msg_progress_done">Done</string>
+
+    <!-- Independent browser. Not the OpenChamber page. -->
+    <string name="browser_entry_title">Browser</string>
+    <string name="browser_entry_body">Open a public https page here. It stays separate from OpenChamber.</string>
+    <string name="browser_address_hint">https://</string>
+    <string name="browser_hint">Enter a public https address. Downloads, pop-ups and file uploads stay off. Complex forms and sign-in flows are not supported yet. What the page reports is not verified.</string>
+    <string name="browser_status_off">Agent control is off</string>
+    <string name="browser_status_on">Agent control is on for 10 minutes</string>
+    <string name="browser_status_taken">You have the page</string>
+    <string name="browser_turn_on">Allow agent</string>
+    <string name="browser_take_over">Take over</string>
+    <string name="browser_turn_off">Turn off</string>
+    <string name="browser_note">Send the task in chat first, then allow the agent here. Leaving this screen turns it off. You cannot allow it and then go back to chat.</string>
+    <string name="browser_agent_needs_local">Agent control needs OpenChamber running on this phone. You can still browse.</string>
+    <string name="browser_unavailable">Browser isn\'t available</string>
+    <string name="browser_unavailable_body">This WebView can\'t keep the browser separate, so nothing is loaded.</string>
+    <string name="browser_controller_missing">Browser control isn\'t ready yet.</string>
+    <string name="browser_address_refused">That address can\'t be opened here.</string>
 </resources>
