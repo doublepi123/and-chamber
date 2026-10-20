@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "description": "Pinned free-software source archives compiled offline into the Android runtime native libraries (arm64-v8a, x86_64). Revisions and hashes were verified against upstream on 2026-10-19.",
+  "android": {
+    "min_api": 26,
+    "ndk_version": "29.0.14206865",
+    "abis": {
+      "arm64-v8a": {"clang_triple": "aarch64-linux-android", "loader32_abi": "armeabi-v7a"},
+      "x86_64": {"clang_triple": "x86_64-linux-android", "loader32_abi": "x86"}
+    }
+  },
+  "components": {
+    "proot": {
+      "upstream": "https://github.com/termux/proot",
+      "version": "5.1.107.97",
+      "tag": "v5.1.107.97",
+      "commit": "4a27ca61ff7a800cdcac3bc616929bba7a484c74",
+      "archive": {
+        "url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.97",
+        "filename": "proot-5.1.107.97.tar.gz",
+        "sha256": "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d",
+        "root_dir": "proot-5.1.107.97"
+      },
+      "license": {"spdx": "GPL-2.0", "file": "COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"},
+      "termux_recipe_commit": "b9b5fdd9fa",
+      "termux_patches": []
+    },
+    "talloc": {
+      "upstream": "https://www.samba.org/ftp/talloc/",
+      "version": "2.5.0",
+      "archive": {
+        "url": "https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz",
+        "filename": "talloc-2.5.0.tar.gz",
+        "sha256": "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007",
+        "root_dir": "talloc-2.5.0"
+      },
+      "license": {"spdx": "LGPL-3.0-or-later", "file": "LICENSE", "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"},
+      "termux_recipe_commit": "b9b5fdd9fa",
+      "termux_patches": []
+    },
+    "libandroid-shmem": {
+      "upstream": "https://github.com/termux/libandroid-shmem",
+      "version": "0.7",
+      "tag": "v0.7",
+      "commit": "7f0bd7e25dbdd146265aff7c6a890029e374622d",
+      "archive": {
+        "url": "https://codeload.github.com/termux/libandroid-shmem/tar.gz/refs/tags/v0.7",
+        "filename": "libandroid-shmem-0.7.tar.gz",
+        "sha256": "1e5ff8459bc0a8c229dd8a94b27d119987e09ef3414331c2b5ebfff20b98e867",
+        "root_dir": "libandroid-shmem-0.7"
+      },
+      "license": {"spdx": "BSD-3-Clause", "file": "LICENSE", "sha256": "0dd43abe17196b0224cb0b159819af798cd508a82a21e5870126fff4e899a7eb"},
+      "termux_recipe_commit": "b9b5fdd9fa",
+      "termux_patches": []
+    }
+  }
+}

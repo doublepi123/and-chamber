@@ -22,7 +22,7 @@ Key constraints:
 | `app/src/main/java/io/andchamber/app/service/RuntimeService.kt` | `specialUse` foreground service that runs runtime operations and keeps the server alive |
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
-| `app/build.gradle.kts` | App build; Exec tasks that prepare PRoot jniLibs from pinned Termux packages; env-driven release signing (`ANDCHAMBER_*`) |
+| `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |
@@ -70,8 +70,8 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 | `…/app/ui/components/` | Stateless shared Compose widgets | [View Map](app/src/main/java/io/andchamber/app/ui/components/codemap.md) |
 | `…/app/ui/theme/` | Material 3 color schemes, typography, shapes, extended `ChamberColors` | [View Map](app/src/main/java/io/andchamber/app/ui/theme/codemap.md) |
 | `app/src/main/assets/` | Runtime manifest pins and the Node preload shim copied into the guest | [View Map](app/src/main/assets/codemap.md) |
-| `scripts/` | Build-time tools: pinned Termux packages → per-ABI prefix → renamed jniLibs; self-contained mirror health checks | [View Map](scripts/codemap.md) |
-| `runtime_tools/` | Python library and SHA-256 lock file for the Termux-based PRoot build | [View Map](runtime_tools/codemap.md) |
+| `scripts/` | Build-time tools: network source preparation for the native runtime, offline native compilation, and the legacy Termux-based pipeline; mirror health checks | [View Map](scripts/codemap.md) |
+| `runtime_tools/` | Python library and SHA-256 lock files for the PRoot build (Termux lock and runtime source lock) | [View Map](runtime_tools/codemap.md) |
 
 ## Not Mapped
 

@@ -16,11 +16,21 @@ Software downloaded and executed at runtime (not bundled in this APK, licensed s
   - OpenChamber (@openchamber/web)   - the web server and UI the app displays
   - OpenCode (@opencode/cli)         - the agent runtime used by OpenChamber
   - Alpine Linux minirootfs 3.24.1   - the guest userland
-  - PRoot                            - user-space chroot/bind-mount launcher (GPL-2.0)
   - Node.js, npm, git, ripgrep and other Alpine packages, each under its own license
 
-Bundled native libraries built from the Termux packages pinned in
-runtime_tools/termux_assets.lock.json (PRoot, libtalloc, libandroid-shmem) keep their own licenses.
+Bundled native components (PRoot, libtalloc, libandroid-shmem) are built from the sources
+pinned in runtime_tools/runtime_sources.lock.json and keep their own licenses. Source
+locations and checksums are recorded in that file; build instructions and known validation
+limits are documented in docs/fdroid-source-build.md. PRoot is a bundled user-space
+chroot/bind-mount launcher, not a component downloaded by the app at runtime.
+
+  - PRoot 5.1.107.97: GPL-2.0; https://github.com/termux/proot
+  - talloc 2.5.0: LGPL-3.0-or-later; https://www.samba.org/ftp/talloc/
+  - libandroid-shmem 0.7: BSD-3-Clause; https://github.com/termux/libandroid-shmem
+
+Local compatibility patches and build adaptations are in runtime_tools/patches/ and
+scripts/build_android_runtime_native.py. This experimental branch is not a release;
+redistribution still requires the applicable license texts and corresponding-source obligations.
 
 Full MIT text for AndCode is included below.
 

@@ -83,13 +83,20 @@ Git repositories under `~/projects` work: AndChamber configures Git for shared s
 
 ## Build from source
 
-JDK 17, Android SDK (platform 35, build-tools 35) and Python 3. No NDK: PRoot and its libraries are extracted from pinned Termux packages at build time.
+JDK 17, Android SDK (latest Command-line Tools, platform 35, build-tools 35, NDK 29.0.14206865), Python 3.12 or later, and the host tools `make`, `patch`, `awk`, `sh`, `tar`, `xz`, `gzip` and `bzip2`. The native libraries (PRoot, talloc, libandroid-shmem) are compiled from pinned source archives; they are no longer extracted from Termux packages.
 
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk
+# Install the NDK (one time)
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
+# 1. Prepare native sources (network step; run before Gradle)
+python3 scripts/prepare_android_runtime_sources.py --output-dir build/runtime-sources
+# 2. Build and test (native compilation is offline; Maven and Google repositories still need network)
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # offline tests for the build scripts
 ```
+
+Step-by-step details, host-tool checks and experimental-status notes are in [docs/fdroid-source-build.md](docs/fdroid-source-build.md).
 
 Release signing is enabled by `ANDCHAMBER_KEYSTORE_FILE`, `ANDCHAMBER_KEYSTORE_PASSWORD`, `ANDCHAMBER_KEY_ALIAS` and `ANDCHAMBER_KEY_PASSWORD` (all four required). Pushing a `v*` tag builds a signed APK on GitHub Actions and publishes a release.
 
@@ -97,6 +104,6 @@ Release signing is enabled by `ANDCHAMBER_KEYSTORE_FILE`, `ANDCHAMBER_KEYSTORE_P
 
 - The PRoot runtime pipeline, verified downloader and atomic environment activation are ported from [AndCode](https://github.com/yuga-hashimoto/and-code) (MIT).
 - The icon is redrawn from OpenChamber's cube mark.
-- OpenChamber, OpenCode, Alpine Linux, PRoot and other software downloaded at runtime keep their own licenses; see [NOTICE](NOTICE).
+- OpenChamber, OpenCode, Alpine Linux and other software downloaded at runtime keep their own licenses. The native components (PRoot, talloc, libandroid-shmem) are bundled in the APK, built from pinned sources, and licensed separately; see [NOTICE](NOTICE).
 
 Released under the [MIT License](LICENSE).
