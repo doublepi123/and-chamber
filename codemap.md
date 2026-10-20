@@ -12,7 +12,7 @@ Key constraints:
 - All embedded pages require `WebViewFeature.MULTI_PROFILE`: unsupported or failed binding blocks page loading before authentication. Home, notifications and the local runtime remain available; remote addresses can be opened explicitly in a browser without adding credentials.
 - Profiles are keyed by target ID and canonical origin. Old default-profile data is neither cleared nor migrated; isolation between target profiles does not change browser Cookie rules for subresources inside one profile.
 - Native HTTP downloads use controlled redirects and the app process; they do not resume after process death. Unknown notification-send outcomes preserve the draft and session entry instead of automatically replaying the operation.
-- Launch can restore the last used OpenChamber instance and page. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
+- Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
 
 ## System Entry Points

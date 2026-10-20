@@ -259,12 +259,12 @@ fun AndChamberApp(
                 val remoteIds = remotes.servers.value.mapTo(HashSet()) { it.id }
                 (resumeTarget(rememberedId, remoteIds, sessionLink != null || OpenSessionLink.pending.value != null) as? ResumeTarget.Remote)?.targetId
             }
-        // The remembered page of that instance; only the one the launch actually opens. Kept until
-        // used (the deep-link callback clears both), until another instance is opened, or until Home.
-        var resumeLink by rememberSaveable {
-            mutableStateOf(
-                if (rememberedRemoteId != null || rememberedId == ServerTarget.LOCAL_ID) uiPrefs.lastTargetPath else null,
-            )
+        // Every instance keeps its own last page; a server removed elsewhere loses its page.
+        LaunchedEffect(inspection) {
+            if (inspection) return@LaunchedEffect
+            remotes.servers.collect { servers ->
+                uiPrefs.retainPages(servers.mapTo(HashSet()) { it.id } + ServerTarget.LOCAL_ID)
+            }
         }
         // Saved, so recreation never runs the decision again; Back to Home then stays on Home.
         var launchPending by rememberSaveable { mutableStateOf(true) }
@@ -317,8 +317,9 @@ fun AndChamberApp(
         }
 
         // Remember the instance being viewed, so the next launch can reopen it. Going Home (Back
-        // from a remote or an overlay, the edge handle's Home) forgets it — Home is never "last
-        // used". Back from the local page leaves the app instead, so the record survives.
+        // from a remote or an overlay, the edge handle's Home) forgets which one it was — Home
+        // is never "last used" — but every instance keeps its own last page. Back from the local
+        // page leaves the app instead, so the record survives.
         LaunchedEffect(inspection) {
             if (inspection) return@LaunchedEffect
             // The launch owns the record while the cover is up; once settled, every navigation
@@ -329,19 +330,12 @@ fun AndChamberApp(
                     when (entry.destination.route) {
                         Routes.WEB -> {
                             val id = entry.arguments?.getString(Routes.ARG_TARGET) ?: return@collect
-                            if (uiPrefs.lastTargetId != id) {
-                                // A different instance: the remembered page belongs to the other one.
-                                resumeLink = null
-                                uiPrefs.setLastTargetId(id)
-                            }
+                            uiPrefs.setLastTargetId(id)
                         }
                         // The independent browser is not an OpenChamber instance. Leaving it must
                         // not forget the server the user had open, and must not navigate there.
                         Routes.BROWSER -> Unit
-                        else -> {
-                            resumeLink = null
-                            uiPrefs.clearLastTarget()
-                        }
+                        else -> uiPrefs.clearLastTarget()
                     }
                 }
             }
@@ -424,6 +418,7 @@ fun AndChamberApp(
                                     onSaveRemote = remotes::upsert,
                                     onRemoveRemote = { server ->
                                         pool.discard(server.id)
+                                        uiPrefs.forgetPage(server.id)
                                         remotes.remove(server.id)
                                     },
                                     onSharedStorageChange = { on -> storageJobs.trySend { storage.setEnabled(on) } },
@@ -490,21 +485,19 @@ fun AndChamberApp(
                             onStartLocal = local::startOrRetry,
                             onSystemBarColor = { webBarColor = it },
                             deepLinkPath = if (isLocal) sessionLink else null,
-                            onDeepLinkUsed = {
-                                sessionLink = null
-                                resumeLink = null
-                            },
-                            // The remembered page is applied only if the server still answers at the
-                            // origin it was remembered on (a re-pointed remote drops its old page).
+                            onDeepLinkUsed = { sessionLink = null },
+                            // This instance's own last page, applied when its page is loaded fresh
+                            // (switching instances or a cold launch), and only if the server still
+                            // answers at the origin it was remembered on (a re-pointed remote drops it).
                             resumePath =
-                                resumeLink?.takeIf {
+                                uiPrefs.pageFor(targetId)?.let { page ->
                                     val targetOrigin = target?.baseUrl?.let(::canonicalWebOrigin)
-                                    targetOrigin != null && targetOrigin == uiPrefs.lastTargetOrigin
+                                    page.path.takeIf { targetOrigin != null && targetOrigin == page.origin }
                                 },
                             onPageLocation = { url ->
                                 val base = target?.baseUrl ?: return@WebScreen
                                 val origin = canonicalWebOrigin(base) ?: return@WebScreen
-                                sanitizedPagePath(url, base)?.let { uiPrefs.setLastTargetPath(it, origin) }
+                                sanitizedPagePath(url, base)?.let { uiPrefs.setPage(targetId, it, origin) }
                             },
                         )
                     }
