@@ -49,6 +49,7 @@
     <!-- 分区 -->
     <string name="section_this_device">本机</string>
     <string name="section_servers">其他电脑</string>
+    <string name="section_browser">浏览器</string>
 
     <!-- 本地运行时卡片 -->
     <string name="local_title">OpenChamber</string>
@@ -260,4 +261,22 @@
     <string name="msg_progress_verifying">正在检查 node、opencode 和网页资源</string>
     <string name="msg_progress_activating">正在激活环境</string>
     <string name="msg_progress_done">完成</string>
+
+    <!-- 独立浏览器，不是 OpenChamber 页面。 -->
+    <string name="browser_entry_title">浏览器</string>
+    <string name="browser_entry_body">在这里打开公网 https 页面。它与 OpenChamber 分开保存。</string>
+    <string name="browser_address_hint">https://</string>
+    <string name="browser_hint">输入公网 https 地址。下载、弹窗和文件上传保持关闭。暂不支持复杂表单和登录流程。页面返回的内容未经核实。</string>
+    <string name="browser_status_off">代理控制已关闭</string>
+    <string name="browser_status_on">代理控制已开启，持续 10 分钟</string>
+    <string name="browser_status_taken">页面已回到你这里</string>
+    <string name="browser_turn_on">允许代理</string>
+    <string name="browser_take_over">接管</string>
+    <string name="browser_turn_off">关闭</string>
+    <string name="browser_note">先在聊天里发出任务，再回到这里允许代理。离开此页面就会关闭。不能先允许再回聊天。</string>
+    <string name="browser_agent_needs_local">代理控制需要 OpenChamber 在本机运行。你仍可以自己浏览。</string>
+    <string name="browser_unavailable">浏览器不可用</string>
+    <string name="browser_unavailable_body">当前 WebView 无法把这个浏览器分开保存，因此没有加载任何页面。</string>
+    <string name="browser_controller_missing">浏览器控制尚未就绪。</string>
+    <string name="browser_address_refused">此地址不能在这里打开。</string>
 </resources>

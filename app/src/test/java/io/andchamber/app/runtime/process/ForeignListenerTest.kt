@@ -14,6 +14,7 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
+import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -82,6 +83,51 @@ class ForeignListenerTest {
         }
     }
 
+    /**
+     * A child whose stdout stays open until [destroy]. A byte-array stream would EOF while the
+     * process is still alive, so it cannot represent a running server.
+     */
+    private class OpenOutputChild(
+        output: String,
+    ) : Process() {
+        private val pipe = java.io.PipedInputStream()
+        private val writer = java.io.PipedOutputStream(pipe)
+        private val alive = java.util.concurrent.atomic.AtomicBoolean(true)
+
+        init {
+            writer.write(output.toByteArray())
+            writer.flush()
+        }
+
+        override fun getOutputStream(): OutputStream = OutputStream.nullOutputStream()
+
+        override fun getInputStream(): InputStream = pipe
+
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+
+        override fun waitFor(): Int {
+            while (isAlive) Thread.sleep(5)
+            return 0
+        }
+
+        override fun exitValue(): Int {
+            if (isAlive) throw IllegalThreadStateException("still running")
+            return 0
+        }
+
+        override fun destroy() {
+            alive.set(false)
+            writer.close()
+        }
+
+        /** Ends stdout without marking the process dead, for a late pump after a replacement launch. */
+        fun endOutput() {
+            writer.close()
+        }
+
+        override fun isAlive(): Boolean = alive.get()
+    }
+
     /** Health probe that records every call; a foreign server answering counts as a call. */
     private class RecordingHealth(
         private val report: HealthReport?,
@@ -103,6 +149,14 @@ class ForeignListenerTest {
         precheckFree: Boolean = true,
         maxLogBytes: Long = 1_048_576L,
         notificationSink: (String) -> Unit = {},
+        browserMcpAsset: () -> String = { "browser-mcp-fixture" },
+        invalidateBrowserEndpoint: (File, File) -> Boolean = { home, root ->
+            BrowserToolAssets.invalidateEndpoint(home, root)
+        },
+        onBrowserLaunchInvalidated: (Long) -> Unit = {},
+        onBrowserUnavailable: (String) -> Unit = {},
+        spawnOverride: (() -> Process)? = null,
+        capturedEnv: MutableList<Map<String, String>> = mutableListOf(),
     ) = ProotOpenChamberServer(
         paths = RuntimePaths(folder.root),
         suite = {
@@ -122,10 +176,16 @@ class ForeignListenerTest {
         pollMillis = 1L,
         maxLogBytes = maxLogBytes,
         notificationSink = notificationSink,
+        browserMcpAsset = browserMcpAsset,
+        browserTrustedRoot = folder.root,
+        invalidateBrowserEndpoint = invalidateBrowserEndpoint,
+        onBrowserLaunchInvalidated = onBrowserLaunchInvalidated,
+        onBrowserUnavailable = onBrowserUnavailable,
         sleep = { Thread.sleep(1) },
-        spawn = { _, _, _ ->
+        spawn = { _, env, _ ->
+            capturedEnv += env
             spawned += true
-            child
+            spawnOverride?.invoke() ?: child
         },
     )
 
@@ -175,6 +235,167 @@ class ForeignListenerTest {
         val launchId = server(child, RecordingHealth(ok), spawned).start(runtime(), "ui-secret", {}, { false })
 
         assertTrue(launchId > 0)
+    }
+
+    @Test
+    fun `start deletes the old credential and syncs the adapter before spawn, without putting a token in env`() {
+        val home = File(folder.root, "home")
+        val credential = BrowserToolAssets.endpointHostFile(home)
+        credential.parentFile.mkdirs()
+        credential.writeText("""{"token":"old-lease","endpoint":"http://127.0.0.1/"}""")
+        val child = FakeChild(
+            output = "OpenChamber server listening on 127.0.0.1:$port\n",
+            exitCode = 0,
+            lifetimeMillis = 10_000L,
+        )
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val spawned = mutableListOf<Boolean>()
+        val captured = mutableListOf<Map<String, String>>()
+        val order = mutableListOf<String>()
+
+        server(
+            child,
+            RecordingHealth(ok),
+            spawned,
+            browserMcpAsset = {
+                order += "sync"
+                "latest-mcp"
+            },
+            invalidateBrowserEndpoint = { target, root ->
+                order += "invalidate"
+                BrowserToolAssets.invalidateEndpoint(target, root)
+            },
+            capturedEnv = captured,
+        ).start(runtime(), "ui-secret", {}, { false })
+
+        assertEquals(listOf("invalidate", "sync"), order)
+        assertFalse(java.nio.file.Files.exists(credential.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertEquals("latest-mcp", File(home, BrowserToolAssets.SCRIPT_RELATIVE).readText())
+        assertEquals(BrowserToolAssets.GUEST_ENDPOINT_FILE, captured.single()[BrowserToolAssets.ENDPOINT_ENV])
+        assertFalse(captured.single().values.any { it.contains("old-lease") })
+        assertEquals("ui-secret", captured.single()["OPENCHAMBER_UI_PASSWORD"])
+    }
+
+    @Test
+    fun `browser prepare failure still starts OpenChamber and injects no browser config`() {
+        val child = FakeChild(
+            output = "OpenChamber server listening on 127.0.0.1:$port\n",
+            exitCode = 0,
+            lifetimeMillis = 10_000L,
+        )
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val captured = mutableListOf<Map<String, String>>()
+        val reasons = mutableListOf<String>()
+
+        val launchId = server(
+            child,
+            RecordingHealth(ok),
+            mutableListOf(),
+            browserMcpAsset = { error("asset missing") },
+            invalidateBrowserEndpoint = { _, _ -> false },
+            capturedEnv = captured,
+            onBrowserUnavailable = { reasons += it },
+        ).start(runtime(), "ui-secret", {}, { false })
+
+        assertTrue(launchId > 0)
+        assertEquals(1, reasons.size)
+        assertFalse(reasons.single().contains("asset missing"))
+        assertFalse(captured.single().containsKey(BrowserToolAssets.ENDPOINT_ENV))
+        assertFalse(captured.single().containsKey(BrowserToolAssets.CONFIG_ENV))
+    }
+
+    @Test
+    fun `stop revokes the current lease and a dead previous pump does not revoke the next launch`() {
+        val first = OpenOutputChild("OpenChamber server listening on 127.0.0.1:$port\n")
+        val second = OpenOutputChild("OpenChamber server listening on 127.0.0.1:$port\n")
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val revoked = mutableListOf<Long>()
+        val children = ArrayDeque<Process>()
+        children.add(first)
+        children.add(second)
+        val created = server(
+            first,
+            RecordingHealth(ok),
+            mutableListOf(),
+            onBrowserLaunchInvalidated = { revoked += it },
+            spawnOverride = { children.removeFirst() },
+        )
+        val launchA = created.start(runtime(), "ui-secret", {}, { false })
+        assertTrue(first.isAlive)
+        assertFalse(revoked.contains(launchA))
+
+        created.stop()
+        val stopped = revoked.toList()
+        assertEquals(listOf(launchA), stopped)
+
+        val launchB = created.start(runtime(), "ui-secret", {}, { false })
+        first.endOutput()
+        Thread.sleep(50)
+
+        assertFalse(revoked.contains(launchB))
+        assertEquals(launchB, created.readyLaunchId())
+        assertEquals(1, revoked.count { it == launchA })
+        assertFalse(revoked.drop(stopped.size).contains(launchA))
+        second.destroy()
+    }
+
+    @Test
+    fun `readyLaunchId is a pure getter and a late revoke for A does not revoke B`() {
+        val first = FakeChild(
+            output = "OpenChamber server listening on 127.0.0.1:$port\n",
+            exitCode = 0,
+            lifetimeMillis = 10_000L,
+        )
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        val revoked = mutableListOf<Long>()
+        val created = server(
+            first,
+            RecordingHealth(ok),
+            mutableListOf(),
+            onBrowserLaunchInvalidated = { revoked += it },
+        )
+        val launchA = created.start(runtime(), "ui-secret", {}, { false })
+        val callbacksBeforeRead = revoked.toList()
+        val seen = created.readyLaunchId()
+        assertEquals(launchA, seen)
+        assertEquals(callbacksBeforeRead, revoked)
+
+        created.stop()
+        val afterStop = revoked.toList()
+        created.readyLaunchId()
+        assertEquals(afterStop, revoked)
+        assertTrue(afterStop.contains(launchA))
+        assertFalse(afterStop.contains(launchA + 1))
+    }
+
+    @Test
+    fun `launch invalidation runs before the credential delete and a later enable is not revoked`() {
+        val child = FakeChild(
+            output = "OpenChamber server listening on 127.0.0.1:$port\n",
+            exitCode = 0,
+            lifetimeMillis = 10_000L,
+        )
+        val ok = HealthReport("ok", isOpenCodeReady = true, openCodeRunning = true, lastOpenCodeError = null, serverId = "ours")
+        var enabledAfter = false
+        var revoked = 0
+
+        server(
+            child,
+            RecordingHealth(ok),
+            mutableListOf(),
+            browserMcpAsset = { "fixture" },
+            invalidateBrowserEndpoint = { _, _ ->
+                enabledAfter = true
+                true
+            },
+            onBrowserLaunchInvalidated = { _ ->
+                revoked += 1
+                check(!enabledAfter) { "revocation ran after a newer credential could exist" }
+            },
+        ).start(runtime(), "ui-secret", {}, { false })
+
+        assertEquals(1, revoked)
+        assertTrue(enabledAfter)
     }
 
     @Test
@@ -335,6 +556,8 @@ class ForeignListenerTest {
         sleep = { Thread.sleep(1) },
         spawn = { _, _, _ -> child },
         notificationSink = { sunk += it },
+        browserMcpAsset = { "browser-mcp-fixture" },
+        browserTrustedRoot = folder.root,
     )
 
     @Test

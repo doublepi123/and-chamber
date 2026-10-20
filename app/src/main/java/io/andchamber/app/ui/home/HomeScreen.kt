@@ -30,8 +30,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,7 +58,9 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
+import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ChamberMark
+import io.andchamber.app.ui.components.IconTile
 import io.andchamber.app.ui.components.SectionHeader
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.revealOnEnter
@@ -78,6 +83,7 @@ internal class HomeActions(
     /** Stops the local server and starts it again, so new folder settings apply. */
     val onRestartLocal: () -> Unit = {},
     val onAutoOpenChange: (Boolean) -> Unit = {},
+    val onOpenBrowser: () -> Unit = {},
 )
 
 /** The storage card only makes sense where the local server can exist at all. */
@@ -206,6 +212,15 @@ internal fun HomeScreen(
                         onRemove = { removingId = it.id },
                         modifier = Modifier.revealOnEnter(3, animate),
                     )
+
+                    SectionHeader(
+                        text = stringResource(R.string.section_browser),
+                        modifier = Modifier.padding(top = 28.dp, bottom = 10.dp).revealOnEnter(4, animate),
+                    )
+                    BrowserEntryCard(
+                        onOpen = actions.onOpenBrowser,
+                        modifier = Modifier.revealOnEnter(4, animate),
+                    )
                     Spacer(Modifier.height(32.dp))
                 }
                 Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.safeDrawing))
@@ -262,6 +277,35 @@ private fun HomeHeader(modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/** A separate public browser. It does not open OpenChamber and does not share its sign-in. */
+@Composable
+private fun BrowserEntryCard(
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ChamberCard(onClick = onOpen, modifier = modifier) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconTile {
+                Icon(Icons.Rounded.Language, contentDescription = null, modifier = Modifier.size(22.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.browser_entry_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = stringResource(R.string.browser_entry_body),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

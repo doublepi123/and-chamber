@@ -72,6 +72,30 @@ class ProotOpenChamberServer(
     private val onStopped: () -> Unit = {},
     /** Receives raw `[OpenChamberDesktopNotify] ` lines, which carry user text and never reach the log. */
     private val notificationSink: (line: String) -> Unit = {},
+    /**
+     * Reads the packaged browser MCP adapter. Production passes the asset reader; tests pass a
+     * fixture. A missing, blank, or unwritable asset degrades this launch: no endpoint env and no
+     * config overlay. It does not fail the OpenChamber start.
+     */
+    private val browserMcpAsset: () -> String = { error("browser-control asset unavailable") },
+    /**
+     * App-private boundary. Ancestors of this directory may be symlinks; only the suffix below it
+     * is checked without following links. Production passes `context.filesDir`.
+     */
+    private val browserTrustedRoot: File = paths.root.parentFile ?: paths.root,
+    /**
+     * Drops a leftover browser-control credential. Called only while [readyLaunchId] is null, so a
+     * controller that consults that id cannot issue a replacement lease during the delete.
+     */
+    private val invalidateBrowserEndpoint: (File, File) -> Boolean = BrowserToolAssets::invalidateEndpoint,
+    /**
+     * Drops the controller's lease for one launch id. The id is captured under [lock] before this
+     * runs, and this is never called while [lock] is held. A late callback for launch A must not
+     * revoke a lease issued for launch B.
+     */
+    private val onBrowserLaunchInvalidated: (Long) -> Unit = {},
+    /** Receives a short, non-sensitive reason when browser control is skipped for this launch. */
+    private val onBrowserUnavailable: (String) -> Unit = {},
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -97,14 +121,13 @@ class ProotOpenChamberServer(
     /** Set when our child for the current launch is known to be dead or stopped. Guarded by [lock]. */
     private var readyId: Long? = null
 
+    /** Launch whose browser lease was already revoked. Stops a death callback from revoking the next one. */
+    private var browserRevokedLaunch = 0L
+
     override fun readyLaunchId(): Long? =
         synchronized(lock) {
             val id = readyId ?: return@synchronized null
-            if (process?.isAlive != true) {
-                readyId = null
-                return@synchronized null
-            }
-            id
+            if (process?.isAlive == true) id else null
         }
 
     override fun isAlive(): Boolean = synchronized(lock) { process?.isAlive == true }
@@ -124,8 +147,15 @@ class ProotOpenChamberServer(
         val prootPath = runCatching { suite().proot.absolutePath }.getOrNull()
             ?: error("Embedded PRoot is unavailable")
         if (!cleanBeforeStart(port, guestRunDir, prootPath)) throw PortInUseException(port)
+        // readyLaunchId stays null from stop() until this child is ready, so the controller refuses
+        // a new enable for the whole prepare. Revoke first; a failed file delete must not skip it.
+        // Delete only while this start still owns the slot. A newer start may already have revoked.
+        revokeBrowserLease(synchronized(lock) { launchId })
+        val credentialCleared = synchronized(lock) { process == null && readyId == null } &&
+            runCatching { invalidateBrowserEndpoint(paths.home, browserTrustedRoot) }.getOrDefault(false)
         runCatching { refreshDns(runtime) }
         val resolved = suite()
+        val browserPrepared = prepareBrowserAdapter(credentialCleared)
 
         paths.logs.mkdirs()
         paths.workspace.mkdirs()
@@ -141,7 +171,12 @@ class ProotOpenChamberServer(
                 extraBinds = emptyList(),
                 port = port,
             )
-        val env = ProotCommands.serverEnvironment(resolved.environment(), paths.prootTmp, uiPassword)
+        val env = ProotCommands.serverEnvironment(
+            resolved.environment(),
+            paths.prootTmp,
+            uiPassword,
+            browserControl = browserPrepared,
+        )
         val signal = CompletableDeferred<Unit>()
         val started = spawn(command, env, paths.root)
         val id =
@@ -152,7 +187,7 @@ class ProotOpenChamberServer(
                 listenSignal = signal
                 ++launchId
             }
-        val pump = pumpOutput(started, port, signal, onLog)
+        val pump = pumpOutput(started, id, port, signal, onLog)
         try {
             waitUntilReady(started, port, isCancelled, signal, pump)
         } catch (error: Throwable) {
@@ -182,6 +217,9 @@ class ProotOpenChamberServer(
                 readyId = null
                 process.also { process = null }
             }
+        // Outside the lock: the callback may hop to Main and must not deadlock a UI caller.
+        val stoppedLaunch = synchronized(lock) { launchId }
+        revokeBrowserLease(stoppedLaunch)
         // Stop the DNS monitor first, so no network refresh can write after the server is torn down.
         // It is idempotent, and a failed start (waitUntilReady throws) also comes through here.
         runCatching { dnsMonitor.stop() }
@@ -198,8 +236,39 @@ class ProotOpenChamberServer(
      * Reads our child's output. The listen line completes [signal]; every line goes to the bounded
      * diagnostic tail and the log. Nothing else is retained, so memory does not grow with uptime.
      */
+    /**
+     * Revokes [launch] at most once, and never while [lock] is held. A late pump from an older launch
+     * is a no-op once that launch was revoked by stop. A newer launch is not consumed by that call.
+     */
+    private fun revokeBrowserLease(launch: Long) {
+        val should = synchronized(lock) {
+            if (launch <= browserRevokedLaunch) {
+                false
+            } else {
+                browserRevokedLaunch = launch
+                true
+            }
+        }
+        if (should) onBrowserLaunchInvalidated(launch)
+    }
+
+    private fun prepareBrowserAdapter(credentialCleared: Boolean): Boolean =
+        runCatching {
+            check(credentialCleared) { "browser-control credential was not cleared" }
+            val asset = browserMcpAsset()
+            check(asset.isNotBlank()) { "browser-control asset is empty" }
+            BrowserToolAssets.sync(paths.home, asset, browserTrustedRoot)
+        }.fold(
+            onSuccess = { true },
+            onFailure = { error ->
+                onBrowserUnavailable("browser-control skipped: ${error.javaClass.simpleName}")
+                false
+            },
+        )
+
     private fun pumpOutput(
         process: Process,
+        launch: Long,
         port: Int,
         signal: CompletableDeferred<Unit>,
         onLog: (String) -> Unit,
@@ -228,8 +297,18 @@ class ProotOpenChamberServer(
                 // An uncaught throwable on this thread kills the whole app; log and end the pump instead.
                 runCatching { onLog("Output reader stopped: ${error.message}") }
             } finally {
-                // The child's output ended: it has exited. Forget trust immediately.
-                synchronized(lock) { if (this.process === process) readyId = null }
+                // Only this launch's own death drops trust. A previous pump must not revoke the next launch.
+                val current = synchronized(lock) {
+                    if (this.process === process && launchId == launch) {
+                        readyId = null
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // readyLaunchId() may already have revoked this death. Do not revoke again, and never
+                // revoke a launch that replaced this process.
+                if (current) revokeBrowserLease(launch)
             }
         }, "openchamber-output").apply { isDaemon = true; start() }
 
