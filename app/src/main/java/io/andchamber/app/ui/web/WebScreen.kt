@@ -48,7 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -176,13 +176,36 @@ internal fun WebScreen(
     }
     var attempt by remember(web) { mutableIntStateOf(0) }
     var gatewayPreparations by remember(web) { mutableIntStateOf(0) }
+    val gatewayBudget = remember(web, sessionKey) { GatewayHandoffBudget() }
+    var handoffTicket by remember(web, sessionKey) { mutableLongStateOf(0L) }
     var gatewayPending by remember(web, sessionKey) { mutableStateOf(web?.gatewayLoginMode == true) }
-    SideEffect {
-        web?.onGatewayCompleted = {
-            if (gatewayPreparations < 2) {
-                gatewayPreparations++
-                web.invalidateSession()
-                attempt++
+    DisposableEffect(web, sessionKey, target?.id, target?.baseUrl) {
+        val complete: (Long) -> Unit = complete@ { ticket ->
+            if (web?.isGatewayHandoffCurrent(ticket) != true) return@complete
+            when (gatewayBudget.claim(ticket)) {
+                GatewayHandoffBudget.Claim.Start -> {
+                    gatewayPreparations = gatewayBudget.used
+                    handoffTicket = ticket
+                    gatewayPending = true
+                    web?.invalidateSession()
+                    attempt++
+                }
+                GatewayHandoffBudget.Claim.Duplicate -> Unit
+                GatewayHandoffBudget.Claim.Rejected -> {
+                    web?.cancelGatewayHandoff(ticket)
+                    phase = SessionPhase.Unreachable(context.getString(R.string.gateway_handoff_failed))
+                }
+            }
+        }
+        web?.onGatewayCompleted = complete
+        if (web != null && web.gatewayHandoffTicket > 0) {
+            if (web.isGatewayHandoffCurrent(web.gatewayHandoffTicket)) complete(web.gatewayHandoffTicket)
+            else web.beginGatewayHandoff()
+        }
+        onDispose {
+            if (web?.onGatewayCompleted === complete) {
+                web.onGatewayCompleted = null
+                web.cancelGatewayHandoff(web.gatewayHandoffTicket)
             }
         }
     }
@@ -207,20 +230,34 @@ internal fun WebScreen(
         // Only a WebView bound to this server's own profile may sign in; otherwise nothing is sent
         // and the isolation panel stays up.
         if (view.isolationFailure != null || view.view == null) return@LaunchedEffect
-        val cookies = view.sessionCookies ?: return@LaunchedEffect
-        if (view.sessionKey == key) {
+        val ticket = handoffTicket
+        // The newly attached callback will claim an existing/quarantined pooled-view ticket first.
+        if (ticket == 0L && view.gatewayHandoffTicket > 0) return@LaunchedEffect
+        if (ticket == 0L && view.sessionKey == key && view.gatewayHandoffTicket == 0L) {
             phase = SessionPhase.Loaded
             return@LaunchedEffect
         }
         phase = SessionPhase.Connecting
+        if (ticket > 0 && !view.awaitGatewayHandoff(ticket)) {
+            phase = SessionPhase.Unreachable(context.getString(R.string.gateway_handoff_failed))
+            return@LaunchedEffect
+        }
+        // A replacement view may have a new cookie capability: capture it only after quiescence.
+        val cookies = view.sessionCookies ?: return@LaunchedEffect
         val result =
             try {
                 auth.prepare(current, cookies)
             } catch (error: CancellationException) {
+                if (ticket > 0) view.cancelGatewayHandoff(ticket)
                 throw error
             } catch (error: Exception) {
                 WebSessionResult.Unreachable(error.message ?: context.getString(R.string.connection_failed))
             }
+        if (ticket > 0 && (!view.isGatewayHandoffCurrent(ticket) || view.sessionCookies !== cookies)) {
+            view.cancelGatewayHandoff(ticket)
+            phase = SessionPhase.Unreachable(context.getString(R.string.gateway_handoff_failed))
+            return@LaunchedEffect
+        }
         phase =
             when (result) {
                 // NeedsLogin: OpenChamber shows its own sign-in page at the same address.
@@ -235,7 +272,10 @@ internal fun WebScreen(
                             is WebSessionResult.Unreachable -> error("unreachable")
                         }
                     // A completed gateway round re-arms the bounded re-prepare for a later expiry.
-                    if (!gateway) gatewayPreparations = 0
+                    if (!gateway) {
+                        gatewayPreparations = 0
+                        gatewayBudget.reset()
+                    }
                     // A session picked from a notification, or the remembered page of this instance,
                     // is the first page, not a second load. The notification link wins over the
                     // remembered page. Keep it pending through gateway retries so the final
@@ -246,10 +286,14 @@ internal fun WebScreen(
                         key,
                         gatewayLogin = gateway && gatewayPreparations < 2,
                     )
+                    if (ticket > 0) handoffTicket = 0L
                     if (startPage.consume) latestDeepLinkUsed()
                     SessionPhase.Loaded
                 }
-                is WebSessionResult.Unreachable -> SessionPhase.Unreachable(result.reason)
+                is WebSessionResult.Unreachable -> {
+                    if (ticket > 0) view.cancelGatewayHandoff(ticket)
+                    SessionPhase.Unreachable(result.reason)
+                }
             }
     }
 
@@ -260,14 +304,24 @@ internal fun WebScreen(
         val link = deepLinkPath ?: return@LaunchedEffect
         val base = target?.baseUrl ?: return@LaunchedEffect
         // A retained notification path must not be consumed by the already-loaded shortcut either.
-        if (gatewayPending) return@LaunchedEffect
+        if (gatewayPending || view.gatewayHandoffTicket != 0L) return@LaunchedEffect
         if (phase != SessionPhase.Loaded || sessionKey == null || view.sessionKey != sessionKey) return@LaunchedEffect
         if (view.navigateWithinSession(withSessionPath(base, link))) latestDeepLinkUsed()
     }
 
-    val retry = {
-        web?.invalidateSession()
-        attempt += 1
+    val retry: () -> Unit = {
+        gatewayBudget.manualRetry()
+        gatewayPreparations = 0
+        if (web != null && web.gatewayHandoffTicket > 0) {
+            web.cancelGatewayHandoff(web.gatewayHandoffTicket)
+            web.beginGatewayHandoff()
+        } else {
+            web?.invalidateSession()
+            attempt += 1
+        }
+    }
+    val reload: () -> Unit = {
+        if (web != null && web.gatewayHandoffTicket > 0) retry() else web?.reload()
     }
     // A WebView whose profile failed is never bound again: drop it and bind a fresh one.
     val retryIsolation = {
@@ -361,7 +415,7 @@ internal fun WebScreen(
                         title = shownTarget.displayName,
                         address = displayAddress(shownTarget.baseUrl),
                         onHome = onExit,
-                        onReload = { web.reload() },
+                        onReload = reload,
                         // The local server's password is internal, so a browser couldn't sign in.
                         onOpenInBrowser = if (shownTarget is ServerTarget.Remote) web::openInBrowser else null,
                     )
@@ -389,7 +443,7 @@ internal fun WebScreen(
                         isLocal = isLocal,
                         onExit = onExit,
                         onRetry = retry,
-                        onReload = { web?.reload() },
+                        onReload = reload,
                         onStartLocal = onStartLocal,
                         onRetryIsolation = retryIsolation,
                         onOpenInBrowser = browserAddress?.let { address -> { openAddressInBrowser(context, address) } },

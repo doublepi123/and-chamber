@@ -93,7 +93,7 @@ class StringResourcesTest {
     @Test
     fun `the number of translated strings is what the brief committed to`() {
         // 221 entries: 220 plain strings plus one plural (log_lines). Changing this is a deliberate decision.
-        assertEquals(221, english.size)
+        assertEquals(222, english.size)
     }
 
     private companion object {

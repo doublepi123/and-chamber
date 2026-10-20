@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- All user-visible copy. Keep keys in sync with values-zh/strings.xml (checked by StringResourcesTest). -->
 <resources>
+    <string name="gateway_handoff_failed">Could not safely finish signing in. Try again or return Home.</string>
     <string name="app_name">AndChamber</string>
     <string name="tagline">OpenChamber on this phone, or on your computer</string>
 

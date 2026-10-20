@@ -48,6 +48,10 @@ import io.andchamber.app.data.WebIsolationFailure
 import io.andchamber.app.data.WebProfileBinding
 import io.andchamber.app.data.canonicalWebOrigin
 import io.andchamber.app.runtime.WebSessionCookies
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -122,8 +126,10 @@ internal class ChamberWebView(
     // Set once the gateway flow actually left [origin] (redirect or navigation to the Access/IdP page).
     // Gateway mode ends only on a return to [origin] after that, not on the initial request itself.
     private var gatewayLeftOrigin = false
-    private var gatewayReturnPending = false
-    var onGatewayCompleted: (() -> Unit)? = null
+    private val gatewayHandoff = GatewayHandoff()
+    private val mainFrameErrors = MainFrameErrorGuard()
+    internal val gatewayHandoffTicket: Long get() = gatewayHandoff.ticket
+    var onGatewayCompleted: ((Long) -> Unit)? = null
 
     /**
      * The page's trusted main-frame location (page loads and history/pushState navigations), so the
@@ -178,6 +184,68 @@ internal class ChamberWebView(
         view = createBoundView()
     }
 
+    private fun handoffBlank(ticket: Long) = gatewayHandoffBlank(ticket)
+    private fun isHandoffBlank(url: String?) = isGatewayHandoffBlank(url)
+
+    internal fun isGatewayHandoffCurrent(ticket: Long): Boolean =
+        view?.let { isCurrent(it) && gatewayHandoff.matches(ticket, it, generation) } == true
+
+    /** Main thread: stop the old document before native authentication can read or commit cookies. */
+    internal fun beginGatewayHandoff(): Long {
+        val webView = view?.takeIf { !destroyed } ?: return -1
+        val previous = gatewayHandoff.ticket
+        val ticket = gatewayHandoff.begin(webView, generation)
+        if (ticket == previous) return ticket
+        val expectedGeneration = generation
+        val completionOwner = onGatewayCompleted
+        mainTrusted = false
+        gatewayLoginMode = false
+        gatewayLeftOrigin = false
+        sessionKey = null
+        committed = false
+        progress = 0
+        pageError = null
+        lastReportedLocation = null
+        rotateToken()
+        try {
+            webView.stopLoading()
+            webView.removeJavascriptInterface(BRIDGE_NAME)
+            webView.loadUrl(handoffBlank(ticket))
+        } catch (_: RuntimeException) {
+            cancelGatewayHandoff(ticket)
+        }
+        main.post {
+            if (isCurrent(webView) && generation == expectedGeneration && isGatewayHandoffCurrent(ticket) &&
+                onGatewayCompleted === completionOwner) {
+                completionOwner?.invoke(ticket)
+            }
+        }
+        return ticket
+    }
+
+    /** Suspends, never blocks Main; a failed barrier cannot release the old document's quarantine. */
+    internal suspend fun awaitGatewayHandoff(ticket: Long): Boolean = try {
+        withContext(Dispatchers.Main.immediate) {
+            val ready = gatewayHandoff.await(ticket)
+            if (ready && isGatewayHandoffCurrent(ticket)) true else {
+                cancelGatewayHandoff(ticket)
+                false
+            }
+        }
+    } catch (_: CancellationException) {
+        withContext(NonCancellable + Dispatchers.Main.immediate) { cancelGatewayHandoff(ticket) }
+        false
+    }
+
+    internal fun cancelGatewayHandoff(ticket: Long) {
+        if (ticket <= 0 || ticket != gatewayHandoff.ticket) return
+        gatewayHandoff.cancel(ticket)
+        mainTrusted = false
+        sessionKey = null
+        progress = 100
+        pageError = context().getString(R.string.gateway_handoff_failed)
+    }
+
     fun load(
         url: String,
         sessionKey: String,
@@ -191,10 +259,10 @@ internal class ChamberWebView(
             pageError = context().getString(R.string.page_failed_title)
             return
         }
+        if (gatewayHandoff.blocksDocuments && !gatewayHandoff.finish(gatewayHandoff.ticket, webView, generation)) return
         this.sessionKey = sessionKey
         gatewayLoginMode = gatewayLogin
         gatewayLeftOrigin = false
-        gatewayReturnPending = false
         rotateToken()
         mainTrusted = false
         targetUrl = url
@@ -205,6 +273,7 @@ internal class ChamberWebView(
         committed = false
         progress = 0
         clearHistoryAfterLoad = true
+        mainFrameErrors.expect(webView, generation, url)
         webView.loadUrl(url)
     }
 
@@ -219,23 +288,30 @@ internal class ChamberWebView(
      * are accepted. Returns false when no session is loaded.
      */
     fun navigateWithinSession(url: String): Boolean {
+        if (gatewayHandoff.blocksDocuments) return false
         if (destroyed || sessionKey == null || origin.isEmpty() || originOf(url) != origin) return false
         val webView = view ?: return false
         if (currentUrl == url && pageError == null) return true // Already showing it.
         pageError = null
         foreignRecoveries = 0
+        mainFrameErrors.expect(webView, generation, url)
         webView.loadUrl(url)
         return true
     }
 
     fun reload() {
+        if (gatewayHandoff.blocksDocuments) return
         if (destroyed) return
         val webView = view ?: return
         pageError = null
         val shown = webView.url
         if (shown.isNullOrEmpty() || shown == BLANK) {
-            currentUrl?.let { webView.loadUrl(it) }
+            currentUrl?.let {
+                mainFrameErrors.expect(webView, generation, it)
+                webView.loadUrl(it)
+            }
         } else {
+            mainFrameErrors.expect(webView, generation, shown)
             webView.reload()
         }
     }
@@ -244,10 +320,10 @@ internal class ChamberWebView(
         bridgeToken = UUID.randomUUID().toString()
     }
 
-    fun canGoBack(): Boolean = !destroyed && view?.canGoBack() == true
+    fun canGoBack(): Boolean = !destroyed && !gatewayHandoff.blocksDocuments && view?.canGoBack() == true
 
     fun goBack() {
-        if (!destroyed) view?.goBack()
+        if (!destroyed && !gatewayHandoff.blocksDocuments) view?.goBack()
     }
 
     fun openInBrowser() {
@@ -272,6 +348,9 @@ internal class ChamberWebView(
 
     fun destroy() {
         if (destroyed) return
+        gatewayHandoff.cancel(gatewayHandoff.ticket)
+        onGatewayCompleted = null
+        onPageLocation = null
         destroyed = true
         mainTrusted = false
         host = null
@@ -347,11 +426,16 @@ internal class ChamberWebView(
     /** Reports a trusted same-origin main-frame location; suppresses repeats and foreign pages. */
     private fun reportPageLocation(url: String?) {
         if (url.isNullOrEmpty() || url == BLANK) return
-        if (!mainTrusted || gatewayLoginMode) return
+        if (!mainTrusted || gatewayLoginMode || gatewayHandoff.blocksDocuments) return
         if (originOf(url) != origin) return
         if (url == lastReportedLocation) return
         lastReportedLocation = url
-        main.post { onPageLocation?.invoke(url) }
+        val expectedView = view
+        val expectedGeneration = generation
+        main.post {
+            if (isCurrent(expectedView) && generation == expectedGeneration && mainTrusted &&
+                !gatewayLoginMode && !gatewayHandoff.blocksDocuments) onPageLocation?.invoke(url)
+        }
     }
 
     private inner class Client : WebViewClient() {
@@ -360,6 +444,7 @@ internal class ChamberWebView(
             request: WebResourceRequest,
         ): Boolean {
             if (!request.isForMainFrame) return false
+            if (gatewayHandoff.blocksDocuments) return request.url.toString() != handoffBlank(gatewayHandoff.ticket)
             return routeOutside(request.url)
         }
 
@@ -372,6 +457,16 @@ internal class ChamberWebView(
             favicon: Bitmap?,
         ) {
             if (!isCurrent(view)) return
+            if (gatewayHandoff.blocksDocuments) {
+                mainTrusted = false
+                view.removeJavascriptInterface(BRIDGE_NAME)
+                if (url == handoffBlank(gatewayHandoff.ticket) && view.url == url) {
+                    gatewayHandoff.started(gatewayHandoff.ticket, view, generation)
+                }
+                return
+            }
+            if (isHandoffBlank(url)) return
+            mainFrameErrors.started(view, generation, url, view.url)
             // Every main-frame document starts with a fresh token and no bridge unless it is ours.
             rotateToken()
             mainTrusted = false
@@ -381,9 +476,11 @@ internal class ChamberWebView(
             }
             if (origin.isNotEmpty() && originOf(url) == origin) {
                 if (gatewayLoginMode && gatewayLeftOrigin) {
-                    gatewayLoginMode = false
-                    gatewayLeftOrigin = false
-                    gatewayReturnPending = true
+                    // Access's same-origin intermediate pages must finish their own gateway work.
+                    if (Uri.parse(url).path?.startsWith("/cdn-cgi/") != true) {
+                        beginGatewayHandoff()
+                        return
+                    }
                 }
                 mainTrusted = true
                 view.addJavascriptInterface(bridge, BRIDGE_NAME)
@@ -399,7 +496,12 @@ internal class ChamberWebView(
             val back = targetUrl
             if (back != null && foreignRecoveries < MAX_FOREIGN_RECOVERIES) {
                 foreignRecoveries++
-                main.post { if (isCurrent(view)) view.loadUrl(back) }
+                main.post {
+                    if (isCurrent(view) && !gatewayHandoff.blocksDocuments) {
+                        mainFrameErrors.expect(view, generation, back)
+                        view.loadUrl(back)
+                    }
+                }
             } else {
                 progress = 100
                 pageError = context().getString(R.string.page_failed_title)
@@ -410,12 +512,9 @@ internal class ChamberWebView(
             view: WebView,
             url: String?,
         ) {
+            if (gatewayHandoff.blocksDocuments || isHandoffBlank(url)) return
             if (isCurrent(view)) {
                 committed = true
-                if (gatewayReturnPending && originOf(url) == origin) {
-                    gatewayReturnPending = false
-                    main.post { onGatewayCompleted?.invoke() }
-                }
             }
         }
 
@@ -424,6 +523,13 @@ internal class ChamberWebView(
             url: String?,
         ) {
             if (!isCurrent(view)) return
+            if (gatewayHandoff.blocksDocuments) {
+                if (url == handoffBlank(gatewayHandoff.ticket) && view.url == url) {
+                    gatewayHandoff.complete(gatewayHandoff.ticket, view, generation)
+                }
+                return
+            }
+            if (isHandoffBlank(url)) return
             progress = 100
             committed = true
             val trusted = origin.isNotEmpty() && originOf(url) == origin
@@ -446,6 +552,8 @@ internal class ChamberWebView(
             isReload: Boolean,
         ) {
             if (!isCurrent(view) || url.isNullOrEmpty() || url == BLANK) return
+            if (gatewayHandoff.blocksDocuments || isHandoffBlank(url)) return
+            mainFrameErrors.started(view, generation, url, view.url)
             currentUrl = url
             reportPageLocation(url)
         }
@@ -455,7 +563,9 @@ internal class ChamberWebView(
             request: WebResourceRequest,
             error: WebResourceError,
         ) {
-            if (isCurrent(view) && request.isForMainFrame) {
+            if (isCurrent(view) && request.isForMainFrame && mainFrameErrors.accepts(
+                    view, generation, request.url.toString(), gatewayHandoff.blocksDocuments,
+                )) {
                 pageError = error.description?.toString()?.takeIf { it.isNotBlank() } ?: "Error ${error.errorCode}"
             }
         }
@@ -467,7 +577,7 @@ internal class ChamberWebView(
             error: SslError,
         ) {
             handler.cancel()
-            if (isCurrent(view) && originOf(error.url) == origin) pageError = context().getString(R.string.certificate_not_trusted)
+            if (isCurrent(view) && !gatewayHandoff.blocksDocuments && originOf(error.url) == origin) pageError = context().getString(R.string.certificate_not_trusted)
         }
 
         override fun onRenderProcessGone(
@@ -572,6 +682,8 @@ internal class ChamberWebView(
     }
 
     private fun replaceAfterCrash() {
+        val interruptedHandoff = gatewayHandoff.blocksDocuments
+        if (interruptedHandoff) cancelGatewayHandoff(gatewayHandoff.ticket)
         val now = SystemClock.elapsedRealtime()
         crashTimes.addLast(now)
         while (crashTimes.isNotEmpty() && now - crashTimes.first() > CRASH_WINDOW_MS) crashTimes.removeFirst()
@@ -587,6 +699,12 @@ internal class ChamberWebView(
         val fresh = createBoundView()
         view = fresh
         generation += 1
+        if (interruptedHandoff) {
+            mainTrusted = false
+            progress = 100
+            pageError = context().getString(R.string.gateway_handoff_failed)
+            return
+        }
         if (fresh == null) {
             progress = 100
             return
@@ -596,6 +714,7 @@ internal class ChamberWebView(
         if (url != null && crashTimes.size <= MAX_AUTO_RELOADS) {
             progress = 0
             committed = false
+            mainFrameErrors.expect(fresh, generation, url)
             fresh.loadUrl(url)
             toast(context().getString(R.string.page_crashed))
         } else {

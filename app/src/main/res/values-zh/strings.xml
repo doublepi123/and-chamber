@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 简体中文。与 values/strings.xml 的键和占位符一一对应（由 StringResourcesTest 校验）。 -->
 <resources>
+    <string name="gateway_handoff_failed">无法安全完成登录。请重试或返回首页。</string>
     <string name="app_name">AndChamber</string>
     <string name="tagline">在手机上或电脑上使用 OpenChamber</string>
 
