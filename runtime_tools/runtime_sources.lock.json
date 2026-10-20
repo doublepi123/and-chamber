@@ -21,7 +21,7 @@
         "sha256": "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d",
         "root_dir": "proot-5.1.107.97"
       },
-      "license": {"spdx": "GPL-2.0", "file": "COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"},
+      "license": {"spdx": "GPL-2.0-or-later", "file": "COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"},
       "termux_recipe_commit": "b9b5fdd9fa",
       "termux_patches": []
     },

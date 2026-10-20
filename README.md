@@ -117,7 +117,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # 构建脚本的
 
 Release 签名通过环境变量启用：`ANDCHAMBER_KEYSTORE_FILE`、`ANDCHAMBER_KEYSTORE_PASSWORD`、`ANDCHAMBER_KEY_ALIAS`、`ANDCHAMBER_KEY_PASSWORD`。四个变量都提供时才会签名。
 
-推送 `v*` 标签会触发 GitHub Actions 构建签名 APK 并发布 Release。
+推送 `v*` 标签会触发 GitHub Actions 构建签名 APK 并发布 Release。发版前先在 `gradle.properties` 中修改 `andchamber.versionName`（如 `0.0.8`）和 `andchamber.versionCode`（如 `8`），两者须与标签一致；标签格式为 `vMAJOR.MINOR.PATCH`，其中 MINOR 与 PATCH 须在 0–99 之间，版本号按 `MAJOR×10000 + MINOR×100 + PATCH` 计算。工作流会在构建前核对两个值，不一致则失败。
 
 ## 项目结构
 

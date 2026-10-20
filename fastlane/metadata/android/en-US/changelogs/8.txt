@@ -1,0 +1,8 @@
+0.0.8
+
+Other:
+- The APK now includes license texts and source notices for the bundled native components: PRoot (GPL-2.0-or-later), talloc (LGPL-3.0-or-later) and libandroid-shmem (BSD-3-Clause).
+- Store metadata is now available in English and Simplified Chinese.
+- Prepares an F-Droid submission; inclusion requires F-Droid's own build and review.
+
+Runtime behavior is unchanged from 0.0.7. The on-device arm64 OpenCode → MCP → WebView loop is not yet verified.

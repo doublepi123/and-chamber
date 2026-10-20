@@ -18,19 +18,21 @@ Software downloaded and executed at runtime (not bundled in this APK, licensed s
   - Alpine Linux minirootfs 3.24.1   - the guest userland
   - Node.js, npm, git, ripgrep and other Alpine packages, each under its own license
 
-Bundled native components (PRoot, libtalloc, libandroid-shmem) are built from the sources
-pinned in runtime_tools/runtime_sources.lock.json and keep their own licenses. Source
-locations and checksums are recorded in that file; build instructions and known validation
-limits are documented in docs/fdroid-source-build.md. PRoot is a bundled user-space
-chroot/bind-mount launcher, not a component downloaded by the app at runtime.
+Bundled native components (compiled into the APK's native libraries, not downloaded at runtime):
 
-  - PRoot 5.1.107.97: GPL-2.0; https://github.com/termux/proot
-  - talloc 2.5.0: LGPL-3.0-or-later; https://www.samba.org/ftp/talloc/
+  - PRoot 5.1.107.97: GPL-2.0-or-later; https://github.com/termux/proot
+  - talloc 2.5.0: LGPL-3.0-or-later (with the GPL-3.0 text it refers to); https://www.samba.org/ftp/talloc/
   - libandroid-shmem 0.7: BSD-3-Clause; https://github.com/termux/libandroid-shmem
 
-Local compatibility patches and build adaptations are in runtime_tools/patches/ and
-scripts/build_android_runtime_native.py. This experimental branch is not a release;
-redistribution still requires the applicable license texts and corresponding-source obligations.
+The license texts for these components are in third_party/native-runtime/ and are packaged
+in the APK under assets/licenses/native/. Upstream source archives, their SHA-256 checksums,
+pinned commits, local patches and build steps are listed in third_party/native-runtime/provenance.json
+and runtime_tools/runtime_sources.lock.json. Local patches are in runtime_tools/patches/ and the
+build steps are in scripts/build_android_runtime_native.py.
+
+These notices summarize attribution and source locations; the full license terms remain
+applicable. Redistribution must include the applicable license texts and comply with the
+corresponding-source obligations for the bundled components.
 
 Full MIT text for AndCode is included below.
 

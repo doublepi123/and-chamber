@@ -98,7 +98,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # offline tests f
 
 Step-by-step details, host-tool checks and experimental-status notes are in [docs/fdroid-source-build.md](docs/fdroid-source-build.md).
 
-Release signing is enabled by `ANDCHAMBER_KEYSTORE_FILE`, `ANDCHAMBER_KEYSTORE_PASSWORD`, `ANDCHAMBER_KEY_ALIAS` and `ANDCHAMBER_KEY_PASSWORD` (all four required). Pushing a `v*` tag builds a signed APK on GitHub Actions and publishes a release.
+Release signing is enabled by `ANDCHAMBER_KEYSTORE_FILE`, `ANDCHAMBER_KEYSTORE_PASSWORD`, `ANDCHAMBER_KEY_ALIAS` and `ANDCHAMBER_KEY_PASSWORD` (all four required). Pushing a `v*` tag builds a signed APK on GitHub Actions and publishes a release. Before tagging, bump `andchamber.versionName` (for example `0.0.8`) and `andchamber.versionCode` (for example `8`) in `gradle.properties` so both match the tag; the tag format is `vMAJOR.MINOR.PATCH` with MINOR and PATCH between 0 and 99, and the versionCode is `MAJOR×10000 + MINOR×100 + PATCH`. The workflow checks both values before building and fails on a mismatch.
 
 ## Credits and license
 

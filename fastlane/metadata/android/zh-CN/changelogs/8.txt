@@ -1,0 +1,9 @@
+0.0.8
+
+其他：
+- APK 现在包含内置原生组件的许可证文本和源码说明：PRoot（GPL-2.0-or-later）、talloc（LGPL-3.0-or-later，并附其引用的 GPL-3.0 文本）和 libandroid-shmem（BSD-3-Clause）。
+- PRoot 源码锁定信息现在使用更正后的 SPDX 许可证标识 GPL-2.0-or-later。
+- 应用商店元数据提供英文和简体中文版本。
+- 为 F-Droid 收录做准备。这并不代表 F-Droid 已收录或批准本应用。
+
+与 0.0.7 相比运行时行为未变化，实验性浏览器的 Agent 控制仍默认关闭。arm64 手机上本机 OpenCode → MCP → WebView 的完整链路尚未验证。

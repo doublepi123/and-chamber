@@ -1,0 +1,35 @@
+Categories:
+  - Development
+License: MIT
+AuthorName: AndChamber contributors
+WebSite: https://github.com/doublepi123/and-chamber
+SourceCode: https://github.com/doublepi123/and-chamber
+IssueTracker: https://github.com/doublepi123/and-chamber/issues
+Changelog: https://github.com/doublepi123/and-chamber/releases
+
+AutoName: AndChamber
+
+RepoType: git
+Repo: https://github.com/doublepi123/and-chamber.git
+
+Builds:
+  - versionName: 0.0.8
+    versionCode: 8
+    commit: v0.0.8
+    subdir: app
+    init: python3 ../scripts/prepare_android_runtime_sources.py --output-dir ../build/runtime-sources
+    gradle:
+      - yes
+    scandelete:
+      - build/runtime-sources/downloads/talloc-2.5.0.tar.gz
+      - build/runtime-sources/downloads/proot-5.1.107.97.tar.gz
+      - build/runtime-sources/downloads/libandroid-shmem-0.7.tar.gz
+    ndk: 29.0.14206865
+    gradleprops:
+      - andchamber.runtimeSourcesDir=build/runtime-sources
+
+AutoUpdateMode: Version v%v
+UpdateCheckMode: Tags ^v[0-9]+\.[0-9]+\.[0-9]+$
+UpdateCheckData: gradle.properties|andchamber\.versionCode=(\d+)|.|andchamber\.versionName=([0-9]+\.[0-9]+\.[0-9]+)
+CurrentVersion: 0.0.8
+CurrentVersionCode: 8
