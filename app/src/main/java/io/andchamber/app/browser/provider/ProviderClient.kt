@@ -49,8 +49,12 @@ class BrowserProviderClient(
     private val inFlight = linkedMapOf<String, Job>()
     private val cancelled = mutableSetOf<String>()
 
+    /** Once stopped, a client never connects again; a new launch builds a new client. */
+    private var stopped = false
+
     override suspend fun start() {
         val previous = gate.withLock {
+            if (stopped) return
             val current = consumer
             consumer = null
             current
@@ -58,12 +62,14 @@ class BrowserProviderClient(
         previous?.cancel()
         previous?.join()
         gate.withLock {
+            if (stopped) return
             consumer = scope.launch { connect() }
         }
     }
 
     override suspend fun stop() {
         val running = gate.withLock {
+            stopped = true
             val jobs = inFlight.values.toList()
             inFlight.clear()
             val current = consumer

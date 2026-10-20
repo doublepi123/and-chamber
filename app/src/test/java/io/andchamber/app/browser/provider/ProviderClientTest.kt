@@ -114,6 +114,26 @@ class ProviderClientTest {
     private val adopted = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     @Test
+    fun `a client stopped before start never opens a connection`() = runBlocking {
+        val opened = java.util.concurrent.atomic.AtomicInteger(0)
+        val transport = object : ProviderTransport {
+            override suspend fun open(url: String, headers: Map<String, String>): ProviderProtocol.Ready = error("unused")
+            override fun events(): kotlinx.coroutines.flow.Flow<String> = kotlinx.coroutines.flow.flow {
+                opened.incrementAndGet()
+                kotlinx.coroutines.awaitCancellation()
+            }
+            override suspend fun claim(requestId: String, connectionId: String): ProviderClaim? = null
+            override suspend fun result(requestId: String, connectionId: String, nonce: String, result: ProviderResult) = Unit
+        }
+        val client = client(transport, RecordingExecutor())
+        // Binding replaced or paused the client between install and start.
+        client.stop()
+        client.start()
+        delay(100)
+        assertEquals(0, opened.get())
+    }
+
+    @Test
     fun `cancellation after claim posts no late result once the connection has changed`() = runBlocking {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

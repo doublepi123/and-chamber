@@ -161,6 +161,42 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                     command.delete()
                     writeStatus(if (opened.get(3, java.util.concurrent.TimeUnit.SECONDS)?.contains("clicked") == true) "browser-opened" else "browser-missing")
                 }
+                if (text.startsWith("tap:")) {
+                    // Real touch on a chat-page element found by CSS selector: its centre is mapped from
+                    // CSS px to screen px through the WebView's on-screen position, then injected as a
+                    // MotionEvent, the same input path a finger uses.
+                    val selector = text.removePrefix("tap:")
+                    val rect = java.util.concurrent.CompletableFuture<String?>()
+                    var webLoc = IntArray(2)
+                    var scale = 1f
+                    runOnMainSync {
+                        val presenter = org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
+                        val web = activity?.window?.decorView?.let { findWebView(it, presenter.currentView()) }
+                        if (web == null) {
+                            rect.complete(null)
+                        } else {
+                            web.getLocationOnScreen(webLoc)
+                            scale = web.resources.displayMetrics.density
+                            web.evaluateJavascript(
+                                "(function(){var e=document.querySelector(${org.json.JSONObject.quote(selector)});if(!e)return null;var r=e.getBoundingClientRect();var c=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2,hit:!!(c&&(e===c||e.contains(c)))});})()",
+                            ) { rect.complete(it) }
+                        }
+                    }
+                    command.delete()
+                    val raw = runCatching { rect.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
+                    val decoded = raw?.let { runCatching { org.json.JSONArray("[$it]").optString(0, "") }.getOrNull() }.orEmpty()
+                    val point = runCatching { org.json.JSONObject(decoded) }.getOrNull()
+                    if (point == null) {
+                        writeStatus("tap-missing")
+                    } else {
+                        val x = webLoc[0] + point.getDouble("x").toFloat() * scale
+                        val y = webLoc[1] + point.getDouble("y").toFloat() * scale
+                        tap(x, y)
+                        java.io.File(targetContext.filesDir, "openchamber-provider-status.json").writeText(
+                            org.json.JSONObject().put("phase", "tapped").put("hit", point.optBoolean("hit")).toString(),
+                        )
+                    }
+                }
                 if (text.startsWith("eval:")) {
                     // androidTest-only DOM probe of the chat page; the result is written verbatim.
                     val value = java.util.concurrent.CompletableFuture<String?>()

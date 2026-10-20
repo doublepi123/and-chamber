@@ -134,9 +134,13 @@ async function clearStatus(args) {
 /** Sends one command and waits for that command's own status (stale status is cleared first). */
 async function deviceCommand(args, text, phase) {
   await clearStatus(args);
-  const quoted = text.replace(/'/g, `'\\''`);
-  // One shell string: run-as runs `sh -c` in the app data directory only when given a single command.
-  await adb(args, ['shell', `run-as io.andchamber.app sh -c "printf %s '${quoted}' > files/openchamber-provider-command"`]);
+  // Through stdin, so any quotes in the command (scripts, URLs) reach the file untouched.
+  await new Promise((resolve) => {
+    const child = spawn(args.adb, ['-s', args.serial, 'shell', "run-as io.andchamber.app sh -c 'cat > files/openchamber-provider-command'"], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+    child.on('close', () => { clearTimeout(timer); resolve(); });
+    child.stdin.end(text);
+  });
   return readDeviceStatus(args, phase, 10000);
 }
 
@@ -201,6 +205,35 @@ async function uiNodes(args) {
   return nodes;
 }
 
+/** Opens the phone session list: dismiss the OpenCode update banner if it covers the header, retry. */
+const sheetTrace = [];
+
+async function openSessionSheet(args) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    // The isolated OpenCode is older than the published one, so OpenChamber shows an update toast
+    // that can cover the header menu button. Dismiss it in the page, like tapping its Dismiss button.
+    await deviceCommand(args, `eval:(function(){var n=0;document.querySelectorAll('li.toast button,[data-sonner-toast] button').forEach(function(b){if(/dismiss/i.test((b.innerText||b.getAttribute('aria-label')||'').trim())){b.click();n++;}});return n;})()`, 'eval');
+    await sleep(800);
+    // Real touch at the button's on-screen centre, mapped from the page's own layout.
+    const dismissed = await readStatusJson(args, 3000, 'eval');
+    const sent = await deviceCommand(args, 'tap:[aria-label="Open sessions and projects"]', 'tapped');
+    const tapped = sent ? await readStatusJson(args, 3000, 'tapped') : await readStatusJson(args, 1000);
+    await sleep(2000);
+    const nodes = await uiNodes(args);
+    sheetTrace.push({ attempt, dismissed: dismissed && dismissed.value, sent, tapped, labels: nodes.filter((n) => n.text || n.desc).map((n) => n.text || n.desc).slice(0, 25) });
+    if (!tapped || !tapped.hit) continue;
+    if (nodes.some((item) => item.text === 'New chat' || item.desc === 'New chat')) return true;
+  }
+  return false;
+}
+
+async function tapLabelPrefix(args, prefix) {
+  const node = (await uiNodes(args)).find((item) => item.text.startsWith(prefix) || item.desc.startsWith(prefix));
+  if (!node) return false;
+  await adb(args, ['shell', 'input', 'tap', String(node.cx), String(node.cy)]);
+  return true;
+}
+
 async function tapLabel(args, label) {
   const node = (await uiNodes(args)).find((item) => item.text === label || item.desc === label);
   if (!node) return false;
@@ -221,13 +254,33 @@ function childPids(parent) {
   }).map(Number);
 }
 
-async function createSession(port, directory) {
+async function createSession(port, directory, title = null) {
   const login = await postJson(`http://127.0.0.1:${port}/auth/session`, {}, JSON.stringify({ password: UI_PASSWORD }));
   const cookie = (login.headers['set-cookie'] || []).map((item) => item.split(';')[0]).join('; ');
-  const created = await postJson(`http://127.0.0.1:${port}/api/session?directory=${encodeURIComponent(directory)}`, { Cookie: cookie }, '{}');
+  const created = await postJson(`http://127.0.0.1:${port}/api/session?directory=${encodeURIComponent(directory)}`, { Cookie: cookie }, JSON.stringify(title ? { title } : {}));
   const id = JSON.parse(created.body).data.id;
   if (!/^ses_/.test(id || '')) throw new Error('second session failed');
   return id;
+}
+
+async function registerProject(port, directory) {
+  if (!directory) return false;
+  const login = await postJson(`http://127.0.0.1:${port}/auth/session`, {}, JSON.stringify({ password: UI_PASSWORD }));
+  const cookie = (login.headers['set-cookie'] || []).map((item) => item.split(';')[0]).join('; ');
+  const id = `path_${Buffer.from(directory).toString('base64url')}`;
+  const now = Date.now();
+  const body = JSON.stringify({ projects: [{ id, path: directory, addedAt: now, lastOpenedAt: now }], activeProjectId: id, lastDirectory: directory });
+  const saved = await new Promise((resolve) => {
+    const target = new URL(`http://127.0.0.1:${port}/api/config/settings`);
+    const request = http.request({ hostname: target.hostname, port: target.port, path: target.pathname, method: 'PUT', headers: { Cookie: cookie, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 10000 }, (response) => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode === 200));
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.end(body);
+  });
+  return saved;
 }
 
 function rawRequest(port, method, urlPath, headers, body) {
@@ -575,22 +628,46 @@ async function main() {
     await sleep(2500);
     const reopenedAfterDispatch = await call('browser.snapshot');
     check('reopen-after-dispatched-cancel', replaced.ok && reopenedAfterDispatch.ok, reopenedAfterDispatch.redacted);
-    // Session revoke must start from a live grant. Reload later invalidates the document, so it cannot prove this.
-    const otherSession = await createSession(port, fixtureDir);
+    // Session revoke must start from a live grant, and go through the real phone session list without
+    // the Browser tab ever having been opened (its context sync must live in the always-mounted shell).
+    // The phone session list shows sessions grouped under registered projects. Register the
+    // directory the sessions live in (OpenCode places them in the server's home) the way adding a
+    // project in the UI does, so the list can show both chats.
+    await registerProject(port, location && location.directory);
+    const otherSession = await createSession(port, fixtureDir, 'oc-switch-target');
+    await deviceCommand(args, `navigate:${sessionID}`, 'navigated');
+    await sleep(4000);
+    await untilProvider(call);
+    await tapLabel(args, 'Dismiss');
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
     const authorized = await call('browser.snapshot');
     check('authorized-before-session-switch', authorized.ok, authorized.redacted);
-    await deviceCommand(args, `context:${otherSession}`, 'context');
+    const switchSheet = await openSessionSheet(args);
+    await screenshot(args, args.out, 'session-sheet.png');
+    fs.writeFileSync(path.join(args.out, 'session-sheet-nodes.json'), JSON.stringify((await uiNodes(args)).filter((n) => n.text || n.desc).map((n) => `${n.text || n.desc} [${n.left},${n.top}][${n.right},${n.bottom}]`), null, 1));
+    const switchRow = await tapLabelPrefix(args, 'oc-switch-target');
+    await sleep(4000);
     const switched = await call('browser.snapshot');
     const switchUi = await uiNodes(args);
-    check('session-switch-revokes', !switched.ok && /AUTHORIZATION_REQUIRED/.test(switched.redacted) && !switchUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on'), switched.redacted);
+    const switchLog = await adb(args, ['logcat', '-d', '-s', 'AndChamberProvider:*']);
+    check('session-switch-revokes', switchSheet && switchRow && !switched.ok && /AUTHORIZATION_REQUIRED/.test(switched.redacted) && !switchUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on') && /revoke reason=session-changed/.test(switchLog.stdout), `sheet=${switchSheet} row=${switchRow} ${switched.redacted}`);
+    // Back to the first chat through the same list, allow again, then clear with New chat.
+    await openSessionSheet(args);
+    const firstRow = await tapLabelPrefix(args, 'Untitled session');
+    await sleep(4000);
     await tapLabel(args, 'Allow agent');
     await sleep(2500);
     const regranted = await call('browser.snapshot');
-    check('regrant-before-context-clear', regranted.ok, regranted.redacted);
-    await deviceCommand(args, 'context:', 'context');
+    check('regrant-before-context-clear', firstRow && regranted.ok, regranted.redacted);
+    await adb(args, ['logcat', '-c']);
+    await openSessionSheet(args);
+    const newChat = await tapLabel(args, 'New chat');
+    await sleep(4000);
     const cleared = await call('browser.snapshot');
     const clearUi = await uiNodes(args);
-    check('empty-context-revokes', !cleared.ok && /AUTHORIZATION_REQUIRED/.test(cleared.redacted) && !clearUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on'), cleared.redacted);
+    const clearLog = await adb(args, ['logcat', '-d', '-s', 'AndChamberProvider:*']);
+    check('empty-context-revokes', newChat && !cleared.ok && /AUTHORIZATION_REQUIRED/.test(cleared.redacted) && !clearUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on') && /revoke reason=session-changed/.test(clearLog.stdout), `newChat=${newChat} ${cleared.redacted}`);
     const reloaded = await deviceCommand(args, 'reload', 'reloaded');
     // The reloaded console rebinds the host once its document commits; poll the bridge for it.
     let reloadBridge = null;
@@ -653,6 +730,7 @@ async function main() {
     // The in-app relay stops with the instrumentation (stop file above).
     fs.rmSync(home, { recursive: true, force: true });
   }
+  fs.writeFileSync(path.join(args.out, 'session-sheet-trace.json'), JSON.stringify(sheetTrace, null, 1), { mode: 0o600 });
   const providerLog = await adb(args, ['logcat', '-d', '-s', 'AndChamberProvider:*', 'OcProviderTest:*']);
   const providerLogText = providerLog.stdout.split(providerToken).join('[redacted]');
   fs.writeFileSync(path.join(args.out, 'provider-logcat.txt'), providerLogText, { mode: 0o600 });

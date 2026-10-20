@@ -128,16 +128,20 @@ class LocalBrowserProviderBinding(
             previous?.stop()
             if (ticket != attempt.get()) return@launch
             val next = clientFactory(origin, token, launchId)
-            val stillCurrent = gate.withLock {
-                synchronized(uiLock) {
+            // Install and start under the same gate that replacement and disconnect take, so no stop can
+            // land between them. A client stopped first stays stopped: start() is a no-op afterwards.
+            val installed = gate.withLock {
+                val current = synchronized(uiLock) {
                     if (ticket != attempt.get() || activeLaunch != launchId || !trustedHostAttached()) false else {
                         client = next
                         true
                     }
                 }
+                if (current) next.start()
+                current
             }
             // A client that never started published no connection; stopping it clears nothing else.
-            if (stillCurrent) next.start() else next.stop()
+            if (!installed) next.stop()
         }
     }
 
