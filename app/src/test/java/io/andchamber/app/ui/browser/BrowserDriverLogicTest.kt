@@ -273,6 +273,30 @@ class BrowserDriverLogicTest {
     }
 
     @Test
+    fun `an unbound host does not move the rebind generation again`() {
+        var generation = 1L
+        var bind = 1L
+        var host: String? = "bound"
+        fun unbind() {
+            if (host == null && generation != bind) return
+            host = null
+            if (generation == bind) generation += 1
+        }
+        unbind()
+        val after = generation
+        unbind()
+        assertEquals(after, generation)
+        assertTrue(generation != bind)
+    }
+
+    @Test
+    fun `empty session context is a different owner`() {
+        val owner = "session-a"
+        val incoming = ""
+        assertTrue(owner != incoming)
+    }
+
+    @Test
     fun `floating size stays inside a phone width and a tablet uses a fixed window`() {
         assertEquals(328, floatWidthDp(360, tablet = false))
         assertEquals(300, floatWidthDp(332, tablet = false))

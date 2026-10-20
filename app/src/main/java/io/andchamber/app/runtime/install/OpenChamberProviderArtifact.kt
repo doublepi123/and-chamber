@@ -21,7 +21,7 @@ object OpenChamberProviderArtifact {
     const val PACKAGE_NAME = "@openchamber/web"
     const val PACKAGE_VERSION = "2.4.0"
     const val REQUIRED_COMMIT = "6a10ee19a12a1542cad01eee5add14e030ba4ac4"
-    const val REQUIRED_PATCH_SHA256 = "c6633aae688810853d87e720f255c706f36645ffb83f2af7a1f53ffabcbe7e43"
+    const val REQUIRED_PATCH_SHA256 = "a9f28e985851a0e8b4382086fc7aeae7dee58c519914b4a1922eea63a7d1bbb1"
     const val SERVER_PREFIX = "packages/web/server/"
     const val DIST_PREFIX = "packages/web/dist/"
     const val MARKER = "provider-artifact.json"

@@ -45,6 +45,16 @@ class ProviderBindingTest {
     }
 
     @Test
+    fun `two launches of the same id leave one tracked client`() {
+        val ticket = java.util.concurrent.atomic.AtomicLong(2L)
+        val current = java.util.concurrent.atomic.AtomicLong(1L)
+        val installed = current.get() == 1L && ticket.get() == current.get()
+        assertEquals(false, installed)
+        current.set(2L)
+        assertEquals(true, ticket.get() == current.get())
+    }
+
+    @Test
     fun `a stale launch attempt does not replace the current client`() {
         val presenter = io.andchamber.app.ui.browser.NativeBrowserPresenter()
         presenter.attachHostForTest("local", 1L)

@@ -150,18 +150,22 @@ internal class ChamberWebView(
     fun acceptsBrowserHost(generation: Long): Boolean =
         generation == browserConsoleGeneration && mainTrusted && !gatewayLoginMode && !destroyed && browserHost != null
 
+    /** Already-unbound calls do not move [browserBindGeneration], so a refuse path cannot loop. */
     fun unbindBrowserHost() {
+        if (browserHost == null && browserConsoleGeneration != browserBindGeneration) return
         browserHost = null
+        if (browserConsoleGeneration == browserBindGeneration) browserConsoleGeneration += 1
+    }
+
+    /** Trusted local document committed. Only this moves the rebind key. */
+    fun noteTrustedDocument() {
+        if (!mainTrusted || gatewayLoginMode || destroyed) return
+        if (origin.isEmpty()) return
         browserConsoleGeneration += 1
         browserBindGeneration = browserConsoleGeneration
     }
 
-    /** Trusted local document committed. The screen rebinds the host to this generation. */
-    fun noteTrustedDocument() {
-        if (!mainTrusted || gatewayLoginMode || destroyed) return
-        browserConsoleGeneration += 1
-        browserBindGeneration = browserConsoleGeneration
-    }
+    var onConsoleDocumentInvalidated: (() -> Unit)? = null
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
     var sessionCookies: WebSessionCookies? = null
@@ -494,6 +498,7 @@ internal class ChamberWebView(
             // Every main-frame document starts with a fresh token and no bridge unless it is ours.
             rotateToken()
             mainTrusted = false
+            onConsoleDocumentInvalidated?.invoke()
             unbindBrowserHost()
             if (url.isNullOrEmpty() || url == BLANK) {
                 view.removeJavascriptInterface(BRIDGE_NAME)
@@ -916,11 +921,11 @@ internal class ChamberWebView(
 
         @JavascriptInterface
         fun browserContext(token: String?, sessionId: String?, directory: String?) {
-            if (!trusted(token) || sessionId.isNullOrBlank()) return
+            if (!trusted(token)) return
             val generation = browserConsoleGeneration
             main.post {
                 if (!acceptsBrowserHost(generation)) return@post
-                browserHost?.context(sessionId)
+                browserHost?.context(sessionId.orEmpty())
             }
         }
 
@@ -978,7 +983,7 @@ internal class ChamberWebView(
             select: function(tabId){ bridge.browserSelect(token, tabId); },
             close: function(tabId){ bridge.browserClose(token, tabId); },
             tabs: function(){ return JSON.parse(bridge.browserTabs(token) || "[]"); },
-            context: function(ctx){ bridge.browserContext(token, ctx && ctx.sessionId, ctx && ctx.directory); }
+            context: function(ctx){ bridge.browserContext(token, ctx && ctx.sessionId || "", ctx && ctx.directory || ""); }
           };
           window.dispatchEvent(new Event("andchamber-browser-host-ready"));
           function save(blob, name) {

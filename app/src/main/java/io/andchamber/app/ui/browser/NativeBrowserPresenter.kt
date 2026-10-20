@@ -65,6 +65,7 @@ class NativeBrowserPresenter(
     private var page: ControlledBrowserPage? = null
     private var adapter: OpenChamberPageAdapter? = null
     private var paused = false
+    private var consoleInvalidated = false
     private var connectionOwner: ConnectionOwner? = null
     private var loadJob: Job? = null
     private var connectionId: String? = null
@@ -82,10 +83,11 @@ class NativeBrowserPresenter(
     fun currentView(): View? = synchronized(lock) { page?.view }
 
     /** Trusted host is attached and the chat page is still in the foreground. */
-    val foreground: Boolean get() = synchronized(lock) { host != null && !paused }
+    val foreground: Boolean get() = synchronized(lock) { host != null && !paused && !consoleInvalidated }
 
     /** Unit tests attach a host without constructing an Activity. Production callers use the Activity overload. */
     internal fun attachHostForTest(instanceKey: String, consoleGeneration: Long) {
+        consoleInvalidated = false
         testHost = true
         synchronized(lock) {
             host = Host(null, instanceKey, consoleGeneration)
@@ -109,6 +111,7 @@ class NativeBrowserPresenter(
             // bridge is gone, so the grant goes too, but the native tabs and their pages stay.
             previous != null && previous.consoleGeneration != consoleGeneration -> revokeAll("console document changed")
         }
+        consoleInvalidated = false
         synchronized(lock) {
             host = Host(context, instanceKey, consoleGeneration)
             publishLocked()
@@ -116,6 +119,19 @@ class NativeBrowserPresenter(
     }
 
     /** The trusted console is gone (screen left, host untrusted): detach whatever generation is attached. */
+    /**
+     * The trusted console document started loading again. Revokes immediately and closes host
+     * admission so the binding drops SSE. Tabs and pages stay. A later attachHost restores admission
+     * only; it does not restore the grant.
+     */
+    fun invalidateConsoleDocument(instanceKey: String) {
+        val matches = synchronized(lock) { host?.instanceKey == instanceKey }
+        if (!matches) return
+        consoleInvalidated = true
+        revokeAll("console document invalidated")
+        synchronized(lock) { publishLocked() }
+    }
+
     fun detachHostAny(instanceKey: String) {
         val generation = synchronized(lock) { host?.takeIf { it.instanceKey == instanceKey }?.consoleGeneration } ?: return
         detachHost(instanceKey, generation)
@@ -217,6 +233,8 @@ class NativeBrowserPresenter(
             running
         }
         job?.cancel()
+        // Every revoke is visible at once: the window must never keep showing "agent on".
+        synchronized(lock) { publishLocked() }
     }
 
     /** Host left the foreground. Revokes, but keeps the window so resume can show it again. */
@@ -599,7 +617,9 @@ class NativeBrowserPresenter(
         }
         revokeAll("open", keepRequestId = request.requestId)
         val pageAdapter = adapterFor(created)
+        android.util.Log.i("AndChamberProvider", "open step=load-start")
         val opened = pageAdapter.openClaimed(request, registry, session)
+        android.util.Log.i("AndChamberProvider", "open step=load-done ok=${opened.result.ok}")
         val tabId = opened.tab?.tabId
         synchronized(lock) {
             if (opened.result.ok && tabId != null) {
@@ -757,7 +777,7 @@ class NativeBrowserPresenter(
             hostAttached = host != null,
             documentEpoch = documentEpoch,
             paused = paused,
-            eligible = host != null && !paused,
+            eligible = host != null && !paused && !consoleInvalidated,
             connected = connectionId != null,
         )
     }

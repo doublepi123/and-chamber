@@ -138,7 +138,6 @@ class BrowserProviderClient(
             inFlight.clear()
             connectionId = null
             serverEpoch = null
-            registry.revoke()
             jobs
         }
         onConnection(null)
@@ -214,6 +213,7 @@ class BrowserProviderClient(
             post(request, ProviderResult(false, errorCode = ProviderCodes.DEADLINE), claim.nonce)
             return
         }
+        android.util.Log.i("AndChamberProvider", "request claimed action=${request.action}")
         val result = try {
             withTimeout(budget) {
                 executor.execute(request, registry, mode, visibleTabId, deadline, clock)
@@ -234,12 +234,16 @@ class BrowserProviderClient(
             )
             ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN)
         }
+        android.util.Log.i("AndChamberProvider", "request done action=${request.action} ok=${result.ok} code=${result.errorCode}")
         post(request, result, claim.nonce)
     }
 
     private suspend fun post(request: ProviderRequest, result: ProviderResult, nonce: String) {
         val current = gate.withLock { connectionId }
-        if (current != request.connectionId) return
+        if (current != request.connectionId) {
+            android.util.Log.i("AndChamberProvider", "result dropped action=${request.action} reason=connection-changed")
+            return
+        }
         if (nonce.isEmpty()) return
         withContext(NonCancellable) {
             val still = gate.withLock { connectionId }

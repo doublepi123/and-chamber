@@ -73,7 +73,7 @@ function postJson(url, headers, body) {
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: response.headers }));
     });
-    request.on('error', () => reject(new Error('request failed')));
+    request.on('error', (error) => reject(new Error(`request failed ${error.code || error.message}`)));
     request.on('timeout', () => { request.destroy(); reject(new Error('request timed out')); });
     request.end(body);
   });
@@ -335,10 +335,10 @@ async function main() {
     fs.writeFileSync(path.join(args.out, 'session-shape.json'), JSON.stringify({ keys: Object.keys(sessionJson), dataKeys: sessionJson.data ? Object.keys(sessionJson.data) : [], locationKeys: location && typeof location === 'object' ? Object.keys(location) : [], locationPathType: location && typeof location.path }), { mode: 0o600 });
     checks.push({ name: 'real-session', result: 'PASS', detail: `location=${JSON.stringify(location).slice(0, 180)}` });
     await adb(args, ['reverse', '--remove', `tcp:${port}`]);
-    const relay = await adb(args, ['shell', `nohup nc -L -s 127.0.0.1 -p ${port} nc 10.0.2.2 ${port} >/dev/null 2>&1 & echo $! > /data/local/tmp/relay${port}.pid`]);
-    if (relay.code !== 0) throw new Error('emulator nc relay failed');
-    checks.push({ name: 'transport', result: 'PASS', detail: 'emulator nc relay → 10.0.2.2' });
-    const instrument = spawn(args.adb, ['-s', args.serial, 'shell', 'am', 'instrument', '-w', '-e', 'port', String(port), '-e', 'token', providerToken, '-e', 'password', UI_PASSWORD, 'io.andchamber.app.test/io.andchamber.app.browser.OpenChamberProviderInstrumentation'], { stdio: 'ignore' });
+    // androidTest-only in-process relay 127.0.0.1:port -> 10.0.2.2:port (adb reverse forwards no bytes
+    // on this emulator, and the shell nc relay dropped about one connection in sixty).
+    checks.push({ name: 'transport', result: 'PASS', detail: 'androidTest in-app relay → 10.0.2.2' });
+    const instrument = spawn(args.adb, ['-s', args.serial, 'shell', 'am', 'instrument', '-w', '-e', 'port', String(port), '-e', 'relay', 'app', '-e', 'token', providerToken, '-e', 'password', UI_PASSWORD, 'io.andchamber.app.test/io.andchamber.app.browser.OpenChamberProviderInstrumentation'], { stdio: 'ignore' });
     instrument.unref();
     const attached = await readDeviceStatus(args, 'attached', 45000);
     checks.push({ name: 'instrumentation-attached', result: attached ? 'PASS' : 'FAIL', detail: attached ? 'status attached' : 'status missing' });
@@ -507,12 +507,12 @@ async function main() {
     await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-hold']);
     const dropped = call('browser.type', { selector: disconnectNote ? disconnectNote.selector : 'missing-ref', value: 'after-disconnect' }).catch((error) => ({ ok: false, redacted: `transport: ${error.message}` }));
     await readStatusJson(args, 15000, 'held');
-    // nc -L forks one child per connection; kill the listener and its children so the SSE really drops.
-    await adb(args, ['shell', `pid=$(cat /data/local/tmp/relay${port}.pid); for c in $(ps -A -o pid,ppid | awk -v p="$pid" '$2==p{print $1}'); do kill "$c"; done; kill "$pid"`]);
+    // Stopping the relay closes every open socket, so the provider SSE really drops.
+    await deviceCommand(args, 'relay-stop', 'relay-stopped');
     const droppedResult = await dropped;
     check('claim-disconnect-no-mutation', droppedResult.ok === false, droppedResult.redacted);
     await adb(args, ['shell', 'run-as io.andchamber.app rm -f files/openchamber-provider-hold']);
-    await adb(args, ['shell', `nohup nc -L -s 127.0.0.1 -p ${port} nc 10.0.2.2 ${port} >/dev/null 2>&1 & echo $! > /data/local/tmp/relay${port}.pid`]);
+    await deviceCommand(args, 'relay-start', 'relay-started');
     // Wait for the provider to reconnect, then the old grant must be gone.
     let reconnected = null;
     const reconnectDeadline = Date.now() + 30000;
@@ -575,6 +575,22 @@ async function main() {
     await sleep(2500);
     const reopenedAfterDispatch = await call('browser.snapshot');
     check('reopen-after-dispatched-cancel', replaced.ok && reopenedAfterDispatch.ok, reopenedAfterDispatch.redacted);
+    // Session revoke must start from a live grant. Reload later invalidates the document, so it cannot prove this.
+    const otherSession = await createSession(port, fixtureDir);
+    const authorized = await call('browser.snapshot');
+    check('authorized-before-session-switch', authorized.ok, authorized.redacted);
+    await deviceCommand(args, `context:${otherSession}`, 'context');
+    const switched = await call('browser.snapshot');
+    const switchUi = await uiNodes(args);
+    check('session-switch-revokes', !switched.ok && /AUTHORIZATION_REQUIRED/.test(switched.redacted) && !switchUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on'), switched.redacted);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const regranted = await call('browser.snapshot');
+    check('regrant-before-context-clear', regranted.ok, regranted.redacted);
+    await deviceCommand(args, 'context:', 'context');
+    const cleared = await call('browser.snapshot');
+    const clearUi = await uiNodes(args);
+    check('empty-context-revokes', !cleared.ok && /AUTHORIZATION_REQUIRED/.test(cleared.redacted) && !clearUi.some((item) => item.text === 'Agent control is on' || item.desc === 'Agent control is on'), cleared.redacted);
     const reloaded = await deviceCommand(args, 'reload', 'reloaded');
     // The reloaded console rebinds the host once its document commits; poll the bridge for it.
     let reloadBridge = null;
@@ -586,16 +602,46 @@ async function main() {
       if (reloadBridge && Array.isArray(reloadBridge.tabs)) break;
       await sleep(1000);
     }
+    const reloadSnapshot = await untilProvider(call);
+    check('reload-requires-allow', !reloadSnapshot.ok && /AUTHORIZATION_REQUIRED/.test(reloadSnapshot.redacted), reloadSnapshot.redacted);
     check('bridge-after-reload', reloaded && bridgeAfterReload && reloadBridge && Array.isArray(reloadBridge.tabs), JSON.stringify(reloadBridge || {}));
-    const tabsBeforePresent = await bridgeTabCount(args);
-    const presented = await deviceCommand(args, `present:${FIXTURE2}`, 'presented');
+    await deviceCommand(args, `navigate:${sessionID}`, 'navigated');
+    // Wait for the new document to commit and the host to rebind before using the entry.
+    await sleep(4000);
+    await untilProvider(call);
+    const navDeadline = Date.now() + 20000;
+    while (Date.now() < navDeadline) {
+      if (await bridgeTabCount(args) >= 0) break;
+      await sleep(1000);
+    }
+    await deviceCommand(args, 'bridge', 'bridge');
+    const beforeEntryStatus = await readStatusJson(args, 5000, 'bridge');
+    const idsBeforeEntry = new Set(((beforeEntryStatus && beforeEntryStatus.tabs) || []).map((tab) => tab.tabId));
+    const tabsBeforeEntry = beforeEntryStatus && Array.isArray(beforeEntryStatus.tabs) ? beforeEntryStatus.tabs.length : -1;
+    const openedEntry = await deviceCommand(args, `open-entry:${FIXTURE2}`, 'entry-opened');
+    const entryStatus = await readStatusJson(args, 5000, 'entry-opened');
     await sleep(3000);
-    const tabsAfterPresent = await bridgeTabCount(args);
-    const iframesAfterPresent = await deviceCommand(args, 'iframes', 'iframes') ? await readStatusJson(args, 5000, 'iframes') : null;
-    check('present-after-reload', presented && tabsBeforePresent >= 0 && tabsAfterPresent === tabsBeforePresent + 1 && iframesAfterPresent && iframesAfterPresent.iframes === 0, `tabs ${tabsBeforePresent}->${tabsAfterPresent} iframes=${iframesAfterPresent && iframesAfterPresent.iframes}`);
-    await deviceCommand(args, 'context:other', 'context');
-    const switched = await call('browser.snapshot');
-    check('session-switch-revokes', !switched.ok && /AUTHORIZATION_REQUIRED/.test(switched.redacted), switched.redacted);
+    await deviceCommand(args, 'bridge', 'bridge');
+    const tabsAfterEntry = await readStatusJson(args, 5000, 'bridge');
+    const entryTabs = tabsAfterEntry && Array.isArray(tabsAfterEntry.tabs) ? tabsAfterEntry.tabs : [];
+    // The tab the entry just created: the one id that was not there before (an older tab may share the URL).
+    const createdTab = entryTabs.find((tab) => !idsBeforeEntry.has(tab.tabId) && tab.url === FIXTURE2);
+    const nativeWindow = await uiNodes(args);
+    const iframesAfterEntry = await deviceCommand(args, 'iframes', 'iframes') ? await readStatusJson(args, 5000, 'iframes') : null;
+    const entryParts = {
+      opened: Boolean(openedEntry),
+      oneMoreTab: tabsBeforeEntry >= 0 && entryTabs.length === tabsBeforeEntry + 1,
+      // The entry records the chat page's current session; navigate:sessionID put the page there.
+      owner: Boolean(createdTab && createdTab.ownerSessionId === sessionID),
+      active: Boolean(createdTab && createdTab.active === true),
+      window: nativeWindow.some((item) => item.text === 'Browser' || item.desc === 'Browser'),
+      noIframe: Boolean(iframesAfterEntry && iframesAfterEntry.iframes === 0),
+    };
+    check('browser-entry-presents', Object.values(entryParts).every(Boolean), `owner=${createdTab && createdTab.ownerSessionId} expected=${sessionID} active=${createdTab && createdTab.active} ${JSON.stringify(entryParts)} tabs ${tabsBeforeEntry}->${entryTabs.length}`);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const entryPage = await call('browser.snapshot');
+    check('browser-entry-second-page', entryPage.ok && /^second\b/.test((entryPage.data && entryPage.data.text) || ''), entryPage.redacted);
   } catch (error) {
     checks.push({ name: 'runner', result: 'FAIL', detail: redact(error.message, secrets) });
     fs.writeFileSync(path.join(args.out, 'server-stderr.log'), redact(stderr, secrets), { mode: 0o600 });
@@ -604,11 +650,22 @@ async function main() {
     await adb(args, ['shell', 'rm -f /data/local/tmp/oc-provider-ui.xml']);
     await sleep(1500);
     try { process.kill(-child.pid, 'SIGTERM'); } catch (_error) { child.kill('SIGTERM'); }
-    await adb(args, ['shell', `pid=$(cat /data/local/tmp/relay${port}.pid 2>/dev/null); if [ -n "$pid" ]; then kill "$pid"; fi; rm -f /data/local/tmp/relay${port}.pid`]);
+    // The in-app relay stops with the instrumentation (stop file above).
     fs.rmSync(home, { recursive: true, force: true });
   }
   const providerLog = await adb(args, ['logcat', '-d', '-s', 'AndChamberProvider:*', 'OcProviderTest:*']);
-  fs.writeFileSync(path.join(args.out, 'provider-logcat.txt'), redact(providerLog.stdout, secrets).length ? providerLog.stdout.split(providerToken).join('[redacted]') : '', { mode: 0o600 });
+  const providerLogText = providerLog.stdout.split(providerToken).join('[redacted]');
+  fs.writeFileSync(path.join(args.out, 'provider-logcat.txt'), providerLogText, { mode: 0o600 });
+  const sessionRevoke = checks.find((item) => item.name === 'session-switch-revokes');
+  if (sessionRevoke && sessionRevoke.result === 'PASS' && !providerLogText.includes('revoke reason=session-changed')) {
+    sessionRevoke.result = 'FAIL';
+    sessionRevoke.detail = 'missing revoke reason=session-changed';
+  }
+  const reloadCheck = checks.find((item) => item.name === 'reload-requires-allow');
+  if (reloadCheck && reloadCheck.result === 'PASS' && !providerLogText.includes('console document invalidated')) {
+    reloadCheck.result = 'FAIL';
+    reloadCheck.detail = 'missing console document invalidated';
+  }
   const body = result(checks);
   fs.writeFileSync(path.join(args.out, 'result.json'), `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ result: body.result, failed: body.failed })}\n`);

@@ -130,7 +130,7 @@ class LocalBrowserProviderBinding(
             val next = clientFactory(origin, token, launchId)
             val stillCurrent = gate.withLock {
                 synchronized(uiLock) {
-                    if (activeLaunch != launchId || !trustedHostAttached()) false else {
+                    if (ticket != attempt.get() || activeLaunch != launchId || !trustedHostAttached()) false else {
                         client = next
                         true
                     }

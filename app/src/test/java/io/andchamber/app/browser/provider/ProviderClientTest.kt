@@ -156,6 +156,25 @@ class ProviderClientTest {
     }
 
     @Test
+    fun `stop does not revoke a shared registry grant`() = runBlocking {
+        val registry = ProviderRegistry()
+        val tab = registry.open("s1", "/proj", "local", "https://example.com", "tab-1")
+        registry.grant(1L, "c-new", "s1", tab.tabId)
+        val client = BrowserProviderClient(
+            origin = "http://127.0.0.1:3000",
+            token = "secret-token",
+            runtimeLaunchId = 1L,
+            instanceKey = "local",
+            clock = { 0L },
+            transport = ScriptTransport(claim = null),
+            executor = RecordingExecutor(),
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            registry = registry,
+        )
+        client.stop()
+        assertEquals("c-new", registry.currentGrant()?.connectionId)
+    }
+
     fun `a cancel event cancels the matching job and posts no late result`() = runBlocking {
         val cancelled = mutableListOf<String>()
         val started = CompletableDeferred<Unit>()

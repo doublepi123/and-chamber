@@ -31,7 +31,9 @@ class ProviderHttpTransport(
     private val maxRetries: Int = ProviderProtocol.MAX_RECONNECTS,
     private val connectTimeoutMs: Int = 5_000,
     private val readTimeoutMs: Int = 0,
-    private val postTimeoutMs: Int = 5_000,
+    // Claims and results are single shots; a slow reply must not be mistaken for a lost one. The
+    // server's own request deadline (up to 45 s) bounds how long a result can still matter.
+    private val postTimeoutMs: Int = 20_000,
     private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : ProviderTransport {
     @Volatile
@@ -101,8 +103,13 @@ class ProviderHttpTransport(
     }
 
     override suspend fun result(requestId: String, connectionId: String, nonce: String, result: ProviderResult) {
-        val body = ProviderProtocol.resultBody(requestId, connectionId, nonce, result) ?: return
-        post(origin.trimEnd('/') + ProviderProtocol.RESULT_PATH, body)
+        val body = ProviderProtocol.resultBody(requestId, connectionId, nonce, result)
+        if (body == null) {
+            android.util.Log.i("AndChamberProvider", "result not encodable ok=${result.ok}")
+            return
+        }
+        val reply = post(origin.trimEnd('/') + ProviderProtocol.RESULT_PATH, body)
+        android.util.Log.i("AndChamberProvider", "result posted bytes=${body.length} matched=${reply?.contains("\"matched\":true")}")
     }
 
     /** Closes the live SSE socket. Claim/result calls already in flight close themselves. */
@@ -131,15 +138,23 @@ class ProviderHttpTransport(
             connection.connectTimeout = postTimeoutMs
             connection.readTimeout = postTimeoutMs
             connection.requestMethod = "POST"
+            // One fresh socket per claim/result. A pooled keep-alive socket the server has already
+            // closed would swallow the post until the timeout, and a lost result is never retried.
+            connection.setRequestProperty("Connection", "close")
             connection.setRequestProperty(ProviderProtocol.TOKEN_HEADER, token)
             connection.setRequestProperty("Content-Type", "application/json")
             connection.doOutput = true
             connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
-            if (connection.responseCode !in 200..299) return@withContext null
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                android.util.Log.i("AndChamberProvider", "post refused path=${java.net.URL(url).path} http=$code")
+                return@withContext null
+            }
             connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            android.util.Log.i("AndChamberProvider", "post failed path=${java.net.URL(url).path} class=${error.javaClass.simpleName}")
             null
         } finally {
             disconnect(connection)

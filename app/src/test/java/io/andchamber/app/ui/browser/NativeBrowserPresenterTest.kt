@@ -364,6 +364,21 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `invalidateConsoleDocument closes admission and keeps tabs without restoring the grant`() = runBlocking {
+        val presenter = presenter { FakePage() }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        presenter.allow()
+        presenter.invalidateConsoleDocument("local")
+        assertFalse(presenter.state.value.eligible)
+        assertNull(presenter.registry.currentGrant())
+        assertEquals(1, presenter.registry.tabs().size)
+        presenter.attachHostForTest("local", 2L)
+        assertTrue(presenter.state.value.eligible)
+        assertNull(presenter.registry.currentGrant())
+    }
+
+    @Test
     fun `an old client cannot clear a newer connection`() {
         val presenter = presenter { FakePage() }
         presenter.setConnection("new", 2L, clientGeneration = 2L)

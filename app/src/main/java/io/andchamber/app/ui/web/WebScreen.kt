@@ -361,14 +361,21 @@ internal fun WebScreen(
             web.browserHost = host
             web.browserConsoleGeneration = consoleGeneration
             web.browserTabsJson = { io.andchamber.app.ui.browser.BrowserHostEvents.tabsJson(presenter.state.value) }
+            web.onConsoleDocumentInvalidated = { presenter.invalidateConsoleDocument(targetId) }
             presenter.attachHost(activity, targetId, consoleGeneration)
             web.view?.evaluateJavascript(io.andchamber.app.ui.browser.BrowserHostEvents.readyScript(), null)
             web.view?.evaluateJavascript(
                 io.andchamber.app.ui.browser.BrowserHostEvents.stateScript(presenter.state.value),
                 null,
             )
-        } else {
-            web?.unbindBrowserHost()
+            host.onChanged = {
+                web.view?.evaluateJavascript(
+                    io.andchamber.app.ui.browser.BrowserHostEvents.stateScript(presenter.state.value),
+                    null,
+                )
+            }
+        } else if (web?.browserHost != null) {
+            web.unbindBrowserHost()
             presenter?.detachHostAny(targetId)
         }
         // Generation hand-over: attachHost with the next generation revokes the grant and keeps the

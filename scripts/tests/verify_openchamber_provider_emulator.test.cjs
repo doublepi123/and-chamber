@@ -47,9 +47,16 @@ test('isolation failures must name AUTHORIZATION_REQUIRED', () => {
   assert.match(source, /check\('frontend-no-iframe'/);
   assert.match(source, /iframes === 0/);
   assert.match(source, /openchamber-provider-dhold/);
+  assert.match(source, /check\('session-switch-revokes'/);
+  assert.match(source, /check\('empty-context-revokes'/);
+  assert.match(source, /check\('browser-entry-presents'/);
+  assert.doesNotMatch(source, /present:\$\{FIXTURE2\}/);
   const instrumentation = require('node:fs').readFileSync(require('node:path').join(__dirname, '../../app/src/androidTest/java/io/andchamber/app/browser/OpenChamberProviderInstrumentation.kt'), 'utf8');
   assert.match(instrumentation, /AndChamberBrowserHost\.select/);
-  assert.match(instrumentation, /AndChamberBrowserHost\.context\(\{sessionId/);
+  assert.match(instrumentation, /val sessionId = text\.removePrefix\("context:"\)/);
+  assert.match(instrumentation, /mobile-workspace-tab-browser/);
+  assert.match(instrumentation, /android-browser-open/);
+  assert.doesNotMatch(instrumentation, /ownerSessionId:'provider-emulator'/);
 });
 
 test('missing UI loop cannot pass and tokens are redacted', () => {

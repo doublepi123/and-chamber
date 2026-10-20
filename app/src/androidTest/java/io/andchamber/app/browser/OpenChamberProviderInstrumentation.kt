@@ -25,6 +25,7 @@ import org.koin.dsl.module
 class OpenChamberProviderInstrumentation : Instrumentation() {
     private var args: Bundle = Bundle()
     @Volatile private var activity: android.app.Activity? = null
+    @Volatile private var relay: LoopbackRelay? = null
 
     override fun onCreate(arguments: Bundle?) {
         args = arguments ?: Bundle()
@@ -87,6 +88,7 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                     BrowserProviderSession(random = PinnedTokenRandom(token), sink = get<LocalBrowserProviderBinding>())
                 }
             })
+            relay = if (args.getString("relay") == "app") LoopbackRelay(port) else null
             activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             waitForIdleSync()
             val session = org.koin.core.context.GlobalContext.get().get<BrowserProviderSession>()
@@ -181,21 +183,84 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                     java.io.File(targetContext.filesDir, "openchamber-provider-status.json").writeText(body.put("phase", "bridge").toString())
                 }
                 if (text.startsWith("context:")) {
-                    val sessionId = text.removePrefix("context:").trim()
+                    val sessionId = text.removePrefix("context:")
                     runOnMainSync { evalChat("window.AndChamberBrowserHost && window.AndChamberBrowserHost.context({sessionId:${org.json.JSONObject.quote(sessionId)}})") }
                     command.delete()
                     writeStatus("context")
+                }
+                if (text.startsWith("navigate:")) {
+                    val sessionId = text.removePrefix("navigate:").trim()
+                    runOnMainSync { evalChat("location.assign('/?session=' + ${org.json.JSONObject.quote(sessionId)})") }
+                    command.delete()
+                    writeStatus("navigated")
+                }
+                if (text.startsWith("open-entry:")) {
+                    val url = text.removePrefix("open-entry:").trim()
+                    // React mounts the drawer and the tab after each click, so every step is its own
+                    // script with a wait for the next element instead of one synchronous click chain.
+                    fun step(script: String): String {
+                        val out = java.util.concurrent.CompletableFuture<String>()
+                        runOnMainSync { evalChat(script) { out.complete(it) } }
+                        return runCatching { out.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull().orEmpty()
+                    }
+                    fun waitFor(selector: String): Boolean {
+                        val deadline = android.os.SystemClock.uptimeMillis() + 8_000
+                        while (android.os.SystemClock.uptimeMillis() < deadline) {
+                            if (step("!!document.querySelector(${org.json.JSONObject.quote(selector)})").contains("true")) return true
+                            Thread.sleep(250)
+                        }
+                        return false
+                    }
+                    fun click(selector: String): Boolean =
+                        waitFor(selector) && step("(function(){var e=document.querySelector(${org.json.JSONObject.quote(selector)});if(!e)return 'missing';e.click();return 'clicked';})()").contains("clicked")
+                    val outcome = when {
+                        !click("[aria-label=\"Open workspace panel\"]") -> "missing-drawer"
+                        !click("[data-testid=\"mobile-workspace-tab-browser\"]") -> "missing-tab"
+                        !waitFor("[data-testid=\"android-browser-address\"]") -> "missing-address"
+                        else -> {
+                            step(
+                                """
+                                (function(){
+                                  var input = document.querySelector('[data-testid="android-browser-address"]');
+                                  var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                  setter.call(input, ${org.json.JSONObject.quote(url)});
+                                  input.dispatchEvent(new Event('input', {bubbles:true}));
+                                  return 'filled';
+                                })()
+                                """.trimIndent(),
+                            )
+                            Thread.sleep(300)
+                            if (click("[data-testid=\"android-browser-open\"]")) "opened" else "missing-open"
+                        }
+                    }
+                    val value = java.util.concurrent.CompletableFuture<String>().also { it.complete(outcome) }
+                    command.delete()
+                    val raw = runCatching { value.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull().orEmpty()
+                    if (raw.contains("opened")) {
+                        val tabs = java.util.concurrent.CompletableFuture<String>()
+                        runOnMainSync { evalChat("JSON.stringify((window.AndChamberBrowserHost&&window.AndChamberBrowserHost.tabs)?window.AndChamberBrowserHost.tabs():null)") { tabs.complete(it) } }
+                        val decoded = runCatching { org.json.JSONArray("[${tabs.get(5, java.util.concurrent.TimeUnit.SECONDS)}]").getString(0) }.getOrNull().orEmpty()
+                        val body = org.json.JSONObject().put("phase", "entry-opened").put("result", "opened")
+                        body.put("tabs", runCatching { org.json.JSONArray(decoded) }.getOrElse { org.json.JSONArray() })
+                        java.io.File(targetContext.filesDir, "openchamber-provider-status.json").writeText(body.toString())
+                    } else {
+                        writeStatus("entry-${raw.trim('"')}")
+                    }
+                }
+                if (text == "relay-stop") {
+                    relay?.stop()
+                    command.delete()
+                    writeStatus("relay-stopped")
+                }
+                if (text == "relay-start") {
+                    relay = LoopbackRelay(port)
+                    command.delete()
+                    writeStatus("relay-started")
                 }
                 if (text == "reload") {
                     runOnMainSync { evalChat("location.reload()") }
                     command.delete()
                     writeStatus("reloaded")
-                }
-                if (text.startsWith("present:")) {
-                    val url = text.removePrefix("present:").trim()
-                    runOnMainSync { evalChat("window.AndChamberBrowserHost && window.AndChamberBrowserHost.present({url:${org.json.JSONObject.quote(url)},ownerSessionId:'provider-emulator'})") }
-                    command.delete()
-                    writeStatus("presented")
                 }
                 if (text == "iframes") {
                     val count = countIframes()
@@ -209,6 +274,7 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                 Thread.sleep(300)
             }
             stop.delete()
+            relay?.stop()
             writeStatus("finished")
             0
         } catch (error: Throwable) {

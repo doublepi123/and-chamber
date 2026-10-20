@@ -16,6 +16,7 @@ internal class BrowserHostSurface(
     private val presenter: NativeBrowserPresenter,
 ) {
     var opener: (suspend (String, String) -> Unit)? = null
+    var onChanged: (() -> Unit)? = null
 
     /** Frontend present creates a tab. The owner is recorded, not granted. */
     fun present(url: String, ownerSessionId: String) {
@@ -37,9 +38,11 @@ internal class BrowserHostSurface(
     /** A different chat session drops the current grant. It does not grant the new session. */
     fun context(sessionId: String) {
         val state = presenter.state.value
-        val owner = state.tabs.firstOrNull { it.id == state.selectedTabId }?.owner
-        if (state.agentOn && !owner.isNullOrBlank() && owner != sessionId) {
+        val owner = state.tabs.firstOrNull { it.active }?.owner
+            ?: state.tabs.firstOrNull { it.id == state.selectedTabId }?.owner
+        if ((!owner.isNullOrBlank() && owner != sessionId) || (sessionId.isBlank() && state.agentOn)) {
             presenter.revokeAll("session-changed")
+            onChanged?.invoke()
         }
     }
 
