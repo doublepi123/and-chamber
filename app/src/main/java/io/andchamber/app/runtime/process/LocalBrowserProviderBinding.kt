@@ -10,6 +10,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -34,26 +36,30 @@ class LocalBrowserProviderBinding(
             executor = router,
             scope = scope,
             registry = presenter.registry,
-            onConnection = ownConnection(presenter, launchId),
+            onConnection = ownConnection(presenter, launchId, CLIENTS.incrementAndGet()),
             onCancel = { requestId -> presenter.cancel(requestId) },
         )
     },
 ) : BrowserProviderSink {
     companion object {
+        private val CLIENTS = AtomicLong()
         /**
          * Each client publishes its own connection and clears only that one, so a stopping client's
          * late disconnect cannot wipe the connection a newer client already adopted.
          */
-        fun ownConnection(presenter: NativeBrowserPresenter, launchId: Long): (String?) -> Unit {
-            var published: String? = null
+        fun ownConnection(
+            presenter: NativeBrowserPresenter,
+            launchId: Long,
+            clientGeneration: Long = 0L,
+        ): (String?) -> Unit {
+            val published = AtomicReference<String?>(null)
             return { connectionId ->
                 if (connectionId != null) {
-                    published = connectionId
-                    presenter.setConnection(connectionId, launchId)
+                    published.set(connectionId)
+                    presenter.setConnection(connectionId, launchId, clientGeneration)
                 } else {
-                    val mine = published
-                    published = null
-                    presenter.clearConnection(mine, launchId)
+                    val mine = published.getAndSet(null)
+                    presenter.clearConnection(mine, launchId, clientGeneration)
                 }
             }
         }
@@ -64,18 +70,19 @@ class LocalBrowserProviderBinding(
     private var activeLaunch = 0L
     private var pending: Pending? = null
     private var client: BrowserProviderClient? = null
+    private val attempt = AtomicLong()
 
     private data class Pending(val origin: String, val token: String, val launchId: Long)
 
     init {
         scope.launch {
-            presenter.state.map { it.hostAttached }.distinctUntilChanged().collect { attached ->
+            presenter.state.map { it.eligible }.distinctUntilChanged().collect { attached ->
                 if (attached) connectPending() else stopCurrent()
             }
         }
     }
 
-    override fun trustedHostAttached(): Boolean = presenter.state.value.hostAttached
+    override fun trustedHostAttached(): Boolean = presenter.state.value.eligible
 
     /** UI control for the current local launch. A call after launch replacement is a no-op. */
     fun grant(sessionId: String, tabId: String) = presenter.allowAsync(sessionId, tabId)
@@ -109,14 +116,17 @@ class LocalBrowserProviderBinding(
         if (!ProviderProtocol.isLoopbackOrigin(origin)) return
         synchronized(uiLock) { pending = Pending(origin, token, launchId) }
         if (!trustedHostAttached()) return
+        val ticket = attempt.incrementAndGet()
         scope.launch {
             val previous = gate.withLock {
+                if (ticket != attempt.get()) return@launch
                 synchronized(uiLock) {
                     activeLaunch = launchId
                     client.also { client = null }
                 }
             }
             previous?.stop()
+            if (ticket != attempt.get()) return@launch
             val next = clientFactory(origin, token, launchId)
             val stillCurrent = gate.withLock {
                 synchronized(uiLock) {
@@ -142,8 +152,10 @@ class LocalBrowserProviderBinding(
      * host attach reconnects. Used when the trusted chat page leaves the foreground.
      */
     private fun disconnect(launchId: Long) {
+        val ticket = attempt.incrementAndGet()
         scope.launch {
             val previous = gate.withLock {
+                if (ticket != attempt.get()) return@launch
                 synchronized(uiLock) {
                     if (activeLaunch != launchId) return@withLock null
                     activeLaunch = 0L

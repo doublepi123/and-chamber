@@ -34,19 +34,21 @@ internal fun BrowserFloatPage(presenter: NativeBrowserPresenter) {
         title = tab?.title.orEmpty(),
         status = status,
         agentOn = state.agentOn,
-        canAllow = state.hostAttached && tab != null && tab.owner.isNotBlank(),
+        canAllow = state.eligible && tab != null && tab.owner.isNotBlank(),
         onAllow = { scope.launch { presenter.allow() } },
         onTakeOver = { presenter.takeover() },
         onClose = { presenter.close(state.selectedTabId.orEmpty()) },
         onHidden = { presenter.background() },
     ) {
-        key(state.viewGeneration) {
+        key(state.viewHandle, state.viewGeneration) {
             val view = presenter.currentView()
             if (view == null) {
                 androidx.compose.material3.Text(stringResource(R.string.browser_unavailable_body))
             } else {
                 AndroidView(
                     factory = {
+                        // The old container may not be released yet; a view can have only one parent.
+                        (view.parent as? android.view.ViewGroup)?.removeView(view)
                         view.setOnTouchListener { _, event ->
                             if (event.actionMasked == MotionEvent.ACTION_DOWN) presenter.takeover()
                             false
@@ -56,7 +58,9 @@ internal fun BrowserFloatPage(presenter: NativeBrowserPresenter) {
                     modifier = Modifier.fillMaxSize(),
                     onRelease = { released ->
                         released.setOnTouchListener(null)
-                        (released.parent as? android.view.ViewGroup)?.removeView(released)
+                        // Only detach from our own container; the view may already be shown elsewhere.
+                        val parent = released.parent as? android.view.ViewGroup
+                        if (parent != null && released !== presenter.currentView()) parent.removeView(released)
                     },
                 )
             }

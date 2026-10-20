@@ -119,18 +119,37 @@ function adb(args, command, timeoutMs = 60000) {
 
 function ordinaryClients(port, cookies) {
   const bodies = ['', ''];
+  const statuses = [0, 0];
   const requests = bodies.map((_, index) => http.get({ hostname: '127.0.0.1', port, path: '/api/openchamber/events?browser=1', headers: { Cookie: cookies.map((item) => item.split(';')[0]).join('; ') } }, (response) => {
+    statuses[index] = response.statusCode;
     response.on('data', (chunk) => { bodies[index] += chunk.toString('utf8'); });
   }));
-  return { bodies, stop() { requests.forEach((request) => request.destroy()); } };
+  return { bodies, statuses, stop() { requests.forEach((request) => request.destroy()); } };
 }
 
-async function readStatusJson(args, timeoutMs) {
+async function clearStatus(args) {
+  await adb(args, ['shell', 'run-as', 'io.andchamber.app', 'rm', '-f', 'files/openchamber-provider-status.json']);
+}
+
+/** Sends one command and waits for that command's own status (stale status is cleared first). */
+async function deviceCommand(args, text, phase) {
+  await clearStatus(args);
+  const quoted = text.replace(/'/g, `'\\''`);
+  // One shell string: run-as runs `sh -c` in the app data directory only when given a single command.
+  await adb(args, ['shell', `run-as io.andchamber.app sh -c "printf %s '${quoted}' > files/openchamber-provider-command"`]);
+  return readDeviceStatus(args, phase, 10000);
+}
+
+/** Reads the status JSON once it carries [phase]; null on timeout. */
+async function readStatusJson(args, timeoutMs, phase = null) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const result = await adb(args, ['exec-out', 'run-as', 'io.andchamber.app', 'cat', 'files/openchamber-provider-status.json']);
-    if (result.code === 0 && result.stdout.includes('"requestId"')) return JSON.parse(result.stdout);
-    if (result.code === 0 && result.stdout.includes('"phase":"iframes:')) return JSON.parse(result.stdout);
+    if (result.code === 0 && result.stdout.trim()) {
+      let parsed = null;
+      try { parsed = JSON.parse(result.stdout); } catch (_error) { parsed = null; }
+      if (parsed && (phase == null || parsed.phase === phase)) return parsed;
+    }
     await sleep(300);
   }
   return null;
@@ -147,6 +166,25 @@ async function readDeviceStatus(args, phase, timeoutMs) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** After resume the provider reconnects; wait until the server reaches it again (max 30 s). */
+async function untilProvider(call) {
+  let last = null;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    last = await call('browser.snapshot');
+    if (!/No Android browser provider/.test(last.redacted)) return last;
+    await sleep(1000);
+  }
+  return last;
+}
+
+/** Number of native tabs as the trusted chat page sees them through the host bridge; -1 if unreadable. */
+async function bridgeTabCount(args) {
+  await deviceCommand(args, 'bridge', 'bridge');
+  const status = await readStatusJson(args, 5000, 'bridge');
+  return status && Array.isArray(status.tabs) ? status.tabs.length : -1;
+}
 
 async function uiNodes(args) {
   await adb(args, ['shell', 'uiautomator', 'dump', '/data/local/tmp/oc-provider-ui.xml']);
@@ -350,6 +388,10 @@ async function main() {
     check('capture-file', pngOk, pngOk ? `png ${png.readUInt32BE(16)}x${png.readUInt32BE(20)}` : captured.redacted);
     await screenshot(args, args.out, 'actions.png');
 
+    // The stale ref must come from the last snapshot before takeover, not an earlier one.
+    const latestBeforeTakeover = await call('browser.snapshot');
+    const latestRef = ((latestBeforeTakeover.data && latestBeforeTakeover.data.elements) || []).find((item) => item.name === 'Apply');
+    check('pre-takeover-ref', latestBeforeTakeover.ok && !!latestRef, latestBeforeTakeover.redacted);
     // Human touch on the page area takes over synchronously.
     const pageBounds = await webViewInWindow(args);
     if (pageBounds) await adb(args, ['shell', 'input', 'tap', String(pageBounds.cx), String(pageBounds.cy)]);
@@ -360,8 +402,6 @@ async function main() {
     await screenshot(args, args.out, 'takeover.png');
     await tapLabel(args, 'Allow agent');
     await sleep(2500);
-    const latestBeforeTakeover = after;
-    const latestRef = ((latestBeforeTakeover.data && latestBeforeTakeover.data.elements) || []).find((item) => item.name === 'Apply');
     const stale = latestRef ? await call('browser.click', { selector: latestRef.selector }) : { ok: true, redacted: 'no latest ref' };
     check('stale-ref-after-regrant', !stale.ok && /REF_EXPIRED/.test(stale.redacted), stale.redacted);
     const fresh = await call('browser.snapshot');
@@ -381,10 +421,10 @@ async function main() {
     // Second real session: its open must not replace the first session's page, and it cannot read it.
     const second = await createSession(port, fixtureDir);
     const secondSnap = await call('browser.snapshot', {}, second);
-    check('second-session-no-read', !secondSnap.ok, secondSnap.redacted);
+    check('second-session-no-read', !secondSnap.ok && /AUTHORIZATION_REQUIRED/.test(secondSnap.redacted), secondSnap.redacted);
     const firstTab = opened.data.tabId;
     const secondNamed = await call('browser.snapshot', { tabId: firstTab }, second);
-    check('second-session-named-tab-refused', !secondNamed.ok, secondNamed.redacted);
+    check('second-session-named-tab-refused', !secondNamed.ok && /AUTHORIZATION_REQUIRED/.test(secondNamed.redacted), secondNamed.redacted);
     const firstAgain = await call('browser.snapshot');
     check('first-session-still-authorized', firstAgain.ok, firstAgain.redacted);
 
@@ -413,19 +453,30 @@ async function main() {
     await adb(args, ['shell', 'input', 'keyevent', 'KEYCODE_HOME']);
     await sleep(1500);
     const background = await call('browser.snapshot');
-    check('background-blocks', !background.ok, background.redacted);
+    check('background-blocks', !background.ok && /AUTHORIZATION_REQUIRED|UNAVAILABLE|No Android browser provider/.test(background.redacted), background.redacted);
     await adb(args, ['shell', 'am', 'start', '-n', 'io.andchamber.app/.MainActivity']);
-    await sleep(2000);
-    const resumed = await call('browser.snapshot');
+    const resumed = await untilProvider(call);
     check('resume-still-unauthorized', !resumed.ok && /AUTHORIZATION_REQUIRED/.test(resumed.redacted), resumed.redacted);
+    const tabsBeforeHomeOpen = await bridgeTabCount(args);
+    await adb(args, ['shell', 'input', 'keyevent', 'KEYCODE_HOME']);
+    await sleep(1500);
+    const pausedOpen = await call('browser.open', { url: FIXTURE });
+    await adb(args, ['shell', 'am', 'start', '-n', 'io.andchamber.app/.MainActivity']);
+    await untilProvider(call);
+    const tabsAfterHomeOpen = await bridgeTabCount(args);
+    check('home-open-creates-nothing', !pausedOpen.ok && /AUTHORIZATION_REQUIRED|UNAVAILABLE|No Android browser provider/.test(pausedOpen.redacted) && tabsBeforeHomeOpen > 0 && tabsAfterHomeOpen === tabsBeforeHomeOpen, `${pausedOpen.redacted} tabs ${tabsBeforeHomeOpen}->${tabsAfterHomeOpen}`);
     const ordinary = await ordinaryClients(port, login.headers['set-cookie'] || []);
     const during = await call('browser.snapshot');
     await sleep(1000);
     ordinary.stop();
-    check('ordinary-clients-no-browser-request', ordinary.bodies.every((body) => !body.includes('browser-control-request')) && (during.ok || /AUTHORIZATION_REQUIRED|UNAVAILABLE/.test(during.redacted)), `streams=${ordinary.bodies.length}`);
-    await adb(args, ['shell', 'run-as io.andchamber.app sh -c \'printf iframes > files/openchamber-provider-command\'']);
-    const iframeStatus = await readStatusJson(args, 10000);
-    check('frontend-no-iframe', iframeStatus && iframeStatus.phase === 'iframes:0', JSON.stringify(iframeStatus || {}));
+    check('ordinary-clients-no-browser-request', ordinary.statuses.every((status) => status === 200) && ordinary.bodies.every((body) => body.includes('event-stream-ready') && !body.includes('browser-control-request')), `streams=${ordinary.bodies.length}`);
+    // The phone console has no Browser rail panel; the native window is the only browser surface.
+    // Prove the chat page holds no iframe and the host bridge works after a tool open.
+    await deviceCommand(args, 'iframes', 'iframes');
+    const iframeStatus = await readStatusJson(args, 5000, 'iframes');
+    await deviceCommand(args, 'bridge', 'bridge');
+    const bridgeStatus = await readStatusJson(args, 5000, 'bridge');
+    check('frontend-no-iframe', iframeStatus && iframeStatus.iframes === 0 && bridgeStatus && Array.isArray(bridgeStatus.tabs) && bridgeStatus.tabs.length > 0, JSON.stringify({ iframeStatus, tabs: bridgeStatus && Array.isArray(bridgeStatus.tabs) ? bridgeStatus.tabs.length : null }));
     // The hold scenarios need the interactive fixture again (the sign-in step left the welcome page),
     // a live grant and refs from the current document.
     const reopened = await call('browser.open', { url: FIXTURE });
@@ -437,9 +488,10 @@ async function main() {
     const holdNote = ((holdSnap.data && holdSnap.data.elements) || []).find((item) => item.name === 'note');
     check('regrant-before-hold', holdSnap.ok && !!holdNote, holdSnap.redacted);
     const heldSelector = holdNote ? holdNote.selector : note.selector;
+    await clearStatus(args);
     await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-hold']);
     const held = call('browser.type', { selector: heldSelector, value: 'held-value' });
-    const heldStatus = await readStatusJson(args, 15000);
+    const heldStatus = await readStatusJson(args, 15000, 'held');
     const wrongClaim = await rawRequest(port, 'POST', '/api/browser-control/claim', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: 'wrong-connection' }));
     const wrongNonce = await rawRequest(port, 'POST', '/api/browser-control/result', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: heldStatus && heldStatus.connectionId, claimNonce: 'wrong-nonce', ok: true, data: {} }));
     const wrongResultConnection = await rawRequest(port, 'POST', '/api/browser-control/result', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: 'wrong-connection', claimNonce: 'wrong-nonce', ok: true, data: {} }));
@@ -448,9 +500,13 @@ async function main() {
     const heldResult = await held;
     const heldSnap = await call('browser.snapshot');
     check('held-type-completes', heldResult.ok && ((heldSnap.data && heldSnap.data.elements) || []).some((item) => item.name === 'note' && item.value === 'held-value'), heldResult.redacted);
+    const disconnectSnap = await call('browser.snapshot');
+    const disconnectNote = ((disconnectSnap.data && disconnectSnap.data.elements) || []).find((item) => item.name === 'note');
+    check('disconnect-ref-fresh', disconnectSnap.ok && !!disconnectNote, disconnectSnap.redacted);
+    await clearStatus(args);
     await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-hold']);
-    const dropped = call('browser.type', { selector: heldSelector, value: 'after-disconnect' }).catch((error) => ({ ok: false, redacted: `transport: ${error.message}` }));
-    await readStatusJson(args, 15000);
+    const dropped = call('browser.type', { selector: disconnectNote ? disconnectNote.selector : 'missing-ref', value: 'after-disconnect' }).catch((error) => ({ ok: false, redacted: `transport: ${error.message}` }));
+    await readStatusJson(args, 15000, 'held');
     // nc -L forks one child per connection; kill the listener and its children so the SSE really drops.
     await adb(args, ['shell', `pid=$(cat /data/local/tmp/relay${port}.pid); for c in $(ps -A -o pid,ppid | awk -v p="$pid" '$2==p{print $1}'); do kill "$c"; done; kill "$pid"`]);
     const droppedResult = await dropped;
@@ -474,6 +530,7 @@ async function main() {
     const secondOpen = await call('browser.open', { url: FIXTURE2 }, second);
     const firstStill = await call('browser.snapshot');
     check('second-open-keeps-first', secondOpen.ok && firstStill.ok && /^provider\b/.test((firstStill.data && firstStill.data.text) || ''), `${secondOpen.redacted} | ${firstStill.redacted}`);
+    await screenshot(args, args.out, 'page-a.png');
     await adb(args, ['shell', 'run-as io.andchamber.app sh -c \'printf %s "select:' + (secondOpen.data && secondOpen.data.tabId) + '" > files/openchamber-provider-command\'']);
     await readDeviceStatus(args, 'selected', 10000);
     const firstAfterSelect = await call('browser.snapshot');
@@ -483,7 +540,62 @@ async function main() {
     const secondAfterAllow = await call('browser.snapshot', {}, second);
     check('second-marker', secondAfterAllow.ok && /^second\b/.test((secondAfterAllow.data && secondAfterAllow.data.text) || ''), secondAfterAllow.redacted);
     const firstAfterSecondAllow = await call('browser.snapshot');
-    check('first-still-refused-after-second-allow', !firstAfterSecondAllow.ok, firstAfterSecondAllow.redacted);
+    check('first-still-refused-after-second-allow', !firstAfterSecondAllow.ok && /AUTHORIZATION_REQUIRED/.test(firstAfterSecondAllow.redacted), firstAfterSecondAllow.redacted);
+    await screenshot(args, args.out, 'page-b.png');
+    // Back to the page session A is using now (the fixture re-opened before the hold steps).
+    const tabA = reopened && reopened.data && reopened.data.tabId;
+    await deviceCommand(args, `select:${tabA}`, 'selected');
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const backToA = await call('browser.snapshot');
+    check('switch-back-to-a', backToA.ok && /^provider\b/.test((backToA.data && backToA.data.text) || ''), backToA.redacted);
+    await screenshot(args, args.out, 'page-a-again.png');
+    const dispatchSnap = await call('browser.snapshot');
+    const dispatchNote = ((dispatchSnap.data && dispatchSnap.data.elements) || []).find((item) => item.name === 'note');
+    await clearStatus(args);
+    await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-dhold']);
+    const dispatched = dispatchNote ? call('browser.type', { selector: dispatchNote.selector, value: 'dispatched-value' }) : Promise.resolve({ ok: true, redacted: 'no dispatch ref' });
+    const dispatchedStatus = await readStatusJson(args, 15000, 'dispatched');
+    check('dispatched-status', Boolean(dispatchedStatus && dispatchedStatus.phase === 'dispatched'), JSON.stringify(dispatchedStatus || {}));
+    const dispatchBounds = await webViewInWindow(args);
+    if (dispatchBounds) await adb(args, ['shell', 'input', 'tap', String(dispatchBounds.cx), String(dispatchBounds.cy)]);
+    await sleep(1500);
+    await adb(args, ['shell', 'run-as io.andchamber.app rm -f files/openchamber-provider-dhold']);
+    const dispatchedResult = await dispatched;
+    // The type already ran in the page when control was taken: its outcome is unknown, not refused.
+    check('dispatched-cancel-fails', dispatchedResult.ok === false && /OUTCOME_UNKNOWN/.test(dispatchedResult.redacted), dispatchedResult.redacted);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const allowAfterDispatch = await call('browser.snapshot');
+    const reopenHint = (await uiNodes(args)).some((item) => /re-?open|unavailable/i.test(`${item.text} ${item.desc}`));
+    check('allow-refused-until-reopen', !allowAfterDispatch.ok && (/AUTHORIZATION_REQUIRED|UNAVAILABLE/.test(allowAfterDispatch.redacted) || reopenHint), allowAfterDispatch.redacted);
+    const replaced = await call('browser.open', { url: FIXTURE });
+    await sleep(2500);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const reopenedAfterDispatch = await call('browser.snapshot');
+    check('reopen-after-dispatched-cancel', replaced.ok && reopenedAfterDispatch.ok, reopenedAfterDispatch.redacted);
+    const reloaded = await deviceCommand(args, 'reload', 'reloaded');
+    // The reloaded console rebinds the host once its document commits; poll the bridge for it.
+    let reloadBridge = null;
+    let bridgeAfterReload = false;
+    const reloadDeadline = Date.now() + 30000;
+    while (Date.now() < reloadDeadline) {
+      bridgeAfterReload = await deviceCommand(args, 'bridge', 'bridge');
+      reloadBridge = await readStatusJson(args, 5000, 'bridge');
+      if (reloadBridge && Array.isArray(reloadBridge.tabs)) break;
+      await sleep(1000);
+    }
+    check('bridge-after-reload', reloaded && bridgeAfterReload && reloadBridge && Array.isArray(reloadBridge.tabs), JSON.stringify(reloadBridge || {}));
+    const tabsBeforePresent = await bridgeTabCount(args);
+    const presented = await deviceCommand(args, `present:${FIXTURE2}`, 'presented');
+    await sleep(3000);
+    const tabsAfterPresent = await bridgeTabCount(args);
+    const iframesAfterPresent = await deviceCommand(args, 'iframes', 'iframes') ? await readStatusJson(args, 5000, 'iframes') : null;
+    check('present-after-reload', presented && tabsBeforePresent >= 0 && tabsAfterPresent === tabsBeforePresent + 1 && iframesAfterPresent && iframesAfterPresent.iframes === 0, `tabs ${tabsBeforePresent}->${tabsAfterPresent} iframes=${iframesAfterPresent && iframesAfterPresent.iframes}`);
+    await deviceCommand(args, 'context:other', 'context');
+    const switched = await call('browser.snapshot');
+    check('session-switch-revokes', !switched.ok && /AUTHORIZATION_REQUIRED/.test(switched.redacted), switched.redacted);
   } catch (error) {
     checks.push({ name: 'runner', result: 'FAIL', detail: redact(error.message, secrets) });
     fs.writeFileSync(path.join(args.out, 'server-stderr.log'), redact(stderr, secrets), { mode: 0o600 });
@@ -495,6 +607,8 @@ async function main() {
     await adb(args, ['shell', `pid=$(cat /data/local/tmp/relay${port}.pid 2>/dev/null); if [ -n "$pid" ]; then kill "$pid"; fi; rm -f /data/local/tmp/relay${port}.pid`]);
     fs.rmSync(home, { recursive: true, force: true });
   }
+  const providerLog = await adb(args, ['logcat', '-d', '-s', 'AndChamberProvider:*', 'OcProviderTest:*']);
+  fs.writeFileSync(path.join(args.out, 'provider-logcat.txt'), redact(providerLog.stdout, secrets).length ? providerLog.stdout.split(providerToken).join('[redacted]') : '', { mode: 0o600 });
   const body = result(checks);
   fs.writeFileSync(path.join(args.out, 'result.json'), `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ result: body.result, failed: body.failed })}\n`);

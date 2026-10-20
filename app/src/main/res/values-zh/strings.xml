@@ -268,7 +268,7 @@
     <string name="browser_address_hint">https://</string>
     <string name="browser_hint">输入公网 https 地址。下载、弹窗和文件上传保持关闭。暂不支持复杂表单和登录流程。页面返回的内容未经核实。</string>
     <string name="browser_status_off">代理控制已关闭</string>
-    <string name="browser_status_on">代理控制已开启，持续 10 分钟</string>
+    <string name="browser_status_on">代理控制已开启</string>
     <string name="browser_status_taken">页面已回到你这里</string>
     <string name="browser_turn_on">允许代理</string>
     <string name="browser_take_over">接管</string>

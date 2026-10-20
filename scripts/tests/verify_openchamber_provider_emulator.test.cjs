@@ -34,6 +34,24 @@ test('click-count 10 is not accepted as 1 and scroll requires a larger offset', 
   assert.equal(harness.exactLabel('scroll-y:40', 'scroll-y') > harness.exactLabel('scroll-y:0', 'scroll-y'), true);
 });
 
+test('isolation failures must name AUTHORIZATION_REQUIRED', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../verify_openchamber_provider_emulator.cjs'), 'utf8');
+  for (const name of ['second-session-no-read', 'second-session-named-tab-refused', 'background-blocks', 'first-fails-after-second-selected', 'first-still-refused-after-second-allow', 'session-switch-revokes']) {
+    const line = source.split('\n').find((item) => item.includes(`check('${name}'`));
+    assert.match(line || '', /AUTHORIZATION_REQUIRED/);
+  }
+  assert.match(source, /latestBeforeTakeover = await call\('browser\.snapshot'\)/);
+  assert.match(source, /disconnectSnap = await call\('browser\.snapshot'\)/);
+  assert.match(source, /event-stream-ready/);
+  // Phone layout has no Browser rail; the check proves no iframe plus a working host bridge instead.
+  assert.match(source, /check\('frontend-no-iframe'/);
+  assert.match(source, /iframes === 0/);
+  assert.match(source, /openchamber-provider-dhold/);
+  const instrumentation = require('node:fs').readFileSync(require('node:path').join(__dirname, '../../app/src/androidTest/java/io/andchamber/app/browser/OpenChamberProviderInstrumentation.kt'), 'utf8');
+  assert.match(instrumentation, /AndChamberBrowserHost\.select/);
+  assert.match(instrumentation, /AndChamberBrowserHost\.context\(\{sessionId/);
+});
+
 test('missing UI loop cannot pass and tokens are redacted', () => {
   const report = harness.result([{ name: 'ui-grant-actions', result: 'FAIL', detail: 'not run' }]);
   assert.equal(report.result, 'FAIL');

@@ -19,6 +19,7 @@ internal class BrowserHostSurface(
 
     /** Frontend present creates a tab. The owner is recorded, not granted. */
     fun present(url: String, ownerSessionId: String) {
+        if (url.isBlank()) return
         val open = opener ?: return
         CoroutineScope(Dispatchers.Main.immediate).launch {
             open(url, ownerSessionId)

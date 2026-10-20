@@ -52,7 +52,7 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                             context?.let { ctx ->
                                 io.andchamber.app.ui.browser.BrowserSession.tryCreate(ctx) { io.andchamber.app.browser.BrowserUrlPolicy() }?.let { page ->
                                     OpenChamberProviderFixtures.attach(page.view, page.view.webViewClient)
-                                    io.andchamber.app.ui.browser.WebControlledPage(page)
+                                    HeldControlledPage(io.andchamber.app.ui.browser.WebControlledPage(page), targetContext.filesDir)
                                 }
                             }
                         },
@@ -103,6 +103,30 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
             }
             session.issue(1L)
             session.connect(1L, "http://127.0.0.1:$port", true)
+            // The trusted console rebinds the host on every committed document. Report ready only
+            // once the console has finished loading and the host has stayed attached for a while.
+            val presenter = org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
+            val stableDeadline = android.os.SystemClock.uptimeMillis() + 60_000
+            var stableSince = 0L
+            var lastGeneration = -1L
+            while (android.os.SystemClock.uptimeMillis() < stableDeadline) {
+                val ready = java.util.concurrent.CompletableFuture<String?>()
+                runOnMainSync {
+                    val web = activity?.window?.decorView?.let { findWebView(it, presenter.currentView()) }
+                    if (web == null) ready.complete(null) else web.evaluateJavascript("document.readyState") { ready.complete(it) }
+                }
+                val state = runCatching { ready.get(3, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()?.trim('"')
+                val generation = presenter.state.value.let { if (it.eligible) it.documentEpoch xor it.viewGeneration else -1L }
+                val now = android.os.SystemClock.uptimeMillis()
+                if (state == "complete" && presenter.state.value.eligible && presenter.state.value.connected && generation == lastGeneration) {
+                    if (stableSince == 0L) stableSince = now
+                    if (now - stableSince >= 3_000) break
+                } else {
+                    stableSince = 0L
+                }
+                lastGeneration = generation
+                Thread.sleep(500)
+            }
             writeStatus("attached")
             // Stay alive until the host writes files/openchamber-provider-stop, at most 20 minutes.
             val stop = java.io.File(targetContext.filesDir, "openchamber-provider-stop").also { it.delete() }
@@ -110,15 +134,77 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
             val command = java.io.File(targetContext.filesDir, "openchamber-provider-command")
             while (android.os.SystemClock.uptimeMillis() < deadline && !stop.exists()) {
                 val text = if (command.isFile) command.readText() else ""
+                try {
                 if (text.startsWith("select:")) {
                     val tabId = text.removePrefix("select:").trim()
-                    runOnMainSync { org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>().select(tabId) }
+                    runOnMainSync { evalChat("window.AndChamberBrowserHost && window.AndChamberBrowserHost.select(${org.json.JSONObject.quote(tabId)})") }
                     command.delete()
                     writeStatus("selected")
                 }
-                if (text == "iframes") {
-                    writeStatus("iframes:${countIframes()}")
+                if (text == "open-browser") {
+                    val opened = java.util.concurrent.CompletableFuture<String>()
+                    runOnMainSync {
+                        evalChat(
+                            """
+                            (function(){
+                              var button = document.querySelector('[data-context-surface="browser"]')
+                                || document.querySelector('[aria-label="Browser"]');
+                              if (!button) return 'missing';
+                              button.click();
+                              return 'clicked';
+                            })()
+                            """.trimIndent(),
+                        ) { opened.complete(it) }
+                    }
                     command.delete()
+                    writeStatus(if (opened.get(3, java.util.concurrent.TimeUnit.SECONDS)?.contains("clicked") == true) "browser-opened" else "browser-missing")
+                }
+                if (text.startsWith("eval:")) {
+                    // androidTest-only DOM probe of the chat page; the result is written verbatim.
+                    val value = java.util.concurrent.CompletableFuture<String?>()
+                    runOnMainSync { evalChat(text.removePrefix("eval:")) { value.complete(it) } }
+                    command.delete()
+                    val raw = runCatching { value.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()
+                    java.io.File(targetContext.filesDir, "openchamber-provider-status.json")
+                        .writeText(org.json.JSONObject().put("phase", "eval").put("value", raw ?: "null").toString())
+                }
+                if (text == "bridge") {
+                    val value = java.util.concurrent.CompletableFuture<String>()
+                    runOnMainSync {
+                        evalChat("JSON.stringify({tabs:(window.AndChamberBrowserHost&&window.AndChamberBrowserHost.tabs)?window.AndChamberBrowserHost.tabs():null,panel:!!document.querySelector('[data-testid=\"android-browser-host\"]')})") { value.complete(it) }
+                    }
+                    command.delete()
+                    val raw = runCatching { value.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull().orEmpty()
+                    // evaluateJavascript returns a JSON string literal; decode it, then tag the phase.
+                    val decoded = runCatching { org.json.JSONArray("[$raw]").getString(0) }.getOrNull().orEmpty()
+                    val body = runCatching { org.json.JSONObject(decoded) }.getOrNull() ?: org.json.JSONObject().put("tabs", org.json.JSONObject.NULL)
+                    java.io.File(targetContext.filesDir, "openchamber-provider-status.json").writeText(body.put("phase", "bridge").toString())
+                }
+                if (text.startsWith("context:")) {
+                    val sessionId = text.removePrefix("context:").trim()
+                    runOnMainSync { evalChat("window.AndChamberBrowserHost && window.AndChamberBrowserHost.context({sessionId:${org.json.JSONObject.quote(sessionId)}})") }
+                    command.delete()
+                    writeStatus("context")
+                }
+                if (text == "reload") {
+                    runOnMainSync { evalChat("location.reload()") }
+                    command.delete()
+                    writeStatus("reloaded")
+                }
+                if (text.startsWith("present:")) {
+                    val url = text.removePrefix("present:").trim()
+                    runOnMainSync { evalChat("window.AndChamberBrowserHost && window.AndChamberBrowserHost.present({url:${org.json.JSONObject.quote(url)},ownerSessionId:'provider-emulator'})") }
+                    command.delete()
+                    writeStatus("presented")
+                }
+                if (text == "iframes") {
+                    val count = countIframes()
+                    java.io.File(targetContext.filesDir, "openchamber-provider-status.json").writeText("""{"phase":"iframes","iframes":$count}""")
+                    command.delete()
+                }
+                } catch (error: java.util.concurrent.TimeoutException) {
+                    command.delete()
+                    writeStatus("command-timeout")
                 }
                 Thread.sleep(300)
             }
@@ -126,6 +212,7 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
             writeStatus("finished")
             0
         } catch (error: Throwable) {
+            android.util.Log.e("OcProviderTest", "instrumentation failed", error)
             runCatching { writeStatus("failed:${error.javaClass.simpleName}") }
             1
         }
@@ -143,6 +230,18 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
     }
 
     /** Counts iframes in the production chat page (not the floating page), on the main thread. */
+    private fun evalChat(script: String, callback: android.webkit.ValueCallback<String>? = null) {
+        val presenter = org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
+        // The chat page lives in the started Activity; the app context has no view tree.
+        val root = activity?.window?.decorView
+        val web = root?.let { findWebView(it, presenter.currentView()) }
+        if (web == null) {
+            callback?.onReceiveValue(null)
+            return
+        }
+        web.evaluateJavascript(script, callback)
+    }
+
     private fun countIframes(): Int {
         val presenter = org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
         val result = java.util.concurrent.CompletableFuture<String?>()
@@ -177,6 +276,28 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
     private fun writeStatus(phase: String) {
         val file = java.io.File(targetContext.filesDir, "openchamber-provider-status.json")
         file.writeText("""{"phase":"$phase"}""")
+    }
+}
+
+private class HeldControlledPage(
+    private val page: io.andchamber.app.ui.browser.ControlledBrowserPage,
+    private val files: java.io.File,
+) : io.andchamber.app.ui.browser.ControlledBrowserPage by page {
+    override fun driver(policy: () -> io.andchamber.app.browser.BrowserUrlPolicy): io.andchamber.app.browser.BrowserDriver {
+        val real = page.driver(policy)
+        return io.andchamber.app.browser.BrowserDriver { request ->
+            val reply = real.execute(request)
+            val hold = java.io.File(files, "openchamber-provider-dhold")
+            val mutation = request.method == io.andchamber.app.browser.BrowserMethod.TYPE ||
+                request.method == io.andchamber.app.browser.BrowserMethod.CLICK ||
+                request.method == io.andchamber.app.browser.BrowserMethod.SCROLL
+            // Hold only after a mutation has run in the page: the action happened, the reply waits.
+            if (mutation && hold.isFile) {
+                java.io.File(files, "openchamber-provider-status.json").writeText("""{"phase":"dispatched","id":"${request.id}"}""")
+                while (hold.isFile) kotlinx.coroutines.delay(200)
+            }
+            reply
+        }
     }
 }
 

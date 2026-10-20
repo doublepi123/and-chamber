@@ -65,6 +65,8 @@ class NativeBrowserPresenter(
     private var page: ControlledBrowserPage? = null
     private var adapter: OpenChamberPageAdapter? = null
     private var paused = false
+    private var connectionOwner: ConnectionOwner? = null
+    private var loadJob: Job? = null
     private var connectionId: String? = null
     private var runtimeLaunchId: Long = 0L
     private var selectedTabId: String? = null
@@ -78,6 +80,9 @@ class NativeBrowserPresenter(
 
     /** UI and tests observe the page the presenter owns. Null until a claimed open creates one. */
     fun currentView(): View? = synchronized(lock) { page?.view }
+
+    /** Trusted host is attached and the chat page is still in the foreground. */
+    val foreground: Boolean get() = synchronized(lock) { host != null && !paused }
 
     /** Unit tests attach a host without constructing an Activity. Production callers use the Activity overload. */
     internal fun attachHostForTest(instanceKey: String, consoleGeneration: Long) {
@@ -93,15 +98,27 @@ class NativeBrowserPresenter(
 
     /** Test and UI entry. Production passes the foreground Activity; a non-Activity context cannot create a page. */
     fun attachHost(context: Context, instanceKey: String, consoleGeneration: Long) {
-        synchronized(lock) {
-            val previous = host
-            if (previous != null && (previous.instanceKey != instanceKey || previous.consoleGeneration != consoleGeneration)) {
-                revokeLocked("host replaced")
-                releasePageLocked()
+        val previous = synchronized(lock) { host }
+        when {
+            // Another instance, or another Activity: nothing from the old host may survive.
+            previous != null && (previous.instanceKey != instanceKey || previous.context !== context) -> {
+                revokeAll("host replaced")
+                synchronized(lock) { releasePageLocked() }
             }
+            // A new document of the same trusted console (load, reload, re-commit): the old page's
+            // bridge is gone, so the grant goes too, but the native tabs and their pages stay.
+            previous != null && previous.consoleGeneration != consoleGeneration -> revokeAll("console document changed")
+        }
+        synchronized(lock) {
             host = Host(context, instanceKey, consoleGeneration)
             publishLocked()
         }
+    }
+
+    /** The trusted console is gone (screen left, host untrusted): detach whatever generation is attached. */
+    fun detachHostAny(instanceKey: String) {
+        val generation = synchronized(lock) { host?.takeIf { it.instanceKey == instanceKey }?.consoleGeneration } ?: return
+        detachHost(instanceKey, generation)
     }
 
     fun detachHost(instanceKey: String, consoleGeneration: Long) {
@@ -109,6 +126,7 @@ class NativeBrowserPresenter(
             val current = host ?: return
             current.instanceKey == instanceKey && current.consoleGeneration == consoleGeneration
         }
+        android.util.Log.i("AndChamberProvider", "detachHost generation=$consoleGeneration matches=$matches")
         if (!matches) return
         revokeAll("host left")
         synchronized(lock) {
@@ -122,10 +140,13 @@ class NativeBrowserPresenter(
      * Clears only the connection [owner] published. A stopping client's late `null` must not wipe the
      * connection a newer client already adopted.
      */
-    fun clearConnection(owner: String?, runtimeLaunchId: Long) {
+    fun clearConnection(owner: String?, runtimeLaunchId: Long, clientGeneration: Long = Long.MAX_VALUE) {
         val cleared = synchronized(lock) {
+            val current = connectionOwner
             if (owner == null || this.connectionId != owner || this.runtimeLaunchId != runtimeLaunchId) return@synchronized false
+            if (current != null && clientGeneration != Long.MAX_VALUE && clientGeneration < current.clientGeneration) return@synchronized false
             this.connectionId = null
+            connectionOwner = current?.copy(connectionId = null)
             true
         }
         if (cleared) {
@@ -134,14 +155,27 @@ class NativeBrowserPresenter(
         }
     }
 
-    fun setConnection(connectionId: String?, runtimeLaunchId: Long) {
-        val changed = synchronized(lock) {
-            val replaced = this.connectionId != connectionId || this.runtimeLaunchId != runtimeLaunchId
+    fun setConnection(connectionId: String?, runtimeLaunchId: Long) =
+        setConnection(connectionId, runtimeLaunchId, clientGeneration = 0L)
+
+    /**
+     * Connection reports are identities, not grants. Only the current launch and client generation
+     * may change the connection. A stopping older client cannot wipe a newer grant.
+     */
+    fun setConnection(connectionId: String?, runtimeLaunchId: Long, clientGeneration: Long) {
+        val adopt = synchronized(lock) {
+            val current = connectionOwner
+            if (current != null && (runtimeLaunchId < current.launchId ||
+                    runtimeLaunchId == current.launchId && clientGeneration < current.clientGeneration)
+            ) {
+                return
+            }
+            connectionOwner = ConnectionOwner(runtimeLaunchId, clientGeneration, connectionId)
             this.connectionId = connectionId
             this.runtimeLaunchId = runtimeLaunchId
-            replaced
+            true
         }
-        if (changed || connectionId == null) revokeAll("connection replaced")
+        if (adopt) revokeAll("connection replaced")
         synchronized(lock) { publishLocked() }
     }
 
@@ -156,6 +190,8 @@ class NativeBrowserPresenter(
      * previous grant must not cancel itself. Every other in-flight page action is cancelled.
      */
     private fun revokeAll(reason: String, keepRequestId: String?) {
+        // Reasons are fixed internal strings; no page or request content is logged.
+        android.util.Log.i("AndChamberProvider", "revoke reason=$reason")
         val job = synchronized(lock) {
             ignored(reason)
             registry.revokeEpoch()
@@ -164,9 +200,18 @@ class NativeBrowserPresenter(
             mode = ProviderMode.MANUAL
             documentEpoch += 1
             adapter?.clearRefs()
-            pages.values.forEach { it.adapter.clearRefs() }
+            pages.values.forEach {
+                it.adapter.clearRefs()
+                if (it.mutationInFlight) {
+                it.outcomeUnknown = true
+                it.mutationInFlight = false
+            }
+            }
+            loadJob?.cancel()
             val running = activeJob
             if (running != null && keepRequestId != null && activeRequestId == keepRequestId) return@synchronized null
+            // Reason is a fixed internal string; nothing from the page or the request is logged.
+            if (running != null) android.util.Log.i("AndChamberProvider", "revoke cancels active action reason=$reason")
             activeJob = null
             activeRequestId = null
             running
@@ -242,11 +287,12 @@ class NativeBrowserPresenter(
     fun select(tabId: String): Boolean {
         val changed = synchronized(lock) {
             val tab = registry.find(tabId) ?: return false
-            if (selectedTabId == tabId) return true
+            if (selectedTabId == tabId && pages[tabId] != null) return true
             selectedTabId = tab.tabId
             val bound = pages[tab.tabId]
             page = bound?.page
             adapter = bound?.adapter
+            viewGeneration += 1
             true
         }
         if (changed) revokeAll("tab selected")
@@ -260,32 +306,42 @@ class NativeBrowserPresenter(
      * user's choice to see it, so its page is created and loaded once here. This is not a grant.
      */
     private fun materializeSelected() {
-        val (tab, prepared) = synchronized(lock) {
+        val request = synchronized(lock) {
             val tabId = selectedTabId ?: return
             if (pages[tabId] != null) return
+            if (!foreground) return
             val tab = registry.find(tabId) ?: return
             val current = host ?: return
-            tab to PreparedOpen(current, current.context)
+            if (current.context != null && !hostAlive(current.context)) return
+            Materialize(tab, PreparedOpen(current, current.context), documentEpoch)
         }
+        val tab = request.tab
+        val prepared = request.prepared
+        val epoch = request.epoch
         val created = sessionFactory(prepared.context) ?: return
         val pageAdapter = adapterFor(created)
+        val admitted = synchronized(lock) {
+            selectedTabId == tab.tabId && pages[tab.tabId] == null && foreground &&
+                host?.consoleGeneration == prepared.host.consoleGeneration && documentEpoch == epoch
+        }
+        if (!admitted) {
+            created.destroy()
+            return
+        }
         synchronized(lock) {
-            if (selectedTabId != tab.tabId || pages[tab.tabId] != null || host?.consoleGeneration != prepared.host.consoleGeneration) {
-                created.destroy()
-                return
-            }
             created.tabId = tab.tabId
-            pages[tab.tabId] = BoundPage(created, pageAdapter, viewGeneration + 1)
+            pages[tab.tabId] = BoundPage(created, pageAdapter, viewGeneration)
             page = created
             adapter = pageAdapter
-            viewGeneration += 1
-            documentEpoch += 1
             mode = ProviderMode.MANUAL
             created.manualNavigation = false
             bind(created)
         }
-        scope.launch {
-            if (!created.loadOnce(tab.url)) synchronized(lock) { pages[tab.tabId]?.outcomeUnknown = true }
+        loadJob = scope.launch {
+            val still = synchronized(lock) {
+                foreground && selectedTabId == tab.tabId && documentEpoch == epoch && pages[tab.tabId]?.page === created
+            }
+            if (!still || !created.loadOnce(tab.url)) synchronized(lock) { pages[tab.tabId]?.outcomeUnknown = true }
             synchronized(lock) { publishLocked() }
         }
     }
@@ -299,6 +355,7 @@ class NativeBrowserPresenter(
                 val bound = selectedTabId?.let { pages[it] }
                 page = bound?.page
                 adapter = bound?.adapter
+                viewGeneration += 1
                 if (selectedTabId == null) releasePageLocked()
             }
             revokeAll("tab closed")
@@ -338,14 +395,38 @@ class NativeBrowserPresenter(
             val tab = tabId?.let { registry.find(it) }
             val connection = connectionId
             val bound = tabId?.let { pages[it] }
-            if (current == null || tab == null || connection == null || tab.ownerSessionId.isBlank() || bound == null || bound.outcomeUnknown || bound.page.tabId != tab.tabId) {
+            val refusal = when {
+                current == null -> "no host"
+                tab == null -> "no tab"
+                connection == null -> "no connection"
+                tab.ownerSessionId.isBlank() -> "no owner"
+                bound == null -> "no page"
+                bound.outcomeUnknown -> "outcome unknown"
+                bound.page.tabId != tab.tabId -> "page tab mismatch"
+                !foreground -> "not foreground"
+                else -> null
+            }
+            if (refusal != null) {
+                android.util.Log.i("AndChamberProvider", "allow refused: $refusal")
                 null
             } else {
-                AllowSnapshot(current, tab, connection, bound.page, documentEpoch, bound.generation)
+                // Every value was checked non-null in the refusal above.
+                AllowSnapshot(current!!, tab!!, connection!!, bound!!.page, documentEpoch, bound.generation)
             }
         } ?: return@withContext false
+        if (!foreground) return@withContext false
+        if (synchronized(lock) { pages[snapshot.tab.tabId]?.outcomeUnknown } == true) {
+            synchronized(lock) {
+                _state.value = _state.value.copy(pageError = "Re-open this page before allowing control")
+            }
+            return@withContext false
+        }
         val probed = snapshot.page?.probe() ?: return@withContext false
-        if (probed !is ProbeAcceptance.Accept) return@withContext false
+        if (!foreground) return@withContext false
+        if (probed !is ProbeAcceptance.Accept) {
+            android.util.Log.i("AndChamberProvider", "allow refused: probe ${(probed as? ProbeAcceptance.Reject)?.message ?: probed.javaClass.simpleName}")
+            return@withContext false
+        }
         val granted = synchronized(lock) {
             val current = host
             val pageNow = page
@@ -360,7 +441,10 @@ class NativeBrowserPresenter(
                 selectedTabId == snapshot.tab.tabId &&
                 connectionId == snapshot.connection
         }
-        if (!granted) return@withContext false
+        if (!granted) {
+            android.util.Log.i("AndChamberProvider", "allow refused: changed during probe")
+            return@withContext false
+        }
         synchronized(lock) {
             val pageNow = page ?: return@synchronized
             pageNow.manualNavigation = false
@@ -426,6 +510,7 @@ class NativeBrowserPresenter(
         deadlineElapsed: Long,
         now: () -> Long,
     ): ProviderResult {
+        if (!foreground) return unavailable()
         if (now() >= deadlineElapsed) return ProviderResult(false, errorCode = ProviderCodes.DEADLINE)
         val session = request.sessionId?.takeIf { it.isNotBlank() }
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
@@ -440,7 +525,14 @@ class NativeBrowserPresenter(
         ignored(incomingMode.name)
         ignored(visibleTabId)
         // WebView may only be touched on the main thread; the provider client calls from IO.
-        return withContext(main) { pageAdapter.execute(request, registry, shown, currentMode, deadlineElapsed) }
+        // Outcome-unknown is decided by the adapter at dispatch time (no reply after the action was
+        // sent). A refusal before dispatch (expired ref, no grant, refused field) changed nothing.
+        // Cancellation mid-dispatch is marked by the adapter's dispatch hook before it propagates.
+        val result = withContext(main) { pageAdapter.execute(request, registry, shown, currentMode, deadlineElapsed) }
+        if (result.errorCode == ProviderCodes.OUTCOME_UNKNOWN) {
+            synchronized(lock) { pages[shown]?.outcomeUnknown = true; publishLocked() }
+        }
+        return result
     }
 
     /**
@@ -462,6 +554,7 @@ class NativeBrowserPresenter(
         deadlineElapsed: Long,
         now: () -> Long,
     ): ProviderResult = withContext(main) {
+        if (!foreground) return@withContext unavailable()
         if (now() >= deadlineElapsed) return@withContext ProviderResult(false, errorCode = ProviderCodes.DEADLINE)
         val prepared = synchronized(lock) {
             val currentHost = host
@@ -491,6 +584,7 @@ class NativeBrowserPresenter(
             synchronized(lock) { publishLocked() }
             return@withContext parked.result
         }
+        if (!foreground) return@withContext unavailable()
         val created = sessionFactory(prepared.context) ?: return@withContext unavailable()
         val replacingOwn = synchronized(lock) { activeOwner == null || activeOwner == session }
         if (!replacingOwn) {
@@ -615,11 +709,23 @@ class NativeBrowserPresenter(
         onOutcomeUnknown = {
             synchronized(lock) { pages[page.tabId]?.outcomeUnknown = true }
         },
+        onDispatch = {
+            synchronized(lock) { pages[page.tabId]?.mutationInFlight = true }
+        },
+        onDispatchDone = { reply ->
+            synchronized(lock) {
+                val bound = pages[page.tabId] ?: return@synchronized
+                bound.mutationInFlight = false
+                if (reply == null) bound.outcomeUnknown = true
+            }
+        },
     )
 
     private fun revokeLocked(reason: String) = revokeAll(reason)
 
     private fun releasePageLocked() {
+        pages.values.forEach { it.page.destroy() }
+        pages.clear()
         page?.destroy()
         page = null
         adapter = null
@@ -627,6 +733,7 @@ class NativeBrowserPresenter(
     }
 
     private fun publishLocked(shown: Boolean? = null, error: String? = page?.pageError) {
+        val forced = if (pages[selectedTabId]?.outcomeUnknown == true) "Re-open this page before allowing control" else error
         val tabs = registry.tabs().map { tab ->
             NativeBrowserTab(
                 id = tab.tabId,
@@ -643,13 +750,15 @@ class NativeBrowserPresenter(
             shown = visible,
             mode = mode,
             agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null,
-            pageError = error,
+            pageError = forced,
             pageReady = page?.ready == true,
-            viewHandle = page?.handle ?: 0,
+            viewHandle = if (page == null) 0 else viewGeneration.toInt(),
             viewGeneration = viewGeneration,
             hostAttached = host != null,
             documentEpoch = documentEpoch,
             paused = paused,
+            eligible = host != null && !paused,
+            connected = connectionId != null,
         )
     }
 
@@ -666,10 +775,18 @@ class NativeBrowserPresenter(
         val adapter: OpenChamberPageAdapter,
         val generation: Long,
         var outcomeUnknown: Boolean = false,
+        var mutationInFlight: Boolean = false,
+    )
+
+    private data class ConnectionOwner(
+        val launchId: Long,
+        val clientGeneration: Long,
+        val connectionId: String?,
     )
 
     private data class Host(val context: Context?, val instanceKey: String, val consoleGeneration: Long)
     private data class PreparedOpen(val host: Host, val context: Context?)
+    private data class Materialize(val tab: ProviderTab, val prepared: PreparedOpen, val epoch: Long)
     private data class AllowSnapshot(
         val host: Host,
         val tab: ProviderTab,

@@ -342,10 +342,19 @@ internal fun WebScreen(
         localState is RuntimeState.Running &&
         web?.gatewayLoginMode != true &&
         phase !is SessionPhase.Unreachable
-    val consoleGeneration = sessionKey.hashCode().toLong()
+    val consoleGeneration = web?.browserBindGeneration ?: sessionKey.hashCode().toLong()
+    // Leaving the trusted console (or this screen) detaches the host: grant revoked, pages destroyed.
+    // A new document of the same console is not a departure; the binding effect below hands over.
+    val hostActivity = context.findActivity()
+    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, hostActivity) {
+        onDispose {
+            web?.unbindBrowserHost()
+            browserPresenter?.detachHostAny(targetId)
+        }
+    }
     androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, consoleGeneration) {
         val presenter = browserPresenter
-        val activity = context.findActivity()
+        val activity = hostActivity
         if (localTrusted && presenter != null && activity != null && web != null) {
             val host = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
             host.opener = { url, owner -> presenter.openUser(url, owner) }
@@ -353,16 +362,18 @@ internal fun WebScreen(
             web.browserConsoleGeneration = consoleGeneration
             web.browserTabsJson = { io.andchamber.app.ui.browser.BrowserHostEvents.tabsJson(presenter.state.value) }
             presenter.attachHost(activity, targetId, consoleGeneration)
+            web.view?.evaluateJavascript(io.andchamber.app.ui.browser.BrowserHostEvents.readyScript(), null)
+            web.view?.evaluateJavascript(
+                io.andchamber.app.ui.browser.BrowserHostEvents.stateScript(presenter.state.value),
+                null,
+            )
         } else {
             web?.unbindBrowserHost()
-            presenter?.onHostPaused()
-            presenter?.detachHost(targetId, consoleGeneration)
+            presenter?.detachHostAny(targetId)
         }
-        onDispose {
-            web?.unbindBrowserHost()
-            browserPresenter?.onHostPaused()
-            browserPresenter?.detachHost(targetId, consoleGeneration)
-        }
+        // Generation hand-over: attachHost with the next generation revokes the grant and keeps the
+        // tabs. `paused` follows only the activity lifecycle observer below.
+        onDispose { }
     }
     val hostLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(browserPresenter, localTrusted, hostLifecycle) {
@@ -375,6 +386,8 @@ internal fun WebScreen(
                 else -> Unit
             }
         }
+        // Start from the real lifecycle state; addObserver replays events up to it.
+        if (!hostLifecycle.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) presenter.onHostPaused()
         hostLifecycle.lifecycle.addObserver(observer)
         onDispose { hostLifecycle.lifecycle.removeObserver(observer) }
     }

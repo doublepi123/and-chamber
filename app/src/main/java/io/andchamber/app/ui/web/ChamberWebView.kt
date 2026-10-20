@@ -144,6 +144,8 @@ internal class ChamberWebView(
     var browserHost: BrowserHostSurface? = null
     var browserTabsJson: () -> String = { "[]" }
     var browserConsoleGeneration: Long = 0L
+    var browserBindGeneration by androidx.compose.runtime.mutableLongStateOf(0L)
+        private set
 
     fun acceptsBrowserHost(generation: Long): Boolean =
         generation == browserConsoleGeneration && mainTrusted && !gatewayLoginMode && !destroyed && browserHost != null
@@ -151,6 +153,14 @@ internal class ChamberWebView(
     fun unbindBrowserHost() {
         browserHost = null
         browserConsoleGeneration += 1
+        browserBindGeneration = browserConsoleGeneration
+    }
+
+    /** Trusted local document committed. The screen rebinds the host to this generation. */
+    fun noteTrustedDocument() {
+        if (!mainTrusted || gatewayLoginMode || destroyed) return
+        browserConsoleGeneration += 1
+        browserBindGeneration = browserConsoleGeneration
     }
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
@@ -530,6 +540,7 @@ internal class ChamberWebView(
             if (gatewayHandoff.blocksDocuments || isHandoffBlank(url)) return
             if (isCurrent(view)) {
                 committed = true
+                if (origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode) noteTrustedDocument()
             }
         }
 
@@ -547,6 +558,7 @@ internal class ChamberWebView(
             if (isHandoffBlank(url)) return
             progress = 100
             committed = true
+            if (origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode) noteTrustedDocument()
             val trusted = origin.isNotEmpty() && originOf(url) == origin
             mainTrusted = trusted
             if (!trusted) return

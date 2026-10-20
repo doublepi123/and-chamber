@@ -45,6 +45,23 @@ class ProviderBindingTest {
     }
 
     @Test
+    fun `a stale launch attempt does not replace the current client`() {
+        val presenter = io.andchamber.app.ui.browser.NativeBrowserPresenter()
+        presenter.attachHostForTest("local", 1L)
+        var created = 0
+        val binding = LocalBrowserProviderBinding(
+            presenter = presenter,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
+            clientFactory = { _, _, _ ->
+                created += 1
+                error("stale")
+            },
+        )
+        binding.onLocalStop(1L)
+        assertEquals(0, created)
+    }
+
+    @Test
     fun `binding refuses a non-loopback origin`() {
         var created = 0
         val binding = LocalBrowserProviderBinding(

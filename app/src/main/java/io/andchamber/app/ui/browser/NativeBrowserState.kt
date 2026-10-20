@@ -19,6 +19,9 @@ data class NativeBrowserState(
     val hostAttached: Boolean = false,
     val documentEpoch: Long = 0L,
     val paused: Boolean = false,
+    val eligible: Boolean = false,
+    /** A provider connection is live. Only a flag: the connection id itself is not exposed. */
+    val connected: Boolean = false,
 )
 
 data class NativeBrowserTab(

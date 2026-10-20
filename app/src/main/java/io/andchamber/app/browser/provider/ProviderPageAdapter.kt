@@ -40,6 +40,8 @@ class OpenChamberPageAdapter(
     private val requireCurrentDom: Boolean = false,
     private val authority: (() -> AuthorityStamp)? = null,
     private val onOutcomeUnknown: () -> Unit = {},
+    private val onDispatch: () -> Unit = {},
+    private val onDispatchDone: (BrowserReply?) -> Unit = {},
 ) {
     var reads: Int = 0
         private set
@@ -212,22 +214,27 @@ class OpenChamberPageAdapter(
         val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
         val ref = resolveClick(request) ?: return refRefusal(request.parameters["selector"])
         val field = currentField(ref)
-        if (!sameAuthority(stamp)) return revokedDuringAction()
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (field == null) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "field check failed")
         }
         if (isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "form submission refused")
         }
-        if (!sameAuthority(stamp)) return revokedDuringAction()
-        val reply = driver.execute(
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
+        val reply = dispatched {
+            driver.execute(
             BrowserRequest(
                 id = request.requestId,
                 method = BrowserMethod.CLICK,
                 params = mapOf(BrowserDriverLogic.PARAM_REF to ref),
             ),
         )
-        if (!sameAuthority(stamp)) return revokedDuringAction()
+        }
+        // No reply means the page may have acted without our seeing it: outcome unknown.
+        if (reply == null) return revokedDuringAction()
+        // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("clicked", refSelector(ref)) })
     }
@@ -240,14 +247,15 @@ class OpenChamberPageAdapter(
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
         val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
         val field = currentField(ref)
-        if (!sameAuthority(stamp)) return revokedDuringAction()
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (field == null) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "field check failed")
         }
         if (isSensitive(field) || !isEditable(field) || isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "refused field")
         }
-        val reply = driver.execute(
+        val reply = dispatched {
+            driver.execute(
             BrowserRequest(
                 id = request.requestId,
                 method = BrowserMethod.TYPE,
@@ -257,7 +265,11 @@ class OpenChamberPageAdapter(
                 ),
             ),
         )
-        if (!sameAuthority(stamp)) return revokedDuringAction()
+        }
+        // No reply means the page may have acted without our seeing it: outcome unknown.
+        if (reply == null) return revokedDuringAction()
+        // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("typed", refSelector(ref)) })
     }
@@ -270,13 +282,19 @@ class OpenChamberPageAdapter(
         if (direction !in BrowserDriverLogic.SCROLL_DIRECTIONS) {
             return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
         }
-        val reply = driver.execute(
-            BrowserRequest(
-                id = request.requestId,
-                method = BrowserMethod.SCROLL,
-                params = mapOf(BrowserDriverLogic.PARAM_DIRECTION to direction),
-            ),
-        )
+        val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
+        val reply = dispatched {
+            driver.execute(
+                BrowserRequest(
+                    id = request.requestId,
+                    method = BrowserMethod.SCROLL,
+                    params = mapOf(BrowserDriverLogic.PARAM_DIRECTION to direction),
+                ),
+            )
+        }
+        if (reply == null) return revokedDuringAction()
+        if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("direction", direction) })
     }
@@ -355,6 +373,25 @@ class OpenChamberPageAdapter(
             now.documentId == stamp.documentId && now.tabId == stamp.tabId && now.granted
     }
 
+    private suspend fun dispatched(block: suspend () -> BrowserReply): BrowserReply? {
+        onDispatch()
+        return try {
+            block().also { onDispatchDone(it) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // The page may already have acted: mark outcome unknown, then let cancellation propagate.
+            onDispatchDone(null)
+            throw cancelled
+        } catch (_: Exception) {
+            onDispatchDone(null)
+            null
+        }
+    }
+
+    /** Revoked before anything reached the page: nothing happened, so the page stays trustworthy. */
+    private fun revokedBeforeDispatch(): ProviderResult =
+        ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
+
+    /** Revoked after the action was sent to the page: what it did is unknown. */
     private fun revokedDuringAction(): ProviderResult {
         onOutcomeUnknown()
         android.util.Log.w("AndChamberProvider", "action=mutate code=${ProviderCodes.OUTCOME_UNKNOWN} class=Revoked")

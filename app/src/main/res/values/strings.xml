@@ -269,7 +269,7 @@
     <string name="browser_address_hint">https://</string>
     <string name="browser_hint">Enter a public https address. Downloads, pop-ups and file uploads stay off. Complex forms and sign-in flows are not supported yet. What the page reports is not verified.</string>
     <string name="browser_status_off">Agent control is off</string>
-    <string name="browser_status_on">Agent control is on for 10 minutes</string>
+    <string name="browser_status_on">Agent control is on</string>
     <string name="browser_status_taken">You have the page</string>
     <string name="browser_turn_on">Allow agent</string>
     <string name="browser_take_over">Take over</string>

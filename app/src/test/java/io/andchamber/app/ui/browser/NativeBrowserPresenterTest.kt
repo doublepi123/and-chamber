@@ -9,6 +9,7 @@ import io.andchamber.app.browser.provider.PageField
 import io.andchamber.app.browser.provider.ProviderCodes
 import io.andchamber.app.browser.provider.ProviderMode
 import io.andchamber.app.browser.provider.ProviderRegistry
+import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.browser.provider.ProviderRequest
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -67,6 +68,25 @@ class NativeBrowserPresenterTest {
         next(null)
         val refused = presenter.execute(request("browser.snapshot").copy(connectionId = "c-new"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
         assertEquals(ProviderCodes.INVALID_REQUEST, refused.errorCode)
+    }
+
+    @Test
+    fun `a new console document revokes the grant but keeps tabs and pages`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
+        val context = android.content.ContextWrapper(null)
+        presenter.attachHost(context, "local", 1L)
+        presenter.setConnection("c1", 1L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.state.value.agentOn)
+        presenter.attachHost(context, "local", 2L)
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals(1, presenter.registry.tabs().size)
+        assertFalse(pages.single().destroyed)
+        // A different Activity is a different host: pages go.
+        presenter.attachHost(android.content.ContextWrapper(null), "local", 3L)
+        assertTrue(pages.single().destroyed)
     }
 
     @Test
@@ -253,6 +273,109 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `paused open creates no page and resume does not restore the grant`() = runBlocking {
+        var created = 0
+        val presenter = presenter { created += 1; FakePage() }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        presenter.allow()
+        presenter.onHostPaused()
+        assertFalse(presenter.state.value.eligible)
+        val paused = presenter.openClaimed(openRequest(id = "open-paused"), 1_000L)
+        assertEquals("BROWSER_PAGE_UNAVAILABLE", paused.errorCode)
+        assertEquals(1, created)
+        presenter.onHostResumed()
+        assertTrue(presenter.state.value.eligible)
+        assertNull(presenter.registry.currentGrant())
+    }
+
+    @Test
+    fun `a dispatched mutation cancelled by revoke becomes outcome unknown until reopened`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        assertTrue(presenter.allow())
+        presenter.execute(request("browser.snapshot", id = "s1"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        // The click reaches the page and then hangs: the page has acted, the reply never came back.
+        val reached = CompletableDeferred<Unit>()
+        page.block = { reached.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+        val acting = launch(Dispatchers.Unconfined) {
+            presenter.execute(
+                request("browser.click", id = "c1", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                1_000L,
+            ) { 0L }
+        }
+        reached.await()
+        presenter.revokeAll("takeover")
+        acting.join()
+        page.block = {}
+        assertFalse(presenter.allow())
+        presenter.openClaimed(openRequest(id = "open-2"), 1_000L)
+        assertTrue(presenter.allow())
+    }
+
+    @Test
+    fun `a refusal before dispatch does not block a later allow`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        assertTrue(presenter.allow())
+        // No snapshot yet, so the ref is unknown: refused before anything reaches the page.
+        val refused = presenter.execute(
+            request("browser.click", id = "c0", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            1_000L,
+        ) { 0L }
+        assertFalse(refused.ok)
+        presenter.takeover()
+        assertTrue(presenter.allow())
+    }
+
+    @Test
+    fun `select changes the view identity and detach destroys every page`() = runBlocking {
+        var next = "page-A"
+        var ids = 0
+        val pages = mutableListOf<FakePage>()
+        val presenter = NativeBrowserPresenter(
+            registry = ProviderRegistry { "tab-${++ids}" },
+            scope = CoroutineScope(dispatcher),
+            sessionFactory = { FakePage(text = next).also { pages += it; next = "page-B" } },
+            main = dispatcher,
+        ).also { it.attachHostForTest("local", 1L) }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(session = "owner-a"), 1_000L)
+        val first = presenter.state.value.viewHandle
+        presenter.openClaimed(openRequest(session = "owner-b", id = "open-b"), 1_000L)
+        presenter.select(presenter.registry.tabs().last().tabId)
+        val second = presenter.state.value.viewHandle
+        presenter.select(presenter.registry.tabs().first().tabId)
+        val third = presenter.state.value.viewHandle
+        assertTrue("$first $second $third", first != second && second != third)
+        presenter.detachHost("local", 1L)
+        assertTrue(pages.all { it.destroyed })
+        assertEquals(2, presenter.registry.tabs().size)
+    }
+
+    @Test
+    fun `an old client cannot clear a newer connection`() {
+        val presenter = presenter { FakePage() }
+        presenter.setConnection("new", 2L, clientGeneration = 2L)
+        presenter.registry.open("s", "/p", "local", "https://example.com", "tab")
+        presenter.registry.grant(2L, "new", "s", "tab")
+        LocalBrowserProviderBinding.ownConnection(presenter, 2L, clientGeneration = 1L).invoke(null)
+        assertEquals("new", presenter.registry.currentGrant()?.connectionId)
+        presenter.clearConnection("new", 2L, clientGeneration = 2L)
+        assertNull(presenter.registry.currentGrant())
+    }
+
+    @Test
     fun `revokeAll cancels the active job and a revoked field check is refused`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
@@ -372,7 +495,7 @@ class NativeBrowserPresenterTest {
         override var onUnknown: (() -> Unit)? = null
         override var onManualDocument: (() -> Unit)? = null
         override fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver = BrowserDriver { request ->
-            runBlocking { block() }
+            block()
             if (request.method == BrowserMethod.SNAPSHOT) reads += 1
             if (request.method == BrowserMethod.TYPE || request.method == BrowserMethod.CLICK) {
                 actions += 1
@@ -404,6 +527,7 @@ class NativeBrowserPresenterTest {
             }
             return fieldsMutable
         }
-        override fun destroy() = Unit
+        var destroyed = false
+        override fun destroy() { destroyed = true }
     }
 }

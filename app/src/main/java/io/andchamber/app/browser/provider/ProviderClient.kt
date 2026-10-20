@@ -31,6 +31,7 @@ class BrowserProviderClient(
     private val scope: CoroutineScope,
     private val registry: ProviderRegistry = ProviderRegistry(),
     private val onConnection: (String?) -> Unit = {},
+    private val clientGeneration: Long = 0L,
     private val onCancel: (String) -> Unit = {},
 ) : BrowserProvider {
     init {
@@ -69,7 +70,6 @@ class BrowserProviderClient(
             consumer = null
             connectionId = null
             serverEpoch = null
-            registry.revoke()
             jobs + listOfNotNull(current)
         }
         onConnection(null)
@@ -77,20 +77,17 @@ class BrowserProviderClient(
         (transport as? ProviderHttpTransport)?.stop()
     }
 
-    override fun grant(sessionId: String, tabId: String) {
-        val connection = connectionId ?: return
-        registry.grant(runtimeLaunchId, connection, sessionId, tabId)
-    }
+    override fun grant(sessionId: String, tabId: String) = Unit
 
-    override fun revoke() = registry.revoke()
+    override fun revoke() = Unit
 
     override fun setManual(manual: Boolean) {
         mode = if (manual) ProviderMode.MANUAL else ProviderMode.AGENT
-        if (manual) registry.revoke()
+        if (manual) onConnection(connectionId)
     }
 
     fun setVisibleTab(tabId: String?) {
-        if (visibleTabId != tabId) registry.revoke()
+        if (visibleTabId != tabId) onConnection(connectionId)
         visibleTabId = tabId
     }
 
@@ -128,7 +125,6 @@ class BrowserProviderClient(
                 inFlight.clear()
                 connectionId = null
                 serverEpoch = null
-                registry.revoke()
                 jobs
             }
             if (stale.isNotEmpty() || gate.withLock { generation == mine && connectionId == null }) onConnection(null)
@@ -155,7 +151,6 @@ class BrowserProviderClient(
             inFlight.clear()
             connectionId = ready.connectionId
             serverEpoch = ready.serverEpoch
-            registry.revoke()
             jobs
         }
         onConnection(ready.connectionId)
