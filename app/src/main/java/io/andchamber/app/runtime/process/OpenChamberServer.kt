@@ -96,6 +96,13 @@ class ProotOpenChamberServer(
     private val onBrowserLaunchInvalidated: (Long) -> Unit = {},
     /** Receives a short, non-sensitive reason when browser control is skipped for this launch. */
     private val onBrowserUnavailable: (String) -> Unit = {},
+    /**
+     * Native provider session. A verified patched artifact selects this path and suppresses the
+     * legacy MCP overlay. The token is rotated for the launch id and revoked with that same id.
+     */
+    private val browserProvider: BrowserProviderSession = BrowserProviderSession(),
+    /** True only after the patched server+dist pair has been hash-verified for this install. */
+    private val patchedOpenChamberVerified: () -> Boolean = { false },
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -171,11 +178,15 @@ class ProotOpenChamberServer(
                 extraBinds = emptyList(),
                 port = port,
             )
+        val nativeProvider = patchedOpenChamberVerified()
+        val nextLaunch = synchronized(lock) { launchId + 1 }
+        val provider = if (nativeProvider) browserProvider.issue(nextLaunch) else null
         val env = ProotCommands.serverEnvironment(
             resolved.environment(),
             paths.prootTmp,
             uiPassword,
-            browserControl = browserPrepared,
+            browserControl = browserPrepared && !nativeProvider,
+            providerToken = provider?.token,
         )
         val signal = CompletableDeferred<Unit>()
         val started = spawn(command, env, paths.root)
@@ -194,9 +205,19 @@ class ProotOpenChamberServer(
             stop()
             throw error
         }
-        synchronized(lock) {
+        val stillCurrent = synchronized(lock) {
             // Only the launch that is still the current child becomes trusted.
-            if (process === started) readyId = id
+            if (process === started) {
+                readyId = id
+                true
+            } else {
+                false
+            }
+        }
+        if (stillCurrent && provider != null) {
+            browserProvider.connect(id, "http://127.0.0.1:$port", browserProvider.trustedHostAttached())
+        } else if (provider != null) {
+            browserProvider.revoke(id)
         }
         // Watch the network only for a server that is ready. A failure here is reported by the monitor
         // itself; it must not fail a start that already succeeded.
@@ -249,7 +270,10 @@ class ProotOpenChamberServer(
                 true
             }
         }
-        if (should) onBrowserLaunchInvalidated(launch)
+        if (should) {
+            browserProvider.revoke(launch)
+            onBrowserLaunchInvalidated(launch)
+        }
     }
 
     private fun prepareBrowserAdapter(credentialCleared: Boolean): Boolean =

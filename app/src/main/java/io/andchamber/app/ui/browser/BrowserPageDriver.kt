@@ -148,6 +148,11 @@ internal class BrowserPageDriver(
             result = mapOf(
                 BrowserDriverLogic.RESULT_MIME to BrowserDriverLogic.MIME_PNG,
                 BrowserDriverLogic.RESULT_DATA to image.base64,
+                BrowserDriverLogic.RESULT_URL to page.displayUrl.orEmpty(),
+                "title" to page.view.title.orEmpty(),
+                "width" to page.view.width.toString(),
+                "height" to page.view.height.toString(),
+                "viewport" to "fill",
             ),
         )
     }

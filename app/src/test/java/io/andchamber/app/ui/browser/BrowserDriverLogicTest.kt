@@ -215,6 +215,64 @@ class BrowserDriverLogicTest {
     }
 
     @Test
+    fun `manual mode allows human navigation and agent mode refuses post and redirect`() {
+        assertTrue(MainFrameGate.allows("GET", isRedirect = false, manual = false))
+        assertFalse(MainFrameGate.allows("POST", isRedirect = false, manual = false))
+        assertFalse(MainFrameGate.allows("GET", isRedirect = true, manual = false))
+        assertTrue(MainFrameGate.isUnsupported("POST", isRedirect = false, manual = false))
+        assertTrue(MainFrameGate.allows("POST", isRedirect = false, manual = true))
+        assertTrue(MainFrameGate.allows("GET", isRedirect = true, manual = true))
+        assertFalse(MainFrameGate.isUnsupported("POST", isRedirect = true, manual = true))
+    }
+
+    @Test
+    fun `manual navigation returns false and a re-probe may keep the same witness`() {
+        val decision = MainFrameDecision.forRequest(method = "GET", redirect = false, manual = true, allowed = true)
+        assertFalse(decision.overrideLoading)
+        assertFalse(decision.startControlledGet)
+        val agent = MainFrameDecision.forRequest(method = "GET", redirect = false, manual = false, allowed = true)
+        assertTrue(agent.overrideLoading)
+        assertTrue(agent.startControlledGet)
+        val probe = """{"ok":true,"documentId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","readyState":"complete"}"""
+        val first = BrowserDriverLogic.acceptProbe(null, probe, policyAllowsUrl = true)
+        assertTrue(first is ProbeAcceptance.Accept)
+        val again = BrowserDriverLogic.acceptProbe(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            probe,
+            policyAllowsUrl = true,
+            allowSameDocument = true,
+        )
+        assertTrue(again is ProbeAcceptance.Accept)
+    }
+
+    @Test
+    fun `human takeover revokes before input and regrant needs a new witness`() {
+        val takeover = ManualTakeover()
+        takeover.grantAgent("session-a:tab-1", "witness-old")
+        assertTrue(takeover.beginHumanInput())
+        assertNull(takeover.grant)
+        assertTrue(takeover.manual)
+        assertTrue(takeover.humanNavigating())
+        takeover.finishManual()
+        assertFalse(takeover.manual)
+        assertNull(takeover.grant)
+        assertFalse(takeover.regrant("session-a:tab-1", ""))
+        assertTrue(takeover.regrant("session-a:tab-1", "witness-after-login"))
+        assertEquals("session-a:tab-1", takeover.grant)
+        takeover.beginHumanInput()
+        assertFalse(takeover.regrant("session-a:tab-1", "witness-during-manual"))
+    }
+
+    @Test
+    fun `floating size stays inside a phone width and a tablet uses a fixed window`() {
+        assertEquals(328, floatWidthDp(360, tablet = false))
+        assertEquals(300, floatWidthDp(332, tablet = false))
+        assertEquals(360, floatWidthDp(800, tablet = true))
+        assertEquals(240, floatHeightDp(800))
+        assertTrue(floatHeightDp(400) <= 168)
+    }
+
+    @Test
     fun `address field adds https and leaves an explicit scheme alone`() {
         assertEquals("https://example.com", normalizeAddress("example.com"))
         assertEquals("https://example.com", normalizeAddress("https://example.com"))

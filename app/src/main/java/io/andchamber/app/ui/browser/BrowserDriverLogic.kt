@@ -175,6 +175,8 @@ internal object BrowserDriverLogic {
         return template.substring(0, at) + json + template.substring(at + ARG_TOKEN.length)
     }
 
+    fun jsonString(vararg values: String): String = values.joinToString(",") { jsonQuote(it) }
+
     fun jsonQuote(value: String): String = buildString {
         append('"')
         for (ch in value) {
@@ -341,6 +343,15 @@ internal object BrowserDriverLogic {
           }
           window[key] = {
             doc: doc,
+            inspect: function(ref){
+              var found = nodes.get(ref);
+              if (!found || !found.isConnected) return {ok:false, error:"missing field"};
+              var type = ((found.getAttribute("type") || "") + "").toLowerCase();
+              var tag = (found.tagName || "").toLowerCase();
+              var name = ((found.getAttribute("name") || found.getAttribute("aria-label") || "") + "").replace(/\s+/g, " ").trim().slice(0, 120);
+              var submit = type === "submit" || type === "image" || (tag === "button" && name.toLowerCase() === "submit");
+              return {ok:true, role: roleOf(found), type: type, name: name, submit: submit};
+            },
             take: function(nonce){
               nodes = new Map();
               var out = [];
@@ -412,10 +423,23 @@ internal object BrowserDriverLogic {
     fun probeScript(): String = PROBE_TEMPLATE
 
     /**
+     * Reads one node already stored by the current document install. The ref is one JSON argument.
+     * Password, file and submit controls are reported so the caller can refuse them before acting.
+     */
+    fun fieldScript(documentNonce: String, ref: String): String =
+        FIELD_TEMPLATE.replace(ARG_TOKEN, "{doc:${jsonQuote(documentNonce)},ref:${jsonQuote(ref)}}")
+
+    /**
      * [acceptedDocumentId] is null until the first ready probe. Loading is pending, not unknown.
      * A later probe must keep the same page-generated id. A changed id is rejected for good.
+     * [allowSameDocument] is only for a re-probe of the document that is already accepted.
      */
-    fun acceptProbe(acceptedDocumentId: String?, raw: String?, policyAllowsUrl: Boolean): ProbeAcceptance {
+    fun acceptProbe(
+        acceptedDocumentId: String?,
+        raw: String?,
+        policyAllowsUrl: Boolean,
+        allowSameDocument: Boolean = false,
+    ): ProbeAcceptance {
         val parsed = parseScriptResult(raw)
         if (parsed is ScriptResult.Failed) {
             return if (parsed.message == "loading") ProbeAcceptance.Pending else ProbeAcceptance.Reject(parsed.message)
@@ -425,6 +449,9 @@ internal object BrowserDriverLogic {
         val state = json["readyState"]?.jsonPrimitive?.contentOrNull
         if (id.isNullOrBlank() || !id.isHex()) return ProbeAcceptance.Reject("no witness")
         if (acceptedDocumentId != null && id != acceptedDocumentId) return ProbeAcceptance.Reject("document changed")
+        if (acceptedDocumentId != null && id == acceptedDocumentId && !allowSameDocument) {
+            return ProbeAcceptance.Reject("witness already used")
+        }
         if (state == "loading") return ProbeAcceptance.Pending
         if (state != "interactive" && state != "complete") return ProbeAcceptance.Reject("not ready")
         if (!policyAllowsUrl) return ProbeAcceptance.Reject("url refused")
@@ -455,6 +482,15 @@ internal object BrowserDriverLogic {
           if (state === "loading") return {ok:false, error:"loading"};
           if (state !== "interactive" && state !== "complete") return {ok:false, error:"not ready"};
           return {ok:true, documentId: witness.documentId, readyState: state};
+        })()
+    """.trimIndent()
+
+    private val FIELD_TEMPLATE = """
+        (function(){
+          var arg = __AC_ARG__;
+          var slot = window["__acB_" + arg.doc];
+          if (!slot || slot.doc !== arg.doc || !slot.inspect) return {ok:false, error:"missing field"};
+          return slot.inspect(arg.ref);
         })()
     """.trimIndent()
 
@@ -494,18 +530,49 @@ internal sealed class ScriptResult {
     data class Failed(val message: String) : ScriptResult()
 }
 
-internal sealed class ProbeAcceptance {
+sealed class ProbeAcceptance {
     data class Accept(val documentId: String) : ProbeAcceptance()
     data object Pending : ProbeAcceptance()
     data class Reject(val message: String) : ProbeAcceptance()
 }
 
-/** Whether a main-frame request may start a new controlled GET. Anything else is unsupported. */
+/**
+ * Agent mode accepts only a controlled top-level GET. Manual mode lets a person navigate, submit
+ * a form, or follow a redirect. Both still go through the public-https and TLS checks elsewhere.
+ * A redirect or a non-GET in agent mode is unsupported and must not be saved by a later finish.
+ */
 internal object MainFrameGate {
     fun isPlainGet(method: String?, isRedirect: Boolean): Boolean =
         !isRedirect && method.equals("GET", ignoreCase = true)
 
-    fun isUnsupported(method: String?, isRedirect: Boolean): Boolean = !isPlainGet(method, isRedirect)
+    fun isUnsupported(method: String?, isRedirect: Boolean, manual: Boolean = false): Boolean =
+        if (manual) false else !isPlainGet(method, isRedirect)
+
+    /** True when this main-frame request may proceed under the current interaction mode. */
+    fun allows(method: String?, isRedirect: Boolean, manual: Boolean): Boolean =
+        !isUnsupported(method, isRedirect, manual)
+}
+
+/**
+ * Manual navigation must not be rewritten into a controlled GET. Agent mode still intercepts a
+ * plain GET so the presenter can load it once through the controlled session.
+ */
+internal data class MainFrameDecision(
+    val overrideLoading: Boolean,
+    val startControlledGet: Boolean,
+) {
+    companion object {
+        fun forRequest(method: String?, redirect: Boolean, manual: Boolean, allowed: Boolean): MainFrameDecision {
+            if (!allowed || !MainFrameGate.allows(method, redirect, manual)) {
+                return MainFrameDecision(overrideLoading = true, startControlledGet = false)
+            }
+            return if (manual) {
+                MainFrameDecision(overrideLoading = false, startControlledGet = false)
+            } else {
+                MainFrameDecision(overrideLoading = true, startControlledGet = true)
+            }
+        }
+    }
 }
 
 internal sealed class Observe {
@@ -631,4 +698,52 @@ internal object BrowserControlRules {
         committed && epoch == expectedEpoch
 
     fun takeOverEnabledWhileBusy(): Boolean = true
+}
+
+/**
+ * Manual login is a person using the page, not an agent grant.
+ *
+ * Takeover clears the grant before any input is accepted. Leaving manual mode does not restore
+ * that grant. A later grant is valid only against a document witness read after the human finished.
+ */
+internal class ManualTakeover {
+    var manual: Boolean = false
+        private set
+    var grant: String? = null
+        private set
+    var witness: String? = null
+        private set
+
+    fun grantAgent(sessionTab: String, documentWitness: String) {
+        manual = false
+        grant = sessionTab
+        witness = documentWitness
+    }
+
+    /** Revokes first. Returns false when there was nothing to revoke. */
+    /** Clears the grant before the method returns, so the following touch cannot ride an agent lease. */
+    fun beginHumanInput(): Boolean {
+        val had = grant != null
+        grant = null
+        witness = null
+        manual = true
+        return had
+    }
+
+    fun humanNavigating(): Boolean = manual && grant == null
+
+    /** Completing manual login does not regrant. The caller must read a new witness first. */
+    fun finishManual() {
+        manual = false
+        grant = null
+        witness = null
+    }
+
+    fun regrant(sessionTab: String, documentWitness: String): Boolean {
+        if (manual) return false
+        if (documentWitness.isBlank() || documentWitness == witness) return false
+        grant = sessionTab
+        witness = documentWitness
+        return true
+    }
 }

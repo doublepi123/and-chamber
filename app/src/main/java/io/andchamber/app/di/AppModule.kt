@@ -3,6 +3,7 @@ package io.andchamber.app.di
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import io.andchamber.app.BuildConfig
 import io.andchamber.app.browser.BrowserController
 import io.andchamber.app.browser.BrowserControllerImpl
 import io.andchamber.app.browser.BrowserRpcServer
@@ -48,10 +49,15 @@ import io.andchamber.app.runtime.network.RuntimeDnsReporter
 import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.install.VerifiedRuntimeDownloader
 import io.andchamber.app.runtime.manifest.RuntimeManifestReader
+import io.andchamber.app.runtime.install.OpenChamberProviderArtifact
+import io.andchamber.app.runtime.process.BrowserProviderSession
 import io.andchamber.app.runtime.process.BrowserToolAssets
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.process.HealthProbe
+import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.runtime.process.ProotOpenChamberServer
+import io.andchamber.app.runtime.process.ProviderPageRouter
+import io.andchamber.app.ui.browser.NativeBrowserPresenter
 import io.andchamber.app.runtime.process.ProotStaleServerCleaner
 import io.andchamber.app.service.RuntimeService
 import kotlinx.coroutines.CoroutineDispatcher
@@ -154,6 +160,14 @@ val appModule =
 
         single { BrowserLaunchRevoker(get()) }
 
+        single { NativeBrowserPresenter(scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)) }
+
+        single { ProviderPageRouter(get()) }
+
+        single {
+            LocalBrowserProviderBinding(get(), get())
+        }
+
         single<OpenChamberServer> {
             val context = get<Context>()
             val paths = RuntimePaths.under(context.filesDir)
@@ -190,6 +204,12 @@ val appModule =
                 },
                 browserTrustedRoot = context.filesDir,
                 onBrowserUnavailable = { reason -> Log.w("AndChamberBrowser", reason) },
+                browserProvider = BrowserProviderSession(sink = get<LocalBrowserProviderBinding>()),
+                patchedOpenChamberVerified = {
+                    OpenChamberProviderArtifact.isApplied(
+                        File(paths.rootfs, "usr/local/lib/node_modules/@openchamber/web"),
+                    )
+                },
                 bindsForStart = { storage.prepareForStart() },
                 onStarted = { binds -> storage.recordStarted(binds) },
                 onStopped = { storage.recordStopped() },
@@ -221,6 +241,7 @@ val appModule =
                         context.assets.open("android-shim.cjs").bufferedReader().use { it.readText() }
                     },
                     dnsProvider = dnsProvider,
+                    providerArtifactSource = { loadDebugProviderArtifact(context) },
                 )
             val scanner = ProcessScanner(myUid = Os.getuid(), myPid = Os.getpid().toLong())
             val prootPath = { suite().proot.absolutePath }
@@ -251,6 +272,33 @@ val appModule =
     }
 
 private fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+
+/**
+ * Debug/emulator provisioning only. Release has no asset and no provider backdoor. A missing asset
+ * keeps stock npm and the legacy MCP path.
+ */
+private fun loadDebugProviderArtifact(context: Context): Pair<OpenChamberProviderArtifact.LaneManifest, File>? {
+    if (!BuildConfig.DEBUG) return null
+    val raw = runCatching {
+        context.assets.open("openchamber-provider/manifest.json").bufferedReader().use { it.readText() }
+    }.getOrNull() ?: return null
+    val manifest = OpenChamberProviderArtifact.parse(raw)
+    val dir = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "openchamber-provider-").toFile()
+    return try {
+        (manifest.server + manifest.dist).forEach { pin ->
+            val target = File(dir, pin.path)
+            target.parentFile?.mkdirs()
+            context.assets.open("openchamber-provider/${pin.path}").use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        OpenChamberProviderArtifact.rejection(manifest, dir)?.let { error(it) }
+        manifest to dir
+    } catch (error: Exception) {
+        dir.deleteRecursively()
+        throw error
+    }
+}
 
 /**
  * Asks the controller to revoke one runtime launch. The hop to Main is asynchronous, so a runtime

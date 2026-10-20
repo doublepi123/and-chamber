@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation
+        android:name="io.andchamber.app.browser.OpenChamberProviderInstrumentation"
+        android:targetPackage="io.andchamber.app" />
+</manifest>

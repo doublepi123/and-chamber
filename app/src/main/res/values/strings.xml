@@ -280,4 +280,8 @@
     <string name="browser_unavailable_body">This WebView can\'t keep the browser separate, so nothing is loaded.</string>
     <string name="browser_controller_missing">Browser control isn\'t ready yet.</string>
     <string name="browser_address_refused">That address can\'t be opened here.</string>
+    <string name="browser_enlarge">Enlarge</string>
+    <string name="browser_restore">Restore</string>
+    <string name="browser_float_status_manual">You are browsing. Allow the agent again after you sign in.</string>
+    <string name="browser_desktop_later">Computer layout is not ready yet.</string>
 </resources>

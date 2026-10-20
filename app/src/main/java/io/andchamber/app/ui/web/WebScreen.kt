@@ -28,12 +28,14 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
@@ -45,6 +47,7 @@ import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -139,6 +142,7 @@ internal fun WebScreen(
     onSystemBarColor: (Color?) -> Unit,
     /** A path such as `/?session=…` to show instead of the start page; reported back once used. */
     deepLinkPath: String? = null,
+    browserPresenter: io.andchamber.app.ui.browser.NativeBrowserPresenter? = null,
     onDeepLinkUsed: () -> Unit = {},
     /** The remembered page of this instance, for the first load only; a deep link wins over it. */
     resumePath: String? = null,
@@ -333,6 +337,24 @@ internal fun WebScreen(
 
     WebLifecycleEffect(web)
     WebHostEffect(web)
+    val localTrusted = isLocal && target is io.andchamber.app.runtime.ServerTarget.Local
+    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, sessionKey) {
+        val presenter = browserPresenter
+        val activity = context.findActivity()
+        if (localTrusted && presenter != null && activity != null && web != null) {
+            web.browserHost = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
+            web.browserTabsJson = { io.andchamber.app.ui.browser.BrowserHostEvents.tabsJson(presenter.state.value) }
+            presenter.attachHost(activity, targetId, sessionKey.hashCode().toLong())
+        } else {
+            web?.browserHost = null
+            if (presenter != null) presenter.detachHost(targetId, sessionKey.hashCode().toLong())
+        }
+        onDispose {
+            web?.browserHost = null
+            browserPresenter?.background()
+            browserPresenter?.detachHost(targetId, sessionKey.hashCode().toLong())
+        }
+    }
 
     val pageError = web?.pageError
     val overlay: WebOverlay? =
@@ -391,6 +413,9 @@ internal fun WebScreen(
                             onRelease = {},
                         )
                     }
+                }
+                if (localTrusted && browserPresenter != null) {
+                    io.andchamber.app.ui.browser.BrowserFloatPage(browserPresenter)
                 }
 
                 AnimatedVisibility(

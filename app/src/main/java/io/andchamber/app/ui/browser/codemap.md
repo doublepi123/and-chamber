@@ -23,7 +23,7 @@ Files:
 
 ## Flow
 
-1. Home card → `Routes.BROWSER`.
+1. In provider mode the Home card is hidden. `BrowserFloatPage` projects `NativeBrowserPresenter` above the local chat. It does not create a page or load a URL. The chat bridge only selects and closes tabs in that presenter.
 2. If `browser == null`, show the not-ready panel. Else create the session, attach the driver, `setVisible(true)`.
 3. Address bar Go: syntax plus DNS preflight, then load. A refusal stays on the current page and shows the refused line.
 4. Allow agent: `enableFromUi()` only while local OpenChamber is running and the page is visible.

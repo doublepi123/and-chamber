@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 // AndChamber app module. Native PRoot pipeline ported from AndCode (MIT); see NOTICE.
@@ -126,6 +127,10 @@ val resolvedApplicationId: String =
         }
     } ?: productionApplicationId
 val isTestIdRequested = testApplicationId != null
+val providerArtifactDir: java.io.File? =
+    providers.gradleProperty("andchamber.providerArtifactDir").orNull
+        ?.takeIf { it.isNotBlank() }
+        ?.let { File(it) }
 val browserSmokeRunnerRequested = providers.gradleProperty("andchamber.browserSmokeRunner").orNull
 val useBrowserSmokeRunner = when (browserSmokeRunnerRequested) {
     null, "false" -> false
@@ -161,10 +166,13 @@ android {
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
-        testInstrumentationRunner = if (useBrowserSmokeRunner) {
-            "io.andchamber.app.browser.BrowserSmokeInstrumentation"
-        } else {
-            "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = when {
+            providers.gradleProperty("andchamber.providerRunner").orNull == "true" ->
+                "io.andchamber.app.browser.OpenChamberProviderInstrumentation"
+            useBrowserSmokeRunner ->
+                "io.andchamber.app.browser.BrowserSmokeInstrumentation"
+            else ->
+                "androidx.test.runner.AndroidJUnitRunner"
         }
 
         // The on-device runtime only exists for these two ABIs (see prepare_android_runtime_native_libs.py).
@@ -192,6 +200,14 @@ android {
                 enableV2Signing = true
                 enableV3Signing = true
             }
+        }
+    }
+
+    sourceSets {
+        if (providerArtifactDir != null) {
+            // Debug/emulator provisioning only. Release must not embed the patched server+dist pair.
+            check(providerArtifactDir.isDirectory) { "andchamber.providerArtifactDir is not a directory" }
+            getByName("debug").assets.srcDir(File(providerArtifactDir, "apk-asset"))
         }
     }
 
@@ -223,6 +239,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     sourceSets {

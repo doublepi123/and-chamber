@@ -43,6 +43,13 @@ class OpenChamberInstaller(
     private val dnsProvider: SystemDnsProvider = SystemDnsProvider { emptyList() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val killPid: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
+    /**
+     * Applies a verified patched `@openchamber/web` pair after npm. The default is a no-op until the
+     * OpenChamber lane publishes a real manifest. A deployer that throws fails the install.
+     */
+    private val providerArtifactDeployer: (File) -> OpenChamberProviderArtifact.DeployResult = {
+        OpenChamberProviderArtifact.DeployResult(false, "not provisioned")
+    },
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -136,6 +143,12 @@ class OpenChamberInstaller(
                 }
                 require(File(rootfs, "$OPENCHAMBER_MODULE_ROOT/dist/index.html").isFile) {
                     "OpenChamber web bundle is missing after install"
+                }
+                // Optional patched pair. A missing manifest keeps stock 2.4.0. A present manifest that
+                // fails verification fails the install rather than leaving a half-replaced package.
+                val deployed = providerArtifactDeployer(File(rootfs, OPENCHAMBER_MODULE_ROOT.removePrefix("/")))
+                check(deployed.applied || deployed.reason == "not provisioned") {
+                    "Patched OpenChamber artifact was not applied: ${deployed.reason}"
                 }
 
                 val metadata =

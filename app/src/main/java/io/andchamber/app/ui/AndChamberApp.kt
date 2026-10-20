@@ -427,6 +427,9 @@ fun AndChamberApp(
                             actions = actions,
                             storage = storageState,
                             autoOpenLocal = uiPrefs.autoOpenLocal,
+                            providerBrowser = io.andchamber.app.runtime.process.BrowserControlSelection
+                                .select(patchedArtifactVerified = true, legacyPrepared = false) ==
+                                io.andchamber.app.runtime.process.BrowserControlMode.NATIVE_PROVIDER,
                         )
                     }
 
@@ -453,6 +456,9 @@ fun AndChamberApp(
                                     "remote|${target.id}|${target.baseUrl}|${target.uiPassword.orEmpty().hashCode()}"
                                 null -> null
                             }
+                        val browserPresenter = remember {
+                            runCatching { org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>() }.getOrNull()
+                        }
                         WebScreen(
                             targetId = targetId,
                             target = target,
@@ -474,6 +480,7 @@ fun AndChamberApp(
                                 sessionLink = null
                                 resumeLink = null
                             },
+                            browserPresenter = if (isLocal) browserPresenter else null,
                             // The remembered page is applied only if the server still answers at the
                             // origin it was remembered on (a re-pointed remote drops its old page).
                             resumePath =

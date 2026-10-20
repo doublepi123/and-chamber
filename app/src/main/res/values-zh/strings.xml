@@ -279,4 +279,8 @@
     <string name="browser_unavailable_body">当前 WebView 无法把这个浏览器分开保存，因此没有加载任何页面。</string>
     <string name="browser_controller_missing">浏览器控制尚未就绪。</string>
     <string name="browser_address_refused">此地址不能在这里打开。</string>
+    <string name="browser_enlarge">放大</string>
+    <string name="browser_restore">还原</string>
+    <string name="browser_float_status_manual">你正在自己浏览。登录完成后，需要再次允许代理。</string>
+    <string name="browser_desktop_later">电脑版排版还没准备好。</string>
 </resources>

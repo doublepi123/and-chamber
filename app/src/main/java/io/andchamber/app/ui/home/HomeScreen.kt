@@ -108,6 +108,8 @@ internal fun HomeScreen(
     storage: SharedStorageState? = null,
     /** "Open OpenChamber when the app starts"; null hides the setting. */
     autoOpenLocal: Boolean? = null,
+    /** New provider mode uses the chat window only, so the old Home card stays hidden. */
+    providerBrowser: Boolean = false,
 ) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -213,14 +215,16 @@ internal fun HomeScreen(
                         modifier = Modifier.revealOnEnter(3, animate),
                     )
 
-                    SectionHeader(
-                        text = stringResource(R.string.section_browser),
-                        modifier = Modifier.padding(top = 28.dp, bottom = 10.dp).revealOnEnter(4, animate),
-                    )
-                    BrowserEntryCard(
-                        onOpen = actions.onOpenBrowser,
-                        modifier = Modifier.revealOnEnter(4, animate),
-                    )
+                    if (!providerBrowser) {
+                        SectionHeader(
+                            text = stringResource(R.string.section_browser),
+                            modifier = Modifier.padding(top = 28.dp, bottom = 10.dp).revealOnEnter(4, animate),
+                        )
+                        BrowserEntryCard(
+                            onOpen = actions.onOpenBrowser,
+                            modifier = Modifier.revealOnEnter(4, animate),
+                        )
+                    }
                     Spacer(Modifier.height(32.dp))
                 }
                 Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.safeDrawing))

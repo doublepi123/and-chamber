@@ -47,6 +47,7 @@ import io.andchamber.app.data.WebIsolationException
 import io.andchamber.app.data.WebIsolationFailure
 import io.andchamber.app.data.WebProfileBinding
 import io.andchamber.app.data.canonicalWebOrigin
+import io.andchamber.app.ui.browser.BrowserHostSurface
 import io.andchamber.app.runtime.WebSessionCookies
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -138,6 +139,10 @@ internal class ChamberWebView(
     var onPageLocation: ((String) -> Unit)? = null
 
     var host: WebHost? = null
+
+    /** Local trusted chat only. Target-site pages never receive this. */
+    var browserHost: BrowserHostSurface? = null
+    var browserTabsJson: () -> String = { "[]" }
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
     var sessionCookies: WebSessionCookies? = null
@@ -878,6 +883,30 @@ internal class ChamberWebView(
         }
 
         @JavascriptInterface
+        fun browserPresent(token: String?, tabId: String?, title: String?, url: String?, ownerSessionId: String?) {
+            if (!trusted(token) || tabId.isNullOrBlank()) return
+            main.post { browserHost?.present(tabId) }
+        }
+
+        @JavascriptInterface
+        fun browserTabs(token: String?): String {
+            if (!trusted(token)) return "[]"
+            return browserTabsJson()
+        }
+
+        @JavascriptInterface
+        fun browserSelect(token: String?, tabId: String?) {
+            if (!trusted(token) || tabId.isNullOrBlank()) return
+            main.post { browserHost?.select(tabId) }
+        }
+
+        @JavascriptInterface
+        fun browserClose(token: String?, tabId: String?) {
+            if (!trusted(token) || tabId.isNullOrBlank()) return
+            main.post { browserHost?.close(tabId) }
+        }
+
+        @JavascriptInterface
         fun themeColor(
             token: String?,
             rgb: Int,
@@ -900,6 +929,13 @@ internal class ChamberWebView(
           var bridge = window.$BRIDGE_NAME;
           if (!bridge) return;
           var token = ${JSONObject.quote(bridgeToken)};
+          window.AndChamberBrowserHost = {
+            present: function(tab){ bridge.browserPresent(token, tab && tab.tabId, tab && tab.title, tab && tab.url, tab && tab.ownerSessionId); },
+            select: function(tabId){ bridge.browserSelect(token, tabId); },
+            close: function(tabId){ bridge.browserClose(token, tabId); },
+            tabs: function(){ return JSON.parse(bridge.browserTabs(token) || "[]"); }
+          };
+          window.dispatchEvent(new Event("andchamber-browser-host-ready"));
           function save(blob, name) {
             var reader = new FileReader();
             reader.onloadend = function () {

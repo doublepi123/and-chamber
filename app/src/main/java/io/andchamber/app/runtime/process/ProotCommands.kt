@@ -104,6 +104,7 @@ object ProotCommands {
         prootTmp: File,
         uiPassword: String,
         browserControl: Boolean = true,
+        providerToken: String? = null,
     ): Map<String, String> =
         buildMap {
             putAll(suiteEnvironment)
@@ -123,8 +124,14 @@ object ProotCommands {
             put("NODE_OPTIONS", "--require $SHIM_PATH")
             // Browser MCP is optional. A failed prepare leaves the user's inline config untouched and
             // injects neither the endpoint path nor an overlay.
-            if (browserControl) {
-                putAll(BrowserToolAssets.launchEnvironment(existingConfig = get(BrowserToolAssets.CONFIG_ENV)))
+            when (BrowserControlSelection.select(providerToken != null, browserControl)) {
+                BrowserControlMode.NATIVE_PROVIDER -> {
+                    put(BrowserProviderSession.MODE_ENV, BrowserProviderSession.MODE_ANDROID)
+                    put(BrowserProviderSession.TOKEN_ENV, providerToken!!)
+                }
+                BrowserControlMode.LEGACY_MCP ->
+                    putAll(BrowserToolAssets.launchEnvironment(existingConfig = get(BrowserToolAssets.CONFIG_ENV)))
+                BrowserControlMode.NONE -> Unit
             }
         }
 

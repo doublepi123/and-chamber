@@ -69,7 +69,7 @@ internal class BrowserSession private constructor(
     var ticket by mutableLongStateOf(0L)
         private set
     var acceptedDocumentId by mutableStateOf<String?>(null)
-        private set
+        internal set
     var mainStarts by mutableIntStateOf(0)
         private set
     var unknownNavigation by mutableStateOf(false)
@@ -84,8 +84,16 @@ internal class BrowserSession private constructor(
     private var destroyed = false
     var onFatal: (() -> Unit)? = null
     var onMainGet: ((String) -> Unit)? = null
+    var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
+
+    /**
+     * Human interaction mode. When true, a person may start a normal top-level navigation, submit
+     * a form, or follow a redirect, still under the public-https and TLS policy. Agent mode keeps
+     * only controlled GETs. This flag is not an agent grant.
+     */
+    var manualNavigation: Boolean = false
 
     fun epoch(): Long = epoch
 
@@ -340,17 +348,19 @@ internal class BrowserSession private constructor(
                 )
                 return true
             }
-            if (MainFrameGate.isPlainGet(request.method, request.isRedirect)) {
-                onMainGet?.invoke(raw)
-            } else {
+            if (!MainFrameGate.allows(request.method, request.isRedirect, manualNavigation)) {
                 onUnknown?.invoke()
                 markUnknownNavigation()
+                return true
             }
+            // Manual mode is a person navigating. Do not rewrite the request or start a controlled GET.
+            if (manualNavigation) return false
+            onMainGet?.invoke(raw)
             return true
         }
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-            if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect)) {
+            if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect, manualNavigation)) {
                 view.post { markUnknownNavigation(); onUnknown?.invoke() }
                 return emptyBlocked()
             }
@@ -365,6 +375,14 @@ internal class BrowserSession private constructor(
 
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             if (destroyed) return
+            if (manualNavigation) {
+                // A person navigating: every new document is a fresh observation, never "unknown".
+                acceptedDocumentId = null
+                mainStarts = 0
+                unknownNavigation = false
+                beginDocument()
+                onManualDocument?.invoke()
+            }
             if (!noteMainStart()) {
                 onUnknown?.invoke()
                 return

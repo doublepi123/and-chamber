@@ -21,11 +21,32 @@ class RuntimeInstallerImpl(
     private val dnsProvider: io.andchamber.app.runtime.network.SystemDnsProvider =
         io.andchamber.app.runtime.network.SystemDnsProvider { emptyList() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val providerArtifactSource: () -> Pair<OpenChamberProviderArtifact.LaneManifest, java.io.File>? = { null },
 ) : RuntimeInstaller {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val installer by lazy {
-        OpenChamberInstaller(paths, abi, manifest, downloader, shimAsset, dnsProvider, nowMillis)
+        OpenChamberInstaller(
+            paths,
+            abi,
+            manifest,
+            downloader,
+            shimAsset,
+            dnsProvider,
+            nowMillis,
+            providerArtifactDeployer = { moduleRoot ->
+                val provisioned = providerArtifactSource()
+                if (provisioned == null) {
+                    OpenChamberProviderArtifact.DeployResult(false, "not provisioned")
+                } else {
+                    try {
+                        OpenChamberProviderArtifact.deploy(provisioned.first, provisioned.second, moduleRoot)
+                    } finally {
+                        provisioned.second.deleteRecursively()
+                    }
+                }
+            },
+        )
     }
 
     override fun recover(): Boolean =
