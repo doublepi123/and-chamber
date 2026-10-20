@@ -167,7 +167,9 @@ class RuntimeService : Service() {
 
     private fun setupText(state: RuntimeState.Installing): String {
         val percent = state.progress?.let { " ${(it * 100).toInt()}%" }.orEmpty()
-        return (state.detail ?: getString(R.string.runtime_notification_setup)) + percent
+        val fallback =
+            if (state.updating) R.string.runtime_notification_updating else R.string.runtime_notification_setup
+        return (state.detail ?: getString(fallback)) + percent
     }
 
     private fun RuntimeState.label(): String =

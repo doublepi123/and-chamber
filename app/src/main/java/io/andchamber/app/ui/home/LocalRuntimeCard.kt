@@ -3,6 +3,7 @@ package io.andchamber.app.ui.home
 import io.andchamber.app.i18n.UserMessages
 import androidx.compose.ui.res.stringResource
 import io.andchamber.app.R
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.SizeTransform
@@ -14,6 +15,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,13 +27,18 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
@@ -40,11 +47,13 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Inventory2
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.SdStorage
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Upgrade
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +62,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -73,18 +83,28 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.InstallStep
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
+import io.andchamber.app.runtime.RuntimeUpdate
+import io.andchamber.app.runtime.RuntimeUpdateState
+import io.andchamber.app.runtime.UpdateFailure
+import io.andchamber.app.runtime.VersionChange
 import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ConfirmDialog
 import io.andchamber.app.ui.components.DetailRow
@@ -98,8 +118,10 @@ import io.andchamber.app.ui.rememberCopyAction
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import io.andchamber.app.ui.theme.ChamberTheme
+import io.andchamber.app.ui.theme.MonoFamily
 import io.andchamber.app.ui.uptimeLabel
 import kotlinx.coroutines.delay
+import kotlin.math.max
 
 /** Coarse phase of [RuntimeState]; content transitions are keyed on this, not on every progress tick. */
 internal enum class RuntimePhase { Checking, Unsupported, NotInstalled, Installing, Stopped, Starting, Running, Stopping, Failed }
@@ -143,10 +165,51 @@ private fun RuntimePhase.tone(): StatusTone =
         else -> StatusTone.Idle
     }
 
-private enum class PendingConfirm { Repair, Uninstall }
+private enum class PendingConfirm { Repair, Uninstall, Update }
 
 /** Recommended free space before setup, with headroom over the ~1.2 GB footprint. */
 private const val LOW_SPACE_BYTES = 3L * 1024 * 1024 * 1024
+
+/** How long a confirmed update hides the offer while the request reaches the runtime. */
+private const val UPDATE_PICKUP_GRACE_MS = 15_000L
+
+/** The first non-null [value] this composition saw, kept from then on (not a snapshot state). */
+@Composable
+private fun <T : Any> rememberFirstNonNull(value: T?): T? {
+    val holder = remember { FirstValue<T>() }
+    if (holder.value == null) holder.value = value
+    return holder.value
+}
+
+private class FirstValue<T : Any> {
+    var value: T? = null
+}
+
+/** What the update slot under the card body shows. */
+private sealed interface UpdateNotice {
+    val kind: Kind
+
+    data class Offer(val update: RuntimeUpdate) : UpdateNotice {
+        override val kind get() = Kind.Offer
+    }
+
+    data class Problem(val failure: UpdateFailure, val canRetry: Boolean) : UpdateNotice {
+        override val kind get() = Kind.Problem
+    }
+
+    /** The slot's transitions key on this, so a new version number updates the row in place. */
+    enum class Kind { Offer, Problem }
+}
+
+/** An installed runtime that isn't being changed: the update offer (or its failure) may show. */
+private val RuntimePhase.showsUpdateNotice: Boolean
+    get() =
+        this == RuntimePhase.Stopped || this == RuntimePhase.Starting || this == RuntimePhase.Running ||
+            this == RuntimePhase.Stopping || this == RuntimePhase.Failed
+
+/** An update can begin now: not in the middle of a start or a stop. */
+private val RuntimePhase.canUpdate: Boolean
+    get() = this == RuntimePhase.Stopped || this == RuntimePhase.Running || this == RuntimePhase.Failed
 
 @Composable
 internal fun LocalRuntimeCard(
@@ -167,6 +230,11 @@ internal fun LocalRuntimeCard(
     /** Open-on-launch setting shown in Details; null hides it. */
     autoOpenLocal: Boolean? = null,
     onAutoOpenChange: (Boolean) -> Unit = {},
+    /** OpenChamber / OpenCode update check and the outcome of the last update. */
+    updates: RuntimeUpdateState = RuntimeUpdateState(),
+    onUpdate: () -> Unit = {},
+    onCheckForUpdates: () -> Unit = {},
+    onDismissUpdateFailure: () -> Unit = {},
 ) {
     val phase = if (checking || state == RuntimeState.Detecting) RuntimePhase.Checking else state.phase
     var logOpen by rememberSaveable { mutableStateOf(false) }
@@ -178,11 +246,34 @@ internal fun LocalRuntimeCard(
         if (phase == RuntimePhase.Failed && logLines.isNotEmpty()) logOpen = true
     }
 
+    // The offer folds away as soon as the user confirms; the runtime picks the request up a moment
+    // later (stopping the server first). If it never does, the offer comes back.
+    var updateRequested by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(updateRequested, phase) {
+        if (!updateRequested) return@LaunchedEffect
+        if (phase != RuntimePhase.Installing) delay(UPDATE_PICKUP_GRACE_MS)
+        updateRequested = false
+    }
+    val requestUpdate = {
+        updateRequested = true
+        onUpdate()
+    }
+    val offer = updates.available?.takeIf { it.hasChanges }
+    val failure = updates.lastFailure
+    val notice: UpdateNotice? =
+        when {
+            info == null || !phase.showsUpdateNotice || updateRequested -> null
+            failure != null -> UpdateNotice.Problem(failure, canRetry = offer != null)
+            offer != null -> UpdateNotice.Offer(offer)
+            else -> null
+        }
+    val updatingNow = (state as? RuntimeState.Installing)?.updating == true
+
     ChamberCard(
         modifier = modifier,
         accent = if (phase == RuntimePhase.Running) ChamberTheme.colors.success else null,
     ) {
-        CardHeader(phase = phase)
+        CardHeader(phase = phase, updating = updatingNow)
 
         AnimatedContent(
             targetState = phase,
@@ -199,8 +290,15 @@ internal fun LocalRuntimeCard(
                     RuntimePhase.Checking -> Spacer(Modifier.height(48.dp))
                     RuntimePhase.Unsupported -> UnsupportedBody()
                     RuntimePhase.NotInstalled -> NotInstalledBody(onSetUp = onSetUp)
-                    RuntimePhase.Installing ->
-                        InstallingBody(state = live as? RuntimeState.Installing)
+                    RuntimePhase.Installing -> {
+                        val installing = live as? RuntimeState.Installing
+                        InstallingBody(
+                            state = installing,
+                            // The offer as it was when the update began: it is cleared once the update
+                            // lands, and a check finishing meanwhile must not change what is shown.
+                            update = rememberFirstNonNull(updates.available.takeIf { installing?.updating == true }),
+                        )
+                    }
                     RuntimePhase.Stopped -> StoppedBody(onStart = onStart)
                     RuntimePhase.Starting ->
                         TransitionBody(
@@ -224,6 +322,45 @@ internal fun LocalRuntimeCard(
                                 onRepair = { confirm = PendingConfirm.Repair },
                             )
                         } ?: Spacer(Modifier.height(96.dp))
+                }
+            }
+        }
+
+        // Below the main actions: an update offer, or why the last update didn't finish. The last
+        // notice stays while the slot folds away.
+        val shownNotice = rememberLastNonNull(notice)
+        AnimatedVisibility(
+            visible = notice != null,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            AnimatedContent(
+                targetState = shownNotice?.kind ?: UpdateNotice.Kind.Offer,
+                transitionSpec = {
+                    (fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(120)))
+                        .using(SizeTransform(clip = false) { _, _ -> tween(260) })
+                },
+                label = "updateNotice",
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            ) { kind ->
+                // Live notice of this kind; while animating out, the last one it had.
+                when (val live = rememberLastNonNull(shownNotice?.takeIf { it.kind == kind })) {
+                    is UpdateNotice.Offer ->
+                        UpdateOfferRow(
+                            update = live.update,
+                            enabled = phase.canUpdate,
+                            onUpdate = { confirm = PendingConfirm.Update },
+                        )
+                    is UpdateNotice.Problem ->
+                        UpdateProblemRow(
+                            failure = live.failure,
+                            canRetry = live.canRetry,
+                            retryEnabled = phase.canUpdate,
+                            // Asks again: the failure may be old news, and a retry stops the server too.
+                            onRetry = { confirm = PendingConfirm.Update },
+                            onDismiss = onDismissUpdateFailure,
+                        )
+                    null -> Unit
                 }
             }
         }
@@ -285,6 +422,10 @@ internal fun LocalRuntimeCard(
                 actionsEnabled = !phase.isBusy,
                 autoOpen = autoOpenLocal,
                 onAutoOpenChange = onAutoOpenChange,
+                updates = updates,
+                // A check while the environment is being replaced would compare against old versions.
+                checkEnabled = phase != RuntimePhase.Installing,
+                onCheckForUpdates = onCheckForUpdates,
                 onRepair = { confirm = PendingConfirm.Repair },
                 onUninstall = { confirm = PendingConfirm.Uninstall },
             )
@@ -292,6 +433,21 @@ internal fun LocalRuntimeCard(
     }
 
     when (confirm) {
+        PendingConfirm.Update ->
+            if (offer == null) {
+                // Nothing left to install (a check or another update got there first).
+                LaunchedEffect(Unit) { confirm = null }
+            } else {
+                // Only a running server is started again afterwards; a stopped one stays stopped.
+                val serverUp = state is RuntimeState.Running || state is RuntimeState.Starting
+                ConfirmDialog(
+                    title = stringResource(R.string.update_dialog_title),
+                    body = stringResource(if (serverUp) R.string.update_dialog_body_running else R.string.update_dialog_body),
+                    confirmLabel = stringResource(R.string.update),
+                    onConfirm = requestUpdate,
+                    onDismiss = { confirm = null },
+                )
+            }
         PendingConfirm.Repair ->
             ConfirmDialog(
                 title = stringResource(R.string.repair_dialog_title),
@@ -314,7 +470,10 @@ internal fun LocalRuntimeCard(
 }
 
 @Composable
-private fun CardHeader(phase: RuntimePhase) {
+private fun CardHeader(
+    phase: RuntimePhase,
+    updating: Boolean,
+) {
     val tone = phase.tone()
     Row(
         modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -341,7 +500,15 @@ private fun CardHeader(phase: RuntimePhase) {
             )
         }
         Spacer(Modifier.width(8.dp))
-        StatusPill(text = phase.statusLabel(), tone = tone)
+        StatusPill(
+            text =
+                if (phase == RuntimePhase.Installing && updating) {
+                    stringResource(R.string.status_updating)
+                } else {
+                    phase.statusLabel()
+                },
+            tone = tone,
+        )
     }
 }
 
@@ -419,20 +586,42 @@ private fun FactRow(
     }
 }
 
+/**
+ * Setup, repair or update progress. An update has its own, shorter step list and says what it moves
+ * to ([update], the offer being installed; null when unknown).
+ */
 @Composable
-private fun InstallingBody(state: RuntimeState.Installing?) {
-    val steps = InstallStep.entries
+private fun InstallingBody(
+    state: RuntimeState.Installing?,
+    update: RuntimeUpdate?,
+) {
+    val updating = state?.updating == true
+    val steps = if (updating) InstallStep.updateSteps else InstallStep.setupSteps
     val current = state?.step ?: steps.first()
-    val currentIndex = steps.indexOf(current)
+    // A step outside this list would read as "step 0"; show it as the first one instead.
+    val currentIndex = steps.indexOf(current).coerceAtLeast(0)
 
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    if (updating) {
         Text(
-            text = stringResource(R.string.step_of, currentIndex + 1, steps.size),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.weight(1f),
+            text = stringResource(R.string.updating_title),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
         )
+        if (update != null) {
+            Spacer(Modifier.height(4.dp))
+            VersionChanges(
+                update = update,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                emphasis = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        Spacer(Modifier.height(14.dp))
     }
+    Text(
+        text = stringResource(R.string.step_of, currentIndex + 1, steps.size),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+    )
     Spacer(Modifier.height(12.dp))
     Column {
         steps.forEachIndexed { index, step ->
@@ -452,7 +641,7 @@ private fun InstallingBody(state: RuntimeState.Installing?) {
     }
     Spacer(Modifier.height(10.dp))
     Text(
-        text = stringResource(R.string.setup_background_note),
+        text = stringResource(if (updating) R.string.update_background_note else R.string.setup_background_note),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -776,6 +965,388 @@ private fun FailedBody(
     }
 }
 
+/**
+ * "Update available": a warm notice under the main actions with what changes and an Update button
+ * (which asks first). [enabled] is false while the server is starting or stopping.
+ */
+@Composable
+private fun UpdateOfferRow(
+    update: RuntimeUpdate,
+    enabled: Boolean,
+    onUpdate: () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        TitleWithAction(
+            // No top padding: the button's touch height already leaves ~14 dp above the title.
+            modifier = Modifier.padding(start = 12.dp, end = 4.dp, bottom = 12.dp),
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Upgrade, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(stringResource(R.string.update_available), style = MaterialTheme.typography.titleSmall)
+                }
+            },
+            action = {
+                TextButton(
+                    onClick = onUpdate,
+                    enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onPrimaryContainer),
+                ) {
+                    Text(stringResource(R.string.update))
+                }
+            },
+            body = {
+                VersionChanges(
+                    update = update,
+                    color = LocalContentColor.current.copy(alpha = 0.78f),
+                    emphasis = LocalContentColor.current,
+                    modifier = Modifier.padding(start = 28.dp, end = 8.dp),
+                )
+            },
+        )
+    }
+}
+
+/**
+ * A [title] line with [action] at its end, and [body] right under the title at the full width: on
+ * a 360 dp phone the version lines would wrap if they shared their width with the button. The title
+ * is centred on the action; the body starts below the title, inside the button's spare touch height
+ * when the title is shorter than it, and below a title that wraps at large font sizes.
+ */
+@Composable
+private fun TitleWithAction(
+    title: @Composable () -> Unit,
+    action: @Composable () -> Unit,
+    body: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Layout(contents = listOf(title, action, body), modifier = modifier) { (titleSlot, actionSlot, bodySlot), constraints ->
+        val gap = 2.dp.roundToPx()
+        val actionPlaceable = actionSlot.single().measure(constraints.copy(minWidth = 0, minHeight = 0))
+        val width =
+            if (constraints.hasBoundedWidth) constraints.maxWidth else constraints.minWidth.coerceAtLeast(actionPlaceable.width)
+        val titlePlaceable =
+            titleSlot.single().measure(Constraints(maxWidth = (width - actionPlaceable.width).coerceAtLeast(0)))
+        val bodyPlaceable = bodySlot.single().measure(Constraints(maxWidth = width))
+        val headHeight = max(titlePlaceable.height, actionPlaceable.height)
+        val titleTop = (headHeight - titlePlaceable.height) / 2
+        val bodyTop = titleTop + titlePlaceable.height + gap
+        layout(width, max(headHeight, bodyTop + bodyPlaceable.height)) {
+            titlePlaceable.placeRelative(0, titleTop)
+            actionPlaceable.placeRelative(width - actionPlaceable.width, (headHeight - actionPlaceable.height) / 2)
+            bodyPlaceable.placeRelative(0, bodyTop)
+        }
+    }
+}
+
+/** One line per package that changes: "OpenChamber 2.4.0 → 2.5.0", versions in mono. */
+@Composable
+private fun VersionChanges(
+    update: RuntimeUpdate,
+    color: Color,
+    emphasis: Color = color,
+    modifier: Modifier = Modifier,
+) {
+    val changes =
+        listOfNotNull(
+            update.openChamber.takeIf { it.changed }?.let { stringResource(R.string.detail_open_chamber) to it },
+            update.openCode.takeIf { it.changed }?.let { stringResource(R.string.detail_open_code) to it },
+        )
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        changes.forEach { (name, change) ->
+            Text(
+                text = versionChangeText(name, change, emphasis),
+                style = MaterialTheme.typography.bodySmall,
+                color = color,
+            )
+        }
+    }
+}
+
+private fun versionChangeText(
+    name: String,
+    change: VersionChange,
+    emphasis: Color,
+) = buildAnnotatedString {
+    append(name)
+    append("  ")
+    withStyle(SpanStyle(fontFamily = MonoFamily)) {
+        // An unknown installed version shows only where it goes.
+        change.current?.let {
+            append(it)
+            append(" → ")
+        }
+        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = emphasis)) { append(change.target) }
+    }
+}
+
+/**
+ * The last update didn't finish. The old version is still installed, so this is a dismissible note
+ * in the card rather than a failed state: the localised reason, a reassurance, the raw output
+ * behind Details, and Try again when there is still something to install.
+ */
+@Composable
+private fun UpdateProblemRow(
+    failure: UpdateFailure,
+    canRetry: Boolean,
+    retryEnabled: Boolean,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var showOutput by rememberSaveable { mutableStateOf(false) }
+    val headline =
+        failure.messageKey?.let { stringResource(UserMessages.headline(it)) }
+            ?: failure.reason.ifBlank { stringResource(R.string.msg_generic) }
+    // English reason first (e.g. the failing command and exit code), then the raw output.
+    val output =
+        listOfNotNull(failure.reason.takeIf { it.isNotBlank() && failure.messageKey != null }, failure.detail?.takeIf { it.isNotBlank() })
+            .joinToString("\n\n")
+            .takeIf { it.isNotEmpty() }
+    val hasActions = output != null || canRetry
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 4.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Icon(
+                    Icons.Rounded.ErrorOutline,
+                    contentDescription = null,
+                    modifier = Modifier.padding(top = 6.dp).size(20.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f).padding(top = 6.dp, bottom = if (hasActions) 0.dp else 8.dp)) {
+                    Text(stringResource(R.string.update_failed_title), style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(2.dp))
+                    Text(headline, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = stringResource(R.string.update_failed_kept),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LocalContentColor.current.copy(alpha = 0.78f),
+                    )
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Rounded.Close,
+                        contentDescription = stringResource(R.string.dismiss),
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+            if (hasActions) {
+                Row(
+                    // Lines the first button's label up with the text above (icon 20 + gap 10,
+                    // less the button's own 12 dp of padding).
+                    modifier = Modifier.fillMaxWidth().padding(start = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (output != null) {
+                        val rotation by animateFloatAsState(if (showOutput) 180f else 0f, label = "updateOutputChevron")
+                        TextButton(
+                            onClick = { showOutput = !showOutput },
+                            colors = ButtonDefaults.textButtonColors(contentColor = LocalContentColor.current.copy(alpha = 0.78f)),
+                        ) {
+                            Text(stringResource(R.string.details), style = MaterialTheme.typography.labelLarge)
+                            Spacer(Modifier.width(2.dp))
+                            Icon(
+                                Icons.Rounded.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp).rotate(rotation),
+                            )
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (canRetry) {
+                        TextButton(
+                            onClick = onRetry,
+                            enabled = retryEnabled,
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onErrorContainer),
+                        ) {
+                            Icon(Icons.Rounded.Replay, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.try_again))
+                        }
+                    }
+                }
+            }
+            AnimatedVisibility(
+                visible = showOutput && output != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                rememberLastNonNull(output)?.let { text ->
+                    RawOutput(text = text, modifier = Modifier.padding(end = 6.dp, top = 2.dp, bottom = 8.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Untranslated command output in the terminal colors of the log, selectable and copyable. */
+@Composable
+private fun RawOutput(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
+    val colors = ChamberTheme.colors
+    val copy = rememberCopyAction()
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = colors.terminalBackground,
+        contentColor = colors.terminalForeground,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Box {
+            SelectionContainer {
+                Text(
+                    text = text,
+                    style = ChamberTextStyles.log,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 180.dp)
+                            .verticalScroll(rememberScrollState())
+                            // Room on the right for the copy button.
+                            .padding(start = 10.dp, top = 8.dp, bottom = 8.dp, end = 36.dp),
+                )
+            }
+            IconButton(
+                onClick = { copy(text) },
+                modifier = Modifier.align(Alignment.TopEnd).size(36.dp),
+            ) {
+                Icon(
+                    Icons.Rounded.ContentCopy,
+                    contentDescription = stringResource(R.string.copy_details),
+                    tint = colors.terminalMuted,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * "Check for updates" in Details, a whole-row action like [AutoOpenRow]: the summary says where
+ * things stand (checking, up to date, update available, or the check failed) and when it last ran.
+ */
+@Composable
+internal fun UpdateCheckRow(
+    updates: RuntimeUpdateState,
+    enabled: Boolean,
+    onCheck: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val clickable = enabled && !updates.checking
+    val hasUpdate = updates.available?.hasChanges == true
+    val checkedAgo = updates.lastCheckedAtMs?.let { checkedAgoLabel(it) }
+    val warning = ChamberTheme.colors.warning
+    val (statusIcon, statusTint) =
+        when {
+            updates.checking -> null to MaterialTheme.colorScheme.onSurfaceVariant
+            updates.checkFailed -> Icons.Rounded.CloudOff to warning
+            hasUpdate -> Icons.Rounded.Upgrade to MaterialTheme.colorScheme.primary
+            updates.lastCheckedAtMs != null -> Icons.Rounded.CheckCircle to ChamberTheme.colors.success
+            else -> null to MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    val status =
+        when {
+            updates.checking -> stringResource(R.string.update_checking)
+            updates.checkFailed -> stringResource(R.string.update_check_failed)
+            hasUpdate && checkedAgo != null -> stringResource(R.string.update_status_checked, stringResource(R.string.update_available), checkedAgo)
+            hasUpdate -> stringResource(R.string.update_available)
+            checkedAgo != null -> stringResource(R.string.update_status_checked, stringResource(R.string.update_up_to_date), checkedAgo)
+            else -> stringResource(R.string.update_not_checked)
+        }
+    val dim = if (enabled) 1f else 0.38f
+
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier =
+                Modifier
+                    .clickable(enabled = clickable, role = Role.Button, onClick = onCheck)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.update_check),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = dim),
+                )
+                Spacer(Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.Top) {
+                    if (statusIcon != null) {
+                        Icon(
+                            statusIcon,
+                            contentDescription = null,
+                            tint = statusTint.copy(alpha = statusTint.alpha * dim),
+                            modifier = Modifier.padding(top = 1.5.dp).size(14.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = (if (updates.checkFailed) warning else MaterialTheme.colorScheme.onSurfaceVariant).copy(alpha = dim),
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Box(modifier = Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                if (updates.checking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        strokeCap = StrokeCap.Round,
+                    )
+                } else {
+                    Icon(
+                        Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = dim),
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "just now", "42 minutes ago", "3 hours ago", "2 days ago". From the app's own resources, so it is
+ * always in the same language as the sentence around it. Ticks every 30 s while shown.
+ */
+@Composable
+private fun checkedAgoLabel(atMs: Long): String {
+    val now by produceState(initialValue = System.currentTimeMillis(), atMs) {
+        while (true) {
+            value = System.currentTimeMillis()
+            delay(30_000)
+        }
+    }
+    val minutes = ((now - atMs).coerceAtLeast(0L) / 60_000L).toInt()
+    val hours = minutes / 60
+    val days = hours / 24
+    return when {
+        minutes < 1 -> stringResource(R.string.checked_just_now)
+        hours < 1 -> pluralStringResource(R.plurals.checked_minutes_ago, minutes, minutes)
+        days < 1 -> pluralStringResource(R.plurals.checked_hours_ago, hours, hours)
+        else -> pluralStringResource(R.plurals.checked_days_ago, days, days)
+    }
+}
+
 @Composable
 private fun FooterToggle(
     label: String,
@@ -847,6 +1418,9 @@ private fun DetailsSection(
     actionsEnabled: Boolean,
     autoOpen: Boolean?,
     onAutoOpenChange: (Boolean) -> Unit,
+    updates: RuntimeUpdateState,
+    checkEnabled: Boolean,
+    onCheckForUpdates: () -> Unit,
     onRepair: () -> Unit,
     onUninstall: () -> Unit,
 ) {
@@ -856,6 +1430,15 @@ private fun DetailsSection(
             AutoOpenRow(
                 checked = autoOpen,
                 onCheckedChange = onAutoOpenChange,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
+        if (info != null) {
+            // Right above the versions it is about.
+            UpdateCheckRow(
+                updates = updates,
+                enabled = checkEnabled,
+                onCheck = onCheckForUpdates,
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }

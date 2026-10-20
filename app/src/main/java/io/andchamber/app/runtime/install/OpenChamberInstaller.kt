@@ -6,8 +6,10 @@ import io.andchamber.app.runtime.MessageKey
 import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.UserFacingException
 import io.andchamber.app.runtime.fs.copyTreeNoFollow
+import io.andchamber.app.runtime.fs.copyTreeStrict
 import io.andchamber.app.runtime.fs.deleteTree
 import io.andchamber.app.runtime.fs.deleteTreeOrThrow
+import io.andchamber.app.runtime.fs.treeSize
 import io.andchamber.app.runtime.manifest.RuntimeManifest
 import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.network.SystemDnsProvider
@@ -46,10 +48,14 @@ class OpenChamberInstaller(
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    /** Full install: download, extract, packages, OpenChamber, native modules, verify, activate. */
+    /**
+     * Full install: download, extract, packages, OpenChamber, native modules, verify, activate.
+     * [versions] null installs the manifest's pinned npm versions.
+     */
     suspend fun install(
         report: InstallReporter,
         proot: EmbeddedCommandSuite.Paths,
+        versions: PackageVersions? = null,
     ): InstalledRuntime =
         withContext(Dispatchers.IO) {
             val architecture = manifest.architecture(abi)
@@ -77,8 +83,7 @@ class OpenChamberInstaller(
                 configureRootfs(rootfs)
                 seedHome(rootfs)
 
-                val env = ProotCommands.installEnvironment(proot.environment(), paths.prootTmp)
-                val runner = GuestRunner(paths, proot, rootfs, env, report, killPid = killPid)
+                val runner = runnerFor(proot, rootfs, report)
 
                 report.step(InstallStep.InstallPackages, null, "apk add nodejs npm git ...", MessageKey.ProgressInstallingPackages)
                 // set -e: any failing command fails the step, even inside a chain.
@@ -92,80 +97,221 @@ class OpenChamberInstaller(
                 )
 
                 // Shim before npm: install-time scripts also run under node and benefit from it.
-                File(rootfs, SHIM_GUEST_PATH.removePrefix("/")).apply {
-                    parentFile?.mkdirs()
-                    writeText(shimAsset())
-                }
-
-                report.step(InstallStep.InstallOpenChamber, null, "npm i @openchamber/web@${manifest.openChamberVersion}")
-                runner.mustSucceed(
-                    "set -e; npm i -g --no-fund --no-audit " +
-                        "@openchamber/web@${manifest.openChamberVersion} " +
-                        "@opencode/cli@${manifest.openCodeVersion}",
-                    MessageKey.OpenChamberInstallFailed,
-                    "Unable to install OpenChamber from npm.",
-                    timeoutMinutes = NPM_TIMEOUT_MINUTES,
-                )
-
-                // The node-pty prebuild is glibc-linked and segfaults on musl, so a source rebuild is
-                // required. A build failure fails the install (recoverable; the old environment stays).
-                report.step(InstallStep.BuildNativeModules, null, "node-pty for musl", MessageKey.ProgressBuildingNative)
-                runner.mustSucceed(
-                    "set -e; cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild",
-                    MessageKey.NativeBuildFailed,
-                    "Unable to build node-pty for the terminal feature. Check the network and retry.",
-                    timeoutMinutes = NATIVE_TIMEOUT_MINUTES,
-                )
-                File(rootfs, PTY_SMOKE_GUEST_PATH.removePrefix("/")).apply {
-                    parentFile?.mkdirs()
-                    writeText(PTY_SMOKE_SCRIPT)
-                }
-                runner.mustSucceed(
-                    "set -e; node $PTY_SMOKE_GUEST_PATH",
-                    MessageKey.PtySmokeFailed,
-                    "The rebuilt node-pty does not work in the guest. The install is incomplete.",
-                    timeoutMinutes = PTY_SMOKE_TIMEOUT_MINUTES,
-                )
-
-                report.step(InstallStep.Verify, null, "node, opencode, web bundle", MessageKey.ProgressVerifying)
-                val nodeVersion = extractVersion(runner.output("node --version"))
-                // Prints `opencode v2.0.32`: parse the number, never the raw line.
-                val opencodeVersion = extractVersion(runner.output("opencode --version"))
-                require(compareVersions(opencodeVersion, MIN_OPENCODE_VERSION) >= 0) {
-                    "OpenCode $opencodeVersion is older than the required $MIN_OPENCODE_VERSION"
-                }
-                require(File(rootfs, "$OPENCHAMBER_MODULE_ROOT/dist/index.html").isFile) {
-                    "OpenChamber web bundle is missing after install"
-                }
-
-                val metadata =
-                    RuntimeMetadata(
-                        runtimeVersion = manifest.runtimeVersion,
-                        alpineVersion = manifest.alpineVersion,
-                        abi = abi,
-                        port = manifest.port,
-                        openChamberVersion = manifest.openChamberVersion,
-                        openCodeVersion = opencodeVersion.removePrefix("v"),
-                        nodeVersion = nodeVersion.removePrefix("v"),
-                        installedAt = nowMillis(),
-                    )
-                // Metadata is written inside the environment, so the directory rename commits it too.
-                File(staging, RuntimePaths.METADATA_FILE_NAME).writeText(json.encodeToString(metadata))
-
-                report.step(InstallStep.Verify, null, null, MessageKey.ProgressActivating)
-                activateRuntimeEnvironment(
-                    active = paths.environment,
+                writeShim(rootfs)
+                val pinned = versions ?: manifestVersions()
+                finishEnvironment(
+                    report = report,
+                    proot = proot,
+                    runner = runner,
+                    rootfs = rootfs,
                     staging = staging,
-                    rollback = paths.rollback,
+                    versions = pinned,
+                    installStep = InstallStep.InstallOpenChamber,
+                    reuseMetadata = null,
                 )
-                report.step(InstallStep.Verify, 1f, null, MessageKey.ProgressDone)
-                InstalledRuntime(metadata = metadata, rootfs = paths.rootfs)
             } catch (error: Throwable) {
                 // Best effort: a leftover staging tree is removed before the next install anyway.
                 deleteTree(staging)
                 throw error
             }
         }
+
+    /**
+     * Updates the npm packages of the active environment to [versions] without a new Alpine base.
+     * The active environment is copied into staging (symlinks and modes kept), npm installs the new
+     * versions there, then the same verification and swap as [install] run. Requires an active
+     * environment with metadata. Any failure deletes staging; the active environment is untouched.
+     */
+    suspend fun update(
+        report: InstallReporter,
+        proot: EmbeddedCommandSuite.Paths,
+        versions: PackageVersions,
+    ): InstalledRuntime =
+        withContext(Dispatchers.IO) {
+            val current =
+                checkNotNull(installedMetadataOrNull()) { "No active runtime environment to update" }
+            paths.cache.mkdirs()
+            paths.logs.mkdirs()
+            paths.prootTmp.mkdirs()
+            paths.home.mkdirs()
+            paths.installLog.writeText("")
+            deleteTreeOrThrow(paths.staging)
+            val staging = paths.staging
+            try {
+                val needed = treeSize(paths.environment) + UPDATE_FREE_SPACE_MARGIN_BYTES
+                val free = paths.root.usableSpace
+                if (free < needed) {
+                    throw UserFacingException(
+                        MessageKey.UpdateNotEnoughSpace,
+                        "Not enough free space to update: need $needed bytes, have $free",
+                    )
+                }
+
+                report.step(InstallStep.CopyEnvironment, null, null, MessageKey.ProgressCopyingEnvironment)
+                copyTreeStrict(paths.environment, staging)
+                // The copy's links still name the live environment. Point them into staging now, so npm and
+                // node-gyp never write through them into the active files. No marker is written here; the
+                // post-commit pass runs on the new environment.
+                clearSymlinkMarker(staging)
+                normalizeRuntimeSymlinks(staging, writeMarker = false)
+                val rootfs = File(staging, "rootfs")
+                check(rootfs.isDirectory) { "Copied environment has no rootfs" }
+                // npm's in-place upgrade breaks PRoot's faked hard links (see removeGlobalPackages), so the
+                // old global packages are removed first and installed again from scratch.
+                removeGlobalPackages(rootfs)
+                ResolvConf.write(rootfs, dnsProvider.dnsServers())
+
+                val runner = runnerFor(proot, rootfs, report)
+                writeShim(rootfs)
+                finishEnvironment(
+                    report = report,
+                    proot = proot,
+                    runner = runner,
+                    rootfs = rootfs,
+                    staging = staging,
+                    versions = versions,
+                    installStep = InstallStep.InstallOpenChamber,
+                    reuseMetadata = current,
+                )
+            } catch (error: Throwable) {
+                deleteTree(staging)
+                throw error
+            }
+        }
+
+    /**
+     * Removes the two global npm packages and their bin links from the staged rootfs, host side, without
+     * following links. An update then installs both from scratch, which is the path verified on device.
+     *
+     * Why: `npm i -g` over an existing global install replaces files that PRoot's `--link2symlink` has
+     * faked as hard links (`.l2s.*` chains). npm's unlink and rename of those leaves a dangling chain:
+     * `opencode` reports "Operation not permitted" or "not found" and the verify step fails. A clean
+     * reinstall does not hit this. Missing entries are fine.
+     *
+     * Only the staged copy is touched. The active environment is never written, so a crash here leaves
+     * it as it was.
+     */
+    internal fun removeGlobalPackages(rootfs: File) = Companion.removeGlobalPackages(rootfs)
+
+    private fun manifestVersions(): PackageVersions =
+        PackageVersions(openChamber = manifest.openChamberVersion, openCode = manifest.openCodeVersion)
+
+    private fun installedMetadataOrNull(): RuntimeMetadata? {
+        val file = paths.metadataFile
+        if (!file.isFile) return null
+        return runCatching { json.decodeFromString<RuntimeMetadata>(file.readText()) }.getOrNull()
+    }
+
+    private fun runnerFor(
+        proot: EmbeddedCommandSuite.Paths,
+        rootfs: File,
+        report: InstallReporter,
+    ): GuestRunner {
+        val env = ProotCommands.installEnvironment(proot.environment(), paths.prootTmp)
+        return GuestRunner(paths, proot, rootfs, env, report, killPid = killPid)
+    }
+
+    private fun writeShim(rootfs: File) {
+        File(rootfs, SHIM_GUEST_PATH.removePrefix("/")).apply {
+            parentFile?.mkdirs()
+            writeText(shimAsset())
+        }
+    }
+
+    /**
+     * The shared tail of install and update: npm install of [versions], node-pty rebuild and smoke test,
+     * verification, metadata, then the atomic swap. [reuseMetadata] carries the active runtime's
+     * runtimeVersion and alpineVersion for an update; a fresh install takes them from the manifest.
+     * Throws on any failure; the caller deletes staging.
+     */
+    private fun finishEnvironment(
+        report: InstallReporter,
+        proot: EmbeddedCommandSuite.Paths,
+        runner: GuestRunner,
+        rootfs: File,
+        staging: File,
+        versions: PackageVersions,
+        installStep: InstallStep,
+        reuseMetadata: RuntimeMetadata?,
+    ): InstalledRuntime {
+        report.step(installStep, null, "npm i @openchamber/web@${versions.openChamber}", MessageKey.ProgressInstallingOpenChamber)
+        runner.mustSucceed(
+            "set -e; npm i -g --no-fund --no-audit " +
+                "@openchamber/web@${versions.openChamber} " +
+                "@opencode/cli@${versions.openCode}",
+            MessageKey.OpenChamberInstallFailed,
+            "Unable to install OpenChamber from npm.",
+            timeoutMinutes = NPM_TIMEOUT_MINUTES,
+        )
+
+        // The node-pty prebuild is glibc-linked and segfaults on musl, so a source rebuild is
+        // required. A build failure fails the install (recoverable; the old environment stays).
+        report.step(InstallStep.BuildNativeModules, null, "node-pty for musl", MessageKey.ProgressBuildingNative)
+        runner.mustSucceed(
+            "set -e; cd $OPENCHAMBER_MODULE_ROOT/node_modules/node-pty && npx --yes node-gyp rebuild",
+            MessageKey.NativeBuildFailed,
+            "Unable to build node-pty for the terminal feature. Check the network and retry.",
+            timeoutMinutes = NATIVE_TIMEOUT_MINUTES,
+        )
+        File(rootfs, PTY_SMOKE_GUEST_PATH.removePrefix("/")).apply {
+            parentFile?.mkdirs()
+            writeText(PTY_SMOKE_SCRIPT)
+        }
+        runner.mustSucceed(
+            "set -e; node $PTY_SMOKE_GUEST_PATH",
+            MessageKey.PtySmokeFailed,
+            "The rebuilt node-pty does not work in the guest. The install is incomplete.",
+            timeoutMinutes = PTY_SMOKE_TIMEOUT_MINUTES,
+        )
+
+        report.step(InstallStep.Verify, null, "node, opencode, web bundle", MessageKey.ProgressVerifying)
+        val nodeVersion = extractVersion(runner.output("node --version"))
+        // Prints `opencode v2.0.32`: parse the number, never the raw line.
+        val opencodeVersion = extractVersion(runner.output("opencode --version"))
+        require(compareVersions(opencodeVersion, MIN_OPENCODE_VERSION) >= 0) {
+            "OpenCode $opencodeVersion is older than the required $MIN_OPENCODE_VERSION"
+        }
+        require(File(rootfs, "$OPENCHAMBER_MODULE_ROOT/dist/index.html").isFile) {
+            "OpenChamber web bundle is missing after install"
+        }
+        // Record what is actually on disk; the requested version is only the fallback.
+        val installedOpenChamber =
+            runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull() ?: versions.openChamber
+
+        val metadata =
+            RuntimeMetadata(
+                runtimeVersion = reuseMetadata?.runtimeVersion ?: manifest.runtimeVersion,
+                alpineVersion = reuseMetadata?.alpineVersion ?: manifest.alpineVersion,
+                abi = abi,
+                port = manifest.port,
+                openChamberVersion = installedOpenChamber,
+                openCodeVersion = opencodeVersion.removePrefix("v"),
+                nodeVersion = nodeVersion.removePrefix("v"),
+                installedAt = nowMillis(),
+            )
+        // Metadata is written inside the environment, so the directory rename commits it too.
+        File(staging, RuntimePaths.METADATA_FILE_NAME).writeText(json.encodeToString(metadata))
+
+        report.step(InstallStep.Verify, null, null, MessageKey.ProgressActivating)
+        activateRuntimeEnvironment(
+            active = paths.environment,
+            staging = staging,
+            rollback = paths.rollback,
+        )
+        report.step(InstallStep.Verify, 1f, null, MessageKey.ProgressDone)
+        return InstalledRuntime(metadata = metadata, rootfs = paths.rootfs)
+    }
+
+    /** Reads an installed global package's version from inside the guest. */
+    private fun installedPackageVersion(
+        runner: GuestRunner,
+        packageName: String,
+    ): String {
+        val output = runner.output("node -p \"require('/usr/local/lib/node_modules/$packageName/package.json').version\"")
+        val version = VERSION_PATTERN.find(output)?.value
+        require(version != null) { "No version reported for $packageName" }
+        return version
+    }
 
     /**
      * Copies the previous /root (legacy layout, inside the environment) into the persistent home,
@@ -352,6 +498,30 @@ class OpenChamberInstaller(
 
         const val OPENCHAMBER_MODULE_ROOT = "/usr/local/lib/node_modules/@openchamber/web"
         const val SHIM_GUEST_PATH = "/opt/andchamber/android-shim.cjs"
+
+        /** Global npm package directories, relative to the rootfs. Removed before an update reinstalls them. */
+        val GLOBAL_PACKAGE_DIRS =
+            listOf(
+                "usr/local/lib/node_modules/@openchamber/web",
+                "usr/local/lib/node_modules/@opencode/cli",
+            )
+
+        /**
+         * Bin links of the global packages, relative to the rootfs. Each is a link into the package above, and
+         * npm recreates it. They are removed with the packages so no dangling link remains.
+         */
+        val GLOBAL_BIN_LINKS =
+            listOf(
+                "usr/local/bin/openchamber",
+                "usr/local/bin/opencode",
+                "usr/local/bin/opencode2",
+            )
+
+        /** Removes the global packages and bin links from [rootfs] (see the instance method for the reason). */
+        internal fun removeGlobalPackages(rootfs: File) {
+            for (relative in GLOBAL_PACKAGE_DIRS) deleteTreeOrThrow(File(rootfs, relative))
+            for (relative in GLOBAL_BIN_LINKS) deleteTreeOrThrow(File(rootfs, relative))
+        }
         const val PTY_SMOKE_GUEST_PATH = "/opt/andchamber/pty-smoke.cjs"
         const val MIN_OPENCODE_VERSION = "2.0.20"
         const val DEFAULT_TIMEOUT_MINUTES = 20L
@@ -360,6 +530,9 @@ class OpenChamberInstaller(
         const val NATIVE_TIMEOUT_MINUTES = 15L
         const val PTY_SMOKE_TIMEOUT_MINUTES = 2L
         const val VERIFY_TIMEOUT_MINUTES = 2L
+
+        /** Free space an update needs beyond the copy: npm, node-gyp and the new packages grow the tree. */
+        const val UPDATE_FREE_SPACE_MARGIN_BYTES = 512L * 1024 * 1024
 
         /**
          * Spawns `/bin/sh -c 'echo PTYOK'` through the rebuilt node-pty and requires the output and

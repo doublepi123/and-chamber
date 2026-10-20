@@ -204,6 +204,62 @@ fun copyTreeNoFollow(
     )
 }
 
+/**
+ * Copies [source] to [destination] (which must not exist) for a later swap, failing on any entry that
+ * cannot be copied: unlike [copyTreeNoFollow], nothing is skipped silently. Symlinks are recreated with
+ * their own target text and never followed. Regular files and directories keep their permission bits.
+ * A directory's mode is applied after its contents are copied, so a read-only directory still gets them.
+ *
+ * A directory without an owner read bit (PRoot bind-mount points come out of the rootfs tarball with
+ * mode 000) cannot be listed, so it is recreated empty with its mode. A readable directory that fails
+ * to list is an error.
+ */
+fun copyTreeStrict(
+    source: File,
+    destination: File,
+) {
+    val from = source.toPath()
+    require(Files.isDirectory(from, LinkOption.NOFOLLOW_LINKS)) { "Not a directory: ${source.name}" }
+    val to = destination.toPath()
+    require(!to.existsNoFollow()) { "Copy destination already exists: ${destination.name}" }
+    copyNodeStrict(from, to)
+}
+
+private fun copyNodeStrict(
+    from: Path,
+    to: Path,
+) {
+    val attributes = Files.readAttributes(from, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    when {
+        attributes.isSymbolicLink -> Files.createSymbolicLink(to, Files.readSymbolicLink(from))
+        attributes.isDirectory -> copyDirectoryStrict(from, to)
+        attributes.isRegularFile -> {
+            Files.copy(from, to, LinkOption.NOFOLLOW_LINKS)
+            Files.setPosixFilePermissions(to, Files.getPosixFilePermissions(from, LinkOption.NOFOLLOW_LINKS))
+        }
+        else -> throw IOException("Unsupported file type: ${from.fileName}")
+    }
+}
+
+private fun copyDirectoryStrict(
+    from: Path,
+    to: Path,
+) {
+    val mode = Files.getPosixFilePermissions(from, LinkOption.NOFOLLOW_LINKS)
+    // Without owner read the entries cannot be listed by this uid, and the guest (which runs as this
+    // uid) cannot list them either. Recreate the directory with its mode only. A readable directory
+    // whose entries cannot be stat'ed fails the copy instead of being dropped.
+    val children =
+        if (PosixFilePermission.OWNER_READ !in mode) {
+            emptyList()
+        } else {
+            Files.newDirectoryStream(from).use { stream -> stream.toList() }
+        }
+    Files.createDirectory(to)
+    for (child in children) copyNodeStrict(child, to.resolve(child.fileName))
+    Files.setPosixFilePermissions(to, mode)
+}
+
 private fun Path.existsNoFollow(): Boolean = Files.exists(this, LinkOption.NOFOLLOW_LINKS)
 
 /**

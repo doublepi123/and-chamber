@@ -2,6 +2,9 @@ package io.andchamber.app.runtime
 
 import io.andchamber.app.runtime.install.InstallReporter
 import io.andchamber.app.runtime.install.InstalledRuntime
+import io.andchamber.app.runtime.install.OpenChamberInstaller
+import io.andchamber.app.runtime.install.PackageVersionSource
+import io.andchamber.app.runtime.install.PackageVersions
 import io.andchamber.app.runtime.install.RuntimeInstaller
 import io.andchamber.app.runtime.process.HealthProbe
 import io.andchamber.app.runtime.process.OpenChamberServer
@@ -16,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -28,7 +32,7 @@ fun interface RuntimeStateListener {
 }
 
 /** The operations that must run inside the foreground service's lifetime. */
-enum class RuntimeOperation { Install, Start, Repair, Stop, Uninstall, Restart }
+enum class RuntimeOperation { Install, Start, Repair, Stop, Uninstall, Restart, Update }
 
 /**
  * Gate between the UI and the controller. [request] must bring the foreground service up first and
@@ -71,6 +75,15 @@ class DefaultLocalRuntimeController(
      * cannot start. Do not add x86_64 here without verifying that path on hardware.
      */
     private val supportedAbis: Set<String> = setOf("arm64-v8a"),
+    /** Registry lookup for newer versions. Null disables the registry check; the bundled pins still apply. */
+    private val versionSource: PackageVersionSource? = null,
+    /**
+     * The versions bundled in the app's manifest. They are the update floor and what a fresh install
+     * takes. Null means there are no bundled versions (tests only).
+     */
+    private val pinnedVersions: PackageVersions? = null,
+    /** Minimum time between automatic registry checks. Manual checks ignore it. */
+    private val updateCheckIntervalMillis: Long = UPDATE_CHECK_INTERVAL_MILLIS,
 ) : LocalRuntimeController {
     private val operationLock = Mutex()
 
@@ -84,6 +97,9 @@ class DefaultLocalRuntimeController(
 
     private val mutableInfo = MutableStateFlow<RuntimeInfo?>(null)
     override val info: StateFlow<RuntimeInfo?> = mutableInfo.asStateFlow()
+
+    private val mutableUpdates = MutableStateFlow(RuntimeUpdateState())
+    override val updates: StateFlow<RuntimeUpdateState> = mutableUpdates.asStateFlow()
 
     /** Operations and recovery jobs queued or running; count and [busy] change together (see WorkCounter). */
     private val work = WorkCounter()
@@ -99,6 +115,18 @@ class DefaultLocalRuntimeController(
     private var restartJob: Job? = null
     private var wantsRunning = false
     private var currentPhase: FailurePhase = FailurePhase.Runtime
+
+    /**
+     * Installed versions the update check compares against. Written under operationLock; the registry
+     * check reads it without the lock, so it is volatile.
+     */
+    @Volatile private var installedVersions: PackageVersions? = null
+
+    /** Newest registry versions from the last successful check. Written by the check job only. */
+    @Volatile private var latestKnown: PackageVersions? = null
+
+    /** Registry check in flight. Not under operationLock: the network must not block the runtime. */
+    @Volatile private var checkJob: Job? = null
 
     /** Decides the starting state from disk, after recovering any interrupted swap. */
     fun initialize() {
@@ -124,12 +152,29 @@ class DefaultLocalRuntimeController(
     override fun restart() = foregroundStarter.request(RuntimeOperation.Restart)
 
     /**
+     * Checks the registry now. Runs outside operationLock, so it can finish while an operation is
+     * queued. Ignored while a check is already running, and when the runtime is not installed.
+     */
+    override fun checkForUpdates() {
+        if (versionSource == null || installedVersions == null) return
+        if (checkJob?.isActive == true) return
+        checkJob = scope.launch { runUpdateCheck() }
+    }
+
+    override fun update() = foregroundStarter.request(RuntimeOperation.Update)
+
+    override fun dismissUpdateFailure() {
+        mutableUpdates.update { it.copy(lastFailure = null) }
+    }
+
+    /**
      * Runs one [RuntimeOperation] on the controller. Called by the foreground service after it has
      * started in the foreground; never by the UI directly.
      */
     override fun perform(operation: RuntimeOperation) {
         when (operation) {
             RuntimeOperation.Install -> launch(FailurePhase.Install) { installLocked(thenStart = true) }
+            RuntimeOperation.Update -> launch(FailurePhase.Runtime) { updateLocked() }
             RuntimeOperation.Start -> {
                 cancelRequested = false
                 launch(FailurePhase.Start) { startLocked(manual = true) }
@@ -148,7 +193,7 @@ class DefaultLocalRuntimeController(
                     // into staging and swap atomically. A failed repair leaves the old runtime intact.
                     stopLocked()
                     currentPhase = FailurePhase.Install
-                    installLocked(thenStart = true)
+                    installLocked(thenStart = true, repair = true)
                 }
             RuntimeOperation.Restart -> {
                 // One queued op, so stop and start can't be reordered by the lock (two separate
@@ -167,6 +212,8 @@ class DefaultLocalRuntimeController(
                     stopLocked()
                     withContext(ioDispatcher) { installer.removeAll() }
                     mutableInfo.value = null
+                    installedVersions = null
+                    mutableUpdates.value = RuntimeUpdateState()
                     publish(RuntimeState.NotInstalled)
                 }
         }
@@ -215,37 +262,206 @@ class DefaultLocalRuntimeController(
         } else {
             refreshInfo(existing)
             publish(RuntimeState.Stopped)
+            // The bundled pins may already be newer than what is installed: offer that without network.
+            recomputeAvailable(existing)
+            maybeCheckForUpdates()
         }
     }
 
-    /** Install, then optionally start (Install and Repair both end running, as the user asked for it). */
-    private suspend fun installLocked(thenStart: Boolean) {
+    /**
+     * Install, then optionally start (Install and Repair both end running, as the user asked for it).
+     * A repair ([repair] = true) installs at least the installed versions, so it never downgrades
+     * OpenCode after an update.
+     */
+    private suspend fun installLocked(
+        thenStart: Boolean,
+        repair: Boolean = false,
+    ) {
         if (abi !in supportedAbis) {
             publish(RuntimeState.UnsupportedAbi)
             return
         }
         cancelRequested = false
         publish(RuntimeState.Installing(InstallStep.DownloadRootfs, 0f, null))
-        val reporter =
-            object : InstallReporter {
-                override fun step(
-                    step: InstallStep,
-                    progress: Float?,
-                    detail: String?,
-                    messageKey: MessageKey?,
-                ) {
-                    publish(RuntimeState.Installing(step, progress, detail, messageKey))
-                }
-
-                override fun log(line: String) = appendLog(line)
-            }
-        val installed = installer.install(reporter)
+        val versions = if (repair) repairVersions() else null
+        val installed = installer.install(installReporter(updating = false), versions)
         refreshInfo(installed)
+        recomputeAvailable(installed)
+        maybeCheckForUpdates()
         // Intermediate Stopped: the service keeps running because busy is still true here.
         publish(RuntimeState.Stopped)
         if (!thenStart) return
         currentPhase = FailurePhase.Start
         startLocked(manual = true)
+    }
+
+    private fun installReporter(updating: Boolean): InstallReporter =
+        object : InstallReporter {
+            override fun step(
+                step: InstallStep,
+                progress: Float?,
+                detail: String?,
+                messageKey: MessageKey?,
+            ) {
+                publish(RuntimeState.Installing(step, progress, detail, messageKey, updating = updating))
+            }
+
+            override fun log(line: String) = appendLog(line)
+        }
+
+    /** Per package, the newer of the installed and the bundled version. Null when nothing is known. */
+    private fun repairVersions(): PackageVersions? {
+        val installed = installedVersions
+        val pinned = pinnedVersions
+        if (installed == null) return null
+        if (pinned == null) return installed
+        return PackageVersions(
+            openChamber = newerOf(installed.openChamber, pinned.openChamber),
+            openCode = newerOf(installed.openCode, pinned.openCode),
+        )
+    }
+
+    private fun newerOf(
+        a: String,
+        b: String,
+    ): String = if (OpenChamberInstaller.compareVersions(a, b) >= 0) a else b
+
+    /**
+     * Updates the installed packages to the available target. The server is stopped first. A failure
+     * keeps the previous environment (which the installer never touches before the swap): it sets
+     * [RuntimeUpdateState.lastFailure] and does not publish [RuntimeState.Failed]. Afterwards the
+     * server is restarted when it was running, otherwise the state rests at Stopped.
+     */
+    private suspend fun updateLocked() {
+        val target = mutableUpdates.value.available
+        if (target == null || !target.hasChanges) return
+        val runtime = withContext(ioDispatcher) { installer.installedRuntime() } ?: return
+        val wasRunning = mutableState.value.let { it is RuntimeState.Running || it is RuntimeState.Starting } || wantsRunning
+
+        cancelRequested = false
+        stopLocked()
+        mutableUpdates.update { it.copy(lastFailure = null) }
+        try {
+            val versions =
+                PackageVersions(
+                    openChamber = target.openChamber.target,
+                    openCode = target.openCode.target,
+                )
+            publish(RuntimeState.Installing(InstallStep.CopyEnvironment, null, null, MessageKey.ProgressCopyingEnvironment, updating = true))
+            val updated = installer.update(installReporter(updating = true), versions)
+            refreshInfo(updated)
+            recomputeAvailable(updated)
+            mutableUpdates.update { it.copy(lastFailure = null) }
+        } catch (error: CancellationException) {
+            // Like install: leave the transient Installing state. The old environment is intact.
+            publish(RuntimeState.Stopped)
+            throw error
+        } catch (error: Throwable) {
+            // Not Failed: the previous environment is still installed and usable. The reason is shown
+            // on the update card instead, so a failed update never blocks the runtime.
+            val typed = error as? UserFacingException
+            appendLog("ERROR: update failed: ${error.message}")
+            mutableUpdates.update {
+                it.copy(
+                    lastFailure =
+                        UpdateFailure(
+                            reason = error.message ?: "Update failed",
+                            messageKey = typed?.key ?: MessageKey.Generic,
+                            detail = typed?.detail,
+                        ),
+                )
+            }
+            // The failed attempt left the old environment in place: show its versions again.
+            refreshInfo(runtime)
+        }
+        recomputeAvailable(installer.installedRuntime() ?: runtime)
+        if (!wasRunning) {
+            publish(RuntimeState.Stopped)
+            return
+        }
+        currentPhase = FailurePhase.Start
+        startLocked(manual = true)
+    }
+
+    /**
+     * Recomputes [RuntimeUpdateState.available] from the installed versions and the newest known
+     * versions: the registry's (when fetched) and the bundled pins. Never offers a downgrade.
+     */
+    private fun recomputeAvailable(runtime: InstalledRuntime) {
+        val installed =
+            PackageVersions(
+                openChamber = runtime.metadata.openChamberVersion,
+                openCode = runtime.metadata.openCodeVersion,
+            )
+        installedVersions = installed
+        mutableUpdates.update { it.copy(available = availableFor(installed, latestKnown)) }
+    }
+
+    private fun availableFor(
+        installed: PackageVersions,
+        registry: PackageVersions?,
+    ): RuntimeUpdate? {
+        val target = newestOf(registry, pinnedVersions) ?: return null
+        val openChamber = VersionChange(current = installed.openChamber, target = newerOf(target.openChamber, installed.openChamber))
+        val openCode = VersionChange(current = installed.openCode, target = newerOf(target.openCode, installed.openCode))
+        val update = RuntimeUpdate(openChamber = openChamber, openCode = openCode)
+        return update.takeIf { it.hasChanges }
+    }
+
+    /** Per package, the higher of the registry and the bundled version. Either may be null. */
+    private fun newestOf(
+        registry: PackageVersions?,
+        pinned: PackageVersions?,
+    ): PackageVersions? {
+        if (registry == null) return pinned
+        if (pinned == null) return registry
+        return PackageVersions(
+            openChamber = newerOf(registry.openChamber, pinned.openChamber),
+            openCode = newerOf(registry.openCode, pinned.openCode),
+        )
+    }
+
+    /** An automatic check, throttled by [updateCheckIntervalMillis] since the last one. */
+    private fun maybeCheckForUpdates() {
+        if (versionSource == null) return
+        val last = mutableUpdates.value.lastCheckedAtMs
+        if (last != null && nowMillis() - last < updateCheckIntervalMillis) return
+        if (checkJob?.isActive == true) return
+        checkJob = scope.launch { runUpdateCheck() }
+    }
+
+    /**
+     * Asks the registry for newer versions, with no operationLock: the network must not hold up the
+     * runtime. Cancellation propagates. A failure keeps the bundled pins and sets [RuntimeUpdateState.checkFailed].
+     */
+    private suspend fun runUpdateCheck() {
+        val source = versionSource ?: return
+        val pinned = pinnedVersions
+        val installed = installedVersions ?: return
+        mutableUpdates.update { it.copy(checking = true) }
+        try {
+            val latest: PackageVersions? =
+                try {
+                    source.latest(pinned ?: installed)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    appendLog("Update check failed: ${error.message}")
+                    null
+                }
+            latestKnown = latest ?: latestKnown
+            mutableUpdates.update {
+                it.copy(
+                    checking = false,
+                    checkFailed = latest == null,
+                    lastCheckedAtMs = nowMillis(),
+                    // Re-read: an update may have finished while the request was in flight.
+                    available = availableFor(installedVersions ?: installed, latestKnown),
+                )
+            }
+        } finally {
+            mutableUpdates.update { if (it.checking) it.copy(checking = false) else it }
+        }
     }
 
     private suspend fun startLocked(manual: Boolean) {
@@ -479,5 +695,8 @@ class DefaultLocalRuntimeController(
     private companion object {
         const val MAX_LOG_LINES = 400
         const val WATCHDOG_MISSES_BEFORE_RESTART = 3
+
+        /** Automatic registry checks run at most this often (manual checks ignore it). */
+        const val UPDATE_CHECK_INTERVAL_MILLIS = 6L * 60 * 60 * 1000
     }
 }

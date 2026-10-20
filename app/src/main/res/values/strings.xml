@@ -10,6 +10,7 @@
     <string name="runtime_notification_channel_description">Keeps the on-device OpenChamber server running</string>
     <string name="runtime_notification_title">OpenChamber</string>
     <string name="runtime_notification_setup">Setting up the Linux environment</string>
+    <string name="runtime_notification_updating">Updating OpenChamber and OpenCode</string>
     <string name="runtime_notification_starting">Starting OpenChamber</string>
     <string name="runtime_notification_running">Running at %1$s</string>
     <string name="runtime_notification_stopping">Stopping OpenChamber</string>
@@ -57,6 +58,7 @@
     <string name="status_checking">Checking</string>
     <string name="status_not_set_up">Not set up</string>
     <string name="status_setting_up">Setting up</string>
+    <string name="status_updating">Updating</string>
     <string name="status_stopped">Stopped</string>
     <string name="status_starting">Starting</string>
     <string name="status_running">Running</string>
@@ -111,6 +113,39 @@
     <string name="detail_free_space">Free space</string>
     <string name="unknown_value">—</string>
     <string name="uninstall">Uninstall</string>
+
+    <!-- OpenChamber and OpenCode updates -->
+    <string name="update_available">Update available</string>
+    <string name="update">Update</string>
+    <string name="updating_title">Updating OpenChamber…</string>
+    <string name="update_background_note">OpenChamber is unavailable until the update is done. You can leave the app. The update keeps going in the background and shows its progress in a notification.</string>
+    <string name="update_dialog_title">Update OpenChamber?</string>
+    <string name="update_dialog_body_running">OpenChamber stops during the update and starts again afterwards, so running tasks are interrupted. The update downloads up to a few hundred MB and takes several minutes. Projects and settings are kept, and if anything fails, the current version keeps working.</string>
+    <string name="update_dialog_body">The update downloads up to a few hundred MB and takes several minutes. OpenChamber can\'t start until it\'s done. Projects and settings are kept, and if anything fails, the current version keeps working.</string>
+    <string name="update_failed_title">The update didn\'t finish</string>
+    <string name="update_failed_kept">The current version is still installed and works as before.</string>
+    <string name="dismiss">Dismiss</string>
+    <string name="copy_details">Copy details</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_checking">Checking…</string>
+    <string name="update_up_to_date">Up to date</string>
+    <string name="update_not_checked">Not checked yet</string>
+    <string name="update_check_failed">Couldn\'t check for updates</string>
+    <!-- %1$s: "Up to date" or "Update available"; %2$s: when, e.g. "42 minutes ago" or "just now" -->
+    <string name="update_status_checked">%1$s · checked %2$s</string>
+    <string name="checked_just_now">just now</string>
+    <plurals name="checked_minutes_ago">
+        <item quantity="one">%1$d minute ago</item>
+        <item quantity="other">%1$d minutes ago</item>
+    </plurals>
+    <plurals name="checked_hours_ago">
+        <item quantity="one">%1$d hour ago</item>
+        <item quantity="other">%1$d hours ago</item>
+    </plurals>
+    <plurals name="checked_days_ago">
+        <item quantity="one">%1$d day ago</item>
+        <item quantity="other">%1$d days ago</item>
+    </plurals>
 
     <!-- Shared storage -->
     <string name="storage_title">Projects and settings folder</string>
@@ -229,6 +264,7 @@
     <string name="step_download_rootfs">Download the Linux base</string>
     <string name="step_extract_rootfs">Unpack the Linux base</string>
     <string name="step_install_packages">Install system packages</string>
+    <string name="step_copy_environment">Copy the current Linux system</string>
     <string name="step_install_openchamber">Install OpenChamber and OpenCode</string>
     <string name="step_build_native_modules">Build terminal support</string>
     <string name="step_verify">Check the installation</string>
@@ -262,6 +298,8 @@
     <string name="msg_progress_verifying">Checking node, opencode and the web bundle</string>
     <string name="msg_progress_activating">Activating the environment</string>
     <string name="msg_progress_done">Done</string>
+    <string name="msg_progress_copying_environment">Copying the current Linux system</string>
+    <string name="msg_update_not_enough_space">Not enough free space to update. The update needs a temporary copy of the Linux system.</string>
 
     <!-- Independent browser. Not the OpenChamber page. -->
     <string name="browser_entry_title">Browser</string>

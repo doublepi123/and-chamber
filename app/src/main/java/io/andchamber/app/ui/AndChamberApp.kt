@@ -163,6 +163,21 @@ private class LocalActions(
         runtime.repair()
     }
 
+    /**
+     * Updates OpenChamber / OpenCode. The runtime stops the server, swaps in the new versions and
+     * starts it again if it was running, so the local page is dropped like on Repair. A failed
+     * update shows in [LocalRuntimeController.updates]; the old version keeps working.
+     */
+    fun update() {
+        askForNotifications()
+        pool.discard(ServerTarget.LOCAL_ID)
+        runtime.update()
+    }
+
+    fun checkForUpdates() = runtime.checkForUpdates()
+
+    fun dismissUpdateFailure() = runtime.dismissUpdateFailure()
+
     fun uninstall() {
         pool.discard(ServerTarget.LOCAL_ID)
         runtime.uninstall()
@@ -394,6 +409,7 @@ fun AndChamberApp(
                         val logLines by runtime.logTail.collectAsStateWithLifecycle()
                         val servers by remotes.servers.collectAsStateWithLifecycle()
                         val storageState by storage.state.collectAsStateWithLifecycle()
+                        val updates by runtime.updates.collectAsStateWithLifecycle()
                         val actions =
                             remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess, uiPrefs) {
                                 HomeActions(
@@ -416,6 +432,9 @@ fun AndChamberApp(
                                     onRestartLocal = local::restart,
                                     onAutoOpenChange = uiPrefs::updateAutoOpenLocal,
                                     onOpenBrowser = { nav.openIfResumed(entry, Routes.BROWSER) },
+                                    onUpdate = local::update,
+                                    onCheckForUpdates = local::checkForUpdates,
+                                    onDismissUpdateFailure = local::dismissUpdateFailure,
                                 )
                             }
                         HomeScreen(
@@ -427,6 +446,7 @@ fun AndChamberApp(
                             actions = actions,
                             storage = storageState,
                             autoOpenLocal = uiPrefs.autoOpenLocal,
+                            updates = updates,
                         )
                     }
 

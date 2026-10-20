@@ -18,6 +18,24 @@ data class RuntimeMetadata(
     val installedAt: Long,
 )
 
+/** npm versions of the two packages the runtime installs (`@openchamber/web`, `@opencode/cli`). */
+data class PackageVersions(
+    val openChamber: String,
+    val openCode: String,
+)
+
+/**
+ * Where newer package versions come from (the npm registry in the app). Implementations do network
+ * I/O and must be called off the main thread. Throws when the registry cannot be read.
+ */
+fun interface PackageVersionSource {
+    /**
+     * The newest stable versions allowed for this app: same major version as [pinned] (the manifest's
+     * versions), no pre-releases, OpenCode at least the app's minimum.
+     */
+    suspend fun latest(pinned: PackageVersions): PackageVersions
+}
+
 data class InstalledRuntime(
     val metadata: RuntimeMetadata,
     /** `environment/rootfs` of the active environment. */
@@ -51,9 +69,25 @@ interface RuntimeInstaller {
     /**
      * Builds a fresh environment in staging, verifies it, then atomically activates it. The active
      * environment is untouched until that swap, so a failed install or repair keeps the old one.
+     * [versions] null installs the versions pinned in the app's runtime manifest.
      * Throws on failure.
      */
-    suspend fun install(report: InstallReporter): InstalledRuntime
+    suspend fun install(
+        report: InstallReporter,
+        versions: PackageVersions? = null,
+    ): InstalledRuntime
+
+    /**
+     * Updates OpenChamber / OpenCode to [versions] without downloading a new Linux base: copies the
+     * active environment into staging, reinstalls the npm packages there, rebuilds node-pty, verifies,
+     * then swaps it in like [install]. The active environment is untouched until that swap, so a failed
+     * update keeps the old one. The server must be stopped first. Throws on failure (a
+     * [io.andchamber.app.runtime.UserFacingException] with `UpdateNotEnoughSpace` when the disk is too full).
+     */
+    suspend fun update(
+        report: InstallReporter,
+        versions: PackageVersions,
+    ): InstalledRuntime
 
     /**
      * Removes the environment (rootfs + metadata) but keeps the guest home, workspace and secrets.

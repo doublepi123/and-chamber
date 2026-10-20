@@ -2,6 +2,7 @@ package io.andchamber.app.runtime
 
 import io.andchamber.app.runtime.install.InstallReporter
 import io.andchamber.app.runtime.install.InstalledRuntime
+import io.andchamber.app.runtime.install.PackageVersions
 import io.andchamber.app.runtime.install.RuntimeInstaller
 import io.andchamber.app.runtime.install.RuntimeMetadata
 import io.andchamber.app.runtime.process.HealthProbe
@@ -76,7 +77,15 @@ class RestartBudgetCleanupTest {
 
         override fun installedRuntime(): InstalledRuntime? = runtime
 
-        override suspend fun install(report: InstallReporter): InstalledRuntime = runtime
+        override suspend fun install(
+            report: InstallReporter,
+            versions: PackageVersions?,
+        ): InstalledRuntime = runtime
+
+        override suspend fun update(
+            report: InstallReporter,
+            versions: PackageVersions,
+        ): InstalledRuntime = runtime
 
         override fun discardEnvironment() = Unit
 

@@ -45,11 +45,24 @@ class RuntimeInstallerImpl(
         return InstalledRuntime(metadata, paths.rootfs)
     }
 
-    override suspend fun install(report: InstallReporter): InstalledRuntime {
+    override suspend fun install(
+        report: InstallReporter,
+        versions: PackageVersions?,
+    ): InstalledRuntime {
         paths.root.mkdirs()
         recover()
         val proot = suite()
-        return installer.install(report, proot)
+        return installer.install(report, proot, versions)
+    }
+
+    override suspend fun update(
+        report: InstallReporter,
+        versions: PackageVersions,
+    ): InstalledRuntime {
+        paths.root.mkdirs()
+        recover()
+        val proot = suite()
+        return installer.update(report, proot, versions)
     }
 
     override fun discardEnvironment() {
