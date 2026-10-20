@@ -98,6 +98,10 @@ class BrowserProviderClient(
         val mine = gate.withLock { ++generation }
         try {
             transport.events().collect { event ->
+                if (ProviderProtocol.isDisconnect(event)) {
+                    dropConnection()
+                    return@collect
+                }
                 val ready = ProviderProtocol.parseReady(event)
                 if (ready != null) {
                     adopt(ready)
@@ -130,6 +134,19 @@ class BrowserProviderClient(
             if (stale.isNotEmpty() || gate.withLock { generation == mine && connectionId == null }) onConnection(null)
             stale.forEach { it.cancel() }
         }
+    }
+
+    private suspend fun dropConnection() {
+        val stale = gate.withLock {
+            val jobs = inFlight.values.toList()
+            inFlight.clear()
+            connectionId = null
+            serverEpoch = null
+            registry.revoke()
+            jobs
+        }
+        onConnection(null)
+        stale.forEach { it.cancel() }
     }
 
     private suspend fun adopt(ready: ProviderProtocol.Ready) {
@@ -215,8 +232,11 @@ class BrowserProviderClient(
             }
             throw cancelled
         } catch (error: Exception) {
-            // Class and action only: messages may echo page content.
-            android.util.Log.w("AndChamberProvider", "${request.action} failed: ${error.javaClass.name}", error)
+            // Class, action and fixed code only: messages and stacks may echo page content.
+            android.util.Log.w(
+                "AndChamberProvider",
+                "action=${request.action} class=${error.javaClass.simpleName} code=${ProviderCodes.OUTCOME_UNKNOWN}",
+            )
             ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN)
         }
         post(request, result, claim.nonce)

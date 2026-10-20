@@ -111,6 +111,8 @@ class ProviderClientTest {
         client.stop()
     }
 
+    private val adopted = java.util.concurrent.CopyOnWriteArrayList<String>()
+
     @Test
     fun `cancellation after claim posts no late result once the connection has changed`() = runBlocking {
         val started = CompletableDeferred<Unit>()
@@ -126,6 +128,8 @@ class ProviderClientTest {
         transport.emit(request("e1", "c1", "r1"))
         withTimeout(1_000) { started.await() }
         transport.emit(ready("e2", "c2"))
+        // Release only after the new connection is adopted; otherwise the old one is still current.
+        withTimeout(1_000) { while (adopted.lastOrNull() != "c2") delay(5) }
         release.complete(Unit)
         delay(50)
         assertTrue(transport.results.isEmpty())
@@ -177,6 +181,43 @@ class ProviderClientTest {
         client.stop()
     }
 
+    @Test
+    fun `disconnect after claim cancels work and a new ready does not inherit the grant`() = runBlocking {
+        val connections = mutableListOf<String?>()
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val transport = ScriptTransport(claim = ProviderClaim(true, "nonce-6", 5_000))
+        val executor = RecordingExecutor(block = {
+            started.complete(Unit)
+            release.await()
+        })
+        val client = BrowserProviderClient(
+            origin = "http://127.0.0.1:3000",
+            token = "secret-token",
+            runtimeLaunchId = 1L,
+            instanceKey = "local",
+            clock = { 0L },
+            transport = transport,
+            executor = executor,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            onConnection = { connections += it },
+        )
+        client.start()
+        transport.emit(ready("e1", "c1"))
+        client.grant("session", "tab")
+        transport.emit(request("e1", "c1", "r1"))
+        withTimeout(1_000) { started.await() }
+        transport.emit(ProviderProtocol.disconnectEvent())
+        delay(40)
+        assertTrue(transport.results.isEmpty())
+        assertEquals(listOf("c1", null), connections)
+        transport.emit(ready("e2", "c2"))
+        delay(20)
+        assertEquals(null, client.registry().currentGrant()?.connectionId)
+        release.complete(Unit)
+        client.stop()
+    }
+
     private fun client(
         transport: ProviderTransport,
         executor: ProviderExecutor,
@@ -190,6 +231,7 @@ class ProviderClientTest {
         transport = transport,
         executor = executor,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        onConnection = { id -> if (id != null) adopted.add(id) },
         onCancel = onCancel,
     )
 

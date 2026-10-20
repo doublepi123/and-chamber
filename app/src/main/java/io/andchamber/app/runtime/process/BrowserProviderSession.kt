@@ -34,11 +34,12 @@ class BrowserProviderSession(
      */
     fun connect(launchId: Long, origin: String, trustedHostAttached: Boolean) {
         val active = current
-        if (active == null || active.launchId != launchId || !trustedHostAttached) {
+        if (active == null || active.launchId != launchId) {
             revoke(launchId)
             return
         }
-        sink.onLocalLaunch(origin, active.token, launchId)
+        sink.noteVerifiedLaunch(origin, active.token, launchId)
+        if (trustedHostAttached) sink.onLocalLaunch(origin, active.token, launchId)
     }
 
     /** Issues a new token and drops the previous one. Safe to call before each local launch. */
@@ -88,6 +89,9 @@ class BrowserProviderSession(
 interface BrowserProviderSink {
     /** True only while the trusted local chat page is in the foreground. Remote consoles are never attached. */
     fun trustedHostAttached(): Boolean = false
+
+    /** Remembers a verified local launch without connecting or deleting its token. */
+    fun noteVerifiedLaunch(origin: String, token: String, launchId: Long) = Unit
 
     /** Local loopback launch only. Implementations must ignore non-loopback origins and must not log [token]. */
     fun onLocalLaunch(origin: String, token: String, launchId: Long)

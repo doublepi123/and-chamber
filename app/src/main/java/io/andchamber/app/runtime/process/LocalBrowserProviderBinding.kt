@@ -7,6 +7,8 @@ import io.andchamber.app.ui.browser.NativeBrowserPresenter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -32,15 +34,46 @@ class LocalBrowserProviderBinding(
             executor = router,
             scope = scope,
             registry = presenter.registry,
-            onConnection = { connectionId -> presenter.setConnection(connectionId, launchId) },
+            onConnection = ownConnection(presenter, launchId),
             onCancel = { requestId -> presenter.cancel(requestId) },
         )
     },
 ) : BrowserProviderSink {
+    companion object {
+        /**
+         * Each client publishes its own connection and clears only that one, so a stopping client's
+         * late disconnect cannot wipe the connection a newer client already adopted.
+         */
+        fun ownConnection(presenter: NativeBrowserPresenter, launchId: Long): (String?) -> Unit {
+            var published: String? = null
+            return { connectionId ->
+                if (connectionId != null) {
+                    published = connectionId
+                    presenter.setConnection(connectionId, launchId)
+                } else {
+                    val mine = published
+                    published = null
+                    presenter.clearConnection(mine, launchId)
+                }
+            }
+        }
+    }
+
     private val gate = Mutex()
     private val uiLock = Any()
     private var activeLaunch = 0L
+    private var pending: Pending? = null
     private var client: BrowserProviderClient? = null
+
+    private data class Pending(val origin: String, val token: String, val launchId: Long)
+
+    init {
+        scope.launch {
+            presenter.state.map { it.hostAttached }.distinctUntilChanged().collect { attached ->
+                if (attached) connectPending() else stopCurrent()
+            }
+        }
+    }
 
     override fun trustedHostAttached(): Boolean = presenter.state.value.hostAttached
 
@@ -67,12 +100,15 @@ class LocalBrowserProviderBinding(
         if (current != null) block(current)
     }
 
+    override fun noteVerifiedLaunch(origin: String, token: String, launchId: Long) {
+        if (!ProviderProtocol.isLoopbackOrigin(origin)) return
+        synchronized(uiLock) { pending = Pending(origin, token, launchId) }
+    }
+
     override fun onLocalLaunch(origin: String, token: String, launchId: Long) {
         if (!ProviderProtocol.isLoopbackOrigin(origin)) return
-        if (!trustedHostAttached()) {
-            presenter.setConnection(null, launchId)
-            return
-        }
+        synchronized(uiLock) { pending = Pending(origin, token, launchId) }
+        if (!trustedHostAttached()) return
         scope.launch {
             val previous = gate.withLock {
                 synchronized(uiLock) {
@@ -90,14 +126,22 @@ class LocalBrowserProviderBinding(
                     }
                 }
             }
-            if (stillCurrent) next.start() else {
-                presenter.setConnection(null, launchId)
-                next.stop()
-            }
+            // A client that never started published no connection; stopping it clears nothing else.
+            if (stillCurrent) next.start() else next.stop()
         }
     }
 
+    /** The launch itself ended: its credential is gone for good. */
     override fun onLocalStop(launchId: Long) {
+        synchronized(uiLock) { if (pending?.launchId == launchId) pending = null }
+        disconnect(launchId)
+    }
+
+    /**
+     * Closes the provider connection for [launchId] but keeps the verified credential, so the next
+     * host attach reconnects. Used when the trusted chat page leaves the foreground.
+     */
+    private fun disconnect(launchId: Long) {
         scope.launch {
             val previous = gate.withLock {
                 synchronized(uiLock) {
@@ -105,9 +149,19 @@ class LocalBrowserProviderBinding(
                     activeLaunch = 0L
                     client.also { client = null }
                 }
-            }
-            presenter.setConnection(null, launchId)
-            previous?.stop()
+            } ?: return@launch
+            // The client clears only the connection it published (see ownConnection).
+            previous.stop()
         }
+    }
+
+    private fun connectPending() {
+        val next = synchronized(uiLock) { pending } ?: return
+        onLocalLaunch(next.origin, next.token, next.launchId)
+    }
+
+    private fun stopCurrent() {
+        val launch = synchronized(uiLock) { activeLaunch }
+        if (launch != 0L) disconnect(launch)
     }
 }

@@ -24,6 +24,7 @@ import org.koin.dsl.module
  */
 class OpenChamberProviderInstrumentation : Instrumentation() {
     private var args: Bundle = Bundle()
+    @Volatile private var activity: android.app.Activity? = null
 
     override fun onCreate(arguments: Bundle?) {
         args = arguments ?: Bundle()
@@ -57,13 +58,36 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
                         },
                     )
                 }
+                single {
+                    val presenter = get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
+                    val router = io.andchamber.app.runtime.process.ProviderPageRouter(presenter)
+                    io.andchamber.app.runtime.process.LocalBrowserProviderBinding(
+                        presenter = presenter,
+                        router = router,
+                        clientFactory = { origin, token, launchId ->
+                            io.andchamber.app.browser.provider.BrowserProviderClient(
+                                origin = origin,
+                                token = token,
+                                runtimeLaunchId = launchId,
+                                instanceKey = "local",
+                                clock = { android.os.SystemClock.elapsedRealtime() },
+                                transport = io.andchamber.app.browser.provider.ProviderHttpTransport(origin, token),
+                                executor = HoldExecutor(router, targetContext.filesDir),
+                                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO),
+                                registry = presenter.registry,
+                                onConnection = io.andchamber.app.runtime.process.LocalBrowserProviderBinding.ownConnection(presenter, launchId),
+                                onCancel = { requestId -> presenter.cancel(requestId) },
+                            )
+                        },
+                    )
+                }
                 single<BrowserProviderSession> {
                     // The host server was started with this test token; production issue() must
                     // produce the same one, so the random source is pinned here (androidTest only).
                     BrowserProviderSession(random = PinnedTokenRandom(token), sink = get<LocalBrowserProviderBinding>())
                 }
             })
-            startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             waitForIdleSync()
             val session = org.koin.core.context.GlobalContext.get().get<BrowserProviderSession>()
             val hostDeadline = android.os.SystemClock.uptimeMillis() + 20_000
@@ -83,7 +107,21 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
             // Stay alive until the host writes files/openchamber-provider-stop, at most 20 minutes.
             val stop = java.io.File(targetContext.filesDir, "openchamber-provider-stop").also { it.delete() }
             val deadline = android.os.SystemClock.uptimeMillis() + 20 * 60_000
-            while (android.os.SystemClock.uptimeMillis() < deadline && !stop.exists()) Thread.sleep(500)
+            val command = java.io.File(targetContext.filesDir, "openchamber-provider-command")
+            while (android.os.SystemClock.uptimeMillis() < deadline && !stop.exists()) {
+                val text = if (command.isFile) command.readText() else ""
+                if (text.startsWith("select:")) {
+                    val tabId = text.removePrefix("select:").trim()
+                    runOnMainSync { org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>().select(tabId) }
+                    command.delete()
+                    writeStatus("selected")
+                }
+                if (text == "iframes") {
+                    writeStatus("iframes:${countIframes()}")
+                    command.delete()
+                }
+                Thread.sleep(300)
+            }
             stop.delete()
             writeStatus("finished")
             0
@@ -104,9 +142,64 @@ class OpenChamberProviderInstrumentation : Instrumentation() {
         up.recycle()
     }
 
+    /** Counts iframes in the production chat page (not the floating page), on the main thread. */
+    private fun countIframes(): Int {
+        val presenter = org.koin.core.context.GlobalContext.get().get<io.andchamber.app.ui.browser.NativeBrowserPresenter>()
+        val result = java.util.concurrent.CompletableFuture<String?>()
+        runOnMainSync {
+            val floatView = presenter.currentView()
+            val root = activity?.window?.decorView
+            val web = root?.let { findWebView(it, floatView) }
+            if (web == null) result.complete(null) else web.evaluateJavascript("document.querySelectorAll('iframe').length") { result.complete(it) }
+        }
+        return runCatching { result.get(5, java.util.concurrent.TimeUnit.SECONDS) }.getOrNull()?.trim('"')?.toIntOrNull() ?: -1
+    }
+
+    private fun findWebView(root: android.view.View, excluded: android.view.View?): android.webkit.WebView? {
+        if (root is android.webkit.WebView && root !== excluded) return root
+        if (root is android.view.ViewGroup) {
+            for (index in 0 until root.childCount) {
+                findWebView(root.getChildAt(index), excluded)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun android.content.Context.findActivityRoot(): android.view.View? {
+        var current = this
+        while (current is android.content.ContextWrapper) {
+            if (current is android.app.Activity) return current.window.decorView
+            current = current.baseContext
+        }
+        return null
+    }
+
     private fun writeStatus(phase: String) {
         val file = java.io.File(targetContext.filesDir, "openchamber-provider-status.json")
         file.writeText("""{"phase":"$phase"}""")
+    }
+}
+
+private class HoldExecutor(
+    private val router: io.andchamber.app.runtime.process.ProviderPageRouter,
+    private val files: java.io.File,
+) : io.andchamber.app.browser.provider.ProviderExecutor {
+    override suspend fun execute(
+        request: io.andchamber.app.browser.provider.ProviderRequest,
+        registry: io.andchamber.app.browser.provider.ProviderRegistry,
+        mode: io.andchamber.app.browser.provider.ProviderMode,
+        visibleTabId: String?,
+        deadlineElapsed: Long,
+        clock: () -> Long,
+    ): io.andchamber.app.browser.provider.ProviderResult {
+        val hold = java.io.File(files, "openchamber-provider-hold")
+        if (hold.isFile) {
+            java.io.File(files, "openchamber-provider-status.json").writeText(
+                """{"phase":"held","requestId":"${request.requestId}","connectionId":"${request.connectionId}","action":"${request.action}"}""",
+            )
+            while (hold.isFile) kotlinx.coroutines.delay(200)
+        }
+        return router.execute(request, registry, mode, visibleTabId, deadlineElapsed, clock)
     }
 }
 

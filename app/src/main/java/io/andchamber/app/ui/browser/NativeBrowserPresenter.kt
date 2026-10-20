@@ -6,6 +6,7 @@ import android.view.View
 import io.andchamber.app.browser.BrowserDriver
 import io.andchamber.app.browser.BrowserUrlPolicy
 import io.andchamber.app.browser.UrlDecision
+import io.andchamber.app.browser.provider.AuthorityStamp
 import io.andchamber.app.browser.provider.OpenChamberPageAdapter
 import io.andchamber.app.browser.provider.PageField
 import io.andchamber.app.browser.provider.ProviderCodes
@@ -60,8 +61,10 @@ class NativeBrowserPresenter(
 
     private var host: Host? = null
     private var testHost: Boolean = false
+    private val pages = linkedMapOf<String, BoundPage>()
     private var page: ControlledBrowserPage? = null
     private var adapter: OpenChamberPageAdapter? = null
+    private var paused = false
     private var connectionId: String? = null
     private var runtimeLaunchId: Long = 0L
     private var selectedTabId: String? = null
@@ -102,24 +105,104 @@ class NativeBrowserPresenter(
     }
 
     fun detachHost(instanceKey: String, consoleGeneration: Long) {
-        synchronized(lock) {
+        val matches = synchronized(lock) {
             val current = host ?: return
-            if (current.instanceKey != instanceKey || current.consoleGeneration != consoleGeneration) return
-            revokeLocked("host left")
+            current.instanceKey == instanceKey && current.consoleGeneration == consoleGeneration
+        }
+        if (!matches) return
+        revokeAll("host left")
+        synchronized(lock) {
             releasePageLocked()
             host = null
             publishLocked()
         }
     }
 
+    /**
+     * Clears only the connection [owner] published. A stopping client's late `null` must not wipe the
+     * connection a newer client already adopted.
+     */
+    fun clearConnection(owner: String?, runtimeLaunchId: Long) {
+        val cleared = synchronized(lock) {
+            if (owner == null || this.connectionId != owner || this.runtimeLaunchId != runtimeLaunchId) return@synchronized false
+            this.connectionId = null
+            true
+        }
+        if (cleared) {
+            revokeAll("connection closed")
+            synchronized(lock) { publishLocked() }
+        }
+    }
+
     fun setConnection(connectionId: String?, runtimeLaunchId: Long) {
-        synchronized(lock) {
-            val changed = this.connectionId != connectionId || this.runtimeLaunchId != runtimeLaunchId
+        val changed = synchronized(lock) {
+            val replaced = this.connectionId != connectionId || this.runtimeLaunchId != runtimeLaunchId
             this.connectionId = connectionId
             this.runtimeLaunchId = runtimeLaunchId
-            if (changed) revokeLocked("connection replaced")
-            publishLocked()
+            replaced
         }
+        if (changed || connectionId == null) revokeAll("connection replaced")
+        synchronized(lock) { publishLocked() }
+    }
+
+    /**
+     * The only revoke path. Epoch, the active job and page refs move together before this returns.
+     * A later allow cannot revive the old grant.
+     */
+    fun revokeAll(reason: String) = revokeAll(reason, keepRequestId = null)
+
+    /**
+     * Single revoke path. [keepRequestId] is the caller's own request: an open that revokes the
+     * previous grant must not cancel itself. Every other in-flight page action is cancelled.
+     */
+    private fun revokeAll(reason: String, keepRequestId: String?) {
+        val job = synchronized(lock) {
+            ignored(reason)
+            registry.revokeEpoch()
+            grantEpoch = 0L
+            witnessForGrant = null
+            mode = ProviderMode.MANUAL
+            documentEpoch += 1
+            adapter?.clearRefs()
+            pages.values.forEach { it.adapter.clearRefs() }
+            val running = activeJob
+            if (running != null && keepRequestId != null && activeRequestId == keepRequestId) return@synchronized null
+            activeJob = null
+            activeRequestId = null
+            running
+        }
+        job?.cancel()
+    }
+
+    /** Host left the foreground. Revokes, but keeps the window so resume can show it again. */
+    fun onHostPaused() {
+        paused = true
+        revokeAll("host paused")
+        synchronized(lock) { publishLocked(shown = false) }
+    }
+
+    /** Restores presentation only. A paused grant is not restored. */
+    fun onHostResumed() {
+        paused = false
+        synchronized(lock) { publishLocked() }
+    }
+
+    /**
+     * The user Browser entry. The owner is recorded on the tab and is not a grant.
+     * This does not authorize the page.
+     */
+    suspend fun openUser(url: String, ownerSessionId: String): ProviderResult {
+        val request = ProviderRequest(
+            serverEpoch = "user",
+            connectionId = connectionId.orEmpty(),
+            requestId = "user-open",
+            action = "browser.open",
+            parameters = mapOf("url" to url),
+            directory = "/",
+            sessionId = ownerSessionId,
+            timeoutMs = 1_000L,
+        )
+        return openClaimed(request, Long.MAX_VALUE)
     }
 
     /** Binding compatibility. Allow itself re-probes; this only records the requested tab. */
@@ -131,10 +214,8 @@ class NativeBrowserPresenter(
     }
 
     fun revokeFromBinding() {
-        synchronized(lock) {
-            revokeLocked("binding revoke")
-            publishLocked()
-        }
+        revokeAll("binding revoke")
+        synchronized(lock) { publishLocked() }
     }
 
     fun prepareAgent() {
@@ -153,43 +234,83 @@ class NativeBrowserPresenter(
     }
 
     fun cancel(requestId: String) {
-        val job = synchronized(lock) {
-            if (activeRequestId != requestId) null else activeJob.also {
-                activeJob = null
-                activeRequestId = null
-                revokeLocked("cancelled")
-            }
-        }
-        job?.cancel()
+        if (synchronized(lock) { activeRequestId } != requestId) return
+        revokeAll("cancelled")
     }
 
     /** User or frontend selection. Does not navigate and does not create a tab. */
-    fun select(tabId: String): Boolean = synchronized(lock) {
-        val tab = registry.find(tabId) ?: return false
-        if (selectedTabId == tabId) return true
-        revokeLocked("tab selected")
-        selectedTabId = tab.tabId
-        publishLocked()
-        true
+    fun select(tabId: String): Boolean {
+        val changed = synchronized(lock) {
+            val tab = registry.find(tabId) ?: return false
+            if (selectedTabId == tabId) return true
+            selectedTabId = tab.tabId
+            val bound = pages[tab.tabId]
+            page = bound?.page
+            adapter = bound?.adapter
+            true
+        }
+        if (changed) revokeAll("tab selected")
+        materializeSelected()
+        synchronized(lock) { publishLocked() }
+        return true
     }
 
-    fun close(tabId: String): Boolean = synchronized(lock) {
-        val removed = registry.close(tabId) ?: return false
-        if (selectedTabId == removed.tabId) {
-            revokeLocked("tab closed")
-            selectedTabId = registry.tabs().lastOrNull()?.tabId
-            if (selectedTabId == null) releasePageLocked()
+    /**
+     * A tab registered while another owner's page was visible has no WebView yet. Selecting it is the
+     * user's choice to see it, so its page is created and loaded once here. This is not a grant.
+     */
+    private fun materializeSelected() {
+        val (tab, prepared) = synchronized(lock) {
+            val tabId = selectedTabId ?: return
+            if (pages[tabId] != null) return
+            val tab = registry.find(tabId) ?: return
+            val current = host ?: return
+            tab to PreparedOpen(current, current.context)
         }
-        publishLocked()
-        true
+        val created = sessionFactory(prepared.context) ?: return
+        val pageAdapter = adapterFor(created)
+        synchronized(lock) {
+            if (selectedTabId != tab.tabId || pages[tab.tabId] != null || host?.consoleGeneration != prepared.host.consoleGeneration) {
+                created.destroy()
+                return
+            }
+            created.tabId = tab.tabId
+            pages[tab.tabId] = BoundPage(created, pageAdapter, viewGeneration + 1)
+            page = created
+            adapter = pageAdapter
+            viewGeneration += 1
+            documentEpoch += 1
+            mode = ProviderMode.MANUAL
+            created.manualNavigation = false
+            bind(created)
+        }
+        scope.launch {
+            if (!created.loadOnce(tab.url)) synchronized(lock) { pages[tab.tabId]?.outcomeUnknown = true }
+            synchronized(lock) { publishLocked() }
+        }
+    }
+
+    fun close(tabId: String): Boolean {
+        val removed = synchronized(lock) { registry.close(tabId) } ?: return false
+        pages.remove(removed.tabId)?.page?.destroy()
+        if (selectedTabId == removed.tabId) {
+            synchronized(lock) {
+                selectedTabId = registry.tabs().lastOrNull()?.tabId
+                val bound = selectedTabId?.let { pages[it] }
+                page = bound?.page
+                adapter = bound?.adapter
+                if (selectedTabId == null) releasePageLocked()
+            }
+            revokeAll("tab closed")
+        }
+        synchronized(lock) { publishLocked() }
+        return true
     }
 
     /** Moves the window off the agent path. A page that is no longer shown cannot be driven. */
     fun background() {
-        synchronized(lock) {
-            revokeLocked("background")
-            publishLocked(shown = false)
-        }
+        revokeAll("background")
+        synchronized(lock) { publishLocked(shown = false) }
     }
 
     /**
@@ -197,18 +318,13 @@ class NativeBrowserPresenter(
      * top-level navigation. This is not an agent grant.
      */
     fun takeover() {
-        val job = synchronized(lock) {
+        synchronized(lock) {
             mode = ProviderMode.MANUAL
             page?.manualNavigation = true
-            adapter?.clearRefs()
-            val running = activeJob
-            activeJob = null
-            activeRequestId = null
-            revokeLocked("takeover")
-            publishLocked()
-            running
+            pages[selectedTabId]?.page?.manualNavigation = true
         }
-        job?.cancel()
+        revokeAll("takeover")
+        synchronized(lock) { publishLocked() }
     }
 
     /**
@@ -221,10 +337,11 @@ class NativeBrowserPresenter(
             val tabId = selectedTabId
             val tab = tabId?.let { registry.find(it) }
             val connection = connectionId
-            if (current == null || tab == null || connection == null || tab.ownerSessionId.isBlank()) {
+            val bound = tabId?.let { pages[it] }
+            if (current == null || tab == null || connection == null || tab.ownerSessionId.isBlank() || bound == null || bound.outcomeUnknown || bound.page.tabId != tab.tabId) {
                 null
             } else {
-                AllowSnapshot(current, tab, connection, page, documentEpoch, viewGeneration)
+                AllowSnapshot(current, tab, connection, bound.page, documentEpoch, bound.generation)
             }
         } ?: return@withContext false
         val probed = snapshot.page?.probe() ?: return@withContext false
@@ -232,12 +349,14 @@ class NativeBrowserPresenter(
         val granted = synchronized(lock) {
             val current = host
             val pageNow = page
-            current != null && pageNow != null &&
+            val bound = pages[snapshot.tab.tabId]
+            current != null && pageNow != null && bound != null && !bound.outcomeUnknown &&
                 current.instanceKey == snapshot.host.instanceKey &&
                 current.consoleGeneration == snapshot.host.consoleGeneration &&
                 pageNow === snapshot.page &&
+                bound.page === snapshot.page &&
                 documentEpoch == snapshot.epoch &&
-                viewGeneration == snapshot.generation &&
+                bound.generation == snapshot.generation &&
                 selectedTabId == snapshot.tab.tabId &&
                 connectionId == snapshot.connection
         }
@@ -353,10 +472,6 @@ class NativeBrowserPresenter(
                 PreparedOpen(currentHost, context)
             }
         } ?: return@withContext unavailable()
-        val url = request.parameters["url"].orEmpty()
-        if (url.isBlank() || policy().checkSyntax(url) !is UrlDecision.Allow) {
-            return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "url refused")
-        }
         val named = request.parameters["tabId"]?.takeIf { it.isNotBlank() }
         if (named != null && registry.find(named) == null) {
             return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "unknown tab")
@@ -364,30 +479,48 @@ class NativeBrowserPresenter(
         if (named != null && registry.ownedByOther(session, request.directory, named)) {
             return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "other session")
         }
+        val url = request.parameters["url"].orEmpty()
+        if (url.isBlank() || policy().checkSyntax(url) !is UrlDecision.Allow) {
+            return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "url refused")
+        }
+        val activeOwner = synchronized(lock) { registry.find(selectedTabId.orEmpty())?.ownerSessionId }
+        if (activeOwner != null && activeOwner != session && pages[selectedTabId] != null) {
+            // Keep the visible owner's page. The other owner gets a registry tab and no WebView.
+            val parked = OpenChamberPageAdapter(driver = UnavailableDriver, present = { true })
+                .openClaimed(request, registry, session)
+            synchronized(lock) { publishLocked() }
+            return@withContext parked.result
+        }
         val created = sessionFactory(prepared.context) ?: return@withContext unavailable()
-        val previous = synchronized(lock) {
+        val replacingOwn = synchronized(lock) { activeOwner == null || activeOwner == session }
+        if (!replacingOwn) {
+            created.destroy()
+            return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "other session")
+        }
+        synchronized(lock) {
             if (host?.consoleGeneration != prepared.host.consoleGeneration) {
                 created.destroy()
                 return@withContext unavailable()
             }
-            revokeLocked("open")
-            val old = page
-            page = created
-            viewGeneration += 1
-            documentEpoch += 1
-            adapter = adapterFor(created)
-            bind(created)
-            publishLocked(shown = true)
-            old
         }
-        previous?.destroy()
-        val pageAdapter = synchronized(lock) { adapter } ?: return@withContext unavailable()
+        revokeAll("open", keepRequestId = request.requestId)
+        val pageAdapter = adapterFor(created)
         val opened = pageAdapter.openClaimed(request, registry, session)
+        val tabId = opened.tab?.tabId
         synchronized(lock) {
-            if (opened.result.ok) {
-                selectedTabId = opened.tab?.tabId
+            if (opened.result.ok && tabId != null) {
+                created.tabId = tabId
+                pages[tabId] = BoundPage(created, pageAdapter, viewGeneration + 1)
+                page = created
+                adapter = pageAdapter
+                selectedTabId = tabId
+                viewGeneration += 1
+                documentEpoch += 1
                 mode = ProviderMode.MANUAL
                 created.manualNavigation = false
+                bind(created)
+            } else {
+                created.destroy()
             }
             publishLocked(shown = opened.result.ok)
         }
@@ -421,30 +554,28 @@ class NativeBrowserPresenter(
     }
 
     private fun onFatal(source: ControlledBrowserPage) {
+        val current = synchronized(lock) { page === source }
+        if (!current) return
+        revokeAll("fatal")
         synchronized(lock) {
-            if (page !== source) return
-            revokeLocked("fatal")
             releasePageLocked()
             publishLocked(error = "The page stopped")
         }
     }
 
     private fun onUnknown(source: ControlledBrowserPage) {
-        synchronized(lock) {
-            if (page !== source) return
-            source.markUnknown()
-            revokeLocked("unknown navigation")
-            publishLocked()
-        }
+        val current = synchronized(lock) { page === source }
+        if (!current) return
+        source.markUnknown()
+        revokeAll("unknown navigation")
+        synchronized(lock) { publishLocked() }
     }
 
     private fun onManualDocument(source: ControlledBrowserPage) {
         synchronized(lock) {
             if (page !== source || !source.manualNavigation) return
             source.clearAcceptedWitness()
-            adapter?.clearRefs()
-            documentEpoch += 1
-            revokeLocked("manual document")
+            pages[source.tabId]?.outcomeUnknown = false
             publishLocked()
         }
     }
@@ -470,17 +601,23 @@ class NativeBrowserPresenter(
         instanceKey = host?.instanceKey ?: "local",
         clock = clock,
         viewportSize = { page.width to page.height },
-        documentFields = { ref -> page.currentField(ref)?.let { mapOf(ref to it) } },
+        documentFields = { ref -> page.currentField(ref)?.let { mapOf(ref to it) } ?: emptyMap() },
+        requireCurrentDom = true,
+        authority = {
+            val grant = registry.currentGrant()
+            AuthorityStamp(
+                grantEpoch = grant?.grantEpoch ?: 0L,
+                documentId = page.acceptedDocument(),
+                tabId = page.tabId,
+                granted = grant != null && grant.tabId == page.tabId && grant.tabId == selectedTabId,
+            )
+        },
+        onOutcomeUnknown = {
+            synchronized(lock) { pages[page.tabId]?.outcomeUnknown = true }
+        },
     )
 
-    private fun revokeLocked(reason: String) {
-        ignored(reason)
-        registry.revokeEpoch()
-        grantEpoch = 0L
-        witnessForGrant = null
-        mode = ProviderMode.MANUAL
-        documentEpoch += 1
-    }
+    private fun revokeLocked(reason: String) = revokeAll(reason)
 
     private fun releasePageLocked() {
         page?.destroy()
@@ -512,6 +649,7 @@ class NativeBrowserPresenter(
             viewGeneration = viewGeneration,
             hostAttached = host != null,
             documentEpoch = documentEpoch,
+            paused = paused,
         )
     }
 
@@ -522,6 +660,13 @@ class NativeBrowserPresenter(
     )
 
     private fun ignored(value: String?) = value
+
+    private data class BoundPage(
+        val page: ControlledBrowserPage,
+        val adapter: OpenChamberPageAdapter,
+        val generation: Long,
+        var outcomeUnknown: Boolean = false,
+    )
 
     private data class Host(val context: Context?, val instanceKey: String, val consoleGeneration: Long)
     private data class PreparedOpen(val host: Host, val context: Context?)
@@ -540,6 +685,7 @@ class NativeBrowserPresenter(
  * fake so the authority rules do not need a WebView.
  */
 interface ControlledBrowserPage {
+    var tabId: String?
     val view: View?
     val handle: Int
     val width: Int
@@ -561,7 +707,13 @@ interface ControlledBrowserPage {
     fun syncWitness(documentId: String)
     suspend fun currentFields(): Map<String, PageField>?
     suspend fun currentField(ref: String): PageField? = currentFields()?.get(ref)
+    fun acceptedDocument(): String? = null
     fun destroy()
+}
+
+private object UnavailableDriver : BrowserDriver {
+    override suspend fun execute(request: io.andchamber.app.browser.BrowserRequest): io.andchamber.app.browser.BrowserReply =
+        io.andchamber.app.browser.BrowserReply(ok = false)
 }
 
 private fun presenterHostAlive(context: Context): Boolean {
@@ -572,6 +724,7 @@ private fun presenterHostAlive(context: Context): Boolean {
 internal class WebControlledPage(
     private val session: BrowserSession,
 ) : ControlledBrowserPage {
+    override var tabId: String? = null
     override val view: View get() = session.view
     override val handle: Int get() = session.view.hashCode()
     override val width: Int get() = session.view.width
@@ -629,6 +782,7 @@ internal class WebControlledPage(
     override fun syncWitness(documentId: String) {
         session.acceptedDocumentId = documentId
     }
+    override fun acceptedDocument(): String? = session.acceptedDocumentId
     override suspend fun currentFields(): Map<String, PageField>? = null
 
     override suspend fun currentField(ref: String): PageField? {

@@ -25,6 +25,15 @@ test('child env lookup rejects a process outside the launched tree', () => {
   assert.throws(() => harness.findAgentTool(7, () => ['77'], read), /agent-tool env/);
 });
 
+test('click-count 10 is not accepted as 1 and scroll requires a larger offset', () => {
+  const harness = require('../verify_openchamber_provider_emulator.cjs');
+  assert.equal(harness.exactLabel('click-count:1', 'click-count'), 1);
+  assert.equal(harness.exactLabel('click-count:10', 'click-count'), 10);
+  assert.notEqual(harness.exactLabel('click-count:10', 'click-count'), 1);
+  assert.equal(harness.exactLabel('scroll-y:0', 'scroll-y'), 0);
+  assert.equal(harness.exactLabel('scroll-y:40', 'scroll-y') > harness.exactLabel('scroll-y:0', 'scroll-y'), true);
+});
+
 test('missing UI loop cannot pass and tokens are redacted', () => {
   const report = harness.result([{ name: 'ui-grant-actions', result: 'FAIL', detail: 'not run' }]);
   assert.equal(report.result, 'FAIL');

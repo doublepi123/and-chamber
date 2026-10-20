@@ -85,6 +85,8 @@ class ProviderHttpTransport(
             } finally {
                 if (active === connection) active = null
                 disconnect(connection)
+                currentConnectionId = null
+                if (sawReady && currentCoroutineContext().isActive) send(ProviderProtocol.disconnectEvent())
             }
             if (!currentCoroutineContext().isActive) break
             if (sawReady) attempt += 1

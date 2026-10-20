@@ -101,7 +101,7 @@ class ProviderPageAdapterTest {
             ProviderMode.AGENT,
             1_000L,
         )
-        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, stale.errorCode)
+        assertEquals(ProviderCodes.REF_EXPIRED, stale.errorCode)
 
         val before = driver.calls
         val css = pages.second.execute(
@@ -208,7 +208,7 @@ class ProviderPageAdapterTest {
         val pages = OpenChamberPageAdapter(
             driver,
             viewportSize = { 12 to 34 },
-            documentFields = { mapOf(ref to PageField("button", "submit", "Sign in", submit = true)) },
+            documentFields = { requested -> if (requested == ref) mapOf(ref to PageField("button", "submit", "Sign in", submit = true)) else null },
         )
         val registry = ProviderRegistry { "tab-1" }
         registry.open("s1", "/proj", "local", "https://public.example", "tab-1")

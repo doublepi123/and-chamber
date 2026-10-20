@@ -74,12 +74,12 @@ class BrowserProviderSessionTest {
 
         session.issue(3L)
         session.connect(3L, "http://127.0.0.1:3000", session.trustedHostAttached())
-        assertNull(session.currentToken())
+        assertEquals(64, session.currentToken()?.length)
         session.issue(4L)
         host = true
         session.connect(4L, "http://127.0.0.1:3000", session.trustedHostAttached())
 
-        assertEquals(listOf("stop", "http://127.0.0.1:3000"), seen)
+        assertEquals(listOf("http://127.0.0.1:3000"), seen)
         assertEquals(64, session.currentToken()?.length)
     }
 

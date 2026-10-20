@@ -55,6 +55,31 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `a stopping client's late disconnect does not clear a newer connection`() = runBlocking {
+        val presenter = presenter { FakePage() }
+        val old = io.andchamber.app.runtime.process.LocalBrowserProviderBinding.ownConnection(presenter, 1L)
+        val next = io.andchamber.app.runtime.process.LocalBrowserProviderBinding.ownConnection(presenter, 1L)
+        old("c-old")
+        next("c-new")
+        old(null)
+        val opened = presenter.execute(openRequest().copy(connectionId = "c-new"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        next(null)
+        val refused = presenter.execute(request("browser.snapshot").copy(connectionId = "c-new"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertEquals(ProviderCodes.INVALID_REQUEST, refused.errorCode)
+    }
+
+    @Test
+    fun `open through execute is not cancelled by its own revoke of the previous grant`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val opened = presenter.execute(openRequest(), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertEquals(1, page.loads)
+    }
+
+    @Test
     fun `claimed open creates one session and loads once`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
@@ -154,7 +179,7 @@ class NativeBrowserPresenterTest {
 
     @Test
     fun `current dom password and submission are refused before the driver acts`() = runBlocking {
-        val page = FakePage(fields = mapOf(REF to PageField("input", "password", "Password")))
+        val page = FakePage().also { it.fieldsMutable = mapOf(REF to PageField("input", "password", "Password")) }
         val presenter = presenter { page }
         presenter.setConnection("c1", 4L)
         presenter.openClaimed(openRequest(), 1_000L)
@@ -190,37 +215,118 @@ class NativeBrowserPresenterTest {
             null,
             1_000L,
         ) { 0L }
-        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, typed.errorCode)
+        assertEquals(ProviderCodes.REF_EXPIRED, typed.errorCode)
     }
 
     @Test
-    fun `select does not navigate and close does not recreate`() = runBlocking {
+    fun `allow reads only the visible page and another owner does not replace it`() = runBlocking {
+        var next = "page-A"
+        var ids = 0
+        val presenter = NativeBrowserPresenter(
+            registry = ProviderRegistry { "tab-${++ids}" },
+            scope = CoroutineScope(dispatcher),
+            sessionFactory = { FakePage(text = next).also { next = "page-B" } },
+            main = dispatcher,
+        ).also { it.attachHostForTest("local", 1L) }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(session = "owner-a"), 1_000L)
+        val pageA = presenter.currentView()
+        presenter.allow()
+        val first = presenter.execute(request("browser.snapshot", session = "owner-a"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals(null, first.errorCode)
+        assertTrue(first.data.toString(), first.data.toString().contains("page-A"))
+        val other = presenter.openClaimed(openRequest(session = "owner-b", id = "open-b"), 1_000L)
+        assertEquals("ok", other.errorCode ?: "ok")
+        assertTrue(presenter.currentView() === pageA)
+        presenter.select(presenter.registry.tabs().last().tabId)
+        // A's grant is gone the moment B's tab is selected.
+        assertNull(presenter.registry.currentGrant())
+        val aAfterSelect = presenter.execute(request("browser.snapshot", id = "r-a2", session = "owner-a"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals(ProviderCodes.AUTHORIZATION_REQUIRED, aAfterSelect.errorCode)
+        // B gets its own page; allowing it reads B, never A's WebView.
+        assertTrue(presenter.allow())
+        val b = presenter.execute(request("browser.snapshot", id = "r-b", session = "owner-b"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertTrue(b.data.toString(), b.data.toString().contains("page-B"))
+        assertFalse(b.data.toString().contains("page-A"))
+        val aAfterAllow = presenter.execute(request("browser.snapshot", id = "r-a3", session = "owner-a"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals(ProviderCodes.AUTHORIZATION_REQUIRED, aAfterAllow.errorCode)
+    }
+
+    @Test
+    fun `revokeAll cancels the active job and a revoked field check is refused`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        presenter.openClaimed(openRequest(), 1_000L)
+        presenter.allow()
+        assertTrue(presenter.beginForTest("r-hold"))
+        val refused = presenter.execute(
+            request("browser.type", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""", "value" to "x")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            5_000L,
+        ) { 0L }
+        assertEquals(ProviderCodes.BUSY, refused.errorCode)
+        presenter.takeover()
+        assertNull(presenter.registry.currentGrant())
+        assertEquals(ProviderMode.MANUAL, presenter.state.value.mode)
+    }
+
+    @Test
+    fun `select does not navigate an existing page and close does not recreate`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
         presenter.openClaimed(openRequest(), 1_000L)
         val first = presenter.registry.tabs().single().tabId
         presenter.registry.open("session-a", "/proj", "local", "https://example.com/next", "tab-next")
+        // A parked tab has no page yet: selecting it creates one page and loads it once.
         assertTrue(presenter.select("tab-next"))
-        assertEquals(1, page.loads)
         assertEquals("tab-next", presenter.state.value.selectedTabId)
-        assertTrue(presenter.close(first))
+        assertEquals(2, pages.size)
+        assertEquals(listOf(1, 1), pages.map { it.loads })
+        // Selecting back to a tab that already has a page does not navigate it again.
+        assertTrue(presenter.select(first))
+        assertEquals(listOf(1, 1), pages.map { it.loads })
+        assertEquals(2, pages.size)
+        assertTrue(presenter.close("tab-next"))
         assertEquals(1, presenter.registry.tabs().size)
-        assertEquals(1, page.loads)
+        assertEquals(listOf(1, 1), pages.map { it.loads })
     }
 
-    private fun presenter(pageFactory: (android.content.Context?) -> ControlledBrowserPage): NativeBrowserPresenter {
+    @Test
+    fun `selecting another owner's parked tab shows its own page and never grants`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        presenter.openClaimed(openRequest(session = "owner-a"), 1_000L)
+        val parked = presenter.openClaimed(openRequest(session = "owner-b", id = "open-2"), 1_000L)
+        assertTrue(parked.ok)
+        assertEquals(1, pages.size)
+        val bTab = presenter.registry.tabs().first { it.ownerSessionId == "owner-b" }.tabId
+        assertTrue(presenter.select(bTab))
+        assertEquals(2, pages.size)
+        assertFalse(presenter.state.value.agentOn)
+        assertTrue(presenter.state.value.shown)
+    }
+
+    private fun presenter(
+        uniqueTabs: Boolean = false,
+        pageFactory: (android.content.Context?) -> ControlledBrowserPage,
+    ): NativeBrowserPresenter {
+        var ids = 0
         return NativeBrowserPresenter(
-            registry = ProviderRegistry { "tab-real" },
+            registry = ProviderRegistry { if (uniqueTabs) "tab-${++ids}" else "tab-real" },
             scope = CoroutineScope(dispatcher),
             sessionFactory = pageFactory,
             main = dispatcher,
         ).also { it.attachHostForTest("local", 1L) }
     }
 
-    private fun openRequest(session: String = "session-a", tabId: String? = null) = ProviderRequest(
+    private fun openRequest(session: String = "session-a", tabId: String? = null, id: String = "open-1") = ProviderRequest(
         serverEpoch = "e1",
         connectionId = "c1",
-        requestId = "open-1",
+        requestId = id,
         action = "browser.open",
         parameters = buildMap {
             put("url", "https://example.com/login")
@@ -235,18 +341,23 @@ class NativeBrowserPresenterTest {
         action: String,
         id: String = "r1",
         parameters: Map<String, String> = emptyMap(),
+        session: String = "session-a",
     ) = ProviderRequest(
-        "e1", "c1", id, action, parameters, "/proj", "session-a", 1_000L,
+        "e1", "c1", id, action, parameters, "/proj", session, 1_000L,
     )
 
     private class FakePage(
         private val probe: ProbeAcceptance = ProbeAcceptance.Accept("witness-1"),
         private val fields: Map<String, PageField> = mapOf(REF to PageField("input", "text", "Note")),
+        var fieldsMutable: Map<String, PageField> = fields,
+        private val text: String = "page-A",
     ) : ControlledBrowserPage {
         var loads = 0
         var reads = 0
         var actions = 0
         var lastRef: String? = null
+        var fieldWait: CompletableDeferred<Unit>? = null
+        val fieldRelease = CompletableDeferred<Unit>()
         var block: suspend () -> Unit = {}
         override val view: View? = null
         override val handle: Int = 7
@@ -255,6 +366,7 @@ class NativeBrowserPresenterTest {
         override val pageError: String? = null
         override val ready: Boolean = true
         override var manualNavigation: Boolean = false
+        override var tabId: String? = null
         override var onProbe: ((String, Long) -> Unit)? = null
         override var onFatal: (() -> Unit)? = null
         override var onUnknown: (() -> Unit)? = null
@@ -269,7 +381,7 @@ class NativeBrowserPresenterTest {
             BrowserReply(
                 ok = true,
                 result = mapOf(
-                    BrowserDriverLogic.RESULT_SNAPSHOT to """{"url":"https://example.com","title":"Hi","text":"hello","elements":[{"ref":"$REF","role":"input","type":"text","name":"Note"}]}""",
+                    BrowserDriverLogic.RESULT_SNAPSHOT to """{"url":"https://example.com","title":"$text","text":"$text","elements":[{"ref":"$REF","role":"input","type":"text","name":"$text"}]}""",
                     "width" to "320",
                     "height" to "240",
                 ),
@@ -285,7 +397,13 @@ class NativeBrowserPresenterTest {
         override fun markUnknown() = Unit
         override fun clearAcceptedWitness() = Unit
         override fun syncWitness(documentId: String) = Unit
-        override suspend fun currentFields(): Map<String, PageField>? = fields
+        override suspend fun currentFields(): Map<String, PageField>? {
+            fieldWait?.let {
+                it.complete(Unit)
+                fieldRelease.await()
+            }
+            return fieldsMutable
+        }
         override fun destroy() = Unit
     }
 }

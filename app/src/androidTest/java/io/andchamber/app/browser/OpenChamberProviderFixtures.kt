@@ -15,6 +15,7 @@ import java.io.ByteArrayInputStream
  */
 internal object OpenChamberProviderFixtures {
     const val ORIGIN = "https://example.com/openchamber-provider"
+    const val ORIGIN2 = "https://example.com/openchamber-provider-second"
     const val LOGIN_URL = "https://example.com/openchamber-provider-login"
     const val LOGIN_SUBMIT_URL = "https://example.com/openchamber-provider-login/submit"
     const val WELCOME_URL = "https://example.com/openchamber-provider-welcome"
@@ -52,6 +53,7 @@ internal object OpenChamberProviderFixtures {
 
     private fun page(url: String, method: String): String? = when {
         method.equals("GET", true) && url == ORIGIN -> html("provider")
+        method.equals("GET", true) && url == ORIGIN2 -> html("second")
         method.equals("GET", true) && url == LOGIN_URL -> loginHtml
         method.equals("POST", true) && url == LOGIN_SUBMIT_URL -> submitHtml
         method.equals("GET", true) && url == WELCOME_URL -> welcomeHtml
@@ -70,10 +72,11 @@ internal object OpenChamberProviderFixtures {
           <p><button id="apply" type="button" aria-label="Apply"
                onclick="var c=document.getElementById('count');c.textContent='click-count:'+(++window.clicks)">Apply</button></p>
           <span id="count">click-count:0</span>
+          <span id="scroll">scroll-y:0</span>
           <div id="framed">framed:<script>document.write(window.top===window.self?'top':'nested')</script></div>
           <div id="tall"></div>
           <span id="bottom">bottom</span>
-          <script>window.clicks=0</script>
+          <script>window.clicks=0;addEventListener('scroll',function(){document.getElementById('scroll').textContent='scroll-y:'+Math.round(window.scrollY)})</script>
         </body></html>
     """.trimIndent()
 

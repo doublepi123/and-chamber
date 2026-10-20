@@ -10,6 +10,7 @@ const path = require('node:path');
 // Patched OpenChamber checkout (packages/web). Pass --source; the env var is a fallback.
 const SOURCE = process.env.OPENCHAMBER_PROVIDER_SOURCE || '';
 const FIXTURE = 'https://example.com/openchamber-provider';
+const FIXTURE2 = 'https://example.com/openchamber-provider-second';
 const UI_PASSWORD = 'provider-emulator-password';
 
 function parseArgs(argv) {
@@ -67,7 +68,7 @@ function findAgentTool(parentPid, listPids = () => fs.readdirSync('/proc').filte
 function postJson(url, headers, body) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
-    const request = http.request({ hostname: target.hostname, port: target.port, path: `${target.pathname}${target.search}`, method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 20000 }, (response) => {
+    const request = http.request({ hostname: target.hostname, port: target.port, path: `${target.pathname}${target.search}`, method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 60000 }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8'), headers: response.headers }));
@@ -84,7 +85,12 @@ function classify(body) {
 }
 
 async function tool(agent, sessionID, action, input, secrets) {
-  const response = await postJson(agent.url, { Authorization: `Bearer ${agent.token}` }, agentToolBody(action, input, sessionID));
+  let response;
+  try {
+    response = await postJson(agent.url, { Authorization: `Bearer ${agent.token}` }, agentToolBody(action, input, sessionID));
+  } catch (error) {
+    return { status: 'error', ok: false, data: null, error: null, redacted: `transport: ${error.message}` };
+  }
   const parsed = classify(response.body);
   return { status: response.status, ...parsed, redacted: redact(response.body, secrets).slice(0, 240) };
 }
@@ -96,9 +102,12 @@ async function screenshot(args, out, name) {
   }
 }
 
-function adb(args, command) {
+function adb(args, command, timeoutMs = 60000) {
   return new Promise((resolve) => {
     const child = spawn(args.adb, ['-s', args.serial, ...command], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // A dead emulator must not hang the run: every adb call is bounded.
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('close', () => clearTimeout(timer));
     const chunks = [];
     child.stdout.on('data', (chunk) => { chunks.push(chunk); });
     child.on('close', (code) => {
@@ -106,6 +115,25 @@ function adb(args, command) {
       resolve({ code, stdout: raw.toString('utf8'), raw });
     });
   });
+}
+
+function ordinaryClients(port, cookies) {
+  const bodies = ['', ''];
+  const requests = bodies.map((_, index) => http.get({ hostname: '127.0.0.1', port, path: '/api/openchamber/events?browser=1', headers: { Cookie: cookies.map((item) => item.split(';')[0]).join('; ') } }, (response) => {
+    response.on('data', (chunk) => { bodies[index] += chunk.toString('utf8'); });
+  }));
+  return { bodies, stop() { requests.forEach((request) => request.destroy()); } };
+}
+
+async function readStatusJson(args, timeoutMs) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const result = await adb(args, ['exec-out', 'run-as', 'io.andchamber.app', 'cat', 'files/openchamber-provider-status.json']);
+    if (result.code === 0 && result.stdout.includes('"requestId"')) return JSON.parse(result.stdout);
+    if (result.code === 0 && result.stdout.includes('"phase":"iframes:')) return JSON.parse(result.stdout);
+    await sleep(300);
+  }
+  return null;
 }
 
 async function readDeviceStatus(args, phase, timeoutMs) {
@@ -202,6 +230,11 @@ async function forge(port, token) {
     out.push({ name, pass: expect(response), status: response.status, body: response.body.split(token).join('[redacted]') });
   }
   return out;
+}
+
+function exactLabel(text, label) {
+  const match = String(text || '').match(new RegExp(`(?:^|[^A-Za-z0-9_-])${label}:(\\d+)(?!\\d)`));
+  return match ? Number(match[1]) : null;
 }
 
 function result(checks) {
@@ -303,9 +336,12 @@ async function main() {
     const after = await call('browser.snapshot');
     const afterNote = ((after.data && after.data.elements) || []).find((item) => item.name === 'note');
     check('type-value', typed.ok && afterNote && afterNote.value === 'hello-provider', typed.redacted);
-    check('click-count', clicked.ok && /click-count:1/.test((after.data && after.data.text) || ''), clicked.redacted);
+    check('click-count', clicked.ok && exactLabel(after.data && after.data.text, 'click-count') === 1, clicked.redacted);
+    const beforeScroll = exactLabel(after.data && after.data.text, 'scroll-y') || 0;
     const scrolled = await call('browser.scroll', { direction: 'down' });
-    check('scroll', scrolled.ok, scrolled.redacted);
+    const scrollSnap = await call('browser.snapshot');
+    const afterScroll = exactLabel(scrollSnap.data && scrollSnap.data.text, 'scroll-y');
+    check('scroll', scrolled.ok && afterScroll != null && afterScroll > beforeScroll, scrollSnap.redacted);
     const captured = await call('browser.capture', { label: 'e2e' });
     const capturePath = captured.ok && captured.data.path ? path.join(home, captured.data.path) : '';
     const png = capturePath && fs.existsSync(capturePath) ? fs.readFileSync(capturePath) : null;
@@ -324,8 +360,14 @@ async function main() {
     await screenshot(args, args.out, 'takeover.png');
     await tapLabel(args, 'Allow agent');
     await sleep(2500);
-    const stale = apply ? await call('browser.click', { selector: apply.selector }) : { ok: true, redacted: '' };
-    check('stale-ref-after-regrant', !stale.ok, stale.redacted);
+    const latestBeforeTakeover = after;
+    const latestRef = ((latestBeforeTakeover.data && latestBeforeTakeover.data.elements) || []).find((item) => item.name === 'Apply');
+    const stale = latestRef ? await call('browser.click', { selector: latestRef.selector }) : { ok: true, redacted: 'no latest ref' };
+    check('stale-ref-after-regrant', !stale.ok && /REF_EXPIRED/.test(stale.redacted), stale.redacted);
+    const fresh = await call('browser.snapshot');
+    const freshApply = ((fresh.data && fresh.data.elements) || []).find((item) => item.name === 'Apply');
+    const freshClick = freshApply ? await call('browser.click', { selector: freshApply.selector }) : { ok: false, redacted: 'no fresh ref' };
+    check('fresh-ref-after-regrant', freshClick.ok, freshClick.redacted);
 
     // Protocol forgery against the real server.
     const forged = await forge(port, providerToken);
@@ -365,13 +407,83 @@ async function main() {
       manualCookie = await call('browser.snapshot');
     }
     const manualText = (manualCookie && manualCookie.data && manualCookie.data.text) || '';
-    check('manual-login-cookie', !!manualCookie && manualCookie.ok && /oc_fixture_login=signed-in-42/.test(manualText), manualCookie ? (manualText || manualCookie.redacted) : `open=${loginOpen.redacted} form=${!!form}`);
+    check('manual-post-js-cookie-redirect', !!manualCookie && manualCookie.ok && /oc_fixture_login=signed-in-42/.test(manualText), manualCookie ? (manualText || manualCookie.redacted) : `open=${loginOpen.redacted} form=${!!form}`);
 
     // Background revokes reads.
     await adb(args, ['shell', 'input', 'keyevent', 'KEYCODE_HOME']);
     await sleep(1500);
     const background = await call('browser.snapshot');
     check('background-blocks', !background.ok, background.redacted);
+    await adb(args, ['shell', 'am', 'start', '-n', 'io.andchamber.app/.MainActivity']);
+    await sleep(2000);
+    const resumed = await call('browser.snapshot');
+    check('resume-still-unauthorized', !resumed.ok && /AUTHORIZATION_REQUIRED/.test(resumed.redacted), resumed.redacted);
+    const ordinary = await ordinaryClients(port, login.headers['set-cookie'] || []);
+    const during = await call('browser.snapshot');
+    await sleep(1000);
+    ordinary.stop();
+    check('ordinary-clients-no-browser-request', ordinary.bodies.every((body) => !body.includes('browser-control-request')) && (during.ok || /AUTHORIZATION_REQUIRED|UNAVAILABLE/.test(during.redacted)), `streams=${ordinary.bodies.length}`);
+    await adb(args, ['shell', 'run-as io.andchamber.app sh -c \'printf iframes > files/openchamber-provider-command\'']);
+    const iframeStatus = await readStatusJson(args, 10000);
+    check('frontend-no-iframe', iframeStatus && iframeStatus.phase === 'iframes:0', JSON.stringify(iframeStatus || {}));
+    // The hold scenarios need the interactive fixture again (the sign-in step left the welcome page),
+    // a live grant and refs from the current document.
+    const reopened = await call('browser.open', { url: FIXTURE });
+    check('reopen-fixture-before-hold', reopened.ok, reopened.redacted);
+    await sleep(2500);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const holdSnap = await call('browser.snapshot');
+    const holdNote = ((holdSnap.data && holdSnap.data.elements) || []).find((item) => item.name === 'note');
+    check('regrant-before-hold', holdSnap.ok && !!holdNote, holdSnap.redacted);
+    const heldSelector = holdNote ? holdNote.selector : note.selector;
+    await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-hold']);
+    const held = call('browser.type', { selector: heldSelector, value: 'held-value' });
+    const heldStatus = await readStatusJson(args, 15000);
+    const wrongClaim = await rawRequest(port, 'POST', '/api/browser-control/claim', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: 'wrong-connection' }));
+    const wrongNonce = await rawRequest(port, 'POST', '/api/browser-control/result', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: heldStatus && heldStatus.connectionId, claimNonce: 'wrong-nonce', ok: true, data: {} }));
+    const wrongResultConnection = await rawRequest(port, 'POST', '/api/browser-control/result', { 'x-andchamber-browser-token': providerToken }, JSON.stringify({ requestId: heldStatus && heldStatus.requestId, connectionId: 'wrong-connection', claimNonce: 'wrong-nonce', ok: true, data: {} }));
+    check('real-pending-wrong-connection', Boolean(heldStatus && heldStatus.requestId) && /"granted":false/.test(wrongClaim.body) && /"matched":false/.test(wrongNonce.body) && /"matched":false/.test(wrongResultConnection.body), `${wrongClaim.status} ${wrongNonce.status} ${wrongResultConnection.status}`);
+    await adb(args, ['shell', 'run-as io.andchamber.app rm -f files/openchamber-provider-hold']);
+    const heldResult = await held;
+    const heldSnap = await call('browser.snapshot');
+    check('held-type-completes', heldResult.ok && ((heldSnap.data && heldSnap.data.elements) || []).some((item) => item.name === 'note' && item.value === 'held-value'), heldResult.redacted);
+    await adb(args, ['shell', 'run-as io.andchamber.app touch files/openchamber-provider-hold']);
+    const dropped = call('browser.type', { selector: heldSelector, value: 'after-disconnect' }).catch((error) => ({ ok: false, redacted: `transport: ${error.message}` }));
+    await readStatusJson(args, 15000);
+    // nc -L forks one child per connection; kill the listener and its children so the SSE really drops.
+    await adb(args, ['shell', `pid=$(cat /data/local/tmp/relay${port}.pid); for c in $(ps -A -o pid,ppid | awk -v p="$pid" '$2==p{print $1}'); do kill "$c"; done; kill "$pid"`]);
+    const droppedResult = await dropped;
+    check('claim-disconnect-no-mutation', droppedResult.ok === false, droppedResult.redacted);
+    await adb(args, ['shell', 'run-as io.andchamber.app rm -f files/openchamber-provider-hold']);
+    await adb(args, ['shell', `nohup nc -L -s 127.0.0.1 -p ${port} nc 10.0.2.2 ${port} >/dev/null 2>&1 & echo $! > /data/local/tmp/relay${port}.pid`]);
+    // Wait for the provider to reconnect, then the old grant must be gone.
+    let reconnected = null;
+    const reconnectDeadline = Date.now() + 30000;
+    while (Date.now() < reconnectDeadline) {
+      reconnected = await call('browser.snapshot');
+      if (!/No Android browser provider/.test(reconnected.redacted)) break;
+      await sleep(1000);
+    }
+    check('reconnect-requires-allow', !reconnected.ok && /AUTHORIZATION_REQUIRED/.test(reconnected.redacted), reconnected.redacted);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const afterReconnect = await call('browser.snapshot');
+    const reconnectNote = ((afterReconnect.data && afterReconnect.data.elements) || []).find((item) => item.name === 'note');
+    check('disconnect-did-not-type', afterReconnect.ok && !!reconnectNote && reconnectNote.value === 'held-value', afterReconnect.redacted);
+    const secondOpen = await call('browser.open', { url: FIXTURE2 }, second);
+    const firstStill = await call('browser.snapshot');
+    check('second-open-keeps-first', secondOpen.ok && firstStill.ok && /^provider\b/.test((firstStill.data && firstStill.data.text) || ''), `${secondOpen.redacted} | ${firstStill.redacted}`);
+    await adb(args, ['shell', 'run-as io.andchamber.app sh -c \'printf %s "select:' + (secondOpen.data && secondOpen.data.tabId) + '" > files/openchamber-provider-command\'']);
+    await readDeviceStatus(args, 'selected', 10000);
+    const firstAfterSelect = await call('browser.snapshot');
+    check('first-fails-after-second-selected', !firstAfterSelect.ok && /AUTHORIZATION_REQUIRED/.test(firstAfterSelect.redacted), firstAfterSelect.redacted);
+    await tapLabel(args, 'Allow agent');
+    await sleep(2500);
+    const secondAfterAllow = await call('browser.snapshot', {}, second);
+    check('second-marker', secondAfterAllow.ok && /^second\b/.test((secondAfterAllow.data && secondAfterAllow.data.text) || ''), secondAfterAllow.redacted);
+    const firstAfterSecondAllow = await call('browser.snapshot');
+    check('first-still-refused-after-second-allow', !firstAfterSecondAllow.ok, firstAfterSecondAllow.redacted);
   } catch (error) {
     checks.push({ name: 'runner', result: 'FAIL', detail: redact(error.message, secrets) });
     fs.writeFileSync(path.join(args.out, 'server-stderr.log'), redact(stderr, secrets), { mode: 0o600 });
@@ -390,4 +502,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { parseArgs, redact, agentToolBody, childEnv, findAgentTool, classify, result, FIXTURE };
+module.exports = { parseArgs, redact, agentToolBody, childEnv, findAgentTool, classify, exactLabel, result, FIXTURE };

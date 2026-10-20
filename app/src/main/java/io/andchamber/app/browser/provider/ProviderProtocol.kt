@@ -15,6 +15,7 @@ import kotlinx.serialization.json.longOrNull
 object ProviderProtocol {
     const val PROTOCOL_VERSION = 1
     const val READY = "openchamber:event-stream-ready"
+    const val DISCONNECT = "openchamber:event-stream-disconnected"
     const val REQUEST = "openchamber:browser-control-request"
     const val CANCEL = "openchamber:browser-control-cancel"
     const val TOKEN_HEADER = "X-AndChamber-Browser-Token"
@@ -46,6 +47,10 @@ object ProviderProtocol {
     }
 
     fun isLoopbackOrigin(origin: String): Boolean = LOOPBACK_ORIGIN.matches(origin)
+
+    fun disconnectEvent(): String = """{"type":"$DISCONNECT"}"""
+
+    fun isDisconnect(data: String): Boolean = parse(data)?.string("type") == DISCONNECT
 
     fun parseReady(data: String): Ready? {
         val obj = parse(data) ?: return null

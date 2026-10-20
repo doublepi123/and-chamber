@@ -74,4 +74,5 @@ object ProviderCodes {
     const val BUSY = "BUSY"
     const val CANCELLED = "CANCELLED"
     const val BROWSER_PAGE_UNAVAILABLE = "BROWSER_PAGE_UNAVAILABLE"
+    const val REF_EXPIRED = "REF_EXPIRED"
 }

@@ -143,6 +143,15 @@ internal class ChamberWebView(
     /** Local trusted chat only. Target-site pages never receive this. */
     var browserHost: BrowserHostSurface? = null
     var browserTabsJson: () -> String = { "[]" }
+    var browserConsoleGeneration: Long = 0L
+
+    fun acceptsBrowserHost(generation: Long): Boolean =
+        generation == browserConsoleGeneration && mainTrusted && !gatewayLoginMode && !destroyed && browserHost != null
+
+    fun unbindBrowserHost() {
+        browserHost = null
+        browserConsoleGeneration += 1
+    }
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
     var sessionCookies: WebSessionCookies? = null
@@ -475,6 +484,7 @@ internal class ChamberWebView(
             // Every main-frame document starts with a fresh token and no bridge unless it is ours.
             rotateToken()
             mainTrusted = false
+            unbindBrowserHost()
             if (url.isNullOrEmpty() || url == BLANK) {
                 view.removeJavascriptInterface(BRIDGE_NAME)
                 return
@@ -883,9 +893,23 @@ internal class ChamberWebView(
         }
 
         @JavascriptInterface
-        fun browserPresent(token: String?, tabId: String?, title: String?, url: String?, ownerSessionId: String?) {
-            if (!trusted(token) || tabId.isNullOrBlank()) return
-            main.post { browserHost?.present(tabId) }
+        fun browserPresent(token: String?, url: String?, ownerSessionId: String?) {
+            if (!trusted(token) || url.isNullOrBlank() || ownerSessionId.isNullOrBlank()) return
+            val generation = browserConsoleGeneration
+            main.post {
+                if (!acceptsBrowserHost(generation)) return@post
+                browserHost?.present(url, ownerSessionId)
+            }
+        }
+
+        @JavascriptInterface
+        fun browserContext(token: String?, sessionId: String?, directory: String?) {
+            if (!trusted(token) || sessionId.isNullOrBlank()) return
+            val generation = browserConsoleGeneration
+            main.post {
+                if (!acceptsBrowserHost(generation)) return@post
+                browserHost?.context(sessionId)
+            }
         }
 
         @JavascriptInterface
@@ -897,13 +921,21 @@ internal class ChamberWebView(
         @JavascriptInterface
         fun browserSelect(token: String?, tabId: String?) {
             if (!trusted(token) || tabId.isNullOrBlank()) return
-            main.post { browserHost?.select(tabId) }
+            val generation = browserConsoleGeneration
+            main.post {
+                if (!acceptsBrowserHost(generation)) return@post
+                browserHost?.select(tabId)
+            }
         }
 
         @JavascriptInterface
         fun browserClose(token: String?, tabId: String?) {
             if (!trusted(token) || tabId.isNullOrBlank()) return
-            main.post { browserHost?.close(tabId) }
+            val generation = browserConsoleGeneration
+            main.post {
+                if (!acceptsBrowserHost(generation)) return@post
+                browserHost?.close(tabId)
+            }
         }
 
         @JavascriptInterface
@@ -930,10 +962,11 @@ internal class ChamberWebView(
           if (!bridge) return;
           var token = ${JSONObject.quote(bridgeToken)};
           window.AndChamberBrowserHost = {
-            present: function(tab){ bridge.browserPresent(token, tab && tab.tabId, tab && tab.title, tab && tab.url, tab && tab.ownerSessionId); },
+            present: function(tab){ bridge.browserPresent(token, tab && tab.url, tab && tab.ownerSessionId); },
             select: function(tabId){ bridge.browserSelect(token, tabId); },
             close: function(tabId){ bridge.browserClose(token, tabId); },
-            tabs: function(){ return JSON.parse(bridge.browserTabs(token) || "[]"); }
+            tabs: function(){ return JSON.parse(bridge.browserTabs(token) || "[]"); },
+            context: function(ctx){ bridge.browserContext(token, ctx && ctx.sessionId, ctx && ctx.directory); }
           };
           window.dispatchEvent(new Event("andchamber-browser-host-ready"));
           function save(blob, name) {

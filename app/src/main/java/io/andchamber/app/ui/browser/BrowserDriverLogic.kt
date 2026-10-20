@@ -349,7 +349,10 @@ internal object BrowserDriverLogic {
               var type = ((found.getAttribute("type") || "") + "").toLowerCase();
               var tag = (found.tagName || "").toLowerCase();
               var name = ((found.getAttribute("name") || found.getAttribute("aria-label") || "") + "").replace(/\s+/g, " ").trim().slice(0, 120);
-              var submit = type === "submit" || type === "image" || (tag === "button" && name.toLowerCase() === "submit");
+              // A <button> inside a form without an explicit type submits it.
+              var submit = type === "submit" || type === "image" || (tag === "button" && !!found.form && type === "");
+              var auto = ((found.getAttribute("autocomplete") || "") + "").toLowerCase();
+              if (auto === "one-time-code" || auto === "current-password" || auto === "new-password") type = auto;
               return {ok:true, role: roleOf(found), type: type, name: name, submit: submit};
             },
             take: function(nonce){
@@ -375,13 +378,20 @@ internal object BrowserDriverLogic {
               return {ok:true, doc:doc, nonce:nonce, url: String(location.href || ""), title: document.title || "", text: text, elements: out, truncated: list.length > out.length};
             },
             act: function(action, ref, text, direction){
+              function refused(el){
+                var type = ((el.getAttribute("type") || "") + "").toLowerCase();
+                var tag = (el.tagName || "").toLowerCase();
+                var auto = ((el.getAttribute("autocomplete") || "") + "").toLowerCase();
+                var implicit = tag === "button" && el.form && type === "";
+                return type === "password" || type === "file" || type === "hidden" || type === "submit" || type === "image" ||
+                  implicit || auto === "one-time-code" || auto === "current-password" || auto === "new-password";
+              }
               if (action !== "scroll"){
                 if (!ref) return {ok:false, error:"missing ref"};
                 var el = nodes.get(ref);
                 if (!el || !el.isConnected) return {ok:false, error:"ref expired"};
                 if (!box(el) || el.disabled) return {ok:false, error:"not actionable"};
-                var type = ((el.getAttribute("type") || "") + "").toLowerCase();
-                if (type === "password" || type === "file") return {ok:false, error:"refused field"};
+                if (refused(el)) return {ok:false, error:"refused field"};
               }
               if (action === "click"){
                 nodes.get(ref).click();
@@ -391,7 +401,7 @@ internal object BrowserDriverLogic {
                 var field = nodes.get(ref);
                 var tag = (field.tagName || "").toLowerCase();
                 if (tag !== "input" && tag !== "textarea") return {ok:false, error:"not editable"};
-                if (type === "password" || type === "file" || type === "hidden") return {ok:false, error:"refused field"};
+                if (refused(field)) return {ok:false, error:"refused field"};
                 var proto = tag === "textarea" ? window.HTMLTextAreaElement : window.HTMLInputElement;
                 var desc = proto && Object.getOwnPropertyDescriptor(proto.prototype, "value");
                 if (!desc || !desc.set) return {ok:false, error:"not editable"};

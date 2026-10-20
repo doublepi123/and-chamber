@@ -18,6 +18,7 @@ data class NativeBrowserState(
     val viewGeneration: Long = 0L,
     val hostAttached: Boolean = false,
     val documentEpoch: Long = 0L,
+    val paused: Boolean = false,
 )
 
 data class NativeBrowserTab(

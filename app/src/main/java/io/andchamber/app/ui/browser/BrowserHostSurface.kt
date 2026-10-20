@@ -2,6 +2,9 @@ package io.andchamber.app.ui.browser
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
@@ -12,8 +15,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 internal class BrowserHostSurface(
     private val presenter: NativeBrowserPresenter,
 ) {
-    fun present(tabId: String) {
-        presenter.select(tabId)
+    var opener: (suspend (String, String) -> Unit)? = null
+
+    /** Frontend present creates a tab. The owner is recorded, not granted. */
+    fun present(url: String, ownerSessionId: String) {
+        val open = opener ?: return
+        CoroutineScope(Dispatchers.Main.immediate).launch {
+            open(url, ownerSessionId)
+        }
     }
 
     fun select(tabId: String) {
@@ -22,6 +31,15 @@ internal class BrowserHostSurface(
 
     fun close(tabId: String) {
         presenter.close(tabId)
+    }
+
+    /** A different chat session drops the current grant. It does not grant the new session. */
+    fun context(sessionId: String) {
+        val state = presenter.state.value
+        val owner = state.tabs.firstOrNull { it.id == state.selectedTabId }?.owner
+        if (state.agentOn && !owner.isNullOrBlank() && owner != sessionId) {
+            presenter.revokeAll("session-changed")
+        }
     }
 
     @Composable
@@ -39,10 +57,10 @@ internal object BrowserHostEvents {
         append('[')
         state.tabs.forEachIndexed { index, tab ->
             if (index > 0) append(',')
-            append("{\"id\":").append(json(tab.id))
+            append("{\"tabId\":").append(json(tab.id))
             append(",\"title\":").append(json(tab.title))
             append(",\"url\":").append(json(tab.url))
-            append(",\"owner\":").append(json(tab.owner))
+            append(",\"ownerSessionId\":").append(json(tab.owner))
             append(",\"active\":").append(tab.active)
             append('}')
         }

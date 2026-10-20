@@ -226,6 +226,15 @@ class BrowserDriverLogicTest {
     }
 
     @Test
+    fun `agent action script refuses implicit submit and one time code before acting`() {
+        val script = BrowserDriverLogic.installScript("a".repeat(32))
+        assertTrue(script.contains("one-time-code"))
+        assertTrue(script.contains("implicit"))
+        assertTrue(script.contains("return {ok:false, error:\"refused field\"}"))
+        assertTrue(script.contains(".click()"))
+    }
+
+    @Test
     fun `manual navigation returns false and a re-probe may keep the same witness`() {
         val decision = MainFrameDecision.forRequest(method = "GET", redirect = false, manual = true, allowed = true)
         assertFalse(decision.overrideLoading)

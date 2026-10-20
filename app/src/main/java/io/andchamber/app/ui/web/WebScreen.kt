@@ -337,22 +337,50 @@ internal fun WebScreen(
 
     WebLifecycleEffect(web)
     WebHostEffect(web)
-    val localTrusted = isLocal && target is io.andchamber.app.runtime.ServerTarget.Local
-    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, sessionKey) {
+    val localTrusted = isLocal &&
+        target is io.andchamber.app.runtime.ServerTarget.Local &&
+        localState is RuntimeState.Running &&
+        web?.gatewayLoginMode != true &&
+        phase !is SessionPhase.Unreachable
+    val consoleGeneration = sessionKey.hashCode().toLong()
+    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, consoleGeneration) {
         val presenter = browserPresenter
         val activity = context.findActivity()
         if (localTrusted && presenter != null && activity != null && web != null) {
-            web.browserHost = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
+            val host = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
+            host.opener = { url, owner -> presenter.openUser(url, owner) }
+            web.browserHost = host
+            web.browserConsoleGeneration = consoleGeneration
             web.browserTabsJson = { io.andchamber.app.ui.browser.BrowserHostEvents.tabsJson(presenter.state.value) }
-            presenter.attachHost(activity, targetId, sessionKey.hashCode().toLong())
+            presenter.attachHost(activity, targetId, consoleGeneration)
         } else {
-            web?.browserHost = null
-            if (presenter != null) presenter.detachHost(targetId, sessionKey.hashCode().toLong())
+            web?.unbindBrowserHost()
+            presenter?.onHostPaused()
+            presenter?.detachHost(targetId, consoleGeneration)
         }
         onDispose {
-            web?.browserHost = null
-            browserPresenter?.background()
-            browserPresenter?.detachHost(targetId, sessionKey.hashCode().toLong())
+            web?.unbindBrowserHost()
+            browserPresenter?.onHostPaused()
+            browserPresenter?.detachHost(targetId, consoleGeneration)
+        }
+    }
+    val hostLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(browserPresenter, localTrusted, hostLifecycle) {
+        val presenter = browserPresenter
+        if (presenter == null || !localTrusted) return@DisposableEffect onDispose {}
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> presenter.onHostPaused()
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> presenter.onHostResumed()
+                else -> Unit
+            }
+        }
+        hostLifecycle.lifecycle.addObserver(observer)
+        onDispose { hostLifecycle.lifecycle.removeObserver(observer) }
+    }
+    if (localTrusted && browserPresenter != null && web != null) {
+        io.andchamber.app.ui.browser.PublishHostState(browserPresenter) { script ->
+            if (web.acceptsBrowserHost(consoleGeneration)) web.view?.evaluateJavascript(script, null)
         }
     }
 

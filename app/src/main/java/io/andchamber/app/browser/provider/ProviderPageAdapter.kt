@@ -36,7 +36,10 @@ class OpenChamberPageAdapter(
     private val clock: () -> Long = { 0L },
     private val viewportMode: () -> String = { "fill" },
     private val viewportSize: () -> Pair<Int, Int> = { 0 to 0 },
-    private val documentFields: suspend (String) -> Map<String, PageField>? = { null },
+    private val documentFields: (suspend (String) -> Map<String, PageField>?)? = null,
+    private val requireCurrentDom: Boolean = false,
+    private val authority: (() -> AuthorityStamp)? = null,
+    private val onOutcomeUnknown: () -> Unit = {},
 ) {
     var reads: Int = 0
         private set
@@ -206,11 +209,17 @@ class OpenChamberPageAdapter(
     }
 
     private suspend fun click(request: ProviderRequest): ProviderResult {
-        val ref = resolveClick(request) ?: return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+        val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
+        val ref = resolveClick(request) ?: return refRefusal(request.parameters["selector"])
         val field = currentField(ref)
-        if (field == null || isSubmissionControl(field)) {
+        if (!sameAuthority(stamp)) return revokedDuringAction()
+        if (field == null) {
+            return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "field check failed")
+        }
+        if (isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "form submission refused")
         }
+        if (!sameAuthority(stamp)) return revokedDuringAction()
         val reply = driver.execute(
             BrowserRequest(
                 id = request.requestId,
@@ -218,6 +227,7 @@ class OpenChamberPageAdapter(
                 params = mapOf(BrowserDriverLogic.PARAM_REF to ref),
             ),
         )
+        if (!sameAuthority(stamp)) return revokedDuringAction()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("clicked", refSelector(ref)) })
     }
@@ -225,13 +235,16 @@ class OpenChamberPageAdapter(
     private suspend fun type(request: ProviderRequest): ProviderResult {
         val selector = request.parameters["selector"]
         val ref = ProviderProtocol.selectorRef(selector)
-        if (ref == null || ref !in snapshotRefs) {
-            return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
-        }
+        if (ref == null || ref !in snapshotRefs) return refRefusal(selector)
         val value = request.parameters["value"] ?: request.parameters["text"]
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
+        val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
         val field = currentField(ref)
-        if (field == null || isSensitive(field) || !isEditable(field) || isSubmissionControl(field)) {
+        if (!sameAuthority(stamp)) return revokedDuringAction()
+        if (field == null) {
+            return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "field check failed")
+        }
+        if (isSensitive(field) || !isEditable(field) || isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "refused field")
         }
         val reply = driver.execute(
@@ -244,6 +257,7 @@ class OpenChamberPageAdapter(
                 ),
             ),
         )
+        if (!sameAuthority(stamp)) return revokedDuringAction()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("typed", refSelector(ref)) })
     }
@@ -288,6 +302,14 @@ class OpenChamberPageAdapter(
         )
     }
 
+    /** A well-formed ref that is not in the current snapshot is expired; anything else is unsupported. */
+    private fun refRefusal(selector: String?): ProviderResult =
+        if (ProviderProtocol.selectorRef(selector) != null) {
+            ProviderResult(false, errorCode = ProviderCodes.REF_EXPIRED, message = "take a new snapshot")
+        } else {
+            ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+        }
+
     private fun resolveClick(request: ProviderRequest): String? {
         val selector = request.parameters["selector"]
         val text = request.parameters["text"]
@@ -323,8 +345,20 @@ class OpenChamberPageAdapter(
             BrowserErrorCode.NOT_VISIBLE, BrowserErrorCode.DRIVER -> ProviderCodes.BROWSER_PAGE_UNAVAILABLE
             else -> ProviderCodes.OUTCOME_UNKNOWN
         }
-        android.util.Log.w("AndChamberProvider", "driver refused: ${reply.error?.code} ${reply.error?.message}")
-        return ProviderResult(false, errorCode = code, message = reply.error?.message)
+        android.util.Log.w("AndChamberProvider", "action=driver code=$code class=${reply.error?.code?.name ?: "none"}")
+        return ProviderResult(false, errorCode = code)
+    }
+
+    private fun sameAuthority(stamp: AuthorityStamp): Boolean {
+        val now = authority?.invoke() ?: stamp
+        return now.grantEpoch == stamp.grantEpoch && now.grantEpoch != 0L &&
+            now.documentId == stamp.documentId && now.tabId == stamp.tabId && now.granted
+    }
+
+    private fun revokedDuringAction(): ProviderResult {
+        onOutcomeUnknown()
+        android.util.Log.w("AndChamberProvider", "action=mutate code=${ProviderCodes.OUTCOME_UNKNOWN} class=Revoked")
+        return ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN)
     }
 
     private fun openPayload(tabId: String) = buildJsonObject {
@@ -358,8 +392,12 @@ class OpenChamberPageAdapter(
         }
     }
 
-    private suspend fun currentField(ref: String): PageField? =
-        documentFields(ref)?.get(ref) ?: snapshotFields[ref]
+    private suspend fun currentField(ref: String): PageField? {
+        val live = documentFields?.invoke(ref)
+        if (live != null) return live[ref]
+        if (requireCurrentDom) return null
+        return snapshotFields[ref]
+    }
 
     private fun refSelector(ref: String): String = """[data-andchamber-ref="$ref"]"""
 
@@ -367,6 +405,7 @@ class OpenChamberPageAdapter(
         val type = field.type.lowercase()
         val name = field.name.lowercase()
         return type == "password" || type == "file" || type == "hidden" ||
+            type == "one-time-code" || type == "current-password" || type == "new-password" ||
             name.contains("password") || name.contains("secret") || name.contains("token")
     }
 
@@ -375,7 +414,8 @@ class OpenChamberPageAdapter(
 
     private fun isSubmissionControl(field: PageField): Boolean {
         val type = field.type.lowercase()
-        return field.submit || type == "submit" || type == "image" || field.role == "button" && field.name.equals("submit", ignoreCase = true)
+        // type="button" never submits; the page script reports implicit form submit buttons.
+        return field.submit || type == "submit" || type == "image"
     }
 
 }
@@ -392,6 +432,14 @@ data class PageField(
 data class OpenedPage(
     val result: ProviderResult,
     val tab: ProviderTab? = null,
+)
+
+/** The grant, document and tab an in-flight action must still name after every await. */
+data class AuthorityStamp(
+    val grantEpoch: Long,
+    val documentId: String?,
+    val tabId: String?,
+    val granted: Boolean,
 )
 
 /**
