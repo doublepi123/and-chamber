@@ -154,6 +154,10 @@ class ProotOpenChamberServer(
         val credentialCleared = synchronized(lock) { process == null && readyId == null } &&
             runCatching { invalidateBrowserEndpoint(paths.home, browserTrustedRoot) }.getOrDefault(false)
         runCatching { refreshDns(runtime) }
+        // Best effort: an install from before the policy existed gets it here, and a failure must not block
+        // the start. Without it OpenChamber offers its own OpenCode/OpenChamber update paths.
+        runCatching { OpenChamberPolicy.write(runtime.rootfs) }
+            .onFailure { onLog("Could not write the OpenChamber policy file: ${it.message}") }
         val resolved = suite()
         val browserPrepared = prepareBrowserAdapter(credentialCleared)
 

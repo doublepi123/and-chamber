@@ -56,6 +56,7 @@ Environment (cleared, then set): `HOME=/root`, `PATH` (guest), `LANG=C.UTF-8`, X
 ## Integration
 
 - Consumers: `runtime/LocalRuntimeController.kt` (`start`, `stop`, `isAlive`, `killOwned`); `runtime/install/OpenChamberInstaller.kt` (`ProotCommands`, `ProcessScanner`, `terminateProcessTree`); `data/WebSessionAuthenticatorImpl.kt` (`readyLaunchId` via `LocalReadiness`).
+- `OpenChamberPolicy.kt`: `OpenChamberPolicy.write(rootfs)` writes `etc/openchamber/policy.json` with exactly `{"opencodeBinary":"/usr/local/bin/opencode"}`. OpenChamber then reports its OpenCode upgrade as unavailable (policy, administrator) and launches OpenCode from that path. The write is atomic (`writeFileReplacing`), skipped when the content already matches, and replaces a symlink at the target without writing through it. Invalid JSON would turn OpenChamber's enterprise mode on, so the file is never written partially. Called from `ProotOpenChamberServer.start` (best effort, logged on failure; so existing installs get it on the next start) and from the installer's `finishEnvironment` before activation.
 - Wiring: `di/AppModule.kt` builds `ProotOpenChamberServer`, `ProotStaleServerCleaner`, and the `killOwnedRuntime` kill hook. It passes `browserMcpAsset` from `assets/browser-control/browser-mcp.cjs` and `onBrowserLaunchInvalidated` through `BrowserLaunchRevoker`. The asset reader has no empty default.
 - Storage: `ProotCommands.serverCommand` takes `storage/GuestBinds`.
 - External contracts:
