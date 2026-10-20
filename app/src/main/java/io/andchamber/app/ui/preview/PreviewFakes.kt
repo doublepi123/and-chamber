@@ -6,6 +6,7 @@ import io.andchamber.app.runtime.RemoteServerStore
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeOperation
 import io.andchamber.app.runtime.RuntimeState
+import io.andchamber.app.runtime.RuntimeUpdateState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.SharedStorageState
@@ -23,6 +24,7 @@ internal class FakeRuntimeController(
     initial: RuntimeState = RuntimeState.Stopped,
     info: RuntimeInfo? = PreviewData.info,
     log: List<String> = PreviewData.log,
+    updates: RuntimeUpdateState = RuntimeUpdateState(),
 ) : LocalRuntimeController {
     private val mutableState = MutableStateFlow(initial)
     override val state: StateFlow<RuntimeState> = mutableState.asStateFlow()
@@ -34,6 +36,19 @@ internal class FakeRuntimeController(
 
     private val mutableInfo = MutableStateFlow(info)
     override val info: StateFlow<RuntimeInfo?> = mutableInfo.asStateFlow()
+
+    private val mutableUpdates = MutableStateFlow(updates)
+    override val updates: StateFlow<RuntimeUpdateState> = mutableUpdates.asStateFlow()
+
+    override fun checkForUpdates() = Unit
+
+    override fun update() {
+        mutableState.value = RuntimeState.Installing(InstallStep.CopyEnvironment, null, null, updating = true)
+    }
+
+    override fun dismissUpdateFailure() {
+        mutableUpdates.value = mutableUpdates.value.copy(lastFailure = null)
+    }
 
     override fun install() {
         mutableState.value = RuntimeState.Installing(InstallStep.DownloadRootfs, 0.1f, "alpine-minirootfs")
@@ -62,6 +77,7 @@ internal class FakeRuntimeController(
             RuntimeOperation.Stop -> stop()
             RuntimeOperation.Uninstall -> uninstall()
             RuntimeOperation.Restart -> restart()
+            RuntimeOperation.Update -> update()
         }
     }
 

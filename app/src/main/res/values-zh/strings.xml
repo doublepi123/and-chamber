@@ -10,6 +10,7 @@
     <string name="runtime_notification_channel_description">保持设备上的 OpenChamber 服务器运行</string>
     <string name="runtime_notification_title">OpenChamber</string>
     <string name="runtime_notification_setup">正在设置 Linux 环境</string>
+    <string name="runtime_notification_updating">正在更新 OpenChamber 和 OpenCode</string>
     <string name="runtime_notification_starting">正在启动 OpenChamber</string>
     <string name="runtime_notification_running">运行于 %1$s</string>
     <string name="runtime_notification_stopping">正在停止 OpenChamber</string>
@@ -57,6 +58,7 @@
     <string name="status_checking">检查中</string>
     <string name="status_not_set_up">未安装</string>
     <string name="status_setting_up">安装中</string>
+    <string name="status_updating">更新中</string>
     <string name="status_stopped">已停止</string>
     <string name="status_starting">启动中</string>
     <string name="status_running">运行中</string>
@@ -110,6 +112,36 @@
     <string name="detail_free_space">可用空间</string>
     <string name="unknown_value">—</string>
     <string name="uninstall">卸载</string>
+
+    <!-- OpenChamber 与 OpenCode 更新 -->
+    <string name="update_available">有可用更新</string>
+    <string name="update">更新</string>
+    <string name="updating_title">正在更新 OpenChamber…</string>
+    <string name="update_background_note">更新完成前 OpenChamber 无法使用。你可以离开应用，更新会在后台继续，并在通知中显示进度。</string>
+    <string name="update_dialog_title">更新 OpenChamber？</string>
+    <string name="update_dialog_body_running">更新期间 OpenChamber 会停止，完成后自动重新启动，正在运行的任务会被中断。更新最多下载几百 MB，需要几分钟。项目和设置都会保留；如果更新失败，当前版本仍可继续使用。</string>
+    <string name="update_dialog_body">更新最多下载几百 MB，需要几分钟，完成前无法启动 OpenChamber。项目和设置都会保留；如果更新失败，当前版本仍可继续使用。</string>
+    <string name="update_failed_title">更新未完成</string>
+    <string name="update_failed_kept">当前版本仍然保留，可以照常使用。</string>
+    <string name="dismiss">关闭</string>
+    <string name="copy_details">复制详细信息</string>
+    <string name="update_check">检查更新</string>
+    <string name="update_checking">正在检查…</string>
+    <string name="update_up_to_date">已是最新版本</string>
+    <string name="update_not_checked">尚未检查</string>
+    <string name="update_check_failed">无法检查更新</string>
+    <!-- %1$s：“已是最新版本”或“有可用更新”；%2$s：时间，例如“42 分钟前”或“刚刚” -->
+    <string name="update_status_checked">%1$s · %2$s检查</string>
+    <string name="checked_just_now">刚刚</string>
+    <plurals name="checked_minutes_ago">
+        <item quantity="other">%1$d 分钟前</item>
+    </plurals>
+    <plurals name="checked_hours_ago">
+        <item quantity="other">%1$d 小时前</item>
+    </plurals>
+    <plurals name="checked_days_ago">
+        <item quantity="other">%1$d 天前</item>
+    </plurals>
 
     <!-- 共享存储 -->
     <string name="storage_title">项目与设置文件夹</string>
@@ -228,6 +260,7 @@
     <string name="step_download_rootfs">下载 Linux 基础系统</string>
     <string name="step_extract_rootfs">解压 Linux 基础系统</string>
     <string name="step_install_packages">安装系统软件包</string>
+    <string name="step_copy_environment">复制当前 Linux 系统</string>
     <string name="step_install_openchamber">安装 OpenChamber 和 OpenCode</string>
     <string name="step_build_native_modules">构建终端支持</string>
     <string name="step_verify">检查安装结果</string>
@@ -261,6 +294,8 @@
     <string name="msg_progress_verifying">正在检查 node、opencode 和网页资源</string>
     <string name="msg_progress_activating">正在激活环境</string>
     <string name="msg_progress_done">完成</string>
+    <string name="msg_progress_copying_environment">正在复制当前 Linux 系统</string>
+    <string name="msg_update_not_enough_space">剩余空间不足，无法更新。更新时需要临时复制一份 Linux 系统。</string>
 
     <!-- 独立浏览器，不是 OpenChamber 页面。 -->
     <string name="browser_entry_title">浏览器</string>

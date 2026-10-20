@@ -1,0 +1,8 @@
+0.0.9
+
+New:
+- Update OpenChamber and OpenCode from Home without reinstalling Linux. The app checks npm for newer stable versions. A failed update keeps the current version.
+- Repair no longer downgrades OpenCode.
+
+Fixes:
+- The terminal could not open (pty.node failed to load). Existing installs are repaired on the next app start.

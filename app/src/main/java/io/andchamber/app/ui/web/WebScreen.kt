@@ -565,7 +565,7 @@ internal fun LocalServerPanel(
         }
         is RuntimeState.Installing ->
             StatusPanel(
-                title = stringResource(R.string.setting_up_title),
+                title = stringResource(if (state.updating) R.string.updating_title else R.string.setting_up_title),
                 body = stringResource(UserMessages.stepLabel(state.step)),
                 progress = state.progress ?: Float.NaN,
                 tertiary = home,

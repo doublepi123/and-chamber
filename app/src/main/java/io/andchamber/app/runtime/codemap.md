@@ -14,6 +14,12 @@ Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running Open
   - `WebSessionResult`: `Ready(url)`, `NeedsLogin(url)`, `NeedsGatewayLogin(url)` for interactive remote Access, or `Unreachable(reason)`.
   - Implementations live in `data/` (`WebSessionAuthenticatorImpl`, `WebSessionProfiles`). This package only defines the contract.
 - `LocalRuntimeController.kt`: `DefaultLocalRuntimeController`. Every operation runs under one `operationLock` (a Mutex). `wantsRunning` records user intent and gates automatic recovery. The watchdog and recovery jobs take the same lock.
+- Updates (OpenChamber and OpenCode npm packages, no Alpine re-download):
+  - `updates: StateFlow<RuntimeUpdateState>` holds `checking`, `available` (`RuntimeUpdate`, one `VersionChange` per package, `changed` says whether it moves), `lastCheckedAtMs`, `checkFailed`, `lastFailure`.
+  - Available = per package the higher of the registry (`PackageVersionSource`, `NpmPackageVersionSource`) and the manifest pins, compared with the installed metadata. It never offers a downgrade. A failed registry check still offers the bundled pins, with `checkFailed` set.
+  - `checkForUpdates()` runs outside `operationLock` so the network never holds up the runtime. It is ignored while a check runs. Automatic checks run after detect and after install, throttled by `updateCheckIntervalMillis` (6 h). Manual checks ignore the throttle.
+  - `update()` → `RuntimeOperation.Update` → `updateLocked()`. It stops a running server, calls `installer.update`, and publishes `Installing(updating = true)` while it runs. Success recomputes `available`. Failure does not publish `Failed`: it sets `lastFailure` and keeps the old environment. The server restarts if it was running, otherwise the state rests at Stopped.
+  - Repair installs `max(installed, pinned)` per package, so a repair never downgrades OpenCode. A fresh install uses the pins.
 - `WorkCounter.kt`: counts queued and running work and publishes `busy = count > 0` under one lock. Decrement uses `invokeOnCompletion`, so a job cancelled before it starts still releases its count.
 - `RestartPolicy.kt`: pure backoff budget (2 s, 5 s, 15 s, 30 s). The budget refills only after 120 s of continuous health. A manual start calls `reset()`. The clock is injected.
 - `RuntimePaths.kt`: layout under `filesDir/runtime`. `environment/` (rootfs and `metadata.json`), `environment.staging`, `environment.rollback`, `home/` (guest /root, survives repair), `cache`, `logs`, `workspace`, `proot-tmp`, `command-suite`, `ui-password`.
@@ -33,7 +39,8 @@ Invariants:
 2. A public action (`install/start/stop/repair/uninstall/restart`) → `ForegroundStarter.request(op)`. The service then calls `perform(op)`, which runs `launch(phase)` under `operationLock`.
 3. Start: `startLocked(manual = true)` sets `wantsRunning`, resets the policy, calls `server.start(...)`, then publishes Running and schedules the watchdog.
 4. Stop: `cancelRequested = true`, `wantsRunning = false`, cancel `restartJob`, then `stopLocked()`: `server.stop()` and `killOwned()`, then Stopped.
-5. Repair: `stopLocked()` → `installLocked(thenStart = true)`. Uninstall: `stopLocked()` → `installer.removeAll()` → NotInstalled.
+5. Repair: `stopLocked()` → `installLocked(thenStart = true, repair = true)`. Uninstall: `stopLocked()` → `installer.removeAll()` → NotInstalled, and `updates` resets.
+5a. Update: `updateLocked()`, described under Design. Only the version target and the installed environment are used. The active environment is never replaced unless the copy and npm steps have all passed.
 6. Restart: stop and start as one queued job, used to apply new storage binds.
 7. Watchdog (every 5 s while Running): a dead child starts recovery at once. A live child with a failed `/health` read counts a miss, and 3 consecutive misses start recovery.
 8. Recovery: `restartAfterCrash()` loops over the budget: delay, `server.stop()`, `startLocked(manual = false)`. Budget exhaustion is ordered: `stopAfterExhaustion()` runs `server.stop()` and then `killOwned()`, both under `NonCancellable`. Each step runs in its own try, so a throwing `stop()` does not skip `killOwned()`. Errors are logged. Only after both steps does the controller clear `wantsRunning` and publish the terminal Failed. Because the service decides from `busy` and `state`, the foreground service may finish only after that terminal state with no pending work. A cancellation that arrives during cleanup is rethrown after both steps have run. Owned processes are never left behind when the child is still alive at exhaustion.
@@ -41,7 +48,7 @@ Invariants:
 
 ## Integration
 
-- `di/AppModule.kt` builds `DefaultLocalRuntimeController`, `RuntimeInstallerImpl`, `ProotOpenChamberServer`, `ProotStaleServerCleaner` and `SharedStorageControllerImpl`.
+- `di/AppModule.kt` builds `DefaultLocalRuntimeController` (with `NpmPackageVersionSource(OkHttpClient)` and the manifest pins), `RuntimeInstallerImpl`, `ProotOpenChamberServer`, `ProotStaleServerCleaner` and `SharedStorageControllerImpl`.
 - `di/AppModule.kt` wires `ForegroundStarter { op -> RuntimeService.request(context, op) }`, so the service is started only through this lambda. The service runs `perform(op)`, and reads `busy`. The UI observes `state`, `logTail` and `info`.
 - `data/WebSessionAuthenticatorImpl.kt` implements `WebSessionAuthenticator.prepare(target, cookies)`. It receives the per-target `WebSessionCookies` from `data/WebSessionProfiles.kt` and never touches a global cookie store. The UI passes that capability from `ui/web/WebScreen.kt`.
 - Live DNS: `ProotOpenChamberServer` receives `DnsRefresherMonitor(DnsRefresher(AndroidSystemDnsProvider, AndroidNetworkEvents, reporter))` from `di/AppModule.kt`. The monitor starts after readiness and stops before teardown. See `network/codemap.md`.
