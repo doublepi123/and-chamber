@@ -95,18 +95,25 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 | Node.js | 24.x | Alpine `nodejs` 包 |
 | OpenChamber | 2.4.0 | npm `@openchamber/web` |
 | OpenCode | 2.0.32 | npm `@opencode/cli`（musl 版本） |
-| PRoot | 5.1.107 | Termux 软件包，构建时固定版本并打包为 jniLibs |
+| PRoot | 5.1.107.97 | 源码构建：固定版本源码归档，SHA-256 校验，编译为 jniLibs（与 talloc、libandroid-shmem 一起随 APK 分发） |
 
 ## 从源码构建
 
-需要 JDK 17、Android SDK（platform 35、build-tools 35）、Python 3。不需要 NDK：PRoot 等原生库在构建时从固定版本的 Termux 软件包中提取。
+需要 JDK 17、Android SDK（Command-line Tools latest、platform 35、build-tools 35、NDK 29.0.14206865）、Python 3.12 及以上，以及宿主工具 `make`、`patch`、`awk`、`sh`、`tar`、`xz`、`gzip`、`bzip2`。原生库（PRoot、talloc、libandroid-shmem）从锁定的源码归档编译，不再从 Termux 软件包提取。
 
 ```bash
 export ANDROID_HOME=$HOME/Android/Sdk
+# 安装 NDK（一次性）
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
+# 1. 准备原生源码（联网，Gradle 构建之前执行）
+python3 scripts/prepare_android_runtime_sources.py --output-dir build/runtime-sources
+# 2. 构建与测试（原生编译离线运行，Maven 与 Google 仓库仍需网络）
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 # 输出：app/build/outputs/apk/debug/app-debug.apk
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # 构建脚本的离线测试
 ```
+
+详细步骤、宿主工具检查与实验性说明见 [docs/fdroid-source-build.md](docs/fdroid-source-build.md)。
 
 Release 签名通过环境变量启用：`ANDCHAMBER_KEYSTORE_FILE`、`ANDCHAMBER_KEYSTORE_PASSWORD`、`ANDCHAMBER_KEY_ALIAS`、`ANDCHAMBER_KEY_PASSWORD`。四个变量都提供时才会签名。
 

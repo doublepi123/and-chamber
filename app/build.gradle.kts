@@ -1,3 +1,5 @@
+import java.util.Properties
+
 // AndChamber app module. Native PRoot pipeline ported from AndCode (MIT); see NOTICE.
 plugins {
     id("com.android.application")
@@ -7,42 +9,121 @@ plugins {
 }
 
 val repoRoot = rootProject.projectDir
-val generatedRuntimeAssets = rootProject.layout.buildDirectory.dir("generated/runtime-assets")
 val generatedRuntimeJni = rootProject.layout.buildDirectory.dir("generated/runtime-jni")
+val runtimeNativeWorkDir = rootProject.layout.buildDirectory.dir("runtime-native")
 
-// Pinned Termux packages (proot, talloc, android-shmem) are fetched from the lock file and
-// unpacked; prepareAndChamberRuntimeNativeLibs then renames the executables into jniLibs.
-val prepareAndChamberRuntimeAssets =
-    tasks.register<Exec>("prepareAndChamberRuntimeAssets") {
-        inputs.file(repoRoot.resolve("runtime_tools/termux_assets.py"))
-        inputs.file(repoRoot.resolve("runtime_tools/termux_assets.lock.json"))
-        inputs.file(repoRoot.resolve("scripts/prepare_android_runtime_assets.py"))
-        outputs.dir(generatedRuntimeAssets)
-        commandLine(
-            "python3",
-            repoRoot.resolve("scripts/prepare_android_runtime_assets.py").absolutePath,
-            "--output-dir",
-            generatedRuntimeAssets.get().asFile.absolutePath,
-            "--lock-file",
-            repoRoot.resolve("runtime_tools/termux_assets.lock.json").absolutePath,
-        )
-    }
+// The runtime native sources are NOT downloaded by the build. They are prepared beforehand with the
+// network step (see docs/fdroid-source-build.md):
+//   python3 scripts/prepare_android_runtime_sources.py --output-dir build/runtime-sources
+// The Gradle build then compiles them offline with the pinned NDK and emits the JNI libraries.
+// Relative override paths resolve against the project root (not the Gradle invocation directory).
+val runtimeSourcesDir: File =
+    providers.gradleProperty("andchamber.runtimeSourcesDir").orNull
+        ?.let { repoRoot.resolve(it) }
+        ?: rootProject.layout.buildDirectory.get().asFile.resolve("runtime-sources")
+val runtimeSourcesLock = repoRoot.resolve("runtime_tools/runtime_sources.lock.json")
+val runtimeNativeScript = repoRoot.resolve("scripts/build_android_runtime_native.py")
+val runtimeSourcesScript = repoRoot.resolve("scripts/prepare_android_runtime_sources.py")
+val runtimePrepareCommand =
+    "python3 scripts/prepare_android_runtime_sources.py --output-dir ${runtimeSourcesDir.absolutePath}"
 
-val prepareAndChamberRuntimeNativeLibs =
-    tasks.register<Exec>("prepareAndChamberRuntimeNativeLibs") {
-        dependsOn(prepareAndChamberRuntimeAssets)
-        inputs.dir(generatedRuntimeAssets)
-        inputs.file(repoRoot.resolve("scripts/prepare_android_runtime_native_libs.py"))
+val ndkVersionPinned = "29.0.14206865"
+
+// Explicit file lists (no globs), so build/ outputs and __pycache__ never enter the fingerprint.
+val runtimePatchFiles: FileCollection =
+    files(
+        repoRoot.resolve("runtime_tools/patches/libandroid-shmem-0.7-andchamber-tmpdir.patch"),
+        repoRoot.resolve("runtime_tools/patches/proot-5.1.107.97-andchamber-string-include.patch"),
+        repoRoot.resolve("runtime_tools/patches/loader-info-posix-awk.awk"),
+    )
+
+// SDK root resolved from the same sources AGP uses: explicit property, ANDROID_HOME/ANDROID_SDK_ROOT, local.properties.
+val androidSdkDir: File? =
+    (providers.gradleProperty("andchamber.sdkDir").orNull
+        ?: System.getenv("ANDROID_HOME")
+        ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: rootProject.file("local.properties").takeIf { it.isFile }?.let { f ->
+            Properties().apply { f.inputStream().use { load(it) } }.getProperty("sdk.dir")
+        })?.let { repoRoot.resolve(it) }
+val ndkDirectory: File =
+    providers.gradleProperty("andchamber.ndkDir").orNull?.let { repoRoot.resolve(it) }
+        ?: androidSdkDir?.resolve("ndk/$ndkVersionPinned")
+        ?: File("/nonexistent/ndk/$ndkVersionPinned")
+
+// Compiles the runtime from the prepared sources. Offline by design: no network access happens here.
+// Inputs: the lock, the build/prepare scripts, the runtime_tools Python modules, the prepared source tree and the
+// NDK version. The script works in its own copies under build/runtime-native, so the source tree is never mutated
+// and is not an output. The doFirst checks run only when the task executes, so configuration and ./gradlew help
+// never compile native code.
+val buildAndChamberRuntimeNative =
+    tasks.register<Exec>("buildAndChamberRuntimeNative") {
+        // Every input that changes the native output. Patches and the awk helper are part of the build.
+        inputs.file(runtimeSourcesLock).withPropertyName("runtimeSourcesLock")
+        inputs.file(runtimeNativeScript).withPropertyName("buildScript")
+        inputs.file(runtimeSourcesScript).withPropertyName("prepareScript")
+        inputs.files(runtimePatchFiles).withPropertyName("runtimePatches")
+        // NDK identity: source.properties carries the revision; the directory itself can be any path.
+        inputs.file(ndkDirectory.resolve("source.properties")).withPropertyName("ndkSourceProperties").optional(true)
+        inputs.property("ndkVersion", ndkVersionPinned)
+        inputs.dir(runtimeSourcesDir).withPropertyName("runtimeSourceTree").optional(true)
         outputs.dir(generatedRuntimeJni)
+
+        doFirst {
+            if (!runtimeSourcesDir.isDirectory) {
+                throw GradleException(
+                    "Runtime sources not found at ${runtimeSourcesDir.absolutePath}.\n" +
+                        "Prepare them first (network step, not run by Gradle):\n  $runtimePrepareCommand",
+                )
+            }
+            if (!ndkDirectory.isDirectory) {
+                throw GradleException(
+                    "NDK $ndkVersionPinned not found at ${ndkDirectory.absolutePath}.\n" +
+                        "Install it with: sdkmanager \"ndk;$ndkVersionPinned\" (or pass -Pandchamber.ndkDir=<path>).",
+                )
+            }
+            // Sources must stay read-only inputs: the build works under runtime-native and writes only jniLibs output.
+            val sources = runtimeSourcesDir.canonicalFile
+            val work = runtimeNativeWorkDir.get().asFile.canonicalFile
+            val out = generatedRuntimeJni.get().asFile.canonicalFile
+            if (sources == work || sources.startsWith(work) || work.startsWith(sources) ||
+                sources == out || out.startsWith(sources) || sources.startsWith(out)
+            ) {
+                throw GradleException(
+                    "runtimeSourcesDir ($sources) must not overlap the native work dir ($work) or output dir ($out).",
+                )
+            }
+        }
+
         commandLine(
             "python3",
-            repoRoot.resolve("scripts/prepare_android_runtime_native_libs.py").absolutePath,
-            "--linux-assets-dir",
-            generatedRuntimeAssets.get().asFile.absolutePath,
+            runtimeNativeScript.absolutePath,
+            "--sources-dir",
+            runtimeSourcesDir.absolutePath,
+            "--ndk-dir",
+            ndkDirectory.absolutePath,
             "--output-dir",
             generatedRuntimeJni.get().asFile.absolutePath,
+            "--work-dir",
+            runtimeNativeWorkDir.get().asFile.absolutePath,
         )
     }
+
+// Debug-only opt-in application id for installing next to the production app on an emulator.
+// Example: ./gradlew :app:assembleDebug -Pandchamber.testApplicationId=io.andchamber.fdroidtest
+val productionApplicationId = "io.andchamber.app"
+val testApplicationId: String? =
+    providers.gradleProperty("andchamber.testApplicationId").orNull?.takeIf { it.isNotBlank() }
+val appIdRegex = Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$")
+val resolvedApplicationId: String =
+    testApplicationId?.also { id ->
+        require(id != productionApplicationId) {
+            "andchamber.testApplicationId must not equal the production id $productionApplicationId"
+        }
+        require(appIdRegex.matches(id) && id.split('.').size >= 3 && !id.startsWith("android.")) {
+            "andchamber.testApplicationId '$id' is not a valid Android application id"
+        }
+    } ?: productionApplicationId
+val isTestIdRequested = testApplicationId != null
 
 // Version: CI passes the tag-derived values as Gradle properties; local builds use the defaults.
 val appVersionName: String = providers.gradleProperty("andchamber.versionName").orNull ?: "0.0.1"
@@ -63,9 +144,11 @@ val hasReleaseSigning =
 android {
     namespace = "io.andchamber.app"
     compileSdk = 35
+    ndkVersion = ndkVersionPinned
 
     defaultConfig {
-        applicationId = "io.andchamber.app"
+        // Production id. Only a debug build can override it, through andchamber.testApplicationId (see below).
+        applicationId = productionApplicationId
         minSdk = 26
         targetSdk = 35
         versionCode = appVersionCode
@@ -145,11 +228,21 @@ android {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(prepareAndChamberRuntimeNativeLibs)
+    dependsOn(buildAndChamberRuntimeNative)
 }
 
 // Release APK is named AndChamber-<versionName>.apk for publishing. Debug keeps the AGP default.
 // AGP 8.5 exposes the output file name on the variant's ApkVariantOutput (the applicationVariants API).
+// The debug test id is applied through the variant API (AGP 8.5 androidComponents), so release always keeps
+// the production id.
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        if (isTestIdRequested) {
+            variant.applicationId.set(resolvedApplicationId)
+        }
+    }
+}
+
 android.applicationVariants.all {
     if (buildType.name == "release") {
         outputs.all {

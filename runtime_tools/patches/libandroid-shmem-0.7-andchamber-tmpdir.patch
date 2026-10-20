@@ -1,0 +1,61 @@
+--- a/shmem.c
++++ b/shmem.c
+@@ -13,6 +13,7 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <unistd.h>
++#include <limits.h>
+ #include <paths.h>
+ 
+ #if __ANDROID_API__ < 26
+@@ -23,7 +24,6 @@
+ #include "shm.h"
+ 
+ #define DBG(...) __android_log_print(ANDROID_LOG_INFO, "shmem", __VA_ARGS__)
+-#define ASHV_KEY_SYMLINK_PATH _PATH_TMP "ashv_key_%d"
+ #define ANDROID_SHMEM_SOCKNAME "/dev/shm/%08x"
+ #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
+ 
+@@ -342,14 +342,29 @@
+ 	int shmid = -1;
+ 
+ 	pthread_mutex_lock(&mutex);
+-	char symlink_path[256];
++	char symlink_path[PATH_MAX];
+ 	if (key != IPC_PRIVATE) {
++		// AndChamber: key symlinks live in the host-side PRoot temp directory
++		// (PROOT_TMP_DIR), not in a Termux prefix path nor in TMPDIR.
++		const char *tmp_dir = getenv("PROOT_TMP_DIR");
++		if (tmp_dir == NULL || tmp_dir[0] != '/') {
++			DBG("%s: PROOT_TMP_DIR must be an absolute host path", __PRETTY_FUNCTION__);
++			pthread_mutex_unlock(&mutex);
++			errno = EINVAL;
++			return -1;
++		}
++		if (snprintf(symlink_path, sizeof(symlink_path), "%s/ashv_key_%d", tmp_dir, key) >=
++				(int)sizeof(symlink_path)) {
++			DBG("%s: key symlink path too long", __PRETTY_FUNCTION__);
++			pthread_mutex_unlock(&mutex);
++			errno = ENAMETOOLONG;
++			return -1;
++		}
+ 		// (1) Check if symlink exists telling us where to connect.
+ 		// (2) If so, try to connect and open.
+ 		// (3) If connected and opened, done. If connection refused
+ 		//     take ownership of the key and create the symlink.
+ 		// (4) If no symlink, create it.
+-		sprintf(symlink_path, ASHV_KEY_SYMLINK_PATH, key);
+ 		char path_buffer[256];
+ 		char num_buffer[64];
+ 		while (true) {
+@@ -382,6 +397,10 @@
+ 				sprintf(num_buffer, "%d", shmid);
+ 			}
+ 			if (symlink(num_buffer, symlink_path) == 0) break;
++			if (errno != EEXIST) {
++				pthread_mutex_unlock(&mutex);
++				return -1;
++			}
+ 		}
+ 	}
+ 
