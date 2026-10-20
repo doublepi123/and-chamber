@@ -15,9 +15,13 @@ Repo: https://github.com/doublepi123/and-chamber.git
 Builds:
   - versionName: 0.0.8
     versionCode: 8
-    commit: v0.0.8
+    commit: 4d57d233fc8c8379c28c359f82bae71b39dc6be0
     subdir: app
-    init: python3 ../scripts/prepare_android_runtime_sources.py --output-dir ../build/runtime-sources
+    sudo:
+      - apt-get update
+      - apt-get install -y make patch gawk
+    init: python3 ../scripts/prepare_android_runtime_sources.py --output-dir 
+      ../build/runtime-sources
     gradle:
       - yes
     scandelete:
@@ -28,8 +32,9 @@ Builds:
     gradleprops:
       - andchamber.runtimeSourcesDir=build/runtime-sources
 
-AutoUpdateMode: Version v%v
+AutoUpdateMode: Version
 UpdateCheckMode: Tags ^v[0-9]+\.[0-9]+\.[0-9]+$
-UpdateCheckData: gradle.properties|andchamber\.versionCode=(\d+)|.|andchamber\.versionName=([0-9]+\.[0-9]+\.[0-9]+)
+UpdateCheckData: 
+  gradle.properties|andchamber\.versionCode=(\d+)|.|andchamber\.versionName=([0-9]+\.[0-9]+\.[0-9]+)
 CurrentVersion: 0.0.8
 CurrentVersionCode: 8

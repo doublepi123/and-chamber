@@ -1,2 +1,4 @@
 # Unified patch context preserves upstream whitespace by design.
 runtime_tools/patches/*.patch -whitespace
+# F-Droid's formatter preserves a trailing space before wrapped scalar values.
+fdroid/metadata/*.yml whitespace=-blank-at-eol
