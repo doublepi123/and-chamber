@@ -1,6 +1,13 @@
 # 源码构建实验：离线原生编译（fdroid-source-runtime）
 
-> 状态：实验性。未达到 F-Droid 提交条件，不声明可复现构建。下方“初次本地验证”记录源码改造阶段的历史结果；后续合并的集成检查以对应 CI 为准。原生脚本或补丁再变更时，需按下方“变更后需要做什么”重新验证。
+> 状态：实验性。F-Droid 候选元数据（`fdroid/metadata/io.andchamber.app.yml`）已存在，但官方 CI 构建、审核、签名和发布仍未完成，不声明可复现构建或收录通过。下方“初次本地验证”记录源码改造阶段的历史结果，以哈希识别，保持不变；后续集成检查以对应 CI 为准。原生脚本或补丁再变更时，需按下方“变更后需要做什么”重新验证。候选元数据与其验证状态由 `fdroid/` 目录负责，本文档不重复记录。
+
+## 许可证、版本与签名（当前）
+
+- **许可证文本随 APK 分发**：`third_party/native-runtime/` 保存 PRoot（GPL-2.0-or-later）、talloc（LGPL-3.0-or-later，并附 GPL-3.0 全文）和 libandroid-shmem（BSD-3-Clause）的许可证文件与来源记录（[provenance.json](../third_party/native-runtime/provenance.json)）。Gradle 任务 `syncNativeLicenseAssets` 将其复制到 `assets/licenses/native/`，所有构建变体均包含。
+- **版本**：`gradle.properties` 中的 `andchamber.versionName` 与 `andchamber.versionCode` 为当前版本（0.0.8 / 8）。发布工作流会校验标签与这两个值一致；旧标签（无这两个键）不做校验。
+- **签名**：采用 F-Droid 独立签名。应用签名不由 GitHub 发布流程与 F-Droid 共享；之后更换签名密钥等同于重新安装并需要数据迁移。
+- **本节不代表**：官方 F-Droid CI 构建、扫描器结果、审核或发布已经通过。
 
 ## 链路
 
@@ -98,8 +105,8 @@ release 构建始终使用 `io.andchamber.app`，覆盖参数不影响 release�
 - **未验证远程连接。** 仅确认 x86_64 界面的显示内容，未测试任何远程 OpenChamber 服务器的连通性。
 - **不作可复现构建声明。** 仅记录了源码哈希与 NDK 版本，未比较不同机器或不同次构建的输出。
 - **Gradle 离线仅限原生阶段。** 原生编译步骤不访问网络。Gradle 自身的依赖解析（Maven、Google 仓库）仍需网络，不属于本实验的离线范围。
-- **F-Droid 提交未就绪。** 本文档不包含 F-Droid 配方（recipe），也不对收录条件、NonFreeNet 或签名流程作结论。
-- 版本号、SDK target 与打包方式本次未变更。
+- **F-Droid 提交未完成。** 候选元数据已存在（`fdroid/metadata/io.andchamber.app.yml`，以及 `fastlane/` 下的商店文案与图标）。本地候选配方的构建、源码扫描和 APK 扫描已通过，但这不代表官方构建环境、审核、签名或收录已通过；详见 [fdroid/README.md](../fdroid/README.md)。
+- 当前发布版本为 `0.0.8 / 8`；SDK target 和原生运行逻辑未变，APK 新增许可证资源。
 
 ## 变更后需要做什么
 
@@ -107,11 +114,19 @@ release 构建始终使用 `io.andchamber.app`，覆盖参数不影响 release�
 - 源码锁文件（`runtime_tools/runtime_sources.lock.json`）或准备脚本（`scripts/prepare_android_runtime_sources.py`）变更：需要重新准备源码，之后同样需要重新编译和验证。
 - 仅修改 Python 测试文件：不影响原生产物，只需重跑测试。
 
-## 下一步（未开始）
+## 下一步（未完成）
 
-- F-Droid 配方（recipe）、元数据与许可证交付。
+- 从已发布 tag 复核候选配方，再推进官方 CI、审核、签名和收录流程。
+- 许可证交付已包含在 APK 中（见上文“许可证、版本与签名”），其法律合规复核由维护者负责。
 - 更多设备和 Android 版本覆盖、长期运行及其他未测功能。
 
 ## CI 与 Release
 
-`.github/workflows/ci.yml` 与 `release.yml` 在 Gradle 之前：安装 NDK `29.0.14206865`，检查宿主工具，并通过 actions/cache 缓存 `build/runtime-sources`（键：锁文件与准备脚本）。缓存未命中时执行准备脚本（CI 中为网络下载）。`ci.yml` 另缓存 `build/generated/runtime-jni`（键：锁文件、两个脚本、补丁目录与 NDK 版本）。release 不缓存 JNI 产物，每次从源码编译。签名、版本推导和 apksigner 步骤未改动。
+`.github/workflows/ci.yml` 与 `release.yml` 在 Gradle 之前：安装 NDK `29.0.14206865`，检查宿主工具，并通过 actions/cache 缓存 `build/runtime-sources`（键：锁文件与准备脚本）。缓存未命中时执行准备脚本（CI 中为网络下载）。`ci.yml` 另缓存 `build/generated/runtime-jni`（键：锁文件、两个脚本、补丁目录与 NDK 版本）。release 不缓存 JNI 产物，每次从源码编译。
+
+`release.yml` 的版本推导在标签格式检查之后，比对 `gradle.properties` 中的 `andchamber.versionName` 与 `andchamber.versionCode`：不一致则失败；缺少这两个键的旧标签跳过比对。签名与 apksigner 步骤未改动。
+
+## 相关入口
+
+- 许可证文本与来源：[third_party/native-runtime/README.md](../third_party/native-runtime/README.md)、[provenance.json](../third_party/native-runtime/provenance.json)；仓库根目录 [NOTICE](../NOTICE)。
+- 许可证校验测试：`scripts/tests/test_native_license_assets.py`（离线，`python3 -m unittest discover -s scripts/tests -p 'test_*.py'`）。

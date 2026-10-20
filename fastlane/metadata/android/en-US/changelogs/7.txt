@@ -1,0 +1,8 @@
+0.0.7 (pre-release)
+
+New:
+- Experimental Browser on Home, with its own WebView profile. Agent control is off by default and needs a new grant each time.
+- Local OpenCode can use six browser tools through a local MCP server: navigate, snapshot, click, type, scroll and capture. Public https only.
+
+Notes:
+- The on-device OpenCode, MCP and WebView loop on an arm64 phone is not yet verified end to end.

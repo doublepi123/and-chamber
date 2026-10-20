@@ -1,0 +1,1 @@
+Users can configure proprietary AI model providers for OpenCode. Compatible self-hosted providers are also supported. AndChamber does not include or require a specific provider.

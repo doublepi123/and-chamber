@@ -1,0 +1,57 @@
+{
+  "description": "Source provenance and license texts for the native components compiled into the AndChamber APK (PRoot runtime). The license files in this directory are the single source of truth; the build copies them into the APK assets.",
+  "lock": "runtime_tools/runtime_sources.lock.json",
+  "components": [
+    {
+      "name": "proot",
+      "version": "5.1.107.97",
+      "upstream": "https://github.com/termux/proot",
+      "tag": "v5.1.107.97",
+      "commit": "4a27ca61ff7a800cdcac3bc616929bba7a484c74",
+      "archive_url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.97",
+      "archive_sha256": "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d",
+      "spdx": "GPL-2.0-or-later",
+      "license_files": [
+        {"path": "proot/COPYING", "source_path": "proot-5.1.107.97/COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"}
+      ],
+      "local_patches": [
+        "runtime_tools/patches/proot-5.1.107.97-andchamber-string-include.patch"
+      ],
+      "build_helpers": [
+        "runtime_tools/patches/loader-info-posix-awk.awk"
+      ],
+      "build_instructions": "scripts/build_android_runtime_native.py (function build_proot and build_loader)"
+    },
+    {
+      "name": "talloc",
+      "version": "2.5.0",
+      "upstream": "https://www.samba.org/ftp/talloc/",
+      "archive_url": "https://www.samba.org/ftp/talloc/talloc-2.5.0.tar.gz",
+      "archive_sha256": "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007",
+      "spdx": "LGPL-3.0-or-later",
+      "license_files": [
+        {"path": "talloc/LICENSE", "source_path": "talloc-2.5.0/LICENSE", "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"},
+        {"path": "talloc/GPL-3.0.txt", "source_url": "https://www.gnu.org/licenses/gpl-3.0.txt", "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986", "note": "Full GNU GPL v3 text referenced by the LGPL-3.0 terms; fetched from the canonical URL and verified on 2026-10-20."}
+      ],
+      "local_patches": [],
+      "build_instructions": "scripts/build_android_runtime_native.py (function build_talloc and install_talloc_as_app_name)"
+    },
+    {
+      "name": "libandroid-shmem",
+      "version": "0.7",
+      "upstream": "https://github.com/termux/libandroid-shmem",
+      "tag": "v0.7",
+      "commit": "7f0bd7e25dbdd146265aff7c6a890029e374622d",
+      "archive_url": "https://codeload.github.com/termux/libandroid-shmem/tar.gz/refs/tags/v0.7",
+      "archive_sha256": "1e5ff8459bc0a8c229dd8a94b27d119987e09ef3414331c2b5ebfff20b98e867",
+      "spdx": "BSD-3-Clause",
+      "license_files": [
+        {"path": "libandroid-shmem/LICENSE", "source_path": "libandroid-shmem-0.7/LICENSE", "sha256": "0dd43abe17196b0224cb0b159819af798cd508a82a21e5870126fff4e899a7eb"}
+      ],
+      "local_patches": [
+        "runtime_tools/patches/libandroid-shmem-0.7-andchamber-tmpdir.patch"
+      ],
+      "build_instructions": "scripts/build_android_runtime_native.py (function build_shmem)"
+    }
+  ]
+}

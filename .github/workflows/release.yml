@@ -54,6 +54,20 @@ jobs:
           fi
           version="$major.$minor.$patch"
           code=$((major * 10000 + minor * 100 + patch))
+          # Canonical version properties must appear together exactly once. Older tags have neither
+          # and are not checked, so historical tags stay buildable.
+          if grep -Eq '^andchamber\.version(Name|Code)=' gradle.properties; then
+            if [ "$(grep -c '^andchamber\.versionName=' gradle.properties)" -ne 1 ] || [ "$(grep -c '^andchamber\.versionCode=' gradle.properties)" -ne 1 ]; then
+              echo "::error::gradle.properties must contain exactly one andchamber.versionName and andchamber.versionCode."
+              exit 1
+            fi
+            prop_name=$(sed -n 's/^andchamber\.versionName=//p' gradle.properties | tail -n 1)
+            prop_code=$(sed -n 's/^andchamber\.versionCode=//p' gradle.properties | tail -n 1)
+            if [ "$prop_name" != "$version" ] || [ "$prop_code" != "$code" ]; then
+              echo "::error::gradle.properties has andchamber.versionName=$prop_name andchamber.versionCode=$prop_code, but tag $TAG needs $version / $code. Bump both properties in gradle.properties before tagging."
+              exit 1
+            fi
+          fi
           echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$code" >> "$GITHUB_ENV"
           echo "Version $version (code $code)"

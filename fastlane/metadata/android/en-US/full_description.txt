@@ -1,0 +1,22 @@
+AndChamber brings OpenChamber, the web interface for OpenCode, to your Android phone. OpenCode is a coding agent. AndChamber can run it on the phone, or connect to an OpenChamber server on your own computer.
+
+Two ways to use it:
+
+* Local mode (arm64-v8a devices only): AndChamber sets up a small Alpine Linux environment in its private storage and runs it with PRoot, without root. Setup downloads Alpine Linux, Node.js, Git and other runtime packages, then installs OpenChamber and OpenCode. It needs a network connection and some time.
+* Remote mode: add the address of an OpenChamber server on your computer. Plain HTTP needs explicit confirmation.
+
+A foreground service runs the local server while the app is in the background. This is not a guarantee of 24/7 operation. On launch, the app can restore the last OpenChamber instance and page you used.
+
+Notifications: finished replies, errors, questions and permission requests can appear as notifications. From a notification you can reply, allow or deny a permission, or answer a simple question.
+
+Shared folder (optional, off by default): keeps projects and OpenCode settings in /sdcard/AndChamber/, reachable with a file manager or USB. It needs all-files access, and other apps with that permission can read the folder, so do not put API keys or other secrets in it.
+
+Experimental browser (optional): a separate Browser on Home with its own WebView profile, which does not copy cookies from OpenChamber. Agent control stays off until you grant it while Browser is in the foreground. Only public https pages are allowed, and support is limited. The on-device agent-control chain has not yet been verified end to end on a phone.
+
+Requirements:
+
+* Android 8.0 (API 26) or later.
+* Embedded pages need a system WebView with multi-profile support.
+* No model, model service, account or subscription is included. Configure models and providers separately in OpenChamber. Where the model runs and what it costs depend on your provider.
+
+Available in English and Simplified Chinese. This is a 0.x pre-release.

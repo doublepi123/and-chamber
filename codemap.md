@@ -24,7 +24,8 @@ Key constraints:
 | `app/src/main/java/io/andchamber/app/service/RuntimeService.kt` | `specialUse` foreground service that runs runtime operations and keeps the server alive |
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
-| `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
+| `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); Sync task `syncNativeLicenseAssets` packages `third_party/native-runtime/` as `assets/licenses/native/` in every variant; env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
+| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.8 / 8); the release workflow checks them against the tag |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |
@@ -86,11 +87,13 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 | `app/src/main/assets/` | Runtime manifest pins, the Node preload shim, and the embedded-browser MCP adapter | [View Map](app/src/main/assets/codemap.md) |
 | `scripts/` | Build-time tools: network source preparation for the native runtime, offline NDK compilation, the legacy Termux pipeline, and mirror health checks | [View Map](scripts/codemap.md) |
 | `runtime_tools/` | Python library and SHA-256 lock files for the PRoot build (Termux lock and runtime source lock) | [View Map](runtime_tools/codemap.md) |
+| `third_party/native-runtime/` | License texts (PRoot COPYING, talloc LGPL-3.0 and GPL-3.0, libandroid-shmem BSD-3-Clause) and the provenance record for native components; packaged into the APK by `syncNativeLicenseAssets` | [View README](third_party/native-runtime/README.md) |
+| `fdroid/` | Candidate F-Droid metadata and submission guide; local fixture build/scans passed, official build, review and signing remain pending | [View README](fdroid/README.md) |
 
 ## Not Mapped
 
 - `app/src/test/` — JVM unit tests (runtime, storage, notifications, i18n string parity).
-- `scripts/tests/` — offline Python tests for mirror diagnostics and CLI argument rules.
+- `scripts/tests/` — offline Python tests for the native source build, the license assets and the legacy mirror diagnostics, plus Node tests for the browser MCP adapter (see [scripts/codemap.md](scripts/codemap.md)).
 - `app/src/main/java/io/andchamber/app/ui/preview/` — Compose previews and fake contract implementations.
 - `app/src/main/res/` — resources (`values/` English, `values-zh/` Simplified Chinese, launcher/notification icons).
 - `docs/` — icon, screenshots, release notes, and `docs/embedded-browser-control.md`. After v0.0.6 integration, 471 JVM checks, 17 emulator smoke checks, and 26 host-to-emulator MCP/WebView checks passed. The arm64 OpenCode → MCP → WebView loop is not verified.

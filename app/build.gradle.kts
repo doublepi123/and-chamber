@@ -11,6 +11,8 @@ plugins {
 val repoRoot = rootProject.projectDir
 val generatedRuntimeJni = rootProject.layout.buildDirectory.dir("generated/runtime-jni")
 val runtimeNativeWorkDir = rootProject.layout.buildDirectory.dir("runtime-native")
+val nativeLicenseSourceDir = repoRoot.resolve("third_party/native-runtime")
+val generatedNativeLicenseAssets = rootProject.layout.buildDirectory.dir("generated/native-license-assets")
 
 // The runtime native sources are NOT downloaded by the build. They are prepared beforehand with the
 // network step (see docs/fdroid-source-build.md):
@@ -225,6 +227,7 @@ android {
 
     sourceSets {
         getByName("main").jniLibs.srcDir(generatedRuntimeJni)
+        getByName("main").assets.srcDir(generatedNativeLicenseAssets)
     }
 
     packaging {
@@ -238,8 +241,23 @@ android {
     }
 }
 
+// Native license texts and provenance are copied from the single source of truth in
+// third_party/native-runtime/ (declared near the top of this script) into a generated assets folder,
+// packaged in every variant. The copy declares inputs and outputs so it is up to date when unchanged.
+val syncNativeLicenseAssets =
+    tasks.register<Sync>("syncNativeLicenseAssets") {
+        from(nativeLicenseSourceDir) {
+            include("**/*")
+            into("licenses/native")
+        }
+        into(generatedNativeLicenseAssets)
+        inputs.dir(nativeLicenseSourceDir).withPropertyName("nativeLicenseSources")
+        outputs.dir(generatedNativeLicenseAssets).withPropertyName("nativeLicenseAssets")
+    }
+
 tasks.named("preBuild").configure {
     dependsOn(buildAndChamberRuntimeNative)
+    dependsOn(syncNativeLicenseAssets)
 }
 
 // Release APK is named AndChamber-<versionName>.apk for publishing. Debug keeps the AGP default.
