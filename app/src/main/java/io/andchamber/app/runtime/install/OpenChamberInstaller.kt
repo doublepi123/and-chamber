@@ -15,6 +15,7 @@ import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.network.SystemDnsProvider
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.process.ProcessScanner
+import io.andchamber.app.runtime.process.OpenChamberPolicy
 import io.andchamber.app.runtime.process.ProotCommands
 import io.andchamber.app.runtime.process.terminateProcessTree
 import kotlinx.coroutines.Dispatchers
@@ -291,6 +292,8 @@ class OpenChamberInstaller(
             )
         // Metadata is written inside the environment, so the directory rename commits it too.
         File(staging, RuntimePaths.METADATA_FILE_NAME).writeText(json.encodeToString(metadata))
+        // Pins OpenCode to the path AndChamber manages, so OpenChamber's own OpenCode upgrade is disabled.
+        OpenChamberPolicy.write(rootfs)
 
         report.step(InstallStep.Verify, null, null, MessageKey.ProgressActivating)
         activateRuntimeEnvironment(

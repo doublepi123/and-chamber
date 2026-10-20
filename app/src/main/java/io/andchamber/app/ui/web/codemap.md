@@ -5,7 +5,8 @@
 Full-screen OpenChamber web UI for one server (`Routes.WEB`, `web/{targetId}`). Owns the WebView pool, session preparation and page loading, navigation policy, the JS bridge, downloads, file and microphone requests, and the overlay panels. It hosts OpenChamber's own web UI; it does not implement it.
 
 Files:
-- `ChamberWebView.kt`: `ChamberWebView` (one WebView bound to one profile, clients, bridge, helper script), `WebViewPool`, `WebHost`, `originOf()`.
+- `ChamberWebView.kt`: `ChamberWebView` (one WebView bound to one profile, clients, bridge, helper script), `WebViewPool`, `WebHost`, `originOf()`. Its `Client.shouldInterceptRequest` answers the local server's update check.
+- `LocalUpdateGate.kt`: pure decision `interceptsLocalUpdateCheck(targetId, origin, method, url)`. True only for the local target, a GET on the binding's own origin, and exactly `/api/openchamber/update-check` (query and fragment ignored). It returns `UPDATE_CHECK_BODY` (`{"available":false,...}`, status 200, `no-store`). OpenChamber's own update prompt cannot be turned off by a server setting, so the app answers it here. Remote targets and every other request pass through.
 - `WebDependencies.kt`: `rememberWebDependencies()` (app singletons `WebSessionProfiles` and `HttpDownloadStarter` from Koin; preview stand-ins in inspection mode), `bindWeb(profiles, target, obtain)`.
 - `IsolationPanel.kt`: the isolation-failure panel, `browserAddressFor()` and `openAddressInBrowser()`.
 - `WebScreen.kt`: `WebScreen` (profile bind, session prep, overlays, BackHandler, insets, page-location reporting via `onPageLocation`, remembered-page application via `resumePath`), `OverlayContent`, `LocalServerPanel`, `WebLifecycleEffect`, `WebHostEffect`.

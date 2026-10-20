@@ -1,0 +1,5 @@
+0.0.10
+
+Fixes:
+- OpenChamber's own update prompt and its "update OpenCode" action are turned off for the on-device server. Updates go through the Home card.
+- Remote servers are not changed.
