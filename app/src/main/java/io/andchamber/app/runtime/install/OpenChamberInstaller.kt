@@ -46,13 +46,6 @@ class OpenChamberInstaller(
     private val dnsProvider: SystemDnsProvider = SystemDnsProvider { emptyList() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val killPid: (Long) -> Unit = { pid -> android.os.Process.killProcess(pid.toInt()) },
-    /**
-     * Applies a verified patched `@openchamber/web` pair after npm. The default is a no-op until the
-     * OpenChamber lane publishes a real manifest. A deployer that throws fails the install.
-     */
-    private val providerArtifactDeployer: (File) -> OpenChamberProviderArtifact.DeployResult = {
-        OpenChamberProviderArtifact.DeployResult(false, "not provisioned")
-    },
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -64,8 +57,12 @@ class OpenChamberInstaller(
         report: InstallReporter,
         proot: EmbeddedCommandSuite.Paths,
         versions: PackageVersions? = null,
+        providerArtifact: LoadedProviderArtifact? = null,
     ): InstalledRuntime =
         withContext(Dispatchers.IO) {
+            val pinned = versions ?: manifestVersions()
+            // Request gate: runs before the rootfs download, staging writes or npm.
+            providerArtifact?.let { ProviderArtifactPolicy.requireDeployable(it.manifest, pinned.openChamber) }
             val architecture = manifest.architecture(abi)
             paths.cache.mkdirs()
             paths.logs.mkdirs()
@@ -106,7 +103,6 @@ class OpenChamberInstaller(
 
                 // Shim before npm: install-time scripts also run under node and benefit from it.
                 writeShim(rootfs)
-                val pinned = versions ?: manifestVersions()
                 finishEnvironment(
                     report = report,
                     proot = proot,
@@ -116,6 +112,7 @@ class OpenChamberInstaller(
                     versions = pinned,
                     installStep = InstallStep.InstallOpenChamber,
                     reuseMetadata = null,
+                    providerArtifact = providerArtifact,
                 )
             } catch (error: Throwable) {
                 // Best effort: a leftover staging tree is removed before the next install anyway.
@@ -134,8 +131,11 @@ class OpenChamberInstaller(
         report: InstallReporter,
         proot: EmbeddedCommandSuite.Paths,
         versions: PackageVersions,
+        providerArtifact: LoadedProviderArtifact? = null,
     ): InstalledRuntime =
         withContext(Dispatchers.IO) {
+            // Request gate: runs before the staging copy, npm or deployment.
+            providerArtifact?.let { ProviderArtifactPolicy.requireDeployable(it.manifest, versions.openChamber) }
             val current =
                 checkNotNull(installedMetadataOrNull()) { "No active runtime environment to update" }
             paths.cache.mkdirs()
@@ -180,6 +180,7 @@ class OpenChamberInstaller(
                     versions = versions,
                     installStep = InstallStep.InstallOpenChamber,
                     reuseMetadata = current,
+                    providerArtifact = providerArtifact,
                 )
             } catch (error: Throwable) {
                 deleteTree(staging)
@@ -241,6 +242,7 @@ class OpenChamberInstaller(
         versions: PackageVersions,
         installStep: InstallStep,
         reuseMetadata: RuntimeMetadata?,
+        providerArtifact: LoadedProviderArtifact?,
     ): InstalledRuntime {
         report.step(installStep, null, "npm i @openchamber/web@${versions.openChamber}", MessageKey.ProgressInstallingOpenChamber)
         runner.mustSucceed(
@@ -282,15 +284,35 @@ class OpenChamberInstaller(
         require(File(rootfs, "$OPENCHAMBER_MODULE_ROOT/dist/index.html").isFile) {
             "OpenChamber web bundle is missing after install"
         }
-        // Optional patched pair. A missing manifest keeps stock 2.4.0. A present manifest that
-        // fails verification fails the install rather than leaving a half-replaced package.
-        val deployed = providerArtifactDeployer(File(rootfs, OPENCHAMBER_MODULE_ROOT.removePrefix("/")))
-        check(deployed.applied || deployed.reason == "not provisioned") {
+        // Optional patched pair. No artifact keeps stock 2.4.0 behaviour. A provisioned artifact
+        // that fails verification fails the install rather than leaving a half-replaced package.
+        val deployed =
+            providerArtifact?.let {
+                OpenChamberProviderArtifact.deploy(
+                    manifest = it.manifest,
+                    source = it.source,
+                    moduleRoot = File(rootfs, OPENCHAMBER_MODULE_ROOT.removePrefix("/")),
+                    expectedPackageVersion = versions.openChamber,
+                )
+            } ?: OpenChamberProviderArtifact.DeployResult(false, "not provisioned")
+        check(deployed.applied || (providerArtifact == null && deployed.reason == "not provisioned")) {
             "Patched OpenChamber artifact was not applied: ${deployed.reason}"
         }
-        // Record what is actually on disk; the requested version is only the fallback.
+        // Record what is actually on disk. The provisioned path never falls back to the requested
+        // version: a failed read or a mismatched package fails the install instead. The stock npm
+        // path keeps main's fallback (requested version when the guest read fails), unchanged.
         val installedOpenChamber =
-            runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull() ?: versions.openChamber
+            if (providerArtifact != null) {
+                installedPackageVersion(runner, "@openchamber/web")
+            } else {
+                runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull()
+                    ?: versions.openChamber
+            }
+        if (providerArtifact != null) {
+            require(installedOpenChamber == versions.openChamber) {
+                "Installed @openchamber/web $installedOpenChamber does not match the requested ${versions.openChamber}"
+            }
+        }
 
         val metadata =
             RuntimeMetadata(

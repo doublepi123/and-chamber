@@ -257,7 +257,7 @@ class ProviderPageAdapterTest {
             ProviderMode.AGENT,
             1_000L,
         )
-        assertEquals(ProviderCodes.UNSUPPORTED_ACTION, resize.errorCode)
+        assertTrue(resize.ok)
         val local = pages.second.execute(
             request("browser.snapshot", mapOf("selector" to """[data-andchamber-ref="$ref"]""")),
             pages.first,
@@ -281,7 +281,7 @@ class ProviderPageAdapterTest {
             ProviderMode.AGENT,
             1_000L,
         )
-        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, openViewport.errorCode)
+        assertTrue(openViewport.ok)
         assertFalse(driver.methods.contains(BrowserMethod.SNAPSHOT))
         assertFalse(driver.methods.contains(BrowserMethod.SCROLL))
     }
@@ -368,6 +368,12 @@ class ProviderPageAdapterTest {
                         "title" to "Hi",
                         "width" to "12",
                         "height" to "34",
+                        "cssWidth" to "1024",
+                        "cssHeight" to "768",
+                        "dpr" to "2.625",
+                        "visualWidth" to "819",
+                        "visualHeight" to "600",
+                        "scale" to "1",
                         "viewport" to "fill",
                     ),
                 )

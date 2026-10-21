@@ -317,5 +317,28 @@
     <string name="browser_enlarge">放大</string>
     <string name="browser_restore">还原</string>
     <string name="browser_float_status_manual">你正在自己浏览。登录完成后，需要再次允许代理。</string>
-    <string name="browser_desktop_later">电脑版排版还没准备好。</string>
+    <string name="browser_more">更多</string>
+    <string name="browser_desktop_layout">电脑版</string>
+    <string name="browser_phone_layout">手机版</string>
+    <string name="browser_mouse_mode">鼠标</string>
+    <string name="browser_touch_mode">触摸</string>
+    <string name="browser_keyboard_tight">键盘挡住了浏览器。可以放大，或关闭。</string>
+    <string name="browser_mode_change_title">切换网页布局？</string>
+    <string name="browser_mode_change_body">切换可能刷新页面，未提交的内容可能丢失。之后需要再次允许代理控制。</string>
+    <string name="browser_resize_window">调整浏览器窗口大小</string>
+    <string name="browser_reopen_required">请重新打开此页面后再允许代理。</string>
+    <string name="browser_mouse_unsupported">当前系统不支持模拟鼠标，可继续直接触摸。</string>
+    <!-- 鼠标模式下开启了无障碍服务时的状态。请保持一行：中文折成两行可能超出状态栏预留的高度。 -->
+    <string name="browser_mouse_hover_accessibility">开启无障碍时悬停无效，仍可点击、拖动和滚动。</string>
+    <string name="browser_page_loading">页面加载中…</string>
+    <string name="browser_mode_reopen_required">要切换显示模式，请重新打开此页面。</string>
+    <string name="browser_scroll_waiting">页面尚未就绪，未保存滚动位置。</string>
+    <string name="browser_scroll_not_saved">未保存滚动位置。</string>
+    <string name="browser_scroll_clamped">页面无法回到原来的滚动位置。</string>
+    <string name="browser_scroll_not_restored">未恢复滚动位置。</string>
+    <string name="browser_mouse_gesture_interrupted">拖动中断，页面已关闭。</string>
+    <string name="browser_retired_page_details">未提交的内容可能丢失；网站存储未被主动清除。重新打开后需再次允许代理。</string>
+    <string name="browser_reopen_page">重新打开</string>
+    <string name="browser_finish_drag_first">请先结束页面中的拖动。</string>
+    <string name="browser_reopen_failed">无法重新打开页面，请重试。</string>
 </resources>

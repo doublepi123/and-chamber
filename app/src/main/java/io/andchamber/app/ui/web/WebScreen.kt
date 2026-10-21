@@ -28,6 +28,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -61,6 +62,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -448,7 +452,25 @@ internal fun WebScreen(
                 WindowInsets.systemBars
                     .union(WindowInsets.displayCutout)
                     .union(WindowInsets.imeAnimationTarget)
-            Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(pageInsets)) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize().windowInsetsPadding(pageInsets)) {
+                // Both the main WebView and native overlay fill this same inset-consumed content box.
+                var consoleSize by remember(web, web.generation) { mutableStateOf(IntSize.Zero) }
+                val density = LocalDensity.current
+                val measurement = web.composerMeasurement
+                val topPx = measurement?.topPx(web.browserConsoleGeneration, web.generation,
+                    consoleSize.width, consoleSize.height)
+                val measuredClearance = composerClearancePx(topPx, consoleSize.height, with(density) { 12.dp.toPx() })
+                val composerClearance = measuredClearance?.let { with(density) { it.toDp() } }
+                    ?: if (maxWidth >= 600.dp) 72.dp else 136.dp
+                androidx.compose.runtime.SideEffect {
+                    web.view?.tag = ComposerLayoutSnapshot(
+                        measurement, web.browserConsoleGeneration, web.generation,
+                        consoleSize.width, consoleSize.height, with(density) { composerClearance.toPx() },
+                        measuredClearance == null,
+                        measurement?.validityReason(web.browserConsoleGeneration, web.generation,
+                            consoleSize.width, consoleSize.height) ?: "measurement-missing",
+                    )
+                }
                 key(web, web.generation) {
                     // Only a WebView bound to this server's profile is ever attached; after a failed
                     // rebind there is none, and the isolation panel covers the screen instead.
@@ -456,14 +478,21 @@ internal fun WebScreen(
                         AndroidView(
                             // Detached from any earlier holder only here, never during recomposition.
                             factory = { viewContext -> web.attachableView() ?: View(viewContext) },
-                            modifier = Modifier.fillMaxSize().clipToBounds(),
+                            modifier = Modifier.fillMaxSize().clipToBounds().onSizeChanged {
+                                if (consoleSize != it) {
+                                    consoleSize = it
+                                    web.requestComposerMeasurement()
+                                }
+                            },
                             // The WebView outlives this screen in the pool; never destroy it here.
                             onRelease = {},
                         )
                     }
                 }
                 if (localTrusted && browserPresenter != null) {
-                    io.andchamber.app.ui.browser.BrowserFloatPage(browserPresenter)
+                    // Includes the actual multiline editor + footer. Missing/stale measurements use
+                    // a conservative fallback; focus itself never changes the agent grant.
+                    io.andchamber.app.ui.browser.BrowserFloatPage(browserPresenter, bottomClearance = composerClearance)
                 }
 
                 AnimatedVisibility(

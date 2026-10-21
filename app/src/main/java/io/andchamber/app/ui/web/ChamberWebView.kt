@@ -144,7 +144,9 @@ internal class ChamberWebView(
     /** Local trusted chat only. Target-site pages never receive this. */
     var browserHost: BrowserHostSurface? = null
     var browserTabsJson: () -> String = { "[]" }
-    var browserConsoleGeneration: Long = 0L
+    @Volatile var browserConsoleGeneration: Long = 0L
+    var composerMeasurement by mutableStateOf<ComposerMeasurement?>(null)
+        private set
     var browserBindGeneration by androidx.compose.runtime.mutableLongStateOf(0L)
         private set
 
@@ -153,6 +155,7 @@ internal class ChamberWebView(
 
     /** Already-unbound calls do not move [browserBindGeneration], so a refuse path cannot loop. */
     fun unbindBrowserHost() {
+        composerMeasurement = null
         if (browserHost == null && browserConsoleGeneration != browserBindGeneration) return
         browserHost = null
         if (browserConsoleGeneration == browserBindGeneration) browserConsoleGeneration += 1
@@ -162,11 +165,20 @@ internal class ChamberWebView(
     fun noteTrustedDocument() {
         if (!mainTrusted || gatewayLoginMode || destroyed) return
         if (origin.isEmpty()) return
+        composerMeasurement = null
         browserConsoleGeneration += 1
         browserBindGeneration = browserConsoleGeneration
     }
 
     var onConsoleDocumentInvalidated: (() -> Unit)? = null
+
+    /** A native layout change needs a fresh report even when CSS dimensions happened to stay equal. */
+    fun requestComposerMeasurement() {
+        composerMeasurement = null
+        if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID ||
+            !acceptsBrowserHost(browserConsoleGeneration)) return
+        view?.evaluateJavascript("window.dispatchEvent(new Event('andchamber-composer-measure'));", null)
+    }
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
     var sessionCookies: WebSessionCookies? = null
@@ -346,6 +358,7 @@ internal class ChamberWebView(
     }
 
     private fun rotateToken() {
+        composerMeasurement = null
         bridgeToken = UUID.randomUUID().toString()
     }
 
@@ -382,6 +395,7 @@ internal class ChamberWebView(
         onPageLocation = null
         destroyed = true
         mainTrusted = false
+        composerMeasurement = null
         host = null
         val old = view ?: return
         (old.parent as? ViewGroup)?.removeView(old)
@@ -503,6 +517,7 @@ internal class ChamberWebView(
             favicon: Bitmap?,
         ) {
             if (!isCurrent(view)) return
+            composerMeasurement = null
             if (gatewayHandoff.blocksDocuments) {
                 mainTrusted = false
                 view.removeJavascriptInterface(BRIDGE_NAME)
@@ -912,6 +927,31 @@ internal class ChamberWebView(
         // UI thread before any state changes.
         private fun trusted(token: String?): Boolean = mainTrusted && !destroyed && token == bridgeToken
 
+        /** Read-only layout data; fixed arity prevents oversized text/JSON payloads. */
+        @JavascriptInterface
+        fun composerBounds(
+            token: String?, top: Double, bottom: Double,
+            viewportWidth: Double, viewportHeight: Double, visible: Boolean,
+        ) {
+            if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID ||
+                !trusted(token) || gatewayLoginMode) return
+            val metrics = ComposerMetrics(top, bottom, viewportWidth, viewportHeight, visible)
+            if (!metrics.valid()) return
+            val console = browserConsoleGeneration
+            val nativeGeneration = generation
+            main.post {
+                // Token belongs to the document, generation to the console binding. Recheck both
+                // after the UI hop; do not query WebView APIs on the bridge thread.
+                val current = view ?: return@post
+                if (!trusted(token) || !acceptsBrowserHost(console) || gatewayHandoff.blocksDocuments ||
+                    !matchesComposerDocument(console, browserConsoleGeneration, nativeGeneration, generation) ||
+                    originOf(current.url) != origin) return@post
+                composerMeasurement = if (visible) ComposerMeasurement(
+                    metrics, console, nativeGeneration, current.width, current.height,
+                ) else null
+            }
+        }
+
         @JavascriptInterface
         fun saveFile(
             token: String?,
@@ -996,6 +1036,7 @@ internal class ChamberWebView(
           var bridge = window.$BRIDGE_NAME;
           if (!bridge) return;
           var token = ${JSONObject.quote(bridgeToken)};
+          ${if (targetId == io.andchamber.app.runtime.ServerTarget.LOCAL_ID && !gatewayLoginMode) composerBoundsObserverScript else ""}
           window.AndChamberBrowserHost = {
             present: function(tab){ bridge.browserPresent(token, tab && tab.url, tab && tab.ownerSessionId); },
             select: function(tabId){ bridge.browserSelect(token, tabId); },

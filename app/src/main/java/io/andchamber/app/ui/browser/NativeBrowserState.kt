@@ -19,9 +19,26 @@ data class NativeBrowserState(
     val hostAttached: Boolean = false,
     val documentEpoch: Long = 0L,
     val paused: Boolean = false,
+    /**
+     * The floating window currently refuses to present this page for input. The page may stay
+     * mounted; admission, allow and page commands refuse until the UI clears the gate.
+     */
+    val presentationBlocked: Boolean = false,
+    /** Trusted console transport admission. It stays true while only presentation is blocked. */
+    val transportEligible: Boolean = false,
+    /** Binding-only monotonic true-to-false transport signal; UI does not use this value. */
+    internal val transportInvalidation: Long = 0L,
     val eligible: Boolean = false,
     /** A provider connection is live. Only a flag: the connection id itself is not exposed. */
     val connected: Boolean = false,
+    val pageRetired: Boolean = false,
+    val mousePressActive: Boolean = false,
+    val desktopMode: Boolean = false,
+    val mouseMode: Boolean = false,
+    /** Pointer position in CSS px. This is not a WebView pixel or a screenshot pixel. */
+    val pointerX: Float = 0f,
+    val pointerY: Float = 0f,
+    val pointerUi: PointerUi = PointerUi(0, 0L, 0f, 0f, false),
 )
 
 data class NativeBrowserTab(

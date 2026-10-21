@@ -55,7 +55,9 @@ class BrowserRpcServerTest {
                 extraHeaders = "Transfer-Encoding: chunked\r\n",
             )
             assertEquals(400, chunked.status)
-            val badToken = exchange(server.port, token.dropLast(1) + "0", session, "snap-7")
+            val invalidToken = token.dropLast(1) + if (token.endsWith("0")) "1" else "0"
+            assertFalse("the invalid token must differ from the real credential", invalidToken == token)
+            val badToken = exchange(server.port, invalidToken, session, "snap-7")
             assertEquals(401, badToken.status)
             assertFalse(badToken.raw.contains(token))
         } finally {

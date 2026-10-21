@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "suite": "local-provider-product",
+  "cases": [
+    "product-blocked-tight",
+    "product-focused-restore",
+    "product-desktop-1024",
+    "product-mouse-move-click",
+    "product-mouse-hover-a11y-off",
+    "product-mouse-drag-wheel",
+    "product-pinch",
+    "product-session-storage",
+    "product-console-profile-isolation",
+    "product-native-entry"
+  ]
+}

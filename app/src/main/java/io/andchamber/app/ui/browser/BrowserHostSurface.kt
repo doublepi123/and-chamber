@@ -37,6 +37,9 @@ internal class BrowserHostSurface(
 
     /** A different chat session drops the current grant. It does not grant the new session. */
     fun context(sessionId: String) {
+        // The console reports the chat it is showing on every chat change. This is an identity the
+        // presenter may use to let that session's open take the window; it is not a grant.
+        presenter.setConsoleSession(sessionId)
         val state = presenter.state.value
         val owner = state.tabs.firstOrNull { it.active }?.owner
             ?: state.tabs.firstOrNull { it.id == state.selectedTabId }?.owner

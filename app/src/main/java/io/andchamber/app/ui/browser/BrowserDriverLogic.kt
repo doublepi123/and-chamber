@@ -33,6 +33,44 @@ import java.security.SecureRandom
  */
 internal object BrowserDriverLogic {
     const val PROFILE_NAME = "andchamber_browser_v1"
+    const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    fun desktopViewportScript(): String = """
+        (function(){
+          if (window.__acDesktopViewport) return;
+          var owned = null;
+          var applying = false;
+          function pin(){
+            if (applying) return;
+            applying = true;
+            try {
+              var head = document.head || document.documentElement;
+              if (!head) return;
+              if (!owned || !owned.isConnected) {
+                owned = document.createElement('meta');
+                owned.name = 'viewport';
+                owned.setAttribute('data-ac-viewport', 'desktop');
+                head.appendChild(owned);
+              }
+              var nodes = document.querySelectorAll('meta[name="viewport"]');
+              for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i].getAttribute('content') !== 'width=1024') {
+                  nodes[i].setAttribute('content', 'width=1024');
+                }
+              }
+              if (owned.getAttribute('content') !== 'width=1024') {
+                owned.setAttribute('content', 'width=1024');
+              }
+            } finally { applying = false; }
+          }
+          pin();
+          var root = document.documentElement;
+          if (root && window.MutationObserver) {
+            var observer = new MutationObserver(function(){ pin(); });
+            observer.observe(root, {childList:true, subtree:true, attributes:true, attributeFilter:['content','name']});
+            window.__acDesktopViewport = {stop:function(){ observer.disconnect(); if (owned) owned.remove(); window.__acDesktopViewport = null; }};
+          }
+        })()
+    """.trimIndent()
     const val PARAM_URL = "url"
     const val PARAM_REF = "ref"
     const val PARAM_TEXT = "text"
@@ -432,6 +470,17 @@ internal object BrowserDriverLogic {
 
     fun probeScript(): String = PROBE_TEMPLATE
 
+    fun geometryScript(): String = GEOMETRY_TEMPLATE
+
+    /**
+     * Restore script. Re-checks the witness and the restore-only CSS projection in the same evaluate, before the
+     * single instant scrollTo. A mismatch returns without any scroll (zero scrollTo). A match performs one instant
+     * scrollTo and returns the real readback. Numeric fields only. The returned documentId is returned to the Session
+     * for internal verification only; it is never sent to the agent.
+     */
+    fun scrollRestoreScript(documentId: String, x: Double, y: Double, targetHeightPx: Int, nativeWidthPx: Int): String =
+        """(function(){var witness=window.__acWitness&&window.__acWitness.documentId;if(witness!==${jsonQuote(documentId)})return {ok:false,reason:"witness"};var v=window.visualViewport;if(!v||!(v.width>0)||!(v.height>0))return {ok:false,reason:"no-visual"};var s=$nativeWidthPx/v.width;if(!isFinite(s)||!(s>0)||Math.abs(s*v.height-$targetHeightPx)>${WindowRestoreTolerance.PROJECTION_PX})return {ok:false,reason:"projection"};scrollTo({left:$x,top:$y,behavior:"instant"});return {ok:true,documentId:witness,scrollX:scrollX,scrollY:scrollY};})()"""
+
     /**
      * Reads one node already stored by the current document install. The ref is one JSON argument.
      * Password, file and submit controls are reported so the caller can refuse them before acting.
@@ -504,6 +553,64 @@ internal object BrowserDriverLogic {
         })()
     """.trimIndent()
 
+    private val GEOMETRY_TEMPLATE = """
+        (function(){
+          var witness = window.__acWitness;
+          var visual = window.visualViewport || {};
+          function finite(value){
+            return typeof value === "number" && isFinite(value) && value >= 0;
+          }
+          return {
+            ok: true,
+            documentId: witness && witness.documentId,
+            innerWidth: innerWidth,
+            innerHeight: innerHeight,
+            clientWidth: document.documentElement ? document.documentElement.clientWidth : 0,
+            clientHeight: document.documentElement ? document.documentElement.clientHeight : 0,
+            scrollX: scrollX,
+            scrollY: scrollY,
+            devicePixelRatio: devicePixelRatio,
+            visualWidth: visual.width,
+            visualHeight: visual.height,
+            offsetLeft: visual.offsetLeft,
+            offsetTop: visual.offsetTop,
+            pageLeft: visual.pageLeft,
+            pageTop: visual.pageTop,
+            visualScale: visual.scale
+          };
+        })()
+    """.trimIndent()
+
+    fun parseGeometry(raw: String?): GeometryProbe? {
+        val parsed = parseScriptResult(raw)
+        val json = (parsed as? ScriptResult.Ok)?.json ?: return null
+        fun positive(name: String): Float? = json[name]?.jsonPrimitive?.contentOrNull?.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+        fun nonNegative(name: String): Float? = json[name]?.jsonPrimitive?.contentOrNull?.toFloatOrNull()?.takeIf { it.isFinite() && it >= 0f }
+        val innerWidth = positive("innerWidth") ?: return null
+        val innerHeight = positive("innerHeight") ?: return null
+        val visualWidth = positive("visualWidth") ?: return null
+        val visualHeight = positive("visualHeight") ?: return null
+        val dpr = positive("devicePixelRatio") ?: return null
+        val scale = positive("visualScale") ?: return null
+        return GeometryProbe(
+            documentId = json["documentId"]?.jsonPrimitive?.contentOrNull,
+            innerWidth = innerWidth.toInt(),
+            innerHeight = innerHeight.toInt(),
+            clientWidth = (positive("clientWidth") ?: return null).toInt(),
+            clientHeight = (positive("clientHeight") ?: return null).toInt(),
+            scrollX = nonNegative("scrollX") ?: return null,
+            scrollY = nonNegative("scrollY") ?: return null,
+            devicePixelRatio = dpr,
+            visualWidth = visualWidth,
+            visualHeight = visualHeight,
+            offsetLeft = nonNegative("offsetLeft") ?: return null,
+            offsetTop = nonNegative("offsetTop") ?: return null,
+            pageLeft = nonNegative("pageLeft") ?: return null,
+            pageTop = nonNegative("pageTop") ?: return null,
+            visualScale = scale,
+        )
+    }
+
     private val READ_TEMPLATE = """
         (function(){
           var arg = __AC_ARG__;
@@ -539,6 +646,8 @@ internal sealed class ScriptResult {
     data class Ok(val json: JsonObject) : ScriptResult()
     data class Failed(val message: String) : ScriptResult()
 }
+
+data class ReadyProbeIdentity(val viewId: String, val ticket: Long, val sessionEpoch: Long)
 
 sealed class ProbeAcceptance {
     data class Accept(val documentId: String) : ProbeAcceptance()

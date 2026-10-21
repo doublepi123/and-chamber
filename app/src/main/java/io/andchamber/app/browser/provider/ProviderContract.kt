@@ -54,6 +54,7 @@ val PROVIDER_SUPPORTED_ACTIONS = listOf(
     "browser.type",
     "browser.scroll",
     "browser.capture",
+    "browser.resize",
 )
 
 data class ProviderResult(

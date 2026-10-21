@@ -1,0 +1,15 @@
+{
+  "package": "@openchamber/web",
+  "version": "2.4.0",
+  "baseTag": "v2.4.0",
+  "baseCommit": "6a10ee19a12a1542cad01eee5add14e030ba4ac4",
+  "upstream": "https://github.com/openchamber/openchamber",
+  "patch": {
+    "file": "openchamber-android-provider.patch",
+    "sha256": "2499ecb38f4f59784928aa21a3ca21bb9478a9e82436c32fe6b02f1991d0d952"
+  },
+  "buildTools": {
+    "bunUpstream": "1.4.3",
+    "bunObserved": "1.4.2"
+  }
+}

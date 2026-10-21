@@ -321,5 +321,28 @@
     <string name="browser_enlarge">Enlarge</string>
     <string name="browser_restore">Restore</string>
     <string name="browser_float_status_manual">You are browsing. Allow the agent again after you sign in.</string>
-    <string name="browser_desktop_later">Computer layout is not ready yet.</string>
+    <string name="browser_more">More</string>
+    <string name="browser_desktop_layout">Computer layout</string>
+    <string name="browser_phone_layout">Phone layout</string>
+    <string name="browser_mouse_mode">Mouse</string>
+    <string name="browser_touch_mode">Touch</string>
+    <string name="browser_keyboard_tight">The keyboard covers the browser. Enlarge it, or close it.</string>
+    <string name="browser_mode_change_title">Change page layout?</string>
+    <string name="browser_mode_change_body">This may reload the page and lose unsent changes. Agent control will need your permission again.</string>
+    <string name="browser_resize_window">Resize browser window</string>
+    <string name="browser_reopen_required">Reopen this page before allowing the agent.</string>
+    <string name="browser_mouse_unsupported">Mouse mode is not supported on this system. You can still use direct touch.</string>
+    <!-- Mouse mode status while any accessibility service is on. Keep it within two lines of the small window. -->
+    <string name="browser_mouse_hover_accessibility">With an accessibility service on, pages can\'t see hover. You can still click, drag and scroll.</string>
+    <string name="browser_page_loading">Page loading…</string>
+    <string name="browser_mode_reopen_required">Reopen this page to change the display mode.</string>
+    <string name="browser_scroll_waiting">The page is not ready yet. Scroll position was not saved.</string>
+    <string name="browser_scroll_not_saved">Scroll position was not saved.</string>
+    <string name="browser_scroll_clamped">The page cannot return to the previous scroll position.</string>
+    <string name="browser_scroll_not_restored">Scroll position was not restored.</string>
+    <string name="browser_mouse_gesture_interrupted">The drag was interrupted and the page was closed.</string>
+    <string name="browser_retired_page_details">Unsubmitted changes may be lost. Website storage was not cleared. Allow the agent again after reopening.</string>
+    <string name="browser_reopen_page">Reopen</string>
+    <string name="browser_finish_drag_first">Finish dragging on the page first.</string>
+    <string name="browser_reopen_failed">Could not reopen the page. You can try again.</string>
 </resources>

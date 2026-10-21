@@ -70,6 +70,7 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import org.koin.dsl.module
 import java.io.File
+import java.io.FileNotFoundException
 import java.util.concurrent.TimeUnit
 
 val appModule =
@@ -282,25 +283,36 @@ val appModule =
 private fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
 
 /**
- * Debug/emulator provisioning only. Release has no asset and no provider backdoor. A missing asset
- * keeps stock npm and the legacy MCP path.
+ * Debug/emulator provisioning only. Release has no asset and no provider backdoor.
+ *
+ * Only a missing `manifest.json` asset returns null (stock npm, legacy path). A declared asset with
+ * a bad manifest, path, duplicate, size or hash throws instead of silently becoming absent. The
+ * manifest's paths are validated before the temporary extraction directory is created or written.
  */
 private fun loadDebugProviderArtifact(context: Context): Pair<OpenChamberProviderArtifact.LaneManifest, File>? {
     if (!BuildConfig.DEBUG) return null
-    val raw = runCatching {
+    val raw = try {
         context.assets.open("openchamber-provider/manifest.json").bufferedReader().use { it.readText() }
-    }.getOrNull() ?: return null
+    } catch (missing: FileNotFoundException) {
+        return null
+    }
     val manifest = OpenChamberProviderArtifact.parse(raw)
+    OpenChamberProviderArtifact.manifestRejection(manifest)?.let { reason ->
+        throw IllegalStateException("Invalid OpenChamber provider manifest: $reason")
+    }
     val dir = java.nio.file.Files.createTempDirectory(context.cacheDir.toPath(), "openchamber-provider-").toFile()
     return try {
         (manifest.server + manifest.dist).forEach { pin ->
             val target = File(dir, pin.path)
+            require(target.canonicalPath.startsWith(dir.canonicalPath + File.separator)) {
+                "OpenChamber provider path escapes the extraction root"
+            }
             target.parentFile?.mkdirs()
             context.assets.open("openchamber-provider/${pin.path}").use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             }
         }
-        OpenChamberProviderArtifact.rejection(manifest, dir)?.let { error(it) }
+        OpenChamberProviderArtifact.contentRejection(manifest, dir)?.let { error(it) }
         manifest to dir
     } catch (error: Exception) {
         dir.deleteRecursively()

@@ -1,0 +1,3554 @@
+diff --git a/packages/ui/src/apps/MobileApp.tsx b/packages/ui/src/apps/MobileApp.tsx
+index 9fee6ca..9efb216 100644
+--- a/packages/ui/src/apps/MobileApp.tsx
++++ b/packages/ui/src/apps/MobileApp.tsx
+@@ -27,6 +27,7 @@ import { MobileToaster } from './MobileToaster';
+ import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
+ import { useRouter } from '@/hooks/useRouter';
+ import { useTerminalSessionKeepalive } from '@/hooks/useTerminalSessionKeepalive';
++import { useAndroidHostContextSync } from '@/lib/browser/useAndroidHostContextSync';
+ import { useUpdatePolling } from '@/hooks/useUpdatePolling';
+ import { useWindowTitle } from '@/hooks/useWindowTitle';
+ import { useEnterprisePolicySync } from '@/hooks/useEnterprisePolicySync';
+@@ -139,6 +140,7 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
+   // keepalive: without it, background PTYs (running project actions included)
+   // are idle-reaped by the server while the workspace drawer is closed.
+   useTerminalSessionKeepalive();
++  useAndroidHostContextSync();
+   const [sessionsSheetOpen, setSessionsSheetOpen] = React.useState(false);
+   // The run overview covers the chat; selecting any session returns to it.
+   React.useEffect(() => useSessionUIStore.subscribe((state, prev) => {
+diff --git a/packages/ui/src/apps/MobileWorkspaceDrawer.tsx b/packages/ui/src/apps/MobileWorkspaceDrawer.tsx
+index f6490fe..ed7423f 100644
+--- a/packages/ui/src/apps/MobileWorkspaceDrawer.tsx
++++ b/packages/ui/src/apps/MobileWorkspaceDrawer.tsx
+@@ -12,6 +12,11 @@ import { TerminalView } from '@/components/views/TerminalView';
+ import { useI18n } from '@/lib/i18n';
+ import type { ProjectRef } from '@/lib/projectContextApi';
+ import { cn } from '@/lib/utils';
++import { isAndroidBrowserProviderMode } from '@/lib/browser/hostCapability';
++import { readAndroidBrowserHost, readAndroidHostTabs, type AndroidHostTab } from '@/lib/browser/androidHost';
++import { presentAndroidBrowserTab, subscribeAndroidHost } from '@/lib/browser/androidHostSync';
++import { normalizeBrowserUrl } from '@/lib/browser/url';
++import { useSessionUIStore } from '@/sync/session-ui-store';
+ import { useDirectoryStore } from '@/stores/useDirectoryStore';
+ import { useMcpConfigStore } from '@/stores/useMcpConfigStore';
+ import { useMcpStore } from '@/stores/useMcpStore';
+@@ -28,7 +33,92 @@ const ENTER_DELAY_MS = 16;
+ const ENTER_DURATION_MS = 320;
+ const DRAWER_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
+ 
+-export type MobileWorkspaceTab = 'changes' | 'files' | 'terminal' | 'notes' | 'mcp';
++export type MobileWorkspaceTab = 'changes' | 'files' | 'terminal' | 'notes' | 'mcp' | 'browser';
++
++export const MobileBrowserPane: React.FC<{ onPresented: () => void }> = ({ onPresented }) => {
++  const { t } = useI18n();
++  const sessionId = useSessionUIStore((state) => state.currentSessionId);
++  const directory = useDirectoryStore((state) => state.currentDirectory);
++  const [draft, setDraft] = React.useState('');
++  const [tabs, setTabs] = React.useState<readonly AndroidHostTab[]>([]);
++  const presented = React.useRef('');
++
++  React.useEffect(() => subscribeAndroidHost(directory || '', () => {
++    const host = readAndroidBrowserHost();
++    setTabs(host ? readAndroidHostTabs(host.tabs()) : []);
++  }), [directory]);
++
++  const submit = (value: string) => {
++    if (!sessionId) return;
++    const url = normalizeBrowserUrl(value);
++    if (!url.startsWith('http://') && !url.startsWith('https://')) return;
++    if (presented.current === url) return;
++    if (!presentAndroidBrowserTab(url, sessionId)) return;
++    presented.current = url;
++    onPresented();
++  };
++
++  return (
++    <div className="flex h-full min-h-0 flex-col" data-testid="mobile-browser-pane">
++      {sessionId ? (
++        <form
++          className="flex items-center gap-2 border-b border-border p-2"
++          onSubmit={(event) => {
++            event.preventDefault();
++            const field = event.currentTarget.elements.namedItem('address');
++            const entered = field && 'value' in field && typeof field.value === 'string' ? field.value : draft;
++            submit(entered);
++          }}
++        >
++          <input
++            name="address"
++            value={draft}
++            onChange={(event) => setDraft(event.target.value)}
++            data-testid="android-browser-address"
++            spellCheck={false}
++            autoComplete="off"
++            placeholder="https://"
++            aria-label={t('mobile.browser.address')}
++            className="oc-raised oc-field h-9 min-w-0 flex-1 rounded-full bg-[var(--surface-elevated)] px-3 typography-micro text-foreground outline-none"
++          />
++          <button
++            type="submit"
++            data-testid="android-browser-open"
++            className="h-9 shrink-0 rounded-full bg-secondary px-3 typography-micro text-secondary-foreground"
++          >
++            {t('mobile.browser.open')}
++          </button>
++        </form>
++      ) : (
++        <p className="px-4 py-6 text-center typography-micro text-muted-foreground">{t('mobile.browser.needsSession')}</p>
++      )}
++      <ul className="min-h-0 flex-1 overflow-y-auto">
++        {tabs.map((tab) => (
++          <li key={tab.tabId} className="flex items-center gap-2 border-b border-border px-3 py-2">
++            <button
++              type="button"
++              className="min-w-0 flex-1 truncate text-start typography-micro"
++              onClick={() => readAndroidBrowserHost()?.select(tab.tabId)}
++            >
++              {tab.title || tab.url}
++            </button>
++            <button
++              type="button"
++              className="shrink-0 text-muted-foreground"
++              aria-label={t('mobile.surface.closeAria')}
++              onClick={() => readAndroidBrowserHost()?.close(tab.tabId)}
++            >
++              <Icon name="close" className="size-4" />
++            </button>
++          </li>
++        ))}
++      </ul>
++      {tabs.length === 0 ? (
++        <p className="px-4 py-6 text-center typography-micro text-muted-foreground">{t('mobile.browser.empty')}</p>
++      ) : null}
++    </div>
++  );
++};
+ 
+ /** Quick MCP enable/disable toggles as a workspace pane, with its own slim
+     action row (add server → settings, refresh) replacing the old fullscreen
+@@ -198,12 +288,19 @@ export const MobileWorkspaceDrawer: React.FC<{
+ 
+   if (variant === 'drawer' && !rootRef.current) return null;
+ 
++  const androidBrowser = isAndroidBrowserProviderMode();
+   const tabItems: SortableTabsStripItem[] = [
+     { id: 'changes', label: t('mobile.menu.git'), icon: <Icon name="git-branch" className="h-3.5 w-3.5" /> },
+     { id: 'files', label: t('mobile.menu.files'), icon: <Icon name="file-text" className="h-3.5 w-3.5" /> },
+     { id: 'terminal', label: t('mobile.menu.terminal'), icon: <Icon name="terminal" className="h-3.5 w-3.5" /> },
+     { id: 'notes', label: t('contextRail.surface.notes'), icon: <Icon name="sticky-note" className="h-3.5 w-3.5" /> },
+     { id: 'mcp', label: t('mobile.menu.mcp'), icon: <McpIcon className="h-3.5 w-3.5" /> },
++    ...(androidBrowser ? [{
++      id: 'browser',
++      label: t('mobile.menu.browser'),
++      testId: 'mobile-workspace-tab-browser',
++      icon: <Icon name="window" className="h-3.5 w-3.5" />,
++    }] : []),
+   ];
+ 
+   const body = (
+@@ -213,7 +310,7 @@ export const MobileWorkspaceDrawer: React.FC<{
+           {/* Mounted only while shown; nonCompositedIndicator keeps the active
+               pill off its own compositing layer — creating one inside the
+               drawer's slide flickers in WKWebView. */}
+-          {visible ? (
++          {visible || variant === 'panel' ? (
+             <SortableTabsStrip
+               items={tabItems}
+               activeId={tab}
+@@ -279,6 +376,13 @@ export const MobileWorkspaceDrawer: React.FC<{
+             </ErrorBoundary>
+           </div>
+         ) : null}
++        {androidBrowser && visitedTabs.has('browser') ? (
++          <div className={cn('h-full', tab !== 'browser' && 'hidden')}>
++            <ErrorBoundary>
++              <MobileBrowserPane onPresented={onClose} />
++            </ErrorBoundary>
++          </div>
++        ) : null}
+         {visitedTabs.has('mcp') ? (
+           <div className={cn('h-full', tab !== 'mcp' && 'hidden')}>
+             <ErrorBoundary>
+diff --git a/packages/ui/src/components/browser/BrowserPane.tsx b/packages/ui/src/components/browser/BrowserPane.tsx
+index 22df3e0..a1775e5 100644
+--- a/packages/ui/src/components/browser/BrowserPane.tsx
++++ b/packages/ui/src/components/browser/BrowserPane.tsx
+@@ -27,6 +27,8 @@ import {
+ } from '@/lib/browser/annotationSession';
+ import { resolveAnnotationOverlayTheme } from '@/lib/browser/overlayTheme';
+ import { registerBrowserController } from '@/lib/browser/controlClient';
++import { isAndroidBrowserProviderMode } from '@/lib/browser/hostCapability';
++import { AndroidHostBrowser } from './AndroidHostBrowser';
+ import { suggestFromHistory } from '@/lib/browser/history';
+ import { selectBrowserHistory, useBrowserHistoryStore } from '@/stores/useBrowserHistoryStore';
+ import {
+@@ -1153,6 +1155,8 @@ const IframeBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tabI
+ };
+ 
+ export const BrowserPane: React.FC<BrowserPaneProps> = (props) => {
++  const [android] = React.useState(isAndroidBrowserProviderMode);
+   const [chromium] = React.useState(isChromiumHost);
++  if (android) return <AndroidHostBrowser {...props} />;
+   return chromium ? <WebviewBrowser {...props} /> : <IframeBrowser {...props} />;
+ };
+diff --git a/packages/ui/src/components/chat/ChatContainer.tsx b/packages/ui/src/components/chat/ChatContainer.tsx
+index 3a1f03c..dd15927 100644
+--- a/packages/ui/src/components/chat/ChatContainer.tsx
++++ b/packages/ui/src/components/chat/ChatContainer.tsx
+@@ -1826,6 +1826,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
+ 
+             <div
+                 ref={attachComposerSlot}
++                data-andchamber-chat-composer=""
+                 // The mobile pill morph pins a floating slot for its tween.
+                 data-composer-slot={floatingComposer ? 'floating' : 'flow'}
+                 className={cn(
+diff --git a/packages/ui/src/components/layout/ContextPanel.tsx b/packages/ui/src/components/layout/ContextPanel.tsx
+index 3dd6301..f44f8d9 100644
+--- a/packages/ui/src/components/layout/ContextPanel.tsx
++++ b/packages/ui/src/components/layout/ContextPanel.tsx
+@@ -32,6 +32,7 @@ import { useSessionTurnActivity } from '@/sync/global-session-status';
+ import { SessionActivityIndicator } from '@/components/session/SessionActivityIndicator';
+ import { ContextPanelContent } from './ContextSidebarTab';
+ import { browserUrlLabel } from '@/lib/browser/url';
++
+ import { Icon } from "@/components/icon/Icon";
+ import type { IconName } from "@/components/icon/icons";
+ import { GuestIcon } from './GuestRailIcon';
+diff --git a/packages/ui/src/components/layout/ContextSurfacePanes.tsx b/packages/ui/src/components/layout/ContextSurfacePanes.tsx
+index f599bf9..8e3fec1 100644
+--- a/packages/ui/src/components/layout/ContextSurfacePanes.tsx
++++ b/packages/ui/src/components/layout/ContextSurfacePanes.tsx
+@@ -11,6 +11,8 @@ import { isRightToLeft, useI18n } from '@/lib/i18n';
+ import { resolveProjectContextId } from '@/lib/projectContextApi';
+ import { cn } from '@/lib/utils';
+ import { registerBrowserOpener, registerSleepingBrowserTab, setShownBrowserTab } from '@/lib/browser/controlClient';
++import { isAndroidBrowserProviderMode } from '@/lib/browser/hostCapability';
++import { useAndroidHostContextSync } from '@/lib/browser/useAndroidHostContextSync';
+ import { subscribeOpenchamberEvents } from '@/lib/openchamberEvents';
+ import { useGuestsStore } from '@/lib/guests/store';
+ import { guestHasSharedSurface, guestSurfaceDocking, type GuestSurfaceDocking } from '@/lib/guests/surfaces';
+@@ -274,6 +276,7 @@ export const ContextSurfacePanes: React.FC = () => {
+     () => (effectiveDirectory ? normalizeContextPanelDirectoryKey(effectiveDirectory) : ''),
+     [effectiveDirectory],
+   );
++  useAndroidHostContextSync();
+   const panelState = useUIStore((state) => (directoryKey ? state.contextPanelByDirectory[directoryKey] : undefined));
+   const placement = useUIStore((state) => state.contextSurfaceZones);
+   const contextPanelByDirectory = useUIStore((state) => state.contextPanelByDirectory);
+@@ -356,13 +359,16 @@ export const ContextSurfacePanes: React.FC = () => {
+   // a screenshot of it. The tab appears in the strip of the calling session's
+   // project, which is not always the project on screen, and belongs to that
+   // session.
+-  React.useEffect(() => registerBrowserOpener((url, context) => {
+-    const directory = context.directory ? normalizeContextPanelDirectoryKey(context.directory) : directoryKey;
+-    if (!directory) return null;
+-    const tabId = openAgentBrowserTab(directory, url, context.sessionId);
+-    if (tabId) wakeBrowserTab(tabId);
+-    return tabId;
+-  }), [directoryKey, openAgentBrowserTab, wakeBrowserTab]);
++  React.useEffect(() => {
++    if (isAndroidBrowserProviderMode()) return;
++    return registerBrowserOpener((url, context) => {
++      const directory = context.directory ? normalizeContextPanelDirectoryKey(context.directory) : directoryKey;
++      if (!directory) return null;
++      const tabId = openAgentBrowserTab(directory, url, context.sessionId);
++      if (tabId) wakeBrowserTab(tabId);
++      return tabId;
++    });
++  }, [directoryKey, openAgentBrowserTab, wakeBrowserTab]);
+   // The agent asked for a file to be shown. It opens in front of whatever tab
+   // the user had, on purpose: the agent is pointing at a result, and the prior
+   // tab is one click away.
+@@ -502,7 +508,7 @@ export const ContextSurfacePanes: React.FC = () => {
+   React.useEffect(() => {
+     // Only a Chromium host mounts views that agents can drive, so only it may
+     // offer to wake a tab; anywhere else a claimed action could never run.
+-    if (!window.__OPENCHAMBER_ELECTRON__) return;
++    if (isAndroidBrowserProviderMode() || !window.__OPENCHAMBER_ELECTRON__) return;
+     const unregister = sleepingBrowserTabs.map((tab) => registerSleepingBrowserTab({
+       tabId: tab.id,
+       directory: tab.directory,
+diff --git a/packages/ui/src/components/ui/sortable-tabs-strip.tsx b/packages/ui/src/components/ui/sortable-tabs-strip.tsx
+index 050d069..a30a8ed 100644
+--- a/packages/ui/src/components/ui/sortable-tabs-strip.tsx
++++ b/packages/ui/src/components/ui/sortable-tabs-strip.tsx
+@@ -29,6 +29,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/component
+ export type SortableTabsStripItem = {
+   id: string;
+   label: string;
++  testId?: string;
+   icon?: React.ReactNode;
+   title?: string;
+   closable?: boolean;
+@@ -603,6 +604,7 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
+                 <button
+                   type="button"
+                   role="tab"
++                  data-testid={item.testId}
+                   aria-selected={isActive}
+                   aria-label={showInactiveIconOnly ? (item.title ?? item.label) : undefined}
+                   onClick={() => onSelect(item.id)}
+diff --git a/packages/ui/src/lib/browser/controlClient.test.ts b/packages/ui/src/lib/browser/controlClient.test.ts
+index 5d8f9f6..ae49ce3 100644
+--- a/packages/ui/src/lib/browser/controlClient.test.ts
++++ b/packages/ui/src/lib/browser/controlClient.test.ts
+@@ -78,6 +78,28 @@ const resetRequests = (): void => {
+   setShownBrowserTab(REPO, null);
+ };
+ 
++describe('android exclusive mode', () => {
++  beforeEach(resetRequests);
++  afterEach(() => {
++    while (cleanups.length > 0) cleanups.pop()?.();
++  });
++
++  test('does not subscribe or claim when the server boot flag is set', async () => {
++    Object.defineProperty(globalThis, 'window', {
++      value: { __OPENCHAMBER_ANDROID_BROWSER_PROVIDER__: true },
++      configurable: true,
++    });
++    cleanups.push(() => Reflect.deleteProperty(globalThis, 'window'));
++    const ran: string[] = [];
++    cleanups.push(tab('tab-1', ran));
++    emit('browser.click', { selector: 'button' }, { directory: REPO, sessionId: 'ses_1' });
++    await wait(50);
++    expect(claims).toEqual([]);
++    expect(posted).toEqual([]);
++    expect(ran).toEqual([]);
++  });
++});
++
+ describe('opening a page before any view exists', () => {
+   beforeEach(resetRequests);
+ 
+diff --git a/packages/ui/src/lib/browser/controlClient.ts b/packages/ui/src/lib/browser/controlClient.ts
+index 11c486a..c7bbf76 100644
+--- a/packages/ui/src/lib/browser/controlClient.ts
++++ b/packages/ui/src/lib/browser/controlClient.ts
+@@ -33,7 +33,7 @@
+ import { runtimeFetch } from '@/lib/runtime-fetch';
+ import { subscribeOpenchamberEvents, type BrowserControlRequestContext } from '@/lib/openchamberEvents';
+ import { normalizeContextPanelDirectoryKey } from '@/stores/useUIStore';
+-import { canDriveBrowserPage } from './hostCapability';
++import { canDriveBrowserPage, isAndroidBrowserProviderMode } from './hostCapability';
+ 
+ type BrowserControlRequest = {
+   readonly requestId: string;
+@@ -455,6 +455,9 @@ const runAction = async (
+ };
+ 
+ const ensureSubscribed = (): void => {
++  // Kotlin is the only claim/result executor in Android mode. Subscribing here
++  // would let this page claim a request the broker must not broadcast.
++  if (isAndroidBrowserProviderMode()) return;
+   if (unsubscribe) return;
+   unsubscribe = subscribeOpenchamberEvents((event) => {
+     if (event.type !== 'browser-control-request') return;
+diff --git a/packages/ui/src/lib/browser/hostCapability.ts b/packages/ui/src/lib/browser/hostCapability.ts
+index 3df6424..061f600 100644
+--- a/packages/ui/src/lib/browser/hostCapability.ts
++++ b/packages/ui/src/lib/browser/hostCapability.ts
+@@ -12,3 +12,14 @@
+ export const canDriveBrowserPage = (): boolean => (
+   Boolean(globalThis.window?.__OPENCHAMBER_ELECTRON__)
+ );
++
++/**
++ * Exclusive Android provider mode, set by the server boot payload.
++ * A user-agent string is not a mode switch: a desktop page opened against an
++ * Android-configured server must still refuse iframe and Electron fallbacks.
++ */
++export const isAndroidBrowserProviderMode = (): boolean => {
++  if (globalThis.window?.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ === true) return true;
++  if (typeof document === 'undefined') return false;
++  return document.documentElement.getAttribute('data-openchamber-android-browser') === 'true';
++};
+diff --git a/packages/ui/src/lib/i18n/messages/ar.ts b/packages/ui/src/lib/i18n/messages/ar.ts
+index 6e381cc..26ba165 100644
+--- a/packages/ui/src/lib/i18n/messages/ar.ts
++++ b/packages/ui/src/lib/i18n/messages/ar.ts
+@@ -262,6 +262,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'الطرفية',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'النسخ',
+   'mobile.menu.update': 'تحديث',
+   'mobile.menu.settings': 'الإعدادات',
+diff --git a/packages/ui/src/lib/i18n/messages/de.ts b/packages/ui/src/lib/i18n/messages/de.ts
+index a229d52..b109da5 100644
+--- a/packages/ui/src/lib/i18n/messages/de.ts
++++ b/packages/ui/src/lib/i18n/messages/de.ts
+@@ -247,6 +247,11 @@ export const dict = {
+   'mobile.menu.files': 'Dateien',
+   'mobile.menu.git': 'Git',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instanzen',
+   'mobile.menu.update': 'Aktualisieren',
+   'mobile.menu.settings': 'Einstellungen',
+diff --git a/packages/ui/src/lib/i18n/messages/en.ts b/packages/ui/src/lib/i18n/messages/en.ts
+index 5c36df1..77ec6c1 100644
+--- a/packages/ui/src/lib/i18n/messages/en.ts
++++ b/packages/ui/src/lib/i18n/messages/en.ts
+@@ -289,6 +289,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'Terminal',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instances',
+   'mobile.menu.update': 'Update',
+   'mobile.menu.settings': 'Settings',
+diff --git a/packages/ui/src/lib/i18n/messages/es.ts b/packages/ui/src/lib/i18n/messages/es.ts
+index 8538ed2..166cbca 100644
+--- a/packages/ui/src/lib/i18n/messages/es.ts
++++ b/packages/ui/src/lib/i18n/messages/es.ts
+@@ -300,6 +300,11 @@ export const dict: Record<I18nKey, string> = {
+   "mobile.menu.git": "Git",
+   "mobile.menu.terminal": "Terminal",
+   "mobile.menu.mcp": "MCP",
++  "mobile.menu.browser": "Browser",
++  "mobile.browser.needsSession": "Start a chat before opening a page.",
++  "mobile.browser.open": "Open",
++  "mobile.browser.address": "Browser address",
++  "mobile.browser.empty": "Enter an address to open the page in the Android browser.",
+   "mobile.menu.instances": "Instancias",
+   "mobile.menu.update": "Actualizar",
+   "mobile.menu.settings": "Ajustes",
+diff --git a/packages/ui/src/lib/i18n/messages/fr.ts b/packages/ui/src/lib/i18n/messages/fr.ts
+index ce6cd1e..c51a685 100644
+--- a/packages/ui/src/lib/i18n/messages/fr.ts
++++ b/packages/ui/src/lib/i18n/messages/fr.ts
+@@ -3197,6 +3197,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'Terminal',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instances',
+   'mobile.menu.update': 'Mettre à jour',
+   'mobile.menu.settings': 'Paramètres',
+diff --git a/packages/ui/src/lib/i18n/messages/he.ts b/packages/ui/src/lib/i18n/messages/he.ts
+index e6af85a..6cd0933 100644
+--- a/packages/ui/src/lib/i18n/messages/he.ts
++++ b/packages/ui/src/lib/i18n/messages/he.ts
+@@ -262,6 +262,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'מסוף',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'מופעים',
+   'mobile.menu.update': 'עדכון',
+   'mobile.menu.settings': 'הגדרות',
+diff --git a/packages/ui/src/lib/i18n/messages/ja.ts b/packages/ui/src/lib/i18n/messages/ja.ts
+index c6cee14..99cd9bd 100644
+--- a/packages/ui/src/lib/i18n/messages/ja.ts
++++ b/packages/ui/src/lib/i18n/messages/ja.ts
+@@ -291,6 +291,11 @@ export const dict: Record<I18nKey, string> = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'ターミナル',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.update': '更新',
+   'mobile.menu.settings': '設定',
+   'mobile.sessions.footer.more': 'その他',
+diff --git a/packages/ui/src/lib/i18n/messages/ko.ts b/packages/ui/src/lib/i18n/messages/ko.ts
+index 9e044ae..1ef8138 100644
+--- a/packages/ui/src/lib/i18n/messages/ko.ts
++++ b/packages/ui/src/lib/i18n/messages/ko.ts
+@@ -290,6 +290,11 @@ export const dict: Record<I18nKey, string> = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': '터미널',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': '인스턴스',
+   'mobile.menu.update': '업데이트',
+   'mobile.menu.settings': '설정',
+diff --git a/packages/ui/src/lib/i18n/messages/nl.ts b/packages/ui/src/lib/i18n/messages/nl.ts
+index 6463bf5..125aded 100644
+--- a/packages/ui/src/lib/i18n/messages/nl.ts
++++ b/packages/ui/src/lib/i18n/messages/nl.ts
+@@ -289,6 +289,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'Terminal',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instanties',
+   'mobile.menu.update': 'Bijwerken',
+   'mobile.menu.settings': 'Instellingen',
+diff --git a/packages/ui/src/lib/i18n/messages/pl.ts b/packages/ui/src/lib/i18n/messages/pl.ts
+index 9c88532..4b1930a 100644
+--- a/packages/ui/src/lib/i18n/messages/pl.ts
++++ b/packages/ui/src/lib/i18n/messages/pl.ts
+@@ -291,6 +291,11 @@ export const dict: Record<I18nKey, string> = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'Terminal',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instancje',
+   'mobile.menu.update': 'Aktualizuj',
+   'mobile.menu.settings': 'Ustawienia',
+diff --git a/packages/ui/src/lib/i18n/messages/pt-BR.ts b/packages/ui/src/lib/i18n/messages/pt-BR.ts
+index 3c4f71a..080ff4e 100644
+--- a/packages/ui/src/lib/i18n/messages/pt-BR.ts
++++ b/packages/ui/src/lib/i18n/messages/pt-BR.ts
+@@ -300,6 +300,11 @@ export const dict: Record<I18nKey, string> = {
+   "mobile.menu.git": "Git",
+   "mobile.menu.terminal": "Terminal",
+   "mobile.menu.mcp": "MCP",
++  "mobile.menu.browser": "Browser",
++  "mobile.browser.needsSession": "Start a chat before opening a page.",
++  "mobile.browser.open": "Open",
++  "mobile.browser.address": "Browser address",
++  "mobile.browser.empty": "Enter an address to open the page in the Android browser.",
+   "mobile.menu.instances": "Instâncias",
+   "mobile.menu.update": "Atualizar",
+   "mobile.menu.settings": "Configurações",
+diff --git a/packages/ui/src/lib/i18n/messages/tr.ts b/packages/ui/src/lib/i18n/messages/tr.ts
+index a1d18ee..f79e264 100644
+--- a/packages/ui/src/lib/i18n/messages/tr.ts
++++ b/packages/ui/src/lib/i18n/messages/tr.ts
+@@ -212,6 +212,11 @@ export const dict = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': 'Terminal',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': 'Browser',
++  'mobile.browser.needsSession': 'Start a chat before opening a page.',
++  'mobile.browser.open': 'Open',
++  'mobile.browser.address': 'Browser address',
++  'mobile.browser.empty': 'Enter an address to open the page in the Android browser.',
+   'mobile.menu.instances': 'Instance\'lar',
+   'mobile.menu.update': 'Güncelle',
+   'mobile.menu.settings': 'Ayarlar',
+diff --git a/packages/ui/src/lib/i18n/messages/uk.ts b/packages/ui/src/lib/i18n/messages/uk.ts
+index 9f7b1ad..c70c9e3 100644
+--- a/packages/ui/src/lib/i18n/messages/uk.ts
++++ b/packages/ui/src/lib/i18n/messages/uk.ts
+@@ -300,6 +300,11 @@ export const dict: Record<I18nKey, string> = {
+   "mobile.menu.git": "Git",
+   "mobile.menu.terminal": "Термінал",
+   "mobile.menu.mcp": "MCP",
++  "mobile.menu.browser": "Browser",
++  "mobile.browser.needsSession": "Start a chat before opening a page.",
++  "mobile.browser.open": "Open",
++  "mobile.browser.address": "Browser address",
++  "mobile.browser.empty": "Enter an address to open the page in the Android browser.",
+   "mobile.menu.instances": "Інстанси",
+   "mobile.menu.update": "Оновити",
+   "mobile.menu.settings": "Налаштування",
+diff --git a/packages/ui/src/lib/i18n/messages/zh-CN.ts b/packages/ui/src/lib/i18n/messages/zh-CN.ts
+index 06b2806..311d3be 100644
+--- a/packages/ui/src/lib/i18n/messages/zh-CN.ts
++++ b/packages/ui/src/lib/i18n/messages/zh-CN.ts
+@@ -290,6 +290,11 @@ export const dict: Record<I18nKey, string> = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': '终端',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': '浏览器',
++  'mobile.browser.needsSession': '先开始一个会话',
++  'mobile.browser.open': '打开',
++  'mobile.browser.address': '浏览器地址',
++  'mobile.browser.empty': '输入地址后，页面会在 Android 浏览器中打开。',
+   'mobile.menu.instances': '实例',
+   'mobile.menu.update': '更新',
+   'mobile.menu.settings': '设置',
+diff --git a/packages/ui/src/lib/i18n/messages/zh-TW.ts b/packages/ui/src/lib/i18n/messages/zh-TW.ts
+index 729ed41..2551596 100644
+--- a/packages/ui/src/lib/i18n/messages/zh-TW.ts
++++ b/packages/ui/src/lib/i18n/messages/zh-TW.ts
+@@ -290,6 +290,11 @@ export const dict: Record<I18nKey, string> = {
+   'mobile.menu.git': 'Git',
+   'mobile.menu.terminal': '終端機',
+   'mobile.menu.mcp': 'MCP',
++  'mobile.menu.browser': '瀏覽器',
++  'mobile.browser.needsSession': '先開始一個會話',
++  'mobile.browser.open': '開啟',
++  'mobile.browser.address': '瀏覽器地址',
++  'mobile.browser.empty': '輸入地址後，頁面會在 Android 瀏覽器中開啟。',
+   'mobile.menu.instances': '執行個體',
+   'mobile.menu.update': '更新',
+   'mobile.menu.settings': '設定',
+diff --git a/packages/ui/src/main.tsx b/packages/ui/src/main.tsx
+index af2d345..1d45d06 100644
+--- a/packages/ui/src/main.tsx
++++ b/packages/ui/src/main.tsx
+@@ -18,6 +18,7 @@ import { initializeLocale, I18nProvider } from './lib/i18n'
+ import type { RuntimeAPIs } from './lib/api/types'
+ import { installRuntimeEndpointReset } from './apps/runtimeEndpointReset'
+ import { prefetchOpenCodeCompatibility } from './components/update/openCodeCompatibilityCheck'
++import { applyAndroidBrowserBootFlag } from './lib/browser/androidBoot'
+ 
+ declare global {
+   interface Window {
+@@ -29,6 +30,7 @@ const runtimeAPIs = (typeof window !== 'undefined' && window.__OPENCHAMBER_RUNTI
+   throw new Error('Runtime APIs not provided for legacy UI entrypoint.');
+ })();
+ 
++applyAndroidBrowserBootFlag();
+ initializeLocale();
+ installRuntimeEndpointReset();
+ prefetchOpenCodeCompatibility();
+diff --git a/packages/ui/src/stores/useUIStore.ts b/packages/ui/src/stores/useUIStore.ts
+index b345a55..d9bdae5 100644
+--- a/packages/ui/src/stores/useUIStore.ts
++++ b/packages/ui/src/stores/useUIStore.ts
+@@ -106,6 +106,8 @@ type ContextPanelTabDescriptor = {
+   targetPath?: string | null;
+   targetDirectory?: string | null;
+   dedupeKey?: string | null;
++  /** Keeps a native-issued browser tab id instead of deriving another one. */
++  id?: string | null;
+   label?: string | null;
+   sessionTitleFallback?: string | null;
+   readOnly?: boolean;
+@@ -343,8 +345,9 @@ const createContextPanelTab = (descriptor: ContextPanelTabDescriptor): ContextPa
+     normalizedTargetPath,
+     descriptor.dedupeKey,
+   );
++  const explicitId = typeof descriptor.id === 'string' ? descriptor.id.trim() : '';
+   return {
+-    id: buildContextPanelTabID(descriptor.mode, dedupeKey),
++    id: explicitId || buildContextPanelTabID(descriptor.mode, dedupeKey),
+     mode: descriptor.mode,
+     targetPath: normalizedTargetPath,
+     targetDirectory: normalizedTargetDirectory,
+@@ -1177,9 +1180,9 @@ interface UIStore {
+   openContextOverview: (directory: string) => void;
+   openContextPreview: (directory: string, url: string) => void;
+   openContextBrowser: (directory: string, url?: string, options?: { reveal?: boolean }) => void;
+-  openNewContextBrowserTab: (directory: string) => void;
++  openNewContextBrowserTab: (directory: string, ownerSessionId?: string | null) => void;
+   /** A new background browser tab for an agent at `url`; returns its tab id, or null where there is no browser. */
+-  openAgentBrowserTab: (directory: string, url: string, ownerSessionId: string | null) => string | null;
++  openAgentBrowserTab: (directory: string, url: string, ownerSessionId: string | null, tabId?: string | null) => string | null;
+   setContextPanelTabTargetPath: (directory: string, tabID: string, targetPath: string) => void;
+   /** Points file tabs and the editor's open files at or under `fromPath` at `toPath` after a move or rename. */
+   moveContextFilePaths: (directory: string, fromPath: string, toPath: string) => void;
+@@ -1887,24 +1890,26 @@ export const useUIStore = create<UIStore>()(
+         // An agent's page gets its own tab in the background: never the tab
+         // the user is on, never an existing tab that happens to show the same
+         // address, and the panel stays as the user left it.
+-        openAgentBrowserTab: (directory, url, ownerSessionId) => {
++        openAgentBrowserTab: (directory, url, ownerSessionId, tabId = null) => {
+           const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
+           if (!normalizedDirectory || isVSCodeRuntime()) return null;
++          const explicitId = typeof tabId === 'string' ? tabId.trim() : '';
+           browserTabSequence += 1;
+-          const dedupeKey = `browser:agent:${Date.now()}-${browserTabSequence}`;
++          const dedupeKey = explicitId || `browser:agent:${Date.now()}-${browserTabSequence}`;
+           if (url.trim()) noteBrowserTabAddressRequested(get().contextPanelByDirectory, normalizedDirectory, dedupeKey, url.trim());
+           get().openContextPanelTab(normalizedDirectory, {
+             mode: 'browser',
+             targetPath: url.trim(),
+             dedupeKey,
++            id: explicitId || null,
+             label: null,
+             ownerSessionId,
+           }, { reveal: false });
+-          return buildContextPanelTabID('browser', dedupeKey);
++          return explicitId || buildContextPanelTabID('browser', dedupeKey);
+         },
+         // Always a new tab, never the existing one: the whole point of asking
+         // for one is to keep what is already open.
+-        openNewContextBrowserTab: (directory) => {
++        openNewContextBrowserTab: (directory, ownerSessionId = null) => {
+           const normalizedDirectory = normalizeDirectoryPath((directory || '').trim());
+           if (!normalizedDirectory || isVSCodeRuntime()) return;
+           browserTabSequence += 1;
+@@ -1913,6 +1918,7 @@ export const useUIStore = create<UIStore>()(
+             targetPath: '',
+             dedupeKey: `browser:new:${Date.now()}-${browserTabSequence}`,
+             label: null,
++            ownerSessionId,
+           });
+         },
+         openContextBrowser: (directory, url = '', options) => {
+diff --git a/packages/ui/src/types/desktop.d.ts b/packages/ui/src/types/desktop.d.ts
+index 6fee8d5..16a7bf4 100644
+--- a/packages/ui/src/types/desktop.d.ts
++++ b/packages/ui/src/types/desktop.d.ts
+@@ -7,6 +7,9 @@ declare global {
+     __OPENCHAMBER_LOCAL_ORIGIN__?: string;
+     __OPENCHAMBER_SSH_FORWARD_API_URL__?: string;
+     __OPENCHAMBER_ELECTRON__?: { runtime?: string; arch?: string; trayEnabled?: boolean; nativeFrame?: boolean };
++    /** Server boot flag. Android mode is never inferred from the user agent. */
++    __OPENCHAMBER_ANDROID_BROWSER_PROVIDER__?: boolean;
++    AndChamberBrowserHost?: import('@/lib/browser/androidHost').AndroidBrowserHost;
+     __OPENCHAMBER_PLATFORM__?: string;
+     __OPENCHAMBER_DESKTOP_BOOT_OUTCOME__?: DesktopBootOutcome;
+   }
+diff --git a/packages/web/bin/cli.js b/packages/web/bin/cli.js
+index cdf1f20..03c14f1 100755
+--- a/packages/web/bin/cli.js
++++ b/packages/web/bin/cli.js
+@@ -2,7 +2,7 @@
+ 
+ import fs from 'fs';
+ import path from 'path';
+-import { spawnSync } from 'child_process';
++import { spawnSync as spawnSyncChild } from 'child_process';
+ import { fileURLToPath, pathToFileURL } from 'url';
+ import { isModuleCliExecution } from './cli-entry.js';
+ import { EXIT_CODE, TunnelCliError } from './lib/cli-errors.js';
+@@ -45,6 +45,12 @@ import { createConnectUrlCommand } from './lib/commands-connect-url.js';
+ import { createLifecycleCommands } from './lib/commands-lifecycle.js';
+ import { createServeCommand } from './lib/commands-serve.js';
+ import { createTunnelCommand, isValidTunnelDoctorResponse, shouldDisplayTunnelQr } from './lib/commands-tunnel.js';
++import { childProcessEnv } from '../server/lib/browser-control/child-env.js';
++
++const spawnSync = (command, args, options = {}) => spawnSyncChild(command, args, {
++  ...options,
++  env: childProcessEnv(options.env ?? process.env),
++});
+ import {
+   resolveDoctorPortStatuses,
+   discoverRunningInstances,
+diff --git a/packages/web/bin/lib/commands-serve.js b/packages/web/bin/lib/commands-serve.js
+index 430c55c..70e83a0 100644
+--- a/packages/web/bin/lib/commands-serve.js
++++ b/packages/web/bin/lib/commands-serve.js
+@@ -11,6 +11,7 @@ import { discoverOpenChamberInstanceOnPort, isDesktopRuntimeForPort } from './cl
+ import { getPidFilePath, getInstanceFilePath, writePidFile, writeInstanceOptions, removePidFile, removeInstanceFile, isProcessRunning, terminateProcessTree } from './cli-process.js';
+ import { isNetworkExposedBindHost } from '../../server/lib/security/bind-host.js';
+ import { assignInjectedEnv } from '../../server/lib/injected-env.js';
++import { childProcessEnv } from '../../server/lib/browser-control/child-env.js';
+ import {
+   intro as clackIntro,
+   outro as clackOutro,
+@@ -285,7 +286,7 @@ async function serveCommand(options) {
+       stdio: ['ignore', logFd, logFd, 'ipc'],
+       // Same marking as the foreground path above: the server's own settings
+       // are recorded as OpenChamber's, the binary path is not.
+-      env: assignInjectedEnv({ ...process.env, OPENCODE_BINARY: opencodeBinary }, {
++      env: assignInjectedEnv(childProcessEnv({ ...process.env, OPENCODE_BINARY: opencodeBinary }), {
+         OPENCHAMBER_PORT: String(targetPort),
+         OPENCHAMBER_RUNTIME: 'web',
+         OPENCHAMBER_HOST: effectiveHost,
+diff --git a/packages/web/server/index.js b/packages/web/server/index.js
+index 3340380..ecca066 100644
+--- a/packages/web/server/index.js
++++ b/packages/web/server/index.js
+@@ -4,7 +4,7 @@ import 'reflect-metadata';
+ import express from 'express';
+ import compression from 'compression';
+ import path from 'path';
+-import { spawn, spawnSync } from 'child_process';
++import { spawn as spawnChild, spawnSync as spawnSyncChild } from 'child_process';
+ import fs from 'fs';
+ import http from 'http';
+ import net from 'net';
+@@ -150,6 +150,8 @@ import { createBrowserControlRouter } from './lib/browser-control/provider.js';
+ import { createDevServerScanner } from './lib/dev-servers/routes.js';
+ import { createDevTunnelRuntime } from './lib/dev-tunnel/runtime.js';
+ import { registerBrowserControlRoutes } from './lib/browser-control/routes.js';
++import { captureAndroidProviderToken, createAndroidProviderRegistry } from './lib/browser-control/android-provider.js';
++import { childProcessEnv } from './lib/browser-control/child-env.js';
+ import { createManagedConfigRuntime } from './lib/opencode/managed-config-file.js';
+ import { createOpenChamberSessionService } from './lib/openchamber-sessions/routes.js';
+ import { createSessionMetadataStore, createOpenCodeSessionMetadata } from './lib/openchamber-sessions/session-metadata-store.js';
+@@ -178,6 +180,23 @@ const uiOpenChamberEventClients = new Set();
+ const HEALTH_CHECK_INTERVAL = 15000;
+ const SHUTDOWN_TIMEOUT = 10000;
+ const MODELS_DEV_API_URL = 'https://models.dev/api.json';
++// Capture before any child can inherit process.env. The token lives only in
++// the provider registry closure after this line.
++const androidProviderLaunch = captureAndroidProviderToken(process.env);
++const androidProvider = createAndroidProviderRegistry({
++  enabled: androidProviderLaunch.enabled,
++  token: androidProviderLaunch.token,
++  createId: () => crypto.randomUUID(),
++});
++const spawn = (command, args, options = {}) => spawnChild(command, args, {
++  ...options,
++  ...(options.env ? { env: childProcessEnv(options.env) } : { env: childProcessEnv(process.env) }),
++});
++const spawnSync = (command, args, options = {}) => spawnSyncChild(command, args, {
++  ...options,
++  ...(options.env ? { env: childProcessEnv(options.env) } : { env: childProcessEnv(process.env) }),
++});
++
+ const MODELS_METADATA_CACHE_TTL = 5 * 60 * 1000;
+ const CLIENT_RELOAD_DELAY_MS = 800;
+ const OPEN_CODE_READY_GRACE_MS = 12000;
+@@ -1343,6 +1362,7 @@ const staticRoutesRuntime = createStaticRoutesRuntime({
+   normalizePwaOrientation,
+   // uiAuthController is created at startup, after this runtime: read it per request.
+   isRequestAuthorized: (req, res) => isRequestAuthorized(req, res, { tunnelAuthController, uiAuthController }),
++  androidBrowserProvider: () => androidProvider.enabled,
+ });
+ const remoteClientAuthRuntime = createRemoteClientAuthRuntime({
+   fsPromises,
+@@ -1706,6 +1726,7 @@ const openChamberSessionService = createOpenChamberSessionService({
+ // clients reached so the broker can fail fast when nobody is listening.
+ const browserControlBroker = createBrowserControlBroker({
+   createId: () => `browser-${crypto.randomUUID()}`,
++  androidProvider,
+   emitRequest: (request) => {
+     // Opening a page only needs a panel to open it in; everything else needs a
+     // client that can actually drive one. Counting the right clients is what
+@@ -1759,6 +1780,7 @@ const browserControlRouter = createBrowserControlRouter({
+   persistPath: extensionsPersistPath(OPENCHAMBER_DATA_DIR),
+   emitProviderReset: emitBrowserProviderResetEvent,
+   createId: () => `browser-${crypto.randomUUID()}`,
++  androidProvider,
+   surfaceControl: {
+     userControls: (guestId) => guestSurfaceRuntime?.userControls(guestId) ?? false,
+     noteAgentActivity: (guestId) => guestSurfaceRuntime?.noteAgentActivity(guestId),
+@@ -2284,6 +2306,19 @@ async function main(options = {}) {
+   let tunnelRuntimeContextHolder = null;
+ 
+   const bootstrapResult = bootstrapRuntime.setupBaseRoutes(app, {
++    androidProviderAuth: {
++      isProviderRequest(req) {
++        if (!androidProvider.enabled) return false;
++        const pathname = String(req.originalUrl || req.url || '').split('?')[0];
++        if (req.method === 'GET' && pathname === '/api/openchamber/events') {
++          return req.query?.provider === 'android';
++        }
++        if (req.method !== 'POST') return false;
++        if (pathname !== '/api/browser-control/claim' && pathname !== '/api/browser-control/result') return false;
++        const header = req.headers?.['x-andchamber-browser-token'];
++        return typeof header === 'string' ? header.length > 0 : Array.isArray(header) && header.length > 0;
++      },
++    },
+     process,
+     openchamberVersion: OPENCHAMBER_VERSION,
+     runtimeName: process.env.OPENCHAMBER_RUNTIME || 'web',
+@@ -2493,7 +2528,7 @@ async function main(options = {}) {
+   relayServiceInstance = relayService;
+   relayService.registerRoutes(app);
+ 
+-  registerBrowserControlRoutes(app, { express, broker: browserControlBroker });
++  registerBrowserControlRoutes(app, { express, broker: browserControlBroker, androidProvider });
+ 
+   // One scanner backs both discovery and the tunnel allowlist, so a port the
+   // user can see is exactly a port the tunnel will dial.
+@@ -2591,6 +2626,7 @@ async function main(options = {}) {
+     emitSessionCreatedEvent,
+     getOpenChamberEventClients: () => uiOpenChamberEventClients,
+     writeSseEvent,
++    androidProvider,
+     globalEventHub: globalMessageStreamHub,
+     permissionAutoAcceptRuntime,
+     worktreeBootstrapStore,
+diff --git a/packages/web/server/lib/browser-control/broker.js b/packages/web/server/lib/browser-control/broker.js
+index 251df84..9c0389e 100644
+--- a/packages/web/server/lib/browser-control/broker.js
++++ b/packages/web/server/lib/browser-control/broker.js
+@@ -25,10 +25,11 @@ const DEFAULT_TIMEOUT_MS = 20_000;
+ const MAX_TIMEOUT_MS = 120_000;
+ 
+ export class BrowserControlError extends Error {
+-  constructor(message, status = 400) {
++  constructor(message, status = 400, code = '') {
+     super(message);
+     this.name = 'BrowserControlError';
+     this.status = status;
++    this.code = typeof code === 'string' ? code : '';
+   }
+ }
+ 
+@@ -37,12 +38,14 @@ export const createBrowserControlBroker = ({
+   createId,
+   setTimer = setTimeout,
+   clearTimer = clearTimeout,
++  androidProvider = null,
+ } = {}) => {
+   if (typeof emitRequest !== 'function') {
+     throw new TypeError('emitRequest is required');
+   }
+ 
+   const pending = new Map();
++  const androidExclusive = androidProvider?.enabled === true;
+ 
+   const settle = (requestId, outcome) => {
+     const entry = pending.get(requestId);
+@@ -66,6 +69,58 @@ export const createBrowserControlBroker = ({
+     request(action, parameters = {}, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, context } = {}) {
+       const requestId = typeof createId === 'function' ? createId() : `browser-${Date.now()}-${pending.size}`;
+       const boundedTimeout = Math.min(Math.max(1_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS), MAX_TIMEOUT_MS);
++      const requestContext = {
++        directory: context?.directory ?? null,
++        sessionId: context?.sessionId ?? null,
++      };
++
++      // Android exclusive mode never broadcasts. The provider connection is
++      // registered as the target before the event is written, so a disconnect
++      // between those two steps still fails the caller instead of falling back.
++      if (androidExclusive) {
++        if (!requestContext.sessionId) {
++          return Promise.reject(new BrowserControlError(
++            'Android browser actions require a session. Nothing was changed.',
++            400,
++            'ANDROID_PROVIDER_SESSION_REQUIRED',
++          ));
++        }
++        const begun = androidProvider.beginRequest({
++          requestId,
++          action,
++          parameters,
++          context: requestContext,
++          timeoutMs: boundedTimeout,
++          setTimer,
++          clearTimer,
++        });
++        if (!begun?.delivered) {
++          return Promise.reject(new BrowserControlError(
++            'No Android browser provider is connected. The page was not opened in an iframe or the desktop browser, and the request was not sent to other clients. Nothing was changed.',
++            503,
++            'ANDROID_PROVIDER_UNAVAILABLE',
++          ));
++        }
++        return new Promise((resolve, reject) => {
++          const finish = (outcome) => {
++            if (signal && onAbort) signal.removeEventListener('abort', onAbort);
++            if (outcome.ok) resolve(outcome.data ?? null);
++            else reject(new BrowserControlError(outcome.message || 'Browser action failed', outcome.status || 400, outcome.code || ''));
++          };
++          const onAbort = () => {
++            androidProvider.cancel(requestId, 'Browser action was cancelled', 'abort');
++          };
++          if (signal?.aborted) {
++            reject(new BrowserControlError('Browser action was cancelled', 499, 'ANDROID_PROVIDER_CANCELLED'));
++            return;
++          }
++          begun.hold(finish);
++          if (signal) signal.addEventListener('abort', onAbort, { once: true });
++          if (!androidProvider.emit(begun.envelope)) {
++            androidProvider.cancel(requestId, 'The Android browser provider disconnected before the request was delivered', 'disconnect');
++          }
++        });
++      }
+ 
+       // The calling session goes out with the request: the client keeps one
+       // session's tabs apart from another's, and opens a tab in the project
+@@ -74,10 +129,7 @@ export const createBrowserControlBroker = ({
+         requestId,
+         action,
+         parameters,
+-        context: {
+-          directory: context?.directory ?? null,
+-          sessionId: context?.sessionId ?? null,
+-        },
++        context: requestContext,
+       });
+       if (!listenerCount) {
+         // Written for the agent reading it, not the user: state what this
+@@ -160,6 +212,12 @@ export const createBrowserControlBroker = ({
+       for (const requestId of [...pending.keys()]) {
+         settle(requestId, { ok: false, message, status: 503 });
+       }
++      androidProvider?.rejectAll?.(message);
++    },
++
++    /** True when builtin actions are bound to the Android provider, not the UI broadcast. */
++    get androidExclusive() {
++      return androidExclusive;
+     },
+   };
+ };
+diff --git a/packages/web/server/lib/browser-control/provider.js b/packages/web/server/lib/browser-control/provider.js
+index 422a290..d58ed98 100644
+--- a/packages/web/server/lib/browser-control/provider.js
++++ b/packages/web/server/lib/browser-control/provider.js
+@@ -32,6 +32,7 @@ import {
+ import { browserProviderResultSchema } from '@openchamber/sdk/schemas';
+ 
+ import { GuestServiceError, proxyGuestServiceRequest } from '../guests/service.js';
++import { ANDROID_BROWSER_PROVIDER, ANDROID_PROVIDER_ERROR_CODES } from './android-provider.js';
+ import { BrowserControlError } from './broker.js';
+ 
+ const BUILTIN_BROWSER_PROVIDER = 'builtin';
+@@ -79,6 +80,7 @@ export const createBrowserControlRouter = ({
+   createId,
+   proxyServiceRequest = proxyGuestServiceRequest,
+   surfaceControl = { userControls: () => false, noteAgentActivity: () => undefined },
++  androidProvider = null,
+ }) => {
+   // `browserProvider` was sanitized on write (settings-helpers.js keeps a
+   // trimmed non-empty string), so the only decision left is builtin or not.
+@@ -178,6 +180,15 @@ export const createBrowserControlRouter = ({
+       if (!providerId) {
+         return broker.request(action, parameters, options);
+       }
++      if (providerId === ANDROID_BROWSER_PROVIDER) {
++        // The launch env selects Android. A settings value with the same name
++        // is not that selection and must not be rewritten to builtin.
++        throw new BrowserControlError(
++          'Android browser provider is selected by the server launch, not by the browserProvider setting. The action was not run.',
++          503,
++          ANDROID_PROVIDER_ERROR_CODES.UNAVAILABLE,
++        );
++      }
+       let guest;
+       try {
+         guest = await findGuest(providerId);
+diff --git a/packages/web/server/lib/browser-control/routes.js b/packages/web/server/lib/browser-control/routes.js
+index 58193d2..0806433 100644
+--- a/packages/web/server/lib/browser-control/routes.js
++++ b/packages/web/server/lib/browser-control/routes.js
+@@ -5,8 +5,26 @@
+  * request it received over the event stream. Only the request id is trusted to
+  * correlate; an unknown id is accepted with `matched: false` rather than an
+  * error, because a client answering after a timeout has done nothing wrong.
++ *
++ * When the Android provider is configured, the same claim and result paths
++ * also accept the provider token. That branch is attached by core-routes as a
++ * narrow auth bypass; these handlers still require connectionId and claimNonce
++ * before an Android result can settle anything.
+  */
+-export function registerBrowserControlRoutes(app, { express, broker }) {
++const providerAuthFailure = (res, auth) => {
++  res.status(auth.status).json({ error: auth.error, code: auth.code });
++};
++
++const isAndroidProviderAttempt = (req, androidProvider) => (
++  androidProvider?.enabled === true
++  && (
++    typeof req.get === 'function'
++      ? Boolean(req.get('x-andchamber-browser-token'))
++      : Boolean(req.headers?.['x-andchamber-browser-token'])
++  )
++);
++
++export function registerBrowserControlRoutes(app, { express, broker, androidProvider = null }) {
+   // Claiming is separate from answering so that a client learns whether it may
+   // act *before* it acts. Deciding by whose result arrives first would be too
+   // late: by then every client has already clicked.
+@@ -16,6 +34,25 @@ export function registerBrowserControlRoutes(app, { express, broker }) {
+       res.status(400).json({ error: 'requestId is required' });
+       return;
+     }
++    if (broker.androidExclusive || isAndroidProviderAttempt(req, androidProvider)) {
++      const auth = androidProvider?.authorize(req) ?? { ok: false, status: 503, code: 'ANDROID_PROVIDER_UNAVAILABLE', error: 'Android browser provider is not configured' };
++      if (!auth.ok) {
++        providerAuthFailure(res, auth);
++        return;
++      }
++      const connectionId = typeof req.body?.connectionId === 'string' ? req.body.connectionId.trim() : '';
++      if (!connectionId) {
++        res.status(400).json({ error: 'connectionId is required', code: 'ANDROID_PROVIDER_PROTOCOL_ERROR' });
++        return;
++      }
++      const claim = androidProvider.claim({ requestId, connectionId });
++      if (!claim.granted) {
++        res.json({ granted: false });
++        return;
++      }
++      res.json({ granted: true, claimNonce: claim.claimNonce, remainingMs: claim.remainingMs });
++      return;
++    }
+     res.json({ granted: broker.claim(requestId) });
+   });
+ 
+@@ -37,6 +74,34 @@ export function registerBrowserControlRoutes(app, { express, broker }) {
+       return;
+     }
+ 
++    if (broker.androidExclusive || isAndroidProviderAttempt(req, androidProvider) || typeof body.connectionId === 'string' || typeof body.claimNonce === 'string') {
++      if (!androidProvider?.enabled) {
++        res.status(403).json({ error: 'Android browser provider is not configured', code: 'ANDROID_PROVIDER_AUTH_REQUIRED', matched: false });
++        return;
++      }
++      const auth = androidProvider.authorize(req);
++      if (!auth.ok) {
++        providerAuthFailure(res, auth);
++        return;
++      }
++      const connectionId = typeof body.connectionId === 'string' ? body.connectionId.trim() : '';
++      const claimNonce = typeof body.claimNonce === 'string' ? body.claimNonce : '';
++      if (!connectionId || !claimNonce) {
++        res.status(400).json({ error: 'connectionId and claimNonce are required', code: 'ANDROID_PROVIDER_PROTOCOL_ERROR', matched: false });
++        return;
++      }
++      const settled = androidProvider.result({
++        requestId,
++        connectionId,
++        claimNonce,
++        ok: body.ok === true,
++        data: body.data ?? null,
++        error: typeof body.error === 'string' ? body.error : '',
++      });
++      res.json({ matched: settled.matched === true });
++      return;
++    }
++
+     const matched = broker.resolve(requestId, {
+       ok: body.ok === true,
+       data: body.data ?? null,
+diff --git a/packages/web/server/lib/git/ssh-wrapper.js b/packages/web/server/lib/git/ssh-wrapper.js
+index 3b54a79..084c7cd 100644
+--- a/packages/web/server/lib/git/ssh-wrapper.js
++++ b/packages/web/server/lib/git/ssh-wrapper.js
+@@ -1,9 +1,10 @@
+-import { spawn } from 'node:child_process';
++import { spawn as spawnChild } from 'node:child_process';
++import { childProcessEnv } from '../browser-control/child-env.js';
+ 
+ const keyPath = process.env.OPENCHAMBER_GIT_SSH_KEY;
+ if (!keyPath || /[\0\r\n]/.test(keyPath)) process.exit(1);
+ 
+-const child = spawn('ssh', [
++const child = spawnChild('ssh', [
+   '-F', 'none',
+   '-o', 'IdentityFile=none',
+   '-i', keyPath,
+@@ -13,7 +14,7 @@ const child = spawn('ssh', [
+   '-o', 'StrictHostKeyChecking=yes',
+   ...process.argv.slice(2),
+ ], {
+-  env: process.env,
++  env: childProcessEnv(process.env),
+   shell: false,
+   windowsHide: true,
+   stdio: 'inherit',
+diff --git a/packages/web/server/lib/openchamber-control/error.js b/packages/web/server/lib/openchamber-control/error.js
+index c5377df..82d957c 100644
+--- a/packages/web/server/lib/openchamber-control/error.js
++++ b/packages/web/server/lib/openchamber-control/error.js
+@@ -12,5 +12,6 @@ export const asControlError = (error, fallbackMessage, fallbackStatus = 500) =>
+   const message = error instanceof Error ? error.message : fallbackMessage;
+   return new OpenChamberControlError(message || fallbackMessage, Number(error?.statusCode) || Number(error?.status) || fallbackStatus, {
+     ...(error?.goalConfigured === true ? { goalConfigured: true } : {}),
++    ...(typeof error?.code === 'string' && error.code ? { code: error.code } : {}),
+   });
+ };
+diff --git a/packages/web/server/lib/openchamber-control/routes.js b/packages/web/server/lib/openchamber-control/routes.js
+index 41f0d5d..96e5006 100644
+--- a/packages/web/server/lib/openchamber-control/routes.js
++++ b/packages/web/server/lib/openchamber-control/routes.js
+@@ -21,6 +21,7 @@ export const registerOpenChamberControlRoutes = (app, { controlService }) => {
+       const controlError = asControlError(error, 'OpenChamber control action failed');
+       return res.status(controlError.statusCode).json({
+         error: controlError.message,
++        ...(typeof controlError.code === 'string' && controlError.code ? { code: controlError.code } : {}),
+         ...(controlError.partial === true ? {
+           partial: true,
+           partialAction: controlError.partialAction,
+diff --git a/packages/web/server/lib/openchamber-control/screenshots.js b/packages/web/server/lib/openchamber-control/screenshots.js
+index 5840da5..6402128 100644
+--- a/packages/web/server/lib/openchamber-control/screenshots.js
++++ b/packages/web/server/lib/openchamber-control/screenshots.js
+@@ -81,3 +81,23 @@ export const writeScreenshot = async ({
+   // commit messages, where a Windows separator is an escape character.
+   return { path: relativePath.split(path.sep).join('/'), absolutePath };
+ };
++
++/**
++ * Physical pixel size of a saved PNG, read from its IHDR.
++ * Capture CSS metrics must not be inferred from this.
++ */
++const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
++const PNG_IHDR = 0x49484452;
++
++export const readPngSize = (bytes) => {
++  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
++  // signature(8) + length(4) + IHDR(4) + width/height/bit fields(13).
++  if (buffer.length < 8 + 4 + 4 + 13) return null;
++  if (!buffer.subarray(0, 8).equals(PNG_SIGNATURE)) return null;
++  if (buffer.readUInt32BE(8) !== 13 || buffer.readUInt32BE(12) !== PNG_IHDR) return null;
++  const width = buffer.readUInt32BE(16);
++  const height = buffer.readUInt32BE(20);
++  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) return null;
++  if (width < 1 || height < 1 || width > 100_000 || height > 100_000) return null;
++  return { width, height };
++};
+diff --git a/packages/web/server/lib/openchamber-control/screenshots.test.js b/packages/web/server/lib/openchamber-control/screenshots.test.js
+index 80129e4..2535e4b 100644
+--- a/packages/web/server/lib/openchamber-control/screenshots.test.js
++++ b/packages/web/server/lib/openchamber-control/screenshots.test.js
+@@ -1,7 +1,7 @@
+ import { describe, expect, it } from 'vitest';
+ import path from 'node:path';
+ 
+-import { SCREENSHOT_DIRECTORY, screenshotSlug, writeScreenshot } from './screenshots.js';
++import { SCREENSHOT_DIRECTORY, readPngSize, screenshotSlug, writeScreenshot } from './screenshots.js';
+ 
+ const createFs = () => {
+   const written = new Map();
+@@ -14,6 +14,35 @@ const createFs = () => {
+   };
+ };
+ 
++describe('png size', () => {
++  const png = (width, height) => {
++    const ihdr = Buffer.alloc(13);
++    ihdr.writeUInt32BE(width, 0);
++    ihdr.writeUInt32BE(height, 4);
++    const file = Buffer.alloc(8 + 4 + 4 + 13);
++    file.set([137, 80, 78, 71, 13, 10, 26, 10]);
++    file.writeUInt32BE(13, 8);
++    file.write('IHDR', 12);
++    file.set(ihdr, 16);
++    return file;
++  };
++
++  it('reads a signed PNG header', () => {
++    expect(readPngSize(png(819, 252))).toEqual({ width: 819, height: 252 });
++  });
++
++  it('rejects a wrong signature, a short file, and a zero dimension', () => {
++    const signed = png(2, 2);
++    signed[0] = 0;
++    expect(readPngSize(signed)).toBeNull();
++    expect(readPngSize(png(2, 2).subarray(0, 20))).toBeNull();
++    expect(readPngSize(png(0, 2))).toBeNull();
++    const ihdrText = Buffer.from('IHDR');
++    const decoy = Buffer.concat([Buffer.from('not a png....'), ihdrText, Buffer.from([0, 0, 0, 8, 0, 0, 0, 8])]);
++    expect(readPngSize(decoy)).toBeNull();
++  });
++});
++
+ describe('screenshot labels', () => {
+   it('keeps a readable name', () => {
+     expect(screenshotSlug('Before fix')).toBe('before-fix');
+diff --git a/packages/web/server/lib/openchamber-control/service.js b/packages/web/server/lib/openchamber-control/service.js
+index 89c52a3..90ab765 100644
+--- a/packages/web/server/lib/openchamber-control/service.js
++++ b/packages/web/server/lib/openchamber-control/service.js
+@@ -3,7 +3,8 @@ import path from 'node:path';
+ import { OpenCode } from '@opencode/client';
+ import { OpenChamberControlError, asControlError } from './error.js';
+ import { OPENCHAMBER_ALL_ACTIONS, OPENCHAMBER_KNOWLEDGE_ACTIONS } from './actions.js';
+-import { writeScreenshot } from './screenshots.js';
++import fsPromises from 'node:fs/promises';
++import { readPngSize, writeScreenshot } from './screenshots.js';
+ import { createProjectKnowledgeActions } from './project-knowledge.js';
+ import { createPageAnswers, createRenderPageAction } from './render-page.js';
+ 
+@@ -28,6 +29,84 @@ const positiveInteger = (value, fallback, field) => {
+   return number;
+ };
+ 
++const CAPTURE_MODES = new Set(['desktop', 'mobile', 'tablet', 'fill']);
++const MAX_CAPTURE_PIXELS = 100_000;
++
++const finiteMetric = (value, { integer = false, allowZero = false } = {}) => {
++  // JSON metrics are numbers. true, [], null, and "" must not become 1 or 0.
++  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
++  if (integer && !Number.isSafeInteger(value)) return null;
++  if (value < 0 || value > MAX_CAPTURE_PIXELS || (!allowZero && value === 0)) return null;
++  return value;
++};
++
++const captureMode = (value) => (CAPTURE_MODES.has(value) ? value : null);
++
++/**
++ * Whitelisted capture geometry. PNG size comes from the saved file, never from
++ * the provider's claim. CSS layout and visual metrics are independent and are
++ * omitted, not invented, when an older desktop provider did not measure them.
++ * A present but illegal metric is a refusal: it is not replaced with 1 or the
++ * physical size.
++ */
++export const captureResponse = (capture, png) => {
++  const claimedWidth = capture.width;
++  const claimedHeight = capture.height;
++  const width = png ? png.width : finiteMetric(claimedWidth, { integer: true });
++  const height = png ? png.height : finiteMetric(claimedHeight, { integer: true });
++  if (png && claimedWidth != null && finiteMetric(claimedWidth, { integer: true }) !== png.width) {
++    throw new OpenChamberControlError('capture PNG width does not match the saved image', 502);
++  }
++  if (png && claimedHeight != null && finiteMetric(claimedHeight, { integer: true }) !== png.height) {
++    throw new OpenChamberControlError('capture PNG height does not match the saved image', 502);
++  }
++  const cssSource = capture.css && typeof capture.css === 'object' ? capture.css : null;
++  const viewport = capture.viewport && typeof capture.viewport === 'object'
++    ? {
++      ...(captureMode(capture.viewport.mode) ? { mode: capture.viewport.mode } : {}),
++      ...(finiteMetric(capture.viewport.width, { integer: true }) != null ? { width: capture.viewport.width } : {}),
++      ...(finiteMetric(capture.viewport.height, { integer: true }) != null ? { height: capture.viewport.height } : {}),
++    }
++    : captureMode(capture.viewport);
++  if (!cssSource) {
++    return {
++      width,
++      height,
++      viewport,
++      ...(png ? { png: { width: png.width, height: png.height } } : {}),
++    };
++  }
++  const css = {
++    width: finiteMetric(cssSource.width, { integer: true }),
++    height: finiteMetric(cssSource.height, { integer: true }),
++    visualWidth: finiteMetric(cssSource.visualWidth),
++    visualHeight: finiteMetric(cssSource.visualHeight),
++    offsetLeft: finiteMetric(cssSource.offsetLeft, { allowZero: true }),
++    offsetTop: finiteMetric(cssSource.offsetTop, { allowZero: true }),
++    dpr: finiteMetric(cssSource.dpr),
++    scale: finiteMetric(cssSource.scale),
++    mode: captureMode(cssSource.mode),
++  };
++  if (Object.values(css).some((value) => value == null)) {
++    throw new OpenChamberControlError('capture CSS metrics are incomplete or invalid', 502);
++  }
++  return {
++    width,
++    height,
++    viewport: viewport || css.mode,
++    // Native sends physical size only as top-level width/height. png is derived
++    // here from the saved file so a caller can compare it with CSS without
++    // reading those top-level fields as layout size.
++    ...(png ? { png: { width: png.width, height: png.height } } : {}),
++    css: {
++      ...css,
++      // The measured ratio lives at css.dpr. This alias is the name the
++      // geometry check already reads; it is not a second provider field.
++      devicePixelRatio: css.dpr,
++    },
++  };
++};
++
+ const normalizeWaitTimeoutMs = (value) => {
+   const seconds = value === undefined || value === null ? DEFAULT_WAIT_TIMEOUT_SECONDS : Number(value);
+   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > MAX_WAIT_TIMEOUT_SECONDS) {
+@@ -694,6 +773,13 @@ export const createOpenChamberControlService = (dependencies) => {
+         mime: capture.mime,
+         label: input.label,
+       });
++      const png = capture.mime === 'image/png'
++        ? readPngSize(await fsPromises.readFile(saved.absolutePath))
++        : null;
++      if (capture.mime === 'image/png' && !png) {
++        throw new OpenChamberControlError('saved screenshot is not a readable PNG', 502);
++      }
++      const metrics = captureResponse(capture, png);
+       // The base64 never goes back to the caller: it is large, and the path is
+       // what an answer, a commit, or a review can actually use.
+       return {
+@@ -703,11 +789,13 @@ export const createOpenChamberControlService = (dependencies) => {
+         // agent is told the one thing it cannot infer: that writing the path is
+         // what puts the picture in front of the user.
+         hint: `Write ![](${saved.path}) in your reply to show this image to the user; it is rendered under your message.`,
+-        url: capture.url ?? null,
+-        title: capture.title ?? null,
+-        viewport: capture.viewport ?? null,
+-        width: capture.width ?? null,
+-        height: capture.height ?? null,
++        url: typeof capture.url === 'string' ? capture.url : null,
++        title: typeof capture.title === 'string' ? capture.title : null,
++        viewport: metrics.viewport,
++        width: metrics.width,
++        height: metrics.height,
++        ...(metrics.png ? { png: metrics.png } : {}),
++        ...(metrics.css ? { css: metrics.css } : {}),
+       };
+     }
+ 
+diff --git a/packages/web/server/lib/openchamber-control/service.test.js b/packages/web/server/lib/openchamber-control/service.test.js
+index b1d0fd0..9f1d492 100644
+--- a/packages/web/server/lib/openchamber-control/service.test.js
++++ b/packages/web/server/lib/openchamber-control/service.test.js
+@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
+ import os from 'node:os';
+ import path from 'node:path';
+ import fs from 'node:fs/promises';
++import zlib from 'node:zlib';
+ 
+ import { createOpenChamberControlService } from './service.js';
+ import { OpenChamberControlError } from './error.js';
+@@ -762,8 +763,8 @@ describe('browser capture', () => {
+       url: 'http://localhost:3000/',
+       title: 'App',
+       viewport: { mode: 'mobile', width: 390, height: 844 },
+-      width: 390,
+-      height: 844,
++      width: 1,
++      height: 1,
+     });
+ 
+     const result = await service.execute('browser.capture', { label: 'After fix' }, directory);
+@@ -772,12 +773,165 @@ describe('browser capture', () => {
+     expect(result.path.endsWith('.png')).toBe(true);
+     expect(result.url).toBe('http://localhost:3000/');
+     expect(result.viewport).toEqual({ mode: 'mobile', width: 390, height: 844 });
++    expect(result.png).toEqual({ width: 1, height: 1 });
+     // The bytes stay on disk; a tool result is not a place to carry an image.
+     expect('base64' in result).toBe(false);
+     const written = await fs.readFile(path.join(directory, result.path));
+     expect(written.length > 0).toBe(true);
+   });
+ 
++  const pngBase64 = (width, height) => {
++    const chunk = (tag, data) => {
++      const body = Buffer.concat([Buffer.from(tag), data]);
++      const length = Buffer.alloc(4);
++      length.writeUInt32BE(data.length);
++      const crc = Buffer.alloc(4);
++      crc.writeUInt32BE(zlib.crc32(body));
++      return Buffer.concat([length, body, crc]);
++    };
++    const raw = Buffer.concat(Array.from({ length: height }, () => Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3)])));
++    const ihdr = Buffer.alloc(13);
++    ihdr.writeUInt32BE(width, 0);
++    ihdr.writeUInt32BE(height, 4);
++    ihdr[8] = 8;
++    ihdr[9] = 2;
++    const file = Buffer.concat([
++      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
++      chunk('IHDR', ihdr),
++      chunk('IDAT', zlib.deflateSync(raw)),
++      chunk('IEND', Buffer.alloc(0)),
++    ]);
++    return file.toString('base64');
++  };
++
++  it('returns measured CSS metrics without the image or extra provider fields', async () => {
++    const { service, directory } = await createBrowserService({
++      base64: pngBase64(819, 252),
++      mime: 'image/png',
++      url: 'https://example.com/page',
++      title: 'Page',
++      width: 819,
++      height: 252,
++      viewport: 'desktop',
++      token: 'secret',
++      css: {
++        width: 1024,
++        height: 315,
++        visualWidth: 1024,
++        visualHeight: 315,
++        offsetLeft: 0,
++        offsetTop: 0,
++        dpr: 2.625,
++        scale: 0.3046875,
++        mode: 'desktop',
++        grant: 'secret',
++      },
++    });
++
++    const result = await service.execute('browser.capture', {}, directory);
++    const written = await fs.readFile(path.join(directory, result.path));
++
++    expect(written.readUInt32BE(16)).toBe(819);
++    expect(written.readUInt32BE(20)).toBe(252);
++    expect(result.png).toEqual({ width: 819, height: 252 });
++    expect(result.css).toEqual({
++      width: 1024,
++      height: 315,
++      visualWidth: 1024,
++      visualHeight: 315,
++      offsetLeft: 0,
++      offsetTop: 0,
++      dpr: 2.625,
++      scale: 0.3046875,
++      mode: 'desktop',
++      devicePixelRatio: 2.625,
++    });
++    expect(result.css.visualWidth).not.toBe(result.png.width);
++    expect(result.css.devicePixelRatio).toBe(result.css.dpr);
++    expect(JSON.stringify(result)).not.toContain('base64');
++    expect(JSON.stringify(result)).not.toContain('secret');
++    expect(result.token).toBeUndefined();
++    expect(result.css.grant).toBeUndefined();
++  });
++
++  it('does not report png for a JPEG, and keeps the old fields', async () => {
++    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
++    const { service, directory } = await createBrowserService({
++      base64: jpeg,
++      mime: 'image/jpeg',
++      url: 'https://example.com/page',
++      title: 'Page',
++      width: 390,
++      height: 844,
++      viewport: { mode: 'desktop', width: 390, height: 844 },
++    });
++    const result = await service.execute('browser.capture', {}, directory);
++    expect(Object.prototype.hasOwnProperty.call(result, 'png')).toBe(false);
++    expect(result.width).toBe(390);
++    expect(result.height).toBe(844);
++    expect(result.url).toBe('https://example.com/page');
++    expect(result.path.endsWith('.jpg')).toBe(true);
++    expect(result.hint).toContain(result.path);
++  });
++
++  it('refuses boolean, null, and array CSS metrics instead of coercing them', async () => {
++    const illegal = [
++      { offsetLeft: null },
++      { width: true },
++      { visualWidth: [] },
++      { height: '' },
++      { scale: -1 },
++    ];
++    for (const override of illegal) {
++      const { service, directory } = await createBrowserService({
++        base64: pngBase64(819, 252),
++        mime: 'image/png',
++        width: 819,
++        height: 252,
++        css: {
++          width: 1024,
++          height: 315,
++          visualWidth: 1024,
++          visualHeight: 315,
++          offsetLeft: 0,
++          offsetTop: 0,
++          dpr: 2.625,
++          scale: 0.3046875,
++          mode: 'desktop',
++          ...override,
++        },
++      });
++      await expect(service.execute('browser.capture', {}, directory)).rejects.toMatchObject({
++        statusCode: 502,
++        message: 'capture CSS metrics are incomplete or invalid',
++      });
++    }
++  });
++
++  it('keeps the old response when a desktop provider sends no CSS metrics', async () => {
++    const { service, directory } = await createBrowserService({
++      base64: pixel,
++      mime: 'image/png',
++      width: 1,
++      height: 1,
++    });
++    const result = await service.execute('browser.capture', {}, directory);
++    expect(result.png).toEqual({ width: 1, height: 1 });
++    expect(result.css).toBeUndefined();
++    expect(Object.keys(result).sort()).toEqual(['height', 'hint', 'path', 'png', 'title', 'url', 'viewport', 'width']);
++  });
++
++  it('refuses illegal CSS metrics instead of inventing them', async () => {
++    const { service, directory } = await createBrowserService({
++      base64: pngBase64(819, 252),
++      mime: 'image/png',
++      width: 819,
++      height: 252,
++      css: { width: Number.NaN, height: 315, visualWidth: 1024, visualHeight: 315, dpr: 1, scale: 1, mode: 'stretched' },
++    });
++    await expect(service.execute('browser.capture', {}, directory)).rejects.toThrow(/CSS metrics/);
++  });
++
+   it('tells the agent how to actually show the image', async () => {
+     const { service, directory } = await createBrowserService({ base64: pixel, mime: 'image/png' });
+     const result = await service.execute('browser.capture', {}, directory);
+diff --git a/packages/web/server/lib/opencode/bootstrap-runtime.js b/packages/web/server/lib/opencode/bootstrap-runtime.js
+index 45cba38..2f93d99 100644
+--- a/packages/web/server/lib/opencode/bootstrap-runtime.js
++++ b/packages/web/server/lib/opencode/bootstrap-runtime.js
+@@ -69,6 +69,7 @@ export const createBootstrapRuntime = (dependencies) => {
+       pluginNotificationEmitter,
+       desktopUpdater,
+       skipBodyParsing,
++      androidProviderAuth = null,
+     } = options;
+ 
+     registerHttpResponseDiagnostics(app);
+@@ -95,6 +96,7 @@ export const createBootstrapRuntime = (dependencies) => {
+       getTunnelUrl,
+       tunnelAuthController,
+       uiAuthController,
++      androidBrowserProvider: androidProviderAuth !== null,
+     });
+ 
+     registerCommonRequestMiddleware(app, { express, verboseRequestLogs, skipBodyParsing });
+@@ -114,6 +116,7 @@ export const createBootstrapRuntime = (dependencies) => {
+       uiAuthController,
+       remoteClientAuthRuntime,
+       clientPairingRuntime,
++      androidProviderAuth,
+       getRelayPairingCandidate,
+       reconcileRelay,
+       getPairingTransports,
+diff --git a/packages/web/server/lib/opencode/core-routes.js b/packages/web/server/lib/opencode/core-routes.js
+index c896e68..b79bbfa 100644
+--- a/packages/web/server/lib/opencode/core-routes.js
++++ b/packages/web/server/lib/opencode/core-routes.js
+@@ -73,6 +73,7 @@ export const registerServerStatusRoutes = (app, dependencies) => {
+     getServerId = async () => null,
+     tunnelAuthController = null,
+     uiAuthController = null,
++    androidBrowserProvider = false,
+   } = dependencies;
+ 
+   // The identity is immutable for the process lifetime; resolve once, and never
+@@ -385,6 +386,7 @@ export const registerServerStatusRoutes = (app, dependencies) => {
+     if (await isRequestAuthorized(req, res, { tunnelAuthController, uiAuthController }).catch(() => false)) {
+       info.port = getServerPort();
+       info.tunnelUrl = getTunnelUrl();
++      info.androidBrowserProvider = androidBrowserProvider === true;
+     }
+     res.json(info);
+   });
+@@ -412,6 +414,7 @@ export const registerAuthAndAccessRoutes = (app, dependencies) => {
+     uiAuthController,
+     remoteClientAuthRuntime,
+     clientPairingRuntime,
++    androidProviderAuth = null,
+     readSettingsFromDiskMigrated,
+     normalizeTunnelSessionTtlMs,
+     // Returns the relay pairing candidate ({ type:'relay', relayUrl, serverId,
+@@ -658,6 +661,15 @@ export const registerAuthAndAccessRoutes = (app, dependencies) => {
+    */
+   const selfAuthenticatedApiPaths = new Set(['/api/git/repository-credential']);
+ 
++  /**
++   * Android provider SSE, claim and result authenticate with the launch token,
++   * a loopback peer and no Origin. Nothing else under /api uses that branch.
++   */
++  const isAndroidBrowserProviderRequest = (req) => {
++    if (typeof androidProviderAuth?.isProviderRequest !== 'function') return false;
++    return androidProviderAuth.isProviderRequest(req) === true;
++  };
++
+   const isGuestOauthCallback = (req) => (
+     req.method === 'GET'
+     && /^\/guests\/[a-z][a-z0-9-]*\/oauth\/callback$/.test(req.path || '')
+@@ -673,6 +685,7 @@ export const registerAuthAndAccessRoutes = (app, dependencies) => {
+   const requireApiAuth = async (req, res, next) => {
+     const pathname = (req.originalUrl || '').split('?')[0];
+     if (selfAuthenticatedApiPaths.has(pathname)) return next();
++    if (isAndroidBrowserProviderRequest(req)) return next();
+     if (isGuestOauthCallback(req) || isFilePreviewRead(req)) {
+       return next();
+     }
+diff --git a/packages/web/server/lib/opencode/feature-routes-runtime.js b/packages/web/server/lib/opencode/feature-routes-runtime.js
+index 4a888ea..64be03c 100644
+--- a/packages/web/server/lib/opencode/feature-routes-runtime.js
++++ b/packages/web/server/lib/opencode/feature-routes-runtime.js
+@@ -255,6 +255,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
+       waitForOpenCodeReady,
+       getOpenChamberEventClients,
+       writeSseEvent,
++      androidProvider = null,
+       emitSessionCreatedEvent,
+       permissionAutoAcceptRuntime,
+       worktreeBootstrapStore,
+@@ -320,6 +321,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
+       scheduledTaskService,
+       getOpenChamberEventClients,
+       writeSseEvent,
++      androidProvider,
+     });
+ 
+     registerOpenChamberSessionRoutes(app, {
+diff --git a/packages/web/server/lib/opencode/lifecycle.js b/packages/web/server/lib/opencode/lifecycle.js
+index fceaf72..201ebc6 100644
+--- a/packages/web/server/lib/opencode/lifecycle.js
++++ b/packages/web/server/lib/opencode/lifecycle.js
+@@ -1,5 +1,5 @@
+ import { readOpenCodeInfo, readExternalOpenCodeVersion, isSupportedOpenCodeVersion, requireOpenCodeV2, UnsupportedOpenCodeVersionError } from './compatibility.js';
+-import { spawn, spawnSync } from 'node:child_process';
++import { spawn as spawnChild, spawnSync as spawnSyncChild } from 'node:child_process';
+ import { accessSync, constants as fsConstants, statSync } from 'node:fs';
+ import net from 'node:net';
+ import { stripAppImageArgv0Leak, stripAppImageLauncherEnv } from '../inherited-env.js';
+@@ -10,6 +10,16 @@ import { overlayEnvironment } from '../environment/variables.js';
+ import { recordStartupPerformance } from './startup-performance.js';
+ import { topUpV1Migration } from './v1-migration-topup.js';
+ import { serverDiagnosticJournal } from '../diagnostics/server-journal.js';
++import { childProcessEnv } from '../browser-control/child-env.js';
++
++const spawn = (command, args, options = {}) => spawnChild(command, args, {
++  ...options,
++  env: childProcessEnv(options.env ?? process.env),
++});
++const spawnSync = (command, args, options = {}) => spawnSyncChild(command, args, {
++  ...options,
++  env: childProcessEnv(options.env ?? process.env),
++});
+ 
+ const parsePositiveInt = (value, fallback) => {
+   const parsed = Number.parseInt(String(value ?? ''), 10);
+@@ -785,7 +795,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
+     // The user's variables go over the inherited environment (a PATH entry
+     // in front of the managed PATH) and under everything OpenChamber itself
+     // sets for OpenCode.
+-    const inheritedEnv = overlayEnvironment({ ...shellEnv, ...process.env, PATH: envPath }, getUserEnvironment());
++    const inheritedEnv = overlayEnvironment({ ...shellEnv, ...childProcessEnv(process.env), PATH: envPath }, getUserEnvironment());
+     // What OpenChamber sets for OpenCode is recorded as injected, so a shell
+     // the agent opens can tell it from the user's own variables.
+     const processEnv = stripAppImageLauncherEnv(stripAppImageArgv0Leak(applyProviderEnvAliases(assignInjectedEnv(
+@@ -800,7 +810,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
+         OPENCODE_SERVER_PASSWORD: openCodePassword,
+       },
+     ))));
+-    managedProcessEnv = processEnv;
++    managedProcessEnv = childProcessEnv(processEnv);
+ 
+     let serverInstance;
+     try {
+@@ -813,7 +823,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
+         timeout: managedStartupTimeoutMs,
+         cwd: state.openCodeWorkingDirectory,
+         shellEnvKeysCount: Object.keys(shellEnv).length,
+-        env: processEnv,
++        env: managedProcessEnv,
+       });
+ 
+       if (!serverInstance || !serverInstance.url) {
+diff --git a/packages/web/server/lib/opencode/openchamber-routes.js b/packages/web/server/lib/opencode/openchamber-routes.js
+index 20725f8..92127e0 100644
+--- a/packages/web/server/lib/opencode/openchamber-routes.js
++++ b/packages/web/server/lib/opencode/openchamber-routes.js
+@@ -1,4 +1,5 @@
+ import { publicEnterprisePolicy } from '../enterprise-mode.js';
++import { childProcessEnv } from '../browser-control/child-env.js';
+ 
+ const SYSTEMD_SERVICE_UNIT_PATTERN = /^[A-Za-z0-9:_.@-]+\.service$/;
+ 
+@@ -279,7 +280,7 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
+           const child = spawnChild(shell, [shellFlag, updateCmd], {
+             detached: true,
+             stdio: 'ignore',
+-            env: process.env,
++            env: childProcessEnv(process.env),
+           });
+           child.unref();
+         }, 500);
+@@ -472,9 +473,9 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
+         const child = spawnChild(shell, [shellFlag, script], {
+           detached: true,
+           stdio: logFd !== null ? ['ignore', logFd, logFd] : 'ignore',
+-          env: storedOptions.uiPassword
++          env: childProcessEnv(storedOptions.uiPassword
+             ? { ...process.env, OPENCHAMBER_UI_PASSWORD: storedOptions.uiPassword }
+-            : process.env,
++            : process.env),
+           windowsHide: true,
+         });
+         child.unref();
+diff --git a/packages/web/server/lib/opencode/static-routes-runtime.js b/packages/web/server/lib/opencode/static-routes-runtime.js
+index 7ca3680..4f822ce 100644
+--- a/packages/web/server/lib/opencode/static-routes-runtime.js
++++ b/packages/web/server/lib/opencode/static-routes-runtime.js
+@@ -14,6 +14,7 @@ export const createStaticRoutesRuntime = (dependencies) => {
+     normalizePwaAppName,
+     normalizePwaOrientation,
+     isRequestAuthorized,
++    androidBrowserProvider = false,
+   } = dependencies;
+ 
+   const resolveDistPath = () => {
+@@ -30,7 +31,36 @@ export const createStaticRoutesRuntime = (dependencies) => {
+     if (fs.existsSync(distPath)) {
+       console.log(`Serving static files from ${distPath}`);
+       const hashedAssetsPrefix = path.join(distPath, 'assets') + path.sep;
++      const sendAppHtml = (_req, res) => {
++        // Android mode is a server launch fact. The boot script carries only
++        // that boolean: never the provider token, a connection id, or a grant.
++        const htmlPath = path.join(distPath, 'index.html');
++        const androidMode = typeof androidBrowserProvider === 'function'
++          ? androidBrowserProvider() === true
++          : androidBrowserProvider === true;
++        if (!androidMode) {
++          res.sendFile(htmlPath);
++          return;
++        }
++        fs.readFile(htmlPath, 'utf8', (error, html) => {
++          if (error) {
++            res.status(500).type('text/plain').send('Static files not found.');
++            return;
++          }
++          const tag = '<script>window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__=true;document.documentElement.setAttribute("data-openchamber-android-browser","true");</script>';
++          const body = html.includes('<head>') ? html.replace('<head>', `<head>${tag}`) : `${tag}${html}`;
++          res.setHeader('Cache-Control', 'no-store');
++          res.type('html').send(body);
++        });
++      };
++      // Before express.static: `/index.html` is a real file, so static would
++      // otherwise return the raw page and skip the boot flag. `/` is listed
++      // too, in case a static index option is reintroduced.
++      app.get(['/', '/index.html'], sendAppHtml);
+       app.use(express.static(distPath, {
++        // `/` must reach the HTML route below. The default index option would
++        // send the raw index.html and skip the Android boot flag.
++        index: false,
+         setHeaders(res, filePath) {
+           // Service workers should never be long-cached; iOS is especially sensitive.
+           if (filePath.endsWith(`${path.sep}sw.js`)) {
+@@ -57,9 +87,7 @@ export const createStaticRoutesRuntime = (dependencies) => {
+         isRequestAuthorized,
+       });
+ 
+-      app.get(/^(?!\/api|\/linear|.*\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map)).*$/, (_req, res) => {
+-        res.sendFile(path.join(distPath, 'index.html'));
+-      });
++      app.get(/^(?!\/api|\/linear|.*\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map)).*$/, sendAppHtml);
+       return;
+     }
+ 
+diff --git a/packages/web/server/lib/opencode/static-routes-runtime.test.js b/packages/web/server/lib/opencode/static-routes-runtime.test.js
+index 24b7c25..5c9fd30 100644
+--- a/packages/web/server/lib/opencode/static-routes-runtime.test.js
++++ b/packages/web/server/lib/opencode/static-routes-runtime.test.js
+@@ -63,6 +63,42 @@ describe('static file caching', () => {
+     expect(response.headers['cache-control']).toBe('public, max-age=31536000, immutable');
+   });
+ 
++  it('serves the original app shell for / outside Android mode', async () => {
++    const response = await request(serve()).get('/');
++    expect(response.status).toBe(200);
++    expect(response.text).toContain('<!doctype html>');
++    expect(response.text).not.toContain('__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__');
++  });
++
++  it('injects the Android boot flag on / and /index.html, including a query', async () => {
++    const app = express();
++    createStaticRoutesRuntime({
++      fs,
++      path,
++      process: { env: { OPENCHAMBER_DIST_DIR: distPath } },
++      __dirname: '/server',
++      express,
++      resolveProjectDirectory: () => '',
++      buildOpenCodeUrl: () => '',
++      getOpenCodeAuthHeaders: () => ({}),
++      readSettingsFromDiskMigrated: async () => ({}),
++      normalizePwaAppName: (value) => value,
++      normalizePwaOrientation: (value) => value,
++      androidBrowserProvider: true,
++    }).registerStaticRoutes(app);
++
++    const root = await request(app).get('/');
++    const queried = await request(app).get('/?session=x');
++    const named = await request(app).get('/index.html');
++
++    for (const response of [root, queried, named]) {
++      expect(response.status).toBe(200);
++      expect(response.text).toContain('window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__=true');
++      expect(response.text).toContain('data-openchamber-android-browser');
++    }
++    expect(root.headers['cache-control']).toBe('no-store');
++  });
++
+   it('keeps unhashed files revalidated and the service worker uncached', async () => {
+     const app = serve();
+ 
+diff --git a/packages/web/server/lib/opencode/v2-install.js b/packages/web/server/lib/opencode/v2-install.js
+index 2f1f543..361f351 100644
+--- a/packages/web/server/lib/opencode/v2-install.js
++++ b/packages/web/server/lib/opencode/v2-install.js
+@@ -5,6 +5,7 @@ import os from 'node:os';
+ import path from 'node:path';
+ import { z } from 'zod';
+ import { requireOpenCodeV2 } from './compatibility.js';
++import { childProcessEnv } from '../browser-control/child-env.js';
+ 
+ const INSTALL_TIMEOUT_MS = 5 * 60_000;
+ const NPM_REGISTRY = 'https://registry.npmjs.org';
+@@ -28,7 +29,7 @@ export const supportsOpenCodeV2Install = (platform = process.platform) =>
+ 
+ const runInstaller = (script, version, env) => new Promise((resolve, reject) => {
+   const child = spawn('/bin/bash', [script, '--version', version, '--no-modify-path'], {
+-    env, cwd: os.tmpdir(), detached: true, stdio: 'ignore',
++    env: childProcessEnv(env), cwd: os.tmpdir(), detached: true, stdio: 'ignore',
+   });
+   const terminate = () => {
+     if (!child.pid) return;
+diff --git a/packages/web/server/lib/scheduled-tasks/routes.js b/packages/web/server/lib/scheduled-tasks/routes.js
+index 1c284d4..41295b7 100644
+--- a/packages/web/server/lib/scheduled-tasks/routes.js
++++ b/packages/web/server/lib/scheduled-tasks/routes.js
+@@ -1,5 +1,6 @@
+ import { asNonEmptyString } from '../shared/guards.js';
+ import { randomUUID } from 'node:crypto';
++import { ANDROID_PROVIDER_ERROR_CODES } from '../browser-control/android-provider.js';
+ 
+ const parseProjectID = (req) => asNonEmptyString(req?.params?.projectId);
+ const parseTaskID = (req) => asNonEmptyString(req?.params?.taskId);
+@@ -12,6 +13,7 @@ export const registerScheduledTaskRoutes = (app, dependencies) => {
+     scheduledTasksRuntime,
+     getOpenChamberEventClients,
+     writeSseEvent,
++    androidProvider = null,
+     scheduledTaskService = createScheduledTaskService(dependencies),
+   } = dependencies;
+ 
+@@ -166,6 +168,27 @@ export const registerScheduledTaskRoutes = (app, dependencies) => {
+   });
+ 
+   app.get('/api/openchamber/events', (req, res) => {
++    if (req.query?.provider === 'android') {
++      if (!androidProvider?.enabled) {
++        res.status(503).json({
++          error: 'Android browser provider is not configured',
++          code: ANDROID_PROVIDER_ERROR_CODES.UNAVAILABLE,
++        });
++        return;
++      }
++      const auth = androidProvider.authorize(req);
++      if (!auth.ok) {
++        res.status(auth.status).json({ error: auth.error, code: auth.code });
++        return;
++      }
++      const attached = androidProvider.attach(req, res);
++      if (!attached.ok && !res.headersSent) {
++        res.status(attached.status).json({ error: attached.error, code: attached.code });
++      }
++      return;
++    }
++    // Android exclusive mode still serves the UI event stream. Browser actions
++    // are not written to it; only the provider connection above receives them.
+     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+     res.setHeader('Cache-Control', 'no-cache, no-transform');
+     res.setHeader('Connection', 'keep-alive');
+diff --git a/packages/web/src/main.tsx b/packages/web/src/main.tsx
+index b5aa7e5..4b5a33b 100644
+--- a/packages/web/src/main.tsx
++++ b/packages/web/src/main.tsx
+@@ -1,4 +1,5 @@
+ import { createConfiguredWebAPIs, getDesktopRelayRestoreReady } from './runtimeConfig';
++import { applyAndroidBrowserBootFlag } from '@openchamber/ui/lib/browser/androidBoot';
+ import { registerSW } from 'virtual:pwa-register';
+ 
+ import type { RuntimeAPIs } from '@openchamber/ui/lib/api/types';
+@@ -14,6 +15,7 @@ declare global {
+   }
+ }
+ 
++applyAndroidBrowserBootFlag();
+ const hostedSurface: HostedSurface = resolveHostedSurface();
+ 
+ type PrerenderingDocument = Document & {
+diff --git a/packages/ui/src/apps/MobileWorkspaceDrawer.browser.test.tsx b/packages/ui/src/apps/MobileWorkspaceDrawer.browser.test.tsx
+new file mode 100644
+index 0000000..f35a8e5
+--- /dev/null
++++ b/packages/ui/src/apps/MobileWorkspaceDrawer.browser.test.tsx
+@@ -0,0 +1,108 @@
++import { afterEach, describe, expect, test } from 'bun:test';
++import React from 'react';
++import { createRoot } from 'react-dom/client';
++
++import { I18nProvider } from '@/lib/i18n';
++import { MobileBrowserPane, MobileWorkspaceDrawer } from './MobileWorkspaceDrawer';
++import { useSessionUIStore } from '@/sync/session-ui-store';
++
++const render = (node: React.ReactElement) => {
++  const host = document.createElement('div');
++  document.body.append(host);
++  const root = createRoot(host);
++  root.render(React.createElement(I18nProvider, null, node));
++  return root;
++};
++
++const installDom = async () => {
++  const { Window } = await import('happy-dom');
++  const dom = new Window();
++  Object.assign(globalThis, {
++    window: dom,
++    document: dom.document,
++    HTMLElement: dom.HTMLElement,
++    HTMLInputElement: dom.HTMLInputElement,
++    Element: dom.Element,
++    Node: dom.Node,
++    ResizeObserver: class {
++      observe() {}
++      unobserve() {}
++      disconnect() {}
++    },
++  });
++};
++
++describe('mobile browser entry', () => {
++  afterEach(() => {
++    document.body.innerHTML = '';
++    Reflect.deleteProperty(window, '__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__');
++    Reflect.deleteProperty(window, 'AndChamberBrowserHost');
++    useSessionUIStore.setState({ currentSessionId: null });
++  });
++
++  test('the workspace tab is absent outside Android mode', async () => {
++    await installDom();
++    const root = render(React.createElement(MobileWorkspaceDrawer, {
++      open: true,
++      onClose: () => undefined,
++      tab: 'notes',
++      onTabChange: () => undefined,
++      pendingChangesDiff: null,
++      onOpenPlan: () => undefined,
++      onOpenMcpSettings: () => undefined,
++      variant: 'panel',
++    }));
++    await new Promise((resolve) => setTimeout(resolve, 40));
++    expect(document.querySelector('[data-testid="mobile-workspace-tab-browser"]')).toBeNull();
++    expect(document.querySelector('iframe')).toBeNull();
++    root.unmount();
++  });
++
++  test('presents once for the current session and creates no iframe', async () => {
++    await installDom();
++    const presented: unknown[] = [];
++    const contexts: unknown[] = [];
++    window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ = true;
++    window.AndChamberBrowserHost = {
++      present: (request) => presented.push(request),
++      select: () => undefined,
++      close: () => undefined,
++      tabs: () => [],
++      context: (context) => contexts.push(context),
++    };
++    useSessionUIStore.setState({ currentSessionId: 'ses_1' });
++    let closed = false;
++    const root = render(React.createElement(MobileBrowserPane, { onPresented: () => { closed = true; } }));
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    const input = document.querySelector<HTMLInputElement>('[data-testid="android-browser-address"]');
++    const button = document.querySelector<HTMLButtonElement>('[data-testid="android-browser-open"]');
++    expect(input).not.toBeNull();
++    if (input) input.value = 'https://example.test/';
++    button?.click();
++    button?.click();
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    expect(presented).toEqual([{ url: 'https://example.test/', ownerSessionId: 'ses_1' }]);
++    expect(closed).toBe(true);
++    expect(document.querySelector('iframe')).toBeNull();
++    root.unmount();
++  });
++
++  test('does not present without a chat session', async () => {
++    await installDom();
++    const presented: unknown[] = [];
++    window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ = true;
++    window.AndChamberBrowserHost = {
++      present: (request) => presented.push(request),
++      select: () => undefined,
++      close: () => undefined,
++      tabs: () => [],
++    };
++    const root = render(React.createElement(MobileBrowserPane, { onPresented: () => undefined }));
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    expect(document.body.textContent).toContain('Start a chat');
++    expect(document.querySelector('[data-testid="android-browser-open"]')).toBeNull();
++    expect(presented).toEqual([]);
++    expect(document.querySelector('iframe')).toBeNull();
++    root.unmount();
++  });
++});
+diff --git a/packages/ui/src/components/browser/AndroidHostBrowser.test.tsx b/packages/ui/src/components/browser/AndroidHostBrowser.test.tsx
+new file mode 100644
+index 0000000..4448b06
+--- /dev/null
++++ b/packages/ui/src/components/browser/AndroidHostBrowser.test.tsx
+@@ -0,0 +1,86 @@
++import { afterEach, describe, expect, test } from 'bun:test';
++import React from 'react';
++import { createRoot } from 'react-dom/client';
++
++import { AndroidHostBrowser } from './AndroidHostBrowser';
++
++describe('AndroidHostBrowser', () => {
++  afterEach(() => {
++    document.body.innerHTML = '';
++  });
++
++  test('does not create an iframe when the native host is missing', async () => {
++    const { Window } = await import('happy-dom');
++    const dom = new Window();
++    Object.assign(globalThis, {
++      window: dom,
++      document: dom.document,
++      HTMLElement: dom.HTMLElement,
++      HTMLInputElement: dom.HTMLInputElement,
++      Element: dom.Element,
++      Node: dom.Node,
++    });
++    const container = document.createElement('div');
++    document.body.appendChild(container);
++    const root = createRoot(container);
++    root.render(React.createElement(AndroidHostBrowser, {
++      initialUrl: 'https://example.test/',
++      directory: '/repo',
++      tabID: 'tab-1',
++      ownerSessionId: 'ses_1',
++      visible: true,
++    }));
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(container.querySelector('iframe')).toBeNull();
++    expect(document.querySelector('iframe')).toBeNull();
++    expect(container.querySelector('webview')).toBeNull();
++    expect(container.querySelector('[data-testid="android-browser-host-missing"]')).not.toBeNull();
++    root.unmount();
++  });
++
++  test('an empty URL tab does not call present, and a submitted URL calls it once', async () => {
++    const { Window } = await import('happy-dom');
++    const dom = new Window();
++    const presented: unknown[] = [];
++    Object.assign(globalThis, {
++      window: dom,
++      document: dom.document,
++      HTMLElement: dom.HTMLElement,
++      HTMLInputElement: dom.HTMLInputElement,
++      Element: dom.Element,
++      Node: dom.Node,
++      Event: dom.Event,
++    });
++    Object.assign(dom, {
++      AndChamberBrowserHost: {
++        present: (request: unknown) => presented.push(request),
++        select: () => undefined,
++        close: () => undefined,
++        tabs: () => [],
++      },
++    });
++    const container = document.createElement('div');
++    document.body.appendChild(container);
++    const root = createRoot(container);
++    root.render(React.createElement(AndroidHostBrowser, {
++      initialUrl: '',
++      directory: '/repo',
++      tabID: 'tab-new',
++      ownerSessionId: 'ses_1',
++      visible: true,
++    }));
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(presented).toEqual([]);
++    expect(document.querySelector('iframe')).toBeNull();
++    const input = container.querySelector('input');
++    expect(input).not.toBeNull();
++    if (!input) return;
++    input.value = 'example.test';
++    input.form?.requestSubmit();
++    input.form?.requestSubmit();
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(presented).toEqual([{ url: 'https://example.test/', ownerSessionId: 'ses_1' }]);
++    expect(document.querySelector('iframe')).toBeNull();
++    root.unmount();
++  });
++});
+diff --git a/packages/ui/src/components/browser/AndroidHostBrowser.tsx b/packages/ui/src/components/browser/AndroidHostBrowser.tsx
+new file mode 100644
+index 0000000..76a3961
+--- /dev/null
++++ b/packages/ui/src/components/browser/AndroidHostBrowser.tsx
+@@ -0,0 +1,93 @@
++import React from 'react';
++
++import { Button } from '@/components/ui/button';
++import { readAndroidBrowserHost, readAndroidHostStateEvent, readAndroidHostTabs, type AndroidHostTab } from '@/lib/browser/androidHost';
++import { presentAndroidBrowserTab, selectAndroidHostTab, subscribeAndroidHost } from '@/lib/browser/androidHostSync';
++import { normalizeBrowserUrl } from '@/lib/browser/url';
++import { normalizeContextPanelDirectoryKey } from '@/stores/useUIStore';
++import type { BrowserPaneProps } from './BrowserPane';
++
++/**
++ * Android exclusive presentation. No iframe and no Electron webview.
++ * Selecting a visible tab only mirrors the native registry into the existing
++ * tab store. It does not call present, so it cannot grant or reload.
++ */
++export const AndroidHostBrowser: React.FC<BrowserPaneProps> = ({ initialUrl, directory, tabID, ownerSessionId, visible }) => {
++  const [hostMissing, setHostMissing] = React.useState(() => readAndroidBrowserHost() === null);
++  const [tabs, setTabs] = React.useState<readonly AndroidHostTab[]>([]);
++  const [draft, setDraft] = React.useState('');
++  const presentedUrl = React.useRef('');
++  const directoryKey = normalizeContextPanelDirectoryKey(directory);
++  const needsAddress = !initialUrl.trim();
++
++  React.useEffect(() => subscribeAndroidHost(directoryKey, () => {
++    const host = readAndroidBrowserHost();
++    setHostMissing(host === null);
++    setTabs(host ? readAndroidHostTabs(host.tabs()) : []);
++  }), [directoryKey]);
++  React.useEffect(() => {
++    const onState = (event: Event) => {
++      const next = readAndroidHostStateEvent(event);
++      if (next.length > 0) setTabs(next);
++    };
++    window.addEventListener('andchamber-browser-host-state', onState);
++    return () => window.removeEventListener('andchamber-browser-host-state', onState);
++  }, []);
++
++  React.useEffect(() => {
++    if (!visible || hostMissing || needsAddress) return;
++    selectAndroidHostTab(tabID, true, directoryKey);
++  }, [directoryKey, hostMissing, needsAddress, tabID, visible]);
++
++  const submitAddress = (value: string) => {
++    const url = normalizeBrowserUrl(value);
++    if (!url.startsWith('http://') && !url.startsWith('https://')) return;
++    if (presentedUrl.current === url) return;
++    if (!presentAndroidBrowserTab(url, ownerSessionId)) return;
++    presentedUrl.current = url;
++  };
++
++  if (hostMissing) {
++    return (
++      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 bg-background p-6 text-center" data-testid="android-browser-host-missing">
++        <span className="typography-ui-header text-foreground">Android browser host is not available</span>
++        <span className="typography-micro text-muted-foreground">This server is in Android browser mode. The page is not opened in an iframe or the desktop browser.</span>
++      </div>
++    );
++  }
++
++  const current = tabs.find((tab) => tab.tabId === tabID);
++  return (
++    <div className="flex h-full min-h-0 flex-col bg-background" data-testid="android-browser-host">
++      {needsAddress ? (
++        <form
++          className="flex items-center gap-2 border-b border-border p-2"
++          data-testid="android-browser-address"
++          onSubmit={(event) => {
++            event.preventDefault();
++            const field = event.currentTarget.elements.namedItem('address');
++            const entered = field && 'value' in field && typeof field.value === 'string' ? field.value : draft;
++            submitAddress(entered);
++          }}
++        >
++          <input
++            name="address"
++            value={draft}
++            onChange={(event) => setDraft(event.target.value)}
++            spellCheck={false}
++            autoComplete="off"
++            placeholder="https://"
++            aria-label="Browser address"
++            className="oc-raised oc-field h-6 min-w-0 flex-1 rounded-full bg-[var(--surface-elevated)] px-3 typography-micro text-foreground outline-none"
++          />
++          <Button type="submit" size="xs" variant="secondary">Open</Button>
++        </form>
++      ) : null}
++      <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center">
++        <span className="typography-micro text-muted-foreground">
++          {current?.url || initialUrl || 'Enter an address to open the page in the Android browser.'}
++        </span>
++      </div>
++    </div>
++  );
++};
+diff --git a/packages/ui/src/lib/browser/androidBoot.ts b/packages/ui/src/lib/browser/androidBoot.ts
+new file mode 100644
+index 0000000..b044173
+--- /dev/null
++++ b/packages/ui/src/lib/browser/androidBoot.ts
+@@ -0,0 +1,16 @@
++/**
++ * Reads the server boot flag before the app bundle evaluates.
++ *
++ * The flag is injected into the document by the server that was launched with
++ * OPENCHAMBER_BROWSER_PROVIDER=android. It is not a user-agent check, and it
++ * never carries the provider token.
++ */
++export const applyAndroidBrowserBootFlag = (): boolean => {
++  if (typeof document === 'undefined') return false;
++  const marker = document.documentElement.getAttribute('data-openchamber-android-browser');
++  if (marker === 'true') {
++    window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ = true;
++    return true;
++  }
++  return window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ === true;
++};
+diff --git a/packages/ui/src/lib/browser/androidHost.test.ts b/packages/ui/src/lib/browser/androidHost.test.ts
+new file mode 100644
+index 0000000..7271924
+--- /dev/null
++++ b/packages/ui/src/lib/browser/androidHost.test.ts
+@@ -0,0 +1,112 @@
++import { afterEach, describe, expect, test } from 'bun:test';
++
++import { isAndroidBrowserProviderMode } from './hostCapability';
++import { readAndroidBrowserHost, readAndroidHostStateEvent, readAndroidHostTabs } from './androidHost';
++import { presentAndroidBrowserTab, selectAndroidHostTab, syncAndroidHostContext } from './androidHostSync';
++
++describe('android browser host mode', () => {
++  afterEach(() => {
++    Reflect.deleteProperty(globalThis, 'window');
++    Reflect.deleteProperty(globalThis, 'document');
++  });
++
++  test('comes from the server boot flag, not a user agent', () => {
++    Object.defineProperty(globalThis, 'window', {
++      value: { navigator: { userAgent: 'Android' } },
++      configurable: true,
++    });
++    expect(isAndroidBrowserProviderMode()).toBe(false);
++    window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ = true;
++    expect(isAndroidBrowserProviderMode()).toBe(true);
++  });
++
++  test('reads a present/select/close host and never a token', () => {
++    const calls: string[] = [];
++    Object.defineProperty(globalThis, 'window', {
++      value: {
++        AndChamberBrowserHost: {
++          present: () => calls.push('present'),
++          select: () => calls.push('select'),
++          close: () => calls.push('close'),
++          tabs: () => [],
++        },
++      },
++      configurable: true,
++    });
++    const host = readAndroidBrowserHost();
++    expect(host).not.toBeNull();
++    expect('token' in (host ?? {})).toBe(false);
++    expect('claimNonce' in (host ?? {})).toBe(false);
++  });
++
++  test('parses a JSON string from tabs() into an array', () => {
++    const tabs = readAndroidHostTabs(JSON.stringify([
++      { tabId: 'native-1', url: 'https://example.test/', title: 'Example', ownerSessionId: 'ses_1' },
++    ]));
++    expect(tabs).toEqual([
++      { tabId: 'native-1', title: 'Example', url: 'https://example.test/', ownerSessionId: 'ses_1', active: false },
++    ]);
++    expect(Array.isArray(tabs)).toBe(true);
++  });
++
++  test('state event detail uses the same tab schema', () => {
++    const event = new Event('andchamber-browser-host-state');
++    Object.assign(event, {
++      detail: [{ tabId: 'native-1', title: 'Example', url: 'https://example.test/', ownerSessionId: 'ses_1', active: true }],
++    });
++    expect(readAndroidHostStateEvent(event)[0]).toMatchObject({
++      tabId: 'native-1',
++      ownerSessionId: 'ses_1',
++      active: true,
++    });
++  });
++
++  test('user present sends url and owner only, and context is optional', () => {
++    const presented: unknown[] = [];
++    const contexts: unknown[] = [];
++    Object.defineProperty(globalThis, 'window', {
++      value: {
++        AndChamberBrowserHost: {
++          present: (request: unknown) => presented.push(request),
++          select: () => undefined,
++          close: () => undefined,
++          tabs: () => [],
++          context: (context: unknown) => contexts.push(context),
++        },
++      },
++      configurable: true,
++    });
++    presentAndroidBrowserTab('https://example.test/', 'ses_1');
++    syncAndroidHostContext({ sessionId: 'ses_2', directory: '/repo' });
++    expect(presented).toEqual([{ url: 'https://example.test/', ownerSessionId: 'ses_1' }]);
++    expect(contexts).toEqual([{ sessionId: 'ses_2', directory: '/repo' }]);
++    expect(JSON.stringify(presented)).not.toContain('grant');
++    expect(presentAndroidBrowserTab('   ', 'ses_1')).toBe(false);
++    expect(presented).toHaveLength(1);
++  });
++
++  test('does not select an invisible tab or present while selecting', () => {
++    const calls: string[] = [];
++    Object.defineProperty(globalThis, 'window', {
++      value: {
++        AndChamberBrowserHost: {
++          present: () => calls.push('present'),
++          select: () => calls.push('select'),
++          close: () => undefined,
++          tabs: () => [{ tabId: 'native-1', title: '', url: 'https://example.test/', ownerSessionId: 'ses_1', active: true }],
++        },
++      },
++      configurable: true,
++    });
++    const state = {
++      openAgentBrowserTab: () => 'native-1',
++      setActiveContextPanelTab: () => undefined,
++      closeContextPanelTab: () => undefined,
++      contextPanelByDirectory: {},
++    };
++    selectAndroidHostTab('native-1', false, '/repo', state);
++    expect(calls).toEqual([]);
++    selectAndroidHostTab('native-1', true, '/repo', state);
++    expect(calls).toEqual(['select']);
++  });
++});
+diff --git a/packages/ui/src/lib/browser/androidHost.ts b/packages/ui/src/lib/browser/androidHost.ts
+new file mode 100644
+index 0000000..7d29649
+--- /dev/null
++++ b/packages/ui/src/lib/browser/androidHost.ts
+@@ -0,0 +1,95 @@
++/**
++ * Typed presentation bridge for the Android exclusive browser.
++ *
++ * The native host may present, select and close a tab, and mirror tab metadata.
++ * It never receives the provider token, a claim nonce, or a grant, and it is
++ * not asked to evaluate a page. Authority stays on the Kotlin SSE client.
++ */
++
++/** Wire schema shared with the Android presenter. ownerSessionId is ownership, not a grant. */
++export type AndroidHostTab = {
++  readonly tabId: string;
++  readonly title: string;
++  readonly url: string;
++  readonly ownerSessionId: string | null;
++  readonly active: boolean;
++};
++
++export type AndroidHostPresentRequest = {
++  readonly url: string;
++  readonly ownerSessionId: string | null;
++};
++
++export type AndroidHostContext = {
++  readonly sessionId: string | null;
++  readonly directory: string | null;
++};
++
++export type AndroidBrowserHost = {
++  /** User Browser entry: Android creates the page. Does not grant. */
++  readonly present: (request: AndroidHostPresentRequest) => void;
++  readonly select: (tabId: string) => void;
++  readonly close: (tabId: string) => void;
++  /** A real array, or a JSON string of that array. Never a grant or token. */
++  readonly tabs: () => readonly AndroidHostTab[] | string;
++  /** Optional. A session change asks Android to revoke; absence is a no-op. */
++  readonly context?: (context: AndroidHostContext) => void;
++};
++
++export const ANDROID_BROWSER_HOST_READY_EVENT = 'andchamber-browser-host-ready';
++export const ANDROID_BROWSER_HOST_STATE_EVENT = 'andchamber-browser-host-state';
++
++const isTab = (value: unknown): value is AndroidHostTab => {
++  if (!value || typeof value !== 'object') return false;
++  const tab = value as Partial<AndroidHostTab> & { id?: unknown; owner?: unknown };
++  const tabId = typeof tab.tabId === 'string' ? tab.tabId : typeof tab.id === 'string' ? tab.id : '';
++  return tabId.length > 0 && typeof tab.url === 'string';
++};
++
++/**
++ * Kotlin's wrapper JSON-encodes the return value. A string is parsed once;
++ * anything that is not a tab array becomes an empty list.
++ */
++const tabFrom = (value: AndroidHostTab & { id?: string; owner?: string | null; directory?: string }): AndroidHostTab & { directory?: string } => {
++  const owner = value.ownerSessionId ?? value.owner;
++  return {
++    tabId: value.tabId || value.id || '',
++    title: typeof value.title === 'string' ? value.title : '',
++    url: value.url,
++    ownerSessionId: typeof owner === 'string' && owner ? owner : null,
++    active: value.active === true,
++    ...(typeof value.directory === 'string' ? { directory: value.directory } : {}),
++  };
++};
++
++export const readAndroidHostTabs = (value: readonly AndroidHostTab[] | string | null | undefined): readonly AndroidHostTab[] => {
++  const parsed = typeof value === 'string'
++    ? (() => { try { return JSON.parse(value) as unknown; } catch { return null; } })()
++    : value;
++  if (!Array.isArray(parsed)) return [];
++  return parsed.filter(isTab).map((tab) => tabFrom(tab));
++};
++
++/** State events carry the same array, either as detail or detail.tabs. */
++export const readAndroidHostStateEvent = (event: Event): readonly AndroidHostTab[] => {
++  const detail = (event as CustomEvent<unknown>).detail;
++  if (Array.isArray(detail) || typeof detail === 'string') return readAndroidHostTabs(detail);
++  if (detail && typeof detail === 'object' && 'tabs' in detail) {
++    return readAndroidHostTabs((detail as { tabs?: readonly AndroidHostTab[] | string }).tabs);
++  }
++  return [];
++};
++
++const isHost = (value: unknown): value is AndroidBrowserHost => {
++  if (!value || typeof value !== 'object') return false;
++  const host = value as Partial<AndroidBrowserHost>;
++  return typeof host.present === 'function'
++    && typeof host.select === 'function'
++    && typeof host.close === 'function'
++    && typeof host.tabs === 'function';
++};
++
++export const readAndroidBrowserHost = (): AndroidBrowserHost | null => {
++  if (typeof window === 'undefined') return null;
++  return isHost(window.AndChamberBrowserHost) ? window.AndChamberBrowserHost : null;
++};
+diff --git a/packages/ui/src/lib/browser/androidHostSync.ts b/packages/ui/src/lib/browser/androidHostSync.ts
+new file mode 100644
+index 0000000..8c7e716
+--- /dev/null
++++ b/packages/ui/src/lib/browser/androidHostSync.ts
+@@ -0,0 +1,135 @@
++/**
++ * Mirrors native Android tabs into the existing context-panel tab store.
++ *
++ * The native tab id is the store id. present/select only choose that tab;
++ * they do not grant authority and they do not ask the host to load again.
++ */
++import { normalizeContextPanelDirectoryKey, useUIStore } from '@/stores/useUIStore';
++import {
++  ANDROID_BROWSER_HOST_READY_EVENT,
++  ANDROID_BROWSER_HOST_STATE_EVENT,
++  readAndroidBrowserHost,
++  readAndroidHostStateEvent,
++  readAndroidHostTabs,
++  type AndroidHostContext,
++  type AndroidHostTab,
++} from './androidHost';
++
++type MirrorState = {
++  readonly openAgentBrowserTab: (directory: string, url: string, ownerSessionId: string | null, tabId?: string | null) => string | null;
++  readonly setActiveContextPanelTab: (directory: string, tabId: string) => void;
++  readonly closeContextPanelTab: (directory: string, tabId: string) => void;
++  readonly contextPanelByDirectory: Record<string, { tabs: ReadonlyArray<{ id: string; mode: string; targetPath: string | null; ownerSessionId: string | null }> }>;
++};
++
++const mirrored = new Map<string, { directory: string; url: string }>();
++let selectedTabId: string | null = null;
++
++const directoryOf = (tab: AndroidHostTab & { directory?: string }, fallback: string): string => (
++  tab.directory ? normalizeContextPanelDirectoryKey(tab.directory) : fallback
++);
++
++export const mirrorAndroidHostTabs = (
++  tabs: readonly AndroidHostTab[],
++  fallbackDirectory: string,
++  state: MirrorState = useUIStore.getState(),
++): void => {
++  const seen = new Set<string>();
++  for (const tab of tabs) {
++    const directory = directoryOf(tab, fallbackDirectory);
++    if (!directory || !tab.tabId) continue;
++    seen.add(tab.tabId);
++    const existing = state.contextPanelByDirectory[directory]?.tabs.find((candidate) => candidate.id === tab.tabId);
++    const previous = mirrored.get(tab.tabId);
++    if (!existing) {
++      state.openAgentBrowserTab(directory, tab.url, tab.ownerSessionId, tab.tabId);
++    }
++    mirrored.set(tab.tabId, { directory, url: tab.url });
++    if (previous && previous.directory !== directory) {
++      state.closeContextPanelTab(previous.directory, tab.tabId);
++    }
++  }
++  for (const [tabId, previous] of [...mirrored.entries()]) {
++    if (seen.has(tabId)) continue;
++    mirrored.delete(tabId);
++    state.closeContextPanelTab(previous.directory, tabId);
++  }
++};
++
++/**
++ * Shows a tab the store already has. A missing tab is mirrored once from the
++ * host list; present is not called, so this cannot grant or reload.
++ */
++export const selectAndroidHostTab = (
++  tabId: string,
++  visible: boolean,
++  fallbackDirectory: string,
++  state: MirrorState = useUIStore.getState(),
++): void => {
++  if (!visible || !tabId) return;
++  const host = readAndroidBrowserHost();
++  if (host) mirrorAndroidHostTabs(readAndroidHostTabs(host.tabs()), fallbackDirectory, state);
++  const directory = mirrored.get(tabId)?.directory || fallbackDirectory;
++  if (!directory) return;
++  state.setActiveContextPanelTab(directory, tabId);
++  // select displays the native tab. It does not navigate or grant. Repeating
++  // it for the same tab would look like another present/load.
++  if (selectedTabId === tabId) return;
++  selectedTabId = tabId;
++  readAndroidBrowserHost()?.select(tabId);
++};
++
++export const subscribeAndroidHost = (
++  fallbackDirectory: string,
++  onChange: () => void,
++): (() => void) => {
++  if (typeof window === 'undefined') return () => undefined;
++  const refresh = () => {
++    const host = readAndroidBrowserHost();
++    if (host) mirrorAndroidHostTabs(readAndroidHostTabs(host.tabs()), fallbackDirectory);
++    onChange();
++  };
++  const onState = (event: Event) => {
++    const tabs = readAndroidHostStateEvent(event);
++    if (tabs.length > 0 || Array.isArray((event as CustomEvent<unknown>).detail)) {
++      mirrorAndroidHostTabs(tabs, fallbackDirectory);
++    } else {
++      refresh();
++      return;
++    }
++    onChange();
++  };
++  window.addEventListener(ANDROID_BROWSER_HOST_READY_EVENT, refresh);
++  window.addEventListener(ANDROID_BROWSER_HOST_STATE_EVENT, onState);
++  refresh();
++  return () => {
++    window.removeEventListener(ANDROID_BROWSER_HOST_READY_EVENT, refresh);
++    window.removeEventListener(ANDROID_BROWSER_HOST_STATE_EVENT, onState);
++  };
++};
++
++/**
++ * Tells Android which chat is current. ownerSessionId on a later present is
++ * still only ownership. A host without context is left alone.
++ */
++export const syncAndroidHostContext = (context: AndroidHostContext): void => {
++  const host = readAndroidBrowserHost();
++  if (!host || typeof host.context !== 'function') return;
++  host.context({
++    sessionId: context.sessionId ?? '',
++    directory: context.directory,
++  });
++};
++
++/**
++ * User Browser entry. Android creates the page; this does not grant.
++ * An empty URL is refused here so the native host never sees one.
++ */
++export const presentAndroidBrowserTab = (url: string, ownerSessionId: string | null): boolean => {
++  const trimmed = url.trim();
++  if (!trimmed) return false;
++  const host = readAndroidBrowserHost();
++  if (!host) return false;
++  host.present({ url: trimmed, ownerSessionId });
++  return true;
++};
+diff --git a/packages/ui/src/lib/browser/useAndroidHostContextSync.test.tsx b/packages/ui/src/lib/browser/useAndroidHostContextSync.test.tsx
+new file mode 100644
+index 0000000..b81d877
+--- /dev/null
++++ b/packages/ui/src/lib/browser/useAndroidHostContextSync.test.tsx
+@@ -0,0 +1,77 @@
++import { afterEach, describe, expect, test } from 'bun:test';
++import React from 'react';
++import { createRoot } from 'react-dom/client';
++
++import { useSessionUIStore } from '@/sync/session-ui-store';
++
++import { resetAndroidHostContextSync, useAndroidHostContextSync } from './useAndroidHostContextSync';
++
++const Probe = () => {
++  useAndroidHostContextSync();
++  return null;
++};
++
++const installDom = async () => {
++  const { Window } = await import('happy-dom');
++  const dom = new Window();
++  Object.assign(globalThis, { window: dom, document: dom.document });
++};
++
++describe('android host context sync', () => {
++  afterEach(() => {
++    document.body.innerHTML = '';
++    Reflect.deleteProperty(window, '__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__');
++    Reflect.deleteProperty(window, 'AndChamberBrowserHost');
++    useSessionUIStore.setState({ currentSessionId: null, currentSessionDirectory: null });
++    resetAndroidHostContextSync();
++  });
++
++  test('sends context when the session changes without a browser pane', async () => {
++    await installDom();
++    const contexts: unknown[] = [];
++    window.__OPENCHAMBER_ANDROID_BROWSER_PROVIDER__ = true;
++    window.AndChamberBrowserHost = {
++      present: () => undefined,
++      select: () => undefined,
++      close: () => undefined,
++      tabs: () => [],
++      context: (context) => contexts.push(context),
++    };
++    useSessionUIStore.setState({ currentSessionId: 'ses_1', currentSessionDirectory: '/repo' });
++    const host = document.createElement('div');
++    document.body.append(host);
++    const root = createRoot(host);
++    root.render(React.createElement(Probe));
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    useSessionUIStore.setState({ currentSessionId: 'ses_2', currentSessionDirectory: '/repo' });
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    expect(contexts.some((context) => JSON.stringify(context) === JSON.stringify({ sessionId: 'ses_2', directory: '/repo' }))).toBe(true);
++
++    useSessionUIStore.setState({ currentSessionId: null, currentSessionDirectory: null });
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    expect(contexts.some((context) => JSON.stringify(context) === JSON.stringify({ sessionId: '', directory: null }))).toBe(true);
++    root.unmount();
++  });
++
++  test('does nothing outside Android mode', async () => {
++    await installDom();
++    const contexts: unknown[] = [];
++    window.AndChamberBrowserHost = {
++      present: () => undefined,
++      select: () => undefined,
++      close: () => undefined,
++      tabs: () => [],
++      context: (context) => contexts.push(context),
++    };
++    useSessionUIStore.setState({ currentSessionId: 'ses_1', currentSessionDirectory: '/repo' });
++    const host = document.createElement('div');
++    document.body.append(host);
++    const root = createRoot(host);
++    root.render(React.createElement(Probe));
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    useSessionUIStore.setState({ currentSessionId: null });
++    await new Promise((resolve) => setTimeout(resolve, 20));
++    expect(contexts).toEqual([]);
++    root.unmount();
++  });
++});
+diff --git a/packages/ui/src/lib/browser/useAndroidHostContextSync.ts b/packages/ui/src/lib/browser/useAndroidHostContextSync.ts
+new file mode 100644
+index 0000000..1063762
+--- /dev/null
++++ b/packages/ui/src/lib/browser/useAndroidHostContextSync.ts
+@@ -0,0 +1,45 @@
++import React from 'react';
++
++import { normalizeContextPanelDirectoryKey } from '@/stores/useUIStore';
++import { useDirectoryStore } from '@/stores/useDirectoryStore';
++import { useSessionUIStore } from '@/sync/session-ui-store';
++
++import { isAndroidBrowserProviderMode } from './hostCapability';
++import { syncAndroidHostContext } from './androidHostSync';
++
++/**
++ * Android must hear every chat change, including leaving a chat, even when
++ * the Browser pane has never been opened. Desktop and mobile both call this
++ * from a root that stays mounted. The same session and directory are sent
++ * once; a later mount of another caller does not repeat it.
++ *
++ * Directory is the current session's directory, then the app directory.
++ * Neither requires the sync runtime, so the mobile shell can call this
++ * before a session list is mounted.
++ */
++let lastSentKey: string | null = null;
++
++export const resetAndroidHostContextSync = (): void => {
++  lastSentKey = null;
++};
++
++export const useAndroidHostContextSync = (): void => {
++  const sessionId = useSessionUIStore((state) => state.currentSessionId);
++  const sessionDirectory = useSessionUIStore((state) => state.currentSessionDirectory);
++  const appDirectory = useDirectoryStore((state) => state.currentDirectory);
++  const directory = sessionDirectory || appDirectory || '';
++  const directoryKey = React.useMemo(
++    () => (directory ? normalizeContextPanelDirectoryKey(directory) : ''),
++    [directory],
++  );
++
++  React.useEffect(() => {
++    if (!isAndroidBrowserProviderMode()) return;
++    const nextSessionId = sessionId ?? '';
++    const nextDirectory = directoryKey || null;
++    const key = `${nextSessionId}\n${nextDirectory ?? ''}`;
++    if (lastSentKey === key) return;
++    lastSentKey = key;
++    syncAndroidHostContext({ sessionId: nextSessionId, directory: nextDirectory });
++  }, [directoryKey, sessionId]);
++};
+diff --git a/packages/web/server/lib/browser-control/android-provider.js b/packages/web/server/lib/browser-control/android-provider.js
+new file mode 100644
+index 0000000..573cf17
+--- /dev/null
++++ b/packages/web/server/lib/browser-control/android-provider.js
+@@ -0,0 +1,383 @@
++/**
++ * Exclusive Android browser provider binding.
++ *
++ * AndChamber launches this server with OPENCHAMBER_BROWSER_PROVIDER=android and
++ * a per-launch ANDCHAMBER_BROWSER_PROVIDER_TOKEN. The token is captured into a
++ * private closure and deleted from process.env before any child is spawned.
++ * Kotlin is the only claim/result executor: requests are written to that one
++ * provider SSE connection, never broadcast to UI clients.
++ *
++ * SSE connection is transport, not authority. A grant lives in the native
++ * client; this module only binds requestId, connectionId and claimNonce.
++ */
++
++import crypto from 'node:crypto';
++
++import { isLoopbackBindHost } from '../security/bind-host.js';
++
++export const ANDROID_BROWSER_PROVIDER = 'android';
++export const ANDROID_PROVIDER_TOKEN_ENV = 'ANDCHAMBER_BROWSER_PROVIDER_TOKEN';
++export const ANDROID_PROVIDER_MODE_ENV = 'OPENCHAMBER_BROWSER_PROVIDER';
++export const ANDROID_PROVIDER_TOKEN_HEADER = 'x-andchamber-browser-token';
++export const ANDROID_PROVIDER_PROTOCOL_VERSION = 1;
++
++export const ANDROID_PROVIDER_ERROR_CODES = Object.freeze({
++  UNAVAILABLE: 'ANDROID_PROVIDER_UNAVAILABLE',
++  AUTH_REQUIRED: 'ANDROID_PROVIDER_AUTH_REQUIRED',
++  REJECTED: 'ANDROID_PROVIDER_REJECTED',
++  BUSY: 'ANDROID_PROVIDER_BUSY',
++  DISCONNECTED: 'ANDROID_PROVIDER_DISCONNECTED',
++  PROTOCOL: 'ANDROID_PROVIDER_PROTOCOL_ERROR',
++});
++
++const TOKEN_BYTES = 32;
++
++/**
++ * The provider token must never reach a child, including OpenCode. Compared
++ * case-insensitively because Windows env lookups are case-insensitive.
++ * Other process secrets have their own filters; this one only owns the token.
++ */
++
++export const isAndroidBrowserProviderMode = (value) => (
++  typeof value === 'string' && value.trim().toLowerCase() === ANDROID_BROWSER_PROVIDER
++);
++
++/**
++ * Drops the provider token (and other process secrets) from an environment
++ * object that is about to be handed to a child. Returns a new object.
++ */
++export const omitProviderTokenFromEnv = (source) => {
++  if (!source || typeof source !== 'object') return {};
++  let stripped = false;
++  const env = {};
++  for (const [name, value] of Object.entries(source)) {
++    if (name.toUpperCase() === ANDROID_PROVIDER_TOKEN_ENV) {
++      stripped = true;
++      continue;
++    }
++    env[name] = value;
++  }
++  return stripped ? env : source;
++};
++
++const headerValue = (headers, name) => {
++  if (!headers || typeof headers !== 'object') return '';
++  const raw = headers[name] ?? headers[name.toLowerCase()];
++  const value = Array.isArray(raw) ? raw[0] : raw;
++  return typeof value === 'string' ? value : '';
++};
++
++const originHeader = (req) => headerValue(req?.headers, 'origin');
++
++const peerAddress = (req) => {
++  const raw = req?.socket?.remoteAddress ?? req?.connection?.remoteAddress ?? '';
++  return typeof raw === 'string' ? raw : '';
++};
++
++const tokensMatch = (provided, expected) => {
++  if (typeof provided !== 'string' || typeof expected !== 'string') return false;
++  const left = Buffer.from(provided);
++  const right = Buffer.from(expected);
++  if (left.length === 0 || left.length !== right.length) return false;
++  return crypto.timingSafeEqual(left, right);
++};
++
++/**
++ * Captures the launch token once. Later reads of process.env cannot recover it.
++ */
++export const captureAndroidProviderToken = (env = process.env) => {
++  const mode = typeof env?.[ANDROID_PROVIDER_MODE_ENV] === 'string' ? env[ANDROID_PROVIDER_MODE_ENV] : '';
++  const raw = typeof env?.[ANDROID_PROVIDER_TOKEN_ENV] === 'string' ? env[ANDROID_PROVIDER_TOKEN_ENV] : '';
++  const enabled = isAndroidBrowserProviderMode(mode);
++  let token = null;
++  let invalid = false;
++  if (enabled) {
++    const trimmed = raw.trim();
++    if (trimmed.length >= TOKEN_BYTES && trimmed === raw && !/[\r\n\0]/.test(trimmed)) {
++      token = trimmed;
++    } else {
++      invalid = true;
++    }
++  }
++  if (env && Object.prototype.hasOwnProperty.call(env, ANDROID_PROVIDER_TOKEN_ENV)) {
++    delete env[ANDROID_PROVIDER_TOKEN_ENV];
++  }
++  return {
++    enabled: enabled && token !== null,
++    configured: enabled,
++    invalid,
++    token,
++  };
++};
++
++/**
++ * Loopback peer, no Origin, header token. UI cookies and browser=1 never substitute.
++ * `redirect: 'manual'` is a client concern; this server never redirects these routes.
++ */
++export const authorizeAndroidProviderRequest = (req, expectedToken) => {
++  if (!expectedToken) {
++    return { ok: false, status: 503, code: ANDROID_PROVIDER_ERROR_CODES.UNAVAILABLE, error: 'Android browser provider is not configured' };
++  }
++  if (!isLoopbackBindHost(peerAddress(req))) {
++    return { ok: false, status: 403, code: ANDROID_PROVIDER_ERROR_CODES.AUTH_REQUIRED, error: 'Android browser provider requires a loopback peer' };
++  }
++  if (originHeader(req)) {
++    return { ok: false, status: 403, code: ANDROID_PROVIDER_ERROR_CODES.AUTH_REQUIRED, error: 'Android browser provider rejects Origin' };
++  }
++  const provided = headerValue(req?.headers, ANDROID_PROVIDER_TOKEN_HEADER).trim();
++  if (!tokensMatch(provided, expectedToken)) {
++    return { ok: false, status: 401, code: ANDROID_PROVIDER_ERROR_CODES.AUTH_REQUIRED, error: 'Android browser provider token is required' };
++  }
++  return { ok: true };
++};
++
++const monotonicNow = () => Number(process.hrtime.bigint() / 1_000_000n);
++
++export const createAndroidProviderRegistry = ({
++  enabled = false,
++  token = null,
++  createId = () => crypto.randomUUID(),
++  now = monotonicNow,
++  wallNow = Date.now,
++  setTimer = setTimeout,
++  clearTimer = clearTimeout,
++} = {}) => {
++  let connection = null;
++  const pending = new Map();
++
++  const writeEvent = (client, event) => {
++    if (!client || client.writableEnded || client.destroyed) return false;
++    try {
++      client.write(`data: ${JSON.stringify(event)}\n\n`);
++      return true;
++    } catch {
++      return false;
++    }
++  };
++
++  const notifyCancel = (entry, requestId, reason) => {
++    if (!entry || !connection || connection.connectionId !== entry.connectionId) return false;
++    return writeEvent(connection.client, {
++      type: 'openchamber:browser-control-cancel',
++      properties: {
++        protocolVersion: ANDROID_PROVIDER_PROTOCOL_VERSION,
++        serverEpoch: entry.serverEpoch,
++        connectionId: entry.connectionId,
++        requestId,
++        reason,
++      },
++    });
++  };
++
++  const failPending = (predicate, outcome) => {
++    for (const [requestId, entry] of [...pending.entries()]) {
++      if (!predicate(entry, requestId)) continue;
++      pending.delete(requestId);
++      if (entry.timer) clearTimer(entry.timer);
++      entry.finish(outcome);
++    }
++  };
++
++  const detach = (client, message) => {
++    if (!connection || connection.client !== client) return false;
++    const connectionId = connection.connectionId;
++    connection = null;
++    try { client.end(); } catch { /* already gone */ }
++    failPending(
++      (entry) => entry.connectionId === connectionId,
++      { ok: false, code: ANDROID_PROVIDER_ERROR_CODES.DISCONNECTED, message, status: 503 },
++    );
++    return true;
++  };
++
++  return {
++    get enabled() {
++      return enabled === true && typeof token === 'string' && token.length > 0;
++    },
++
++    get token() {
++      return token;
++    },
++
++    get connectionId() {
++      return connection?.connectionId ?? null;
++    },
++
++    get serverEpoch() {
++      return connection?.serverEpoch ?? null;
++    },
++
++    get connected() {
++      return connection !== null;
++    },
++
++    authorize(req) {
++      if (!this.enabled) {
++        return { ok: false, status: 503, code: ANDROID_PROVIDER_ERROR_CODES.UNAVAILABLE, error: 'Android browser provider is not configured' };
++      }
++      return authorizeAndroidProviderRequest(req, token);
++    },
++
++    /**
++     * Attaches the single provider SSE. A second live connection is rejected;
++     * a replacement is not accepted until the first closes.
++     */
++    attach(req, res) {
++      if (connection) {
++        return { ok: false, status: 409, code: ANDROID_PROVIDER_ERROR_CODES.BUSY, error: 'An Android browser provider is already connected' };
++      }
++      const connectionId = createId();
++      const serverEpoch = createId();
++      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
++      res.setHeader('Cache-Control', 'no-cache, no-transform');
++      res.setHeader('Connection', 'keep-alive');
++      res.setHeader('X-Accel-Buffering', 'no');
++      res.flushHeaders?.();
++      res.openchamberAndroidProvider = true;
++      res.openchamberConnectionId = connectionId;
++      connection = { client: res, connectionId, serverEpoch, connectedAt: wallNow() };
++      const ready = writeEvent(res, {
++        type: 'openchamber:event-stream-ready',
++        properties: {
++          protocolVersion: ANDROID_PROVIDER_PROTOCOL_VERSION,
++          serverEpoch,
++          connectionId,
++        },
++      });
++      if (!ready) {
++        connection = null;
++        return { ok: false, status: 500, code: ANDROID_PROVIDER_ERROR_CODES.PROTOCOL, error: 'Android browser provider stream could not start' };
++      }
++      const heartbeat = setInterval(() => {
++        if (!writeEvent(res, { type: 'openchamber:heartbeat', properties: { timestamp: wallNow() } })) {
++          clearInterval(heartbeat);
++          detach(res, 'The Android browser provider disconnected');
++        }
++      }, 25_000);
++      heartbeat.unref?.();
++      req.on('close', () => {
++        clearInterval(heartbeat);
++        detach(res, 'The Android browser provider disconnected');
++      });
++      return { ok: true, connectionId, serverEpoch };
++    },
++
++    /**
++     * Registers the pending request before the caller emits it. The returned
++     * envelope is the only payload that may be written to the provider.
++     */
++    beginRequest({ requestId, action, parameters, context, timeoutMs, setTimer: requestSetTimer = setTimer, clearTimer: requestClearTimer = clearTimer }) {
++      if (!connection) return { delivered: 0 };
++      const current = connection;
++      const started = now();
++      const bounded = Math.min(Math.max(1_000, Number(timeoutMs) || 20_000), 120_000);
++      const claimNonce = crypto.randomBytes(24).toString('base64url');
++      const envelope = {
++        protocolVersion: ANDROID_PROVIDER_PROTOCOL_VERSION,
++        serverEpoch: current.serverEpoch,
++        connectionId: current.connectionId,
++        requestId,
++        action,
++        parameters,
++        context,
++        deadlineAtEpochMs: wallNow() + bounded,
++        timeoutMs: bounded,
++      };
++      return {
++        delivered: 1,
++        envelope,
++        hold(finish) {
++          if (connection !== current) {
++            finish({ ok: false, code: ANDROID_PROVIDER_ERROR_CODES.DISCONNECTED, message: 'The Android browser provider disconnected', status: 503 });
++            return;
++          }
++          const entry = {
++            connectionId: current.connectionId,
++            serverEpoch: current.serverEpoch,
++            claimNonce,
++            claimed: false,
++            started,
++            timeoutMs: bounded,
++            timer: null,
++            finish,
++            expired: false,
++          };
++          const settleTimeout = () => {
++            const currentEntry = pending.get(requestId);
++            if (!currentEntry || currentEntry !== entry) return;
++            pending.delete(requestId);
++            entry.expired = true;
++            notifyCancel(entry, requestId, 'timeout');
++            entry.finish({
++              ok: false,
++              code: 'ANDROID_PROVIDER_TIMEOUT',
++              message: `The Android browser provider did not respond within ${Math.round(bounded / 1000)}s`,
++              status: 504,
++            });
++          };
++          entry.timer = requestSetTimer(settleTimeout, bounded);
++          entry.timer.unref?.();
++          pending.set(requestId, entry);
++        },
++      };
++    },
++
++    emit(envelope) {
++      if (!connection || connection.connectionId !== envelope.connectionId) return false;
++      return writeEvent(connection.client, {
++        type: 'openchamber:browser-control-request',
++        properties: envelope,
++      });
++    },
++
++    claim({ requestId, connectionId }) {
++      const entry = pending.get(requestId);
++      if (!entry || entry.expired || entry.claimed) return { granted: false };
++      if (entry.connectionId !== connectionId) return { granted: false };
++      if (!connection || connection.connectionId !== connectionId) return { granted: false };
++      const elapsed = now() - entry.started;
++      const remainingMs = Math.max(0, entry.timeoutMs - elapsed);
++      if (remainingMs <= 0) return { granted: false };
++      entry.claimed = true;
++      return { granted: true, claimNonce: entry.claimNonce, remainingMs };
++    },
++
++    /**
++     * Settles only a claimed request whose connection and nonce match.
++     * A wrong connection or nonce cannot settle. A late match after timeout
++     * returns matched:false. An error result still settles the waiting caller.
++     */
++    result({ requestId, connectionId, claimNonce, ok, data, error }) {
++      const entry = pending.get(requestId);
++      if (!entry) return { matched: false };
++      if (entry.connectionId !== connectionId || entry.claimNonce !== claimNonce || !entry.claimed) {
++        return { matched: false, settled: false };
++      }
++      pending.delete(requestId);
++      if (entry.timer) clearTimer(entry.timer);
++      entry.finish(ok === true
++        ? { ok: true, data: data ?? null }
++        : {
++          ok: false,
++          code: typeof error === 'string' && error ? error : 'ANDROID_PROVIDER_RESULT_ERROR',
++          message: typeof error === 'string' && error ? error : 'Android browser provider reported a failure',
++          status: 400,
++        });
++      return { matched: true };
++    },
++
++    cancel(requestId, message, reason = 'abort') {
++      const entry = pending.get(requestId);
++      if (!entry) return false;
++      pending.delete(requestId);
++      if (entry.timer) clearTimer(entry.timer);
++      notifyCancel(entry, requestId, reason);
++      entry.finish({ ok: false, code: 'ANDROID_PROVIDER_CANCELLED', message, status: 499 });
++      return true;
++    },
++
++    rejectAll(message = 'The Android browser provider disconnected') {
++      failPending(() => true, { ok: false, code: ANDROID_PROVIDER_ERROR_CODES.DISCONNECTED, message, status: 503 });
++    },
++  };
++};
+diff --git a/packages/web/server/lib/browser-control/android-provider.test.js b/packages/web/server/lib/browser-control/android-provider.test.js
+new file mode 100644
+index 0000000..d456644
+--- /dev/null
++++ b/packages/web/server/lib/browser-control/android-provider.test.js
+@@ -0,0 +1,379 @@
++import http from 'node:http';
++import { once } from 'node:events';
++import express from 'express';
++import request from 'supertest';
++import { describe, expect, test } from 'bun:test';
++
++import {
++  ANDROID_PROVIDER_TOKEN_ENV,
++  authorizeAndroidProviderRequest,
++  captureAndroidProviderToken,
++  createAndroidProviderRegistry,
++  omitProviderTokenFromEnv,
++} from './android-provider.js';
++import { childProcessEnv } from './child-env.js';
++import { BrowserControlError, createBrowserControlBroker } from './broker.js';
++import { registerBrowserControlRoutes } from './routes.js';
++import { createBrowserControlRouter } from './provider.js';
++import { registerAuthAndAccessRoutes } from '../opencode/core-routes.js';
++
++const TOKEN = 'a'.repeat(43);
++
++const loopbackReq = (headers = {}, address = '127.0.0.1') => ({
++  headers,
++  socket: { remoteAddress: address },
++});
++
++describe('android provider token', () => {
++  test('captures the launch token and deletes it from the environment', () => {
++    const env = {
++      OPENCHAMBER_BROWSER_PROVIDER: 'android',
++      [ANDROID_PROVIDER_TOKEN_ENV]: TOKEN,
++      PATH: '/usr/bin',
++    };
++    const captured = captureAndroidProviderToken(env);
++    expect(captured.enabled).toBe(true);
++    expect(captured.token).toBe(TOKEN);
++    expect(env[ANDROID_PROVIDER_TOKEN_ENV]).toBeUndefined();
++    expect(env.PATH).toBe('/usr/bin');
++  });
++
++  test('does not enable Android mode without a usable token', () => {
++    const env = { OPENCHAMBER_BROWSER_PROVIDER: 'android', [ANDROID_PROVIDER_TOKEN_ENV]: 'short' };
++    expect(captureAndroidProviderToken(env).enabled).toBe(false);
++    expect(env[ANDROID_PROVIDER_TOKEN_ENV]).toBeUndefined();
++  });
++
++  test('omits the token from every child environment copy and leaves OpenCode secrets to their own filters', () => {
++    const source = {
++      PATH: '/usr/bin',
++      [ANDROID_PROVIDER_TOKEN_ENV]: TOKEN,
++      andchamber_browser_provider_token: TOKEN,
++      OPENCODE_SERVER_PASSWORD: 'password',
++    };
++    expect(omitProviderTokenFromEnv(source)).toEqual({ PATH: '/usr/bin', OPENCODE_SERVER_PASSWORD: 'password' });
++    expect(childProcessEnv(source)).toEqual({ PATH: '/usr/bin', OPENCODE_SERVER_PASSWORD: 'password' });
++    const clean = { PATH: '/usr/bin' };
++    expect(omitProviderTokenFromEnv(clean)).toBe(clean);
++  });
++});
++
++describe('android provider auth', () => {
++  test('requires loopback, no Origin, and a constant-time token match', () => {
++    expect(authorizeAndroidProviderRequest(loopbackReq({ 'x-andchamber-browser-token': TOKEN }), TOKEN).ok).toBe(true);
++    expect(authorizeAndroidProviderRequest(loopbackReq({ 'x-andchamber-browser-token': TOKEN, origin: 'http://127.0.0.1:3000' }), TOKEN).status).toBe(403);
++    expect(authorizeAndroidProviderRequest(loopbackReq({ 'x-andchamber-browser-token': TOKEN }, '192.0.2.10'), TOKEN).status).toBe(403);
++    expect(authorizeAndroidProviderRequest(loopbackReq({ 'x-andchamber-browser-token': 'wrong-token-value-of-same-length-pad' }), TOKEN).status).toBe(401);
++    expect(authorizeAndroidProviderRequest(loopbackReq({ cookie: 'oc_session=1' }), TOKEN).status).toBe(401);
++  });
++});
++
++const readSse = async (server, headers) => {
++  const address = server.address();
++  const req = http.request({
++    hostname: '127.0.0.1',
++    port: address.port,
++    path: '/api/openchamber/events?provider=android',
++    headers,
++  });
++  req.end();
++  const [res] = await once(req, 'response');
++  let body = '';
++  const ready = new Promise((resolve, reject) => {
++    res.on('data', (chunk) => {
++      body += chunk.toString();
++      if (body.includes('event-stream-ready')) resolve(body);
++    });
++    res.on('error', reject);
++  });
++  return { res, ready, request: req };
++};
++
++describe('android provider SSE and broker binding', () => {
++  test('targets one connection and rejects a second provider', async () => {
++    const registry = createAndroidProviderRegistry({ enabled: true, token: TOKEN, createId: (() => {
++      let n = 0;
++      return () => `id-${++n}`;
++    })() });
++    const app = express();
++    app.get('/api/openchamber/events', (req, res) => {
++      const attached = registry.attach(req, res);
++      if (!attached.ok && !res.headersSent) res.status(attached.status).json(attached);
++    });
++    const server = app.listen(0, '127.0.0.1');
++    await once(server, 'listening');
++    try {
++      const first = await readSse(server, { 'x-andchamber-browser-token': TOKEN });
++      const ready = await first.ready;
++      expect(ready).toContain('"protocolVersion":1');
++      expect(ready).toContain('"serverEpoch":"id-2"');
++      expect(ready).toContain('"connectionId":"id-1"');
++
++      const address = server.address();
++      const second = await fetch(`http://127.0.0.1:${address.port}/api/openchamber/events?provider=android`, {
++        headers: { 'x-andchamber-browser-token': TOKEN },
++      });
++      expect(second.status).toBe(409);
++      first.request.destroy();
++    } finally {
++      server.close();
++    }
++  });
++
++  test('registers pending before emit and does not broadcast when the provider is offline', async () => {
++    const emitted = [];
++    const registry = createAndroidProviderRegistry({ enabled: true, token: TOKEN, createId: () => 'conn-1' });
++    const broker = createBrowserControlBroker({
++      emitRequest: (payload) => { emitted.push(payload); return 2; },
++      createId: () => 'req-1',
++      androidProvider: registry,
++    });
++    await expect(broker.request('browser.open', { url: 'http://127.0.0.1/' }, {
++      context: { directory: '/repo', sessionId: 'ses_1' },
++    })).rejects.toMatchObject({ code: 'ANDROID_PROVIDER_UNAVAILABLE', status: 503 });
++    expect(emitted).toEqual([]);
++  });
++
++  test('claim and result bind connection and nonce; wrong values cannot settle', async () => {
++    let now = 1_000;
++    const registry = createAndroidProviderRegistry({
++      enabled: true,
++      token: TOKEN,
++      createId: () => 'conn-1',
++      now: () => now,
++      wallNow: () => 1_700_000_000_000,
++    });
++    registry.attach(
++      { on() {}, socket: { remoteAddress: '127.0.0.1' }, headers: {} },
++      { setHeader() {}, flushHeaders() {}, write: () => true, on() {} },
++    );
++    const broker = createBrowserControlBroker({
++      emitRequest: () => 2,
++      createId: () => 'req-1',
++      androidProvider: registry,
++    });
++    const pending = broker.request('browser.snapshot', {}, { context: { sessionId: 'ses_1', directory: '/repo' }, timeoutMs: 5_000 });
++    const app = express();
++    registerBrowserControlRoutes(app, { express, broker, androidProvider: registry });
++
++    const wrongConn = await request(app)
++      .post('/api/browser-control/claim')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'other' });
++    expect(wrongConn.body).toEqual({ granted: false });
++
++    const claim = await request(app)
++      .post('/api/browser-control/claim')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'conn-1' });
++    expect(claim.body.granted).toBe(true);
++    expect(claim.body.claimNonce).toEqual(expect.any(String));
++    expect(claim.body.remainingMs).toBeGreaterThan(0);
++
++    const wrongNonce = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'conn-1', claimNonce: 'nope', ok: true, data: { clicked: true } });
++    expect(wrongNonce.body).toEqual({ matched: false });
++
++    const result = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'conn-1', claimNonce: claim.body.claimNonce, ok: true, data: { url: 'http://127.0.0.1/' } });
++    expect(result.body).toEqual({ matched: true });
++    expect(await pending).toEqual({ url: 'http://127.0.0.1/' });
++  });
++
++  test('timeout, abort and disconnect notify only the provider connection', async () => {
++    const written = [];
++    let now = 0;
++    const registry = createAndroidProviderRegistry({
++      enabled: true,
++      token: TOKEN,
++      createId: () => 'conn-1',
++      now: () => now,
++      wallNow: () => 1_000,
++    });
++    registry.attach(
++      { on() {}, socket: { remoteAddress: '127.0.0.1' }, headers: {} },
++      { setHeader() {}, flushHeaders() {}, write: (chunk) => { written.push(chunk); return true; }, on() {} },
++    );
++    const broker = createBrowserControlBroker({
++      emitRequest: () => { throw new Error('must not broadcast'); },
++      createId: () => 'req-timeout',
++      androidProvider: registry,
++      setTimer: (callback) => { queueMicrotask(callback); return 1; },
++      clearTimer: () => {},
++    });
++    const timedOut = broker.request('browser.snapshot', {}, { context: { sessionId: 'ses_1' }, timeoutMs: 1_000 });
++    await expect(timedOut).rejects.toMatchObject({ status: 504, code: 'ANDROID_PROVIDER_TIMEOUT' });
++    const cancel = written.map((chunk) => String(chunk)).find((chunk) => chunk.includes('browser-control-cancel'));
++    expect(cancel).toContain('"reason":"timeout"');
++    expect(cancel).toContain('"connectionId":"conn-1"');
++    expect(cancel).not.toContain('browser-control-request');
++
++    written.length = 0;
++    const controller = new AbortController();
++    const brokerAbort = createBrowserControlBroker({
++      emitRequest: () => 9,
++      createId: () => 'req-abort',
++      androidProvider: registry,
++    });
++    const aborted = brokerAbort.request('browser.click', { selector: 'button' }, {
++      context: { sessionId: 'ses_1' },
++      signal: controller.signal,
++    });
++    controller.abort();
++    await expect(aborted).rejects.toMatchObject({ status: 499 });
++    expect(written.join('')).toContain('"reason":"abort"');
++    expect(written.join('')).not.toContain('"requestId":"broadcast"');
++
++    const app = express();
++    registerBrowserControlRoutes(app, { express, broker: brokerAbort, androidProvider: registry });
++    const late = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-abort', connectionId: 'conn-1', claimNonce: 'late', ok: true, data: { clicked: true } });
++    expect(late.status).toBe(200);
++    expect(late.body).toEqual({ matched: false });
++  });
++
++  test('a late matched result after timeout returns matched false', async () => {
++    const registry = createAndroidProviderRegistry({ enabled: true, token: TOKEN, createId: () => 'conn-1', now: () => 0 });
++    registry.attach(
++      { on() {}, socket: { remoteAddress: '127.0.0.1' }, headers: {} },
++      { setHeader() {}, flushHeaders() {}, write: () => true, on() {} },
++    );
++    const broker = createBrowserControlBroker({
++      emitRequest: () => 1,
++      createId: () => 'req-late',
++      androidProvider: registry,
++      setTimer: (callback) => { queueMicrotask(callback); return 1; },
++      clearTimer: () => {},
++    });
++    const app = express();
++    registerBrowserControlRoutes(app, { express, broker, androidProvider: registry });
++    const pending = broker.request('browser.snapshot', {}, { context: { sessionId: 'ses_1' } });
++    await expect(pending).rejects.toThrow('did not respond');
++    const claim = registry.claim({ requestId: 'req-late', connectionId: 'conn-1' });
++    expect(claim.granted).toBe(false);
++    const late = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-late', connectionId: 'conn-1', claimNonce: 'unused', ok: true, data: { url: 'http://127.0.0.1/' } });
++    expect(late.body).toEqual({ matched: false });
++  });
++
++  test('an unclaimed result does not settle, and a late result is matched false', async () => {
++    let fire = null;
++    const registry = createAndroidProviderRegistry({
++      enabled: true,
++      token: TOKEN,
++      createId: () => 'conn-1',
++      now: () => 0,
++    });
++    registry.attach(
++      { on() {}, socket: { remoteAddress: '127.0.0.1' }, headers: {} },
++      { setHeader() {}, flushHeaders() {}, write: () => true, on() {} },
++    );
++    const broker = createBrowserControlBroker({
++      emitRequest: () => 1,
++      createId: () => 'req-1',
++      androidProvider: {
++        ...registry,
++        beginRequest(input) {
++          const begun = registry.beginRequest(input);
++          return { ...begun, hold: (finish) => { fire = () => finish({ ok: false, message: 'timed out', status: 504 }); } };
++        },
++      },
++    });
++    const app = express();
++    registerBrowserControlRoutes(app, { express, broker, androidProvider: registry });
++    const pending = broker.request('browser.click', { selector: 'button' }, { context: { sessionId: 'ses_1' } });
++    const unclaimed = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'conn-1', claimNonce: 'unused', ok: true, data: { clicked: true } });
++    expect(unclaimed.body.matched).toBe(false);
++    fire();
++    await expect(pending).rejects.toThrow('timed out');
++    const late = await request(app)
++      .post('/api/browser-control/result')
++      .set('x-andchamber-browser-token', TOKEN)
++      .send({ requestId: 'req-1', connectionId: 'conn-1', claimNonce: 'unused', ok: true, data: {} });
++    expect(late.body).toEqual({ matched: false });
++  });
++
++  test('disconnect rejects provider pending and does not fall back to broadcast', async () => {
++    const emitted = [];
++    const listeners = new Set();
++    const registry = createAndroidProviderRegistry({ enabled: true, token: TOKEN, createId: () => 'conn-1' });
++    const req = { on(event, fn) { listeners.add(fn); }, socket: { remoteAddress: '127.0.0.1' }, headers: {} };
++    registry.attach(req, { setHeader() {}, flushHeaders() {}, write: () => true, end() {}, on() {} });
++    const broker = createBrowserControlBroker({
++      emitRequest: (payload) => { emitted.push(payload); return 3; },
++      createId: () => 'req-1',
++      androidProvider: registry,
++    });
++    const pending = broker.request('browser.snapshot', {}, { context: { sessionId: 'ses_1' } });
++    for (const listener of listeners) listener();
++    await expect(pending).rejects.toMatchObject({ code: 'ANDROID_PROVIDER_DISCONNECTED' });
++    expect(emitted).toEqual([]);
++  });
++});
++
++describe('provider precedence', () => {
++  test('keeps an extension ahead of the Android builtin path and does not rewrite the setting', async () => {
++    const brokerCalls = [];
++    const router = createBrowserControlRouter({
++      broker: { request: async () => { brokerCalls.push('broker'); return { from: 'broker' }; } },
++      readSettings: async () => ({ browserProvider: 'server-chrome' }),
++      persistSettings: async () => { throw new Error('must not rewrite'); },
++      findGuest: async () => ({
++        id: 'server-chrome',
++        name: 'Server Chrome',
++        enabled: true,
++        packageRoot: '/ext',
++        service: { entry: 'service/main.js', runtime: 'host', provides: ['browser'] },
++        capabilityGrants: ['service'],
++      }),
++      persistPath: '/data',
++      emitProviderReset: () => { throw new Error('must not reset'); },
++      createId: () => 'req-1',
++      proxyServiceRequest: async () => ({ status: 200, body: JSON.stringify({ ok: true, data: { from: 'extension' } }) }),
++      androidProvider: createAndroidProviderRegistry({ enabled: true, token: TOKEN }),
++    });
++    expect(await router.request('browser.snapshot', {})).toEqual({ from: 'extension' });
++    expect(brokerCalls).toEqual([]);
++  });
++});
++
++describe('narrow provider auth bypass', () => {
++  test('bypasses only the provider SSE, claim and result', async () => {
++    const requireAuth = (_req, res) => res.status(401).json({ error: 'locked' });
++    const app = express();
++    app.use(express.json());
++    registerAuthAndAccessRoutes(app, {
++      express,
++      tunnelAuthController: { classifyRequestScope: () => 'local' },
++      uiAuthController: { requireAuth, handleSessionStatus() {}, handleSessionCreate() {}, handleUrlAuthToken() {} },
++      androidProviderAuth: {
++        isProviderRequest(req) {
++          const pathname = String(req.originalUrl || '').split('?')[0];
++          if (req.method === 'GET' && pathname === '/api/openchamber/events' && req.query?.provider === 'android') return true;
++          return req.method === 'POST' && (pathname === '/api/browser-control/claim' || pathname === '/api/browser-control/result');
++        },
++      },
++    });
++    app.get('/api/openchamber/events', (_req, res) => res.json({ stream: true }));
++    app.post('/api/browser-control/claim', (_req, res) => res.json({ granted: false }));
++    app.post('/api/browser-control/result', (_req, res) => res.json({ matched: false }));
++    app.get('/api/config/settings', (_req, res) => res.json({ secret: true }));
++
++    await request(app).get('/api/openchamber/events?provider=android').expect(200, { stream: true });
++    await request(app).post('/api/browser-control/claim').send({}).expect(200);
++    await request(app).post('/api/browser-control/result').send({}).expect(200);
++    await request(app).get('/api/config/settings').expect(401);
++    await request(app).get('/api/openchamber/events').expect(401);
++  });
++});
+diff --git a/packages/web/server/lib/browser-control/child-env.js b/packages/web/server/lib/browser-control/child-env.js
+new file mode 100644
+index 0000000..8b2a642
+--- /dev/null
++++ b/packages/web/server/lib/browser-control/child-env.js
+@@ -0,0 +1,11 @@
++/**
++ * Child environments must not inherit the Android provider token.
++ *
++ * The token is deleted from process.env at startup. This filter is the second
++ * line: every spawn site that copies process.env passes the object through
++ * here, so a token restored into the parent env still cannot reach a child.
++ */
++
++import { omitProviderTokenFromEnv } from './android-provider.js';
++
++export const childProcessEnv = (source = process.env) => omitProviderTokenFromEnv(source);

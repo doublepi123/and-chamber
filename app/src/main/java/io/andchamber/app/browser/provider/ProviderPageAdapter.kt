@@ -83,6 +83,7 @@ class OpenChamberPageAdapter(
             "browser.type" -> type(request)
             "browser.scroll" -> scroll(request)
             "browser.capture" -> capture()
+            "browser.resize" -> ProviderResult(ok = true, data = buildJsonObject { put("accepted", true) })
             else -> ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_ACTION)
         }
     }
@@ -132,7 +133,8 @@ class OpenChamberPageAdapter(
     ): OpenedPage {
         val url = request.parameters["url"].orEmpty()
         if (url.isBlank()) return OpenedPage(ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST))
-        if (request.parameters.containsKey("viewport") && request.parameters["viewport"] != "fill") {
+        val viewport = request.parameters["viewport"]
+        if (viewport != null && viewport != "fill" && viewport != "desktop" && viewport != "mobile") {
             return OpenedPage(ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER))
         }
         val named = request.parameters["tabId"]?.takeIf { it.isNotBlank() }
@@ -160,7 +162,9 @@ class OpenChamberPageAdapter(
 
     private suspend fun snapshot(registry: ProviderRegistry, session: String, tabId: String?): ProviderResult {
         reads += 1
+        val stamp = authority?.invoke()
         val reply = driver.execute(BrowserRequest("snapshot", BrowserMethod.SNAPSHOT))
+        if (stamp != null && !sameAuthority(stamp)) return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
         if (!reply.ok) return fromDriver(reply)
         val raw = reply.result[BrowserDriverLogic.RESULT_SNAPSHOT]
         val parsed = when {
@@ -191,6 +195,7 @@ class OpenChamberPageAdapter(
                 })
             }
         }
+        if (stamp != null && !sameAuthority(stamp)) return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
         snapshotRefs = refs
         snapshotNames = names
         snapshotFields = fields
@@ -301,11 +306,22 @@ class OpenChamberPageAdapter(
 
     private suspend fun capture(): ProviderResult {
         captures += 1
+        val stamp = authority?.invoke()
         val reply = driver.execute(BrowserRequest("capture", BrowserMethod.CAPTURE))
+        if (stamp != null && !sameAuthority(stamp)) return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
         if (!reply.ok) return fromDriver(reply)
         val (fallbackWidth, fallbackHeight) = viewportSize()
         val width = reply.result["width"]?.toIntOrNull() ?: fallbackWidth
         val height = reply.result["height"]?.toIntOrNull() ?: fallbackHeight
+        val cssWidth = reply.result["cssWidth"]?.toIntOrNull()
+        val cssHeight = reply.result["cssHeight"]?.toIntOrNull()
+        val visualWidth = reply.result["visualWidth"]?.toFloatOrNull()
+        val visualHeight = reply.result["visualHeight"]?.toFloatOrNull()
+        val dpr = reply.result["dpr"]?.toFloatOrNull()
+        val scale = reply.result["scale"]?.toFloatOrNull()
+        if (cssWidth == null || cssHeight == null || visualWidth == null || visualHeight == null || dpr == null || scale == null) {
+            return ProviderResult(false, errorCode = ProviderCodes.BROWSER_PAGE_UNAVAILABLE, message = "geometry not ready")
+        }
         return ProviderResult(
             ok = true,
             data = buildJsonObject {
@@ -315,7 +331,21 @@ class OpenChamberPageAdapter(
                 put("title", reply.result["title"].orEmpty())
                 put("width", width)
                 put("height", height)
+                put("cssWidth", cssWidth)
+                put("cssHeight", cssHeight)
+                put("dpr", dpr)
                 put("viewport", reply.result["viewport"] ?: viewportMode())
+                put("css", buildJsonObject {
+                    put("width", cssWidth)
+                    put("height", cssHeight)
+                    put("visualWidth", visualWidth)
+                    put("visualHeight", visualHeight)
+                    put("offsetLeft", reply.result["offsetLeft"]?.toFloatOrNull() ?: 0f)
+                    put("offsetTop", reply.result["offsetTop"]?.toFloatOrNull() ?: 0f)
+                    put("dpr", dpr)
+                    put("scale", scale)
+                    put("mode", reply.result["viewport"] ?: viewportMode())
+                })
             },
         )
     }
@@ -341,6 +371,13 @@ class OpenChamberPageAdapter(
     }
 
     private fun unsupportedParameter(request: ProviderRequest): ProviderResult? {
+        if (request.action == "browser.resize") {
+            val viewport = request.parameters["viewport"]
+            if (viewport != "desktop" && viewport != "mobile" && viewport != "fill") {
+                return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+            }
+            return null
+        }
         if (request.action == "browser.snapshot" && request.parameters.containsKey("selector")) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
         }
@@ -370,7 +407,8 @@ class OpenChamberPageAdapter(
     private fun sameAuthority(stamp: AuthorityStamp): Boolean {
         val now = authority?.invoke() ?: stamp
         return now.grantEpoch == stamp.grantEpoch && now.grantEpoch != 0L &&
-            now.documentId == stamp.documentId && now.tabId == stamp.tabId && now.granted
+            now.documentId == stamp.documentId && now.tabId == stamp.tabId && now.granted &&
+            now.geometryEpoch == stamp.geometryEpoch
     }
 
     private suspend fun dispatched(block: suspend () -> BrowserReply): BrowserReply? {
@@ -477,6 +515,7 @@ data class AuthorityStamp(
     val documentId: String?,
     val tabId: String?,
     val granted: Boolean,
+    val geometryEpoch: Long = 0L,
 )
 
 /**

@@ -76,13 +76,27 @@ class LocalBrowserProviderBinding(
 
     init {
         scope.launch {
-            presenter.state.map { it.eligible }.distinctUntilChanged().collect { attached ->
-                if (attached) connectPending() else stopCurrent()
-            }
+            var lastEligible = false
+            var observedInvalidation = 0L
+            presenter.state
+                .map { it.transportEligible to it.transportInvalidation }
+                .distinctUntilChanged()
+                .collect { (eligible, invalidation) ->
+                    val invalidated = invalidation != observedInvalidation
+                    observedInvalidation = invalidation
+                    when {
+                        // Presentation block affects `eligible`, not transport: keep the client connected.
+                        !eligible -> stopCurrent()
+                        // Also reconnect when StateFlow conflated a fast false->true. The transport
+                        // invalidation counter changes even when the final boolean is true again.
+                        invalidated || !lastEligible -> connectPending()
+                    }
+                    lastEligible = eligible
+                }
         }
     }
 
-    override fun trustedHostAttached(): Boolean = presenter.state.value.eligible
+    override fun trustedHostAttached(): Boolean = presenter.state.value.transportEligible
 
     /** UI control for the current local launch. A call after launch replacement is a no-op. */
     fun grant(sessionId: String, tabId: String) = presenter.allowAsync(sessionId, tabId)
