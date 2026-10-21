@@ -5,7 +5,7 @@
 AndChamber is an Android app (`io.andchamber.app`, Kotlin + Jetpack Compose, minSdk 26, target 35) that runs the OpenChamber web server (OpenChamber 2.4.0 + OpenCode 2.0.32) natively on the phone and shows it in a profile-isolated full-screen WebView (AndroidX WebKit 1.14.0). It builds an Alpine Linux 3.24 userland (Node.js 24) in app-private storage, runs it under PRoot (no root), keeps the server alive with a foreground service, signs the bound WebView profile in automatically, bridges OpenChamber's notifications to Android notifications with quick replies, and can also connect to remote OpenChamber servers.
 
 Key constraints:
-- On-device mode is arm64-v8a only (x86_64 Android seccomp blocks `fork`, which PRoot does not translate); x86_64 builds can only use remote servers.
+- On-device mode runs on arm64-v8a and x86_64 (PRoot 5.1.107.98 rewrites the guest's raw `fork` to `clone`, which Android's x86_64 app seccomp policy allows). Other ABIs can only use remote servers. The x86_64 gate is the emulator probe in `docs/testing-x86-runtime.md`; it is not yet verified on a physical x86_64 device.
 - OpenCode stays on v2 (OpenChamber requires ≥ 2.0.20); no downgrades.
 - Optional shared storage `/sdcard/AndChamber`: `projects/` → `~/projects`, `opencode/` → `~/.config/opencode`. Secrets (`service.json`, `auth.json`, session DB, OpenChamber data) and `node_modules` stay private. The private workspace is `~/projects-private`.
 - Guest paths: home `~` = `/root` (bind of `<runtime>/home`), server working directory `/root`.

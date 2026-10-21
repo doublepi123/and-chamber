@@ -12,6 +12,9 @@ Legacy Termux utilities (manual only, not run by Gradle or CI):
 
 - `prepare_android_runtime_assets.py`: resolves, downloads, verifies and extracts the Termux `proot` dependency closure into a per-ABI prefix tree with a manifest.
 - `prepare_android_runtime_native_libs.py`: takes that prefix tree and renames the executables and shared libraries into `jniLibs` names.
+- `provision_x86_probe.py` (developer, network for Alpine only): downloads the official Alpine x86_64 minirootfs and checks it against `runtime-manifest.json`, builds the static probe binaries (`fork_regs` from the prepared PRoot 5.1.107.98 tree, `sysprobe` and `vforkasm` from `x86_probe/`) and writes `manifest.json` with their SHA-256. It is the only place where the probe inputs are verified; the instrumentation test does not check them.
+- `push_x86_probe.sh <serial> <out-dir> [app-id]` (developer, adb): copies the provisioned inputs into the probe application's private cache with `run-as`. It refuses the production id prefixes and any application id that is not a plain Java package name (the id is interpolated into `sh -c` on the device). It never touches other devices or packages.
+- `x86_probe/`: the probe sources and the PTY client. `sysprobe.c` and `vforkasm.c` are built statically by the provision script. `pty-io.mjs` and `ws-min.mjs` (Node 22, no dependencies) run terminal I/O against the server through a forwarded port. The marker is accepted only as a standalone output line, and the command builds each marker by shell concatenation so the echo never matches. Cookie jars and passwords stay outside the repository.
 
 ## Design (legacy Termux utilities)
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Pinned free-software source archives compiled offline into the Android runtime native libraries (arm64-v8a, x86_64). Revisions and hashes were verified against upstream on 2026-10-19.",
+  "description": "Pinned free-software source archives compiled offline into the Android runtime native libraries (arm64-v8a, x86_64). PRoot 5.1.107.98 was verified against upstream (tag, commit and archive SHA-256) on 2026-10-21; the other components on 2026-10-19.",
   "android": {
     "min_api": 26,
     "ndk_version": "29.0.14206865",
@@ -12,14 +12,14 @@
   "components": {
     "proot": {
       "upstream": "https://github.com/termux/proot",
-      "version": "5.1.107.97",
-      "tag": "v5.1.107.97",
-      "commit": "4a27ca61ff7a800cdcac3bc616929bba7a484c74",
+      "version": "5.1.107.98",
+      "tag": "v5.1.107.98",
+      "commit": "e2d843ee6dab076ea0ed1ffd5d0ea12232185499",
       "archive": {
-        "url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.97",
-        "filename": "proot-5.1.107.97.tar.gz",
-        "sha256": "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d",
-        "root_dir": "proot-5.1.107.97"
+        "url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.98",
+        "filename": "proot-5.1.107.98.tar.gz",
+        "sha256": "a1237d2039e0efedd1639aa4a99ac5e48a10f4c2e14cce445b2cbebedf32d22e",
+        "root_dir": "proot-5.1.107.98"
       },
       "license": {"spdx": "GPL-2.0-or-later", "file": "COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"},
       "termux_recipe_commit": "b9b5fdd9fa",

@@ -4,15 +4,15 @@
   "components": [
     {
       "name": "proot",
-      "version": "5.1.107.97",
+      "version": "5.1.107.98",
       "upstream": "https://github.com/termux/proot",
-      "tag": "v5.1.107.97",
-      "commit": "4a27ca61ff7a800cdcac3bc616929bba7a484c74",
-      "archive_url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.97",
-      "archive_sha256": "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d",
+      "tag": "v5.1.107.98",
+      "commit": "e2d843ee6dab076ea0ed1ffd5d0ea12232185499",
+      "archive_url": "https://codeload.github.com/termux/proot/tar.gz/refs/tags/v5.1.107.98",
+      "archive_sha256": "a1237d2039e0efedd1639aa4a99ac5e48a10f4c2e14cce445b2cbebedf32d22e",
       "spdx": "GPL-2.0-or-later",
       "license_files": [
-        {"path": "proot/COPYING", "source_path": "proot-5.1.107.97/COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"}
+        {"path": "proot/COPYING", "source_path": "proot-5.1.107.98/COPYING", "sha256": "0ffa6454acbe7e410ac6f0007df83b9b3161fe55484c1f4b87487c0f2d228a6d"}
       ],
       "local_patches": [
         "runtime_tools/patches/proot-5.1.107.97-andchamber-string-include.patch"

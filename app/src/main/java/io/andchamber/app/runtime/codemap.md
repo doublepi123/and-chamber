@@ -31,7 +31,7 @@ Invariants:
 - Stop sets `cancelRequested` and cancels `restartJob` before queuing behind the lock. The restart job holds the lock while it waits, so queuing first would let it finish.
 - Repair never deletes the live environment first. Install builds in staging, and the swap is the only mutation.
 - A cancelled start lands in Stopped or NotInstalled, never in Starting.
-- Only `arm64-v8a` runs on device (`supportedAbis`). x86_64 is blocked because Android's seccomp filter kills `SYS_fork`, which PRoot cannot translate.
+- `supportedAbis` is `arm64-v8a` and `x86_64`. Other ABIs report UnsupportedAbi. x86_64 relies on PRoot 5.1.107.98: Android's x86_64 app seccomp policy rejects the raw `SYS_fork` (57), and PRoot rewrites it to `clone(SIGCHLD)` with the child's registers restored. The gate is `docs/testing-x86-runtime.md` (emulator probe, not yet a physical device).
 
 ## Flow
 
