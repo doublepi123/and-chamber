@@ -11,7 +11,7 @@ Files:
 - `SystemUi.kt`: `findActivity()`, `SystemBarsEffect`, `WindowBackgroundEffect`.
 - `StorageAccess.kt`: `rememberStorageAccessRequest`, `hasStorageAccess`.
 - `ComposeUtils.kt`: `rememberLastNonNull`, `revealOnEnter`, `rememberCopyAction`, `rememberNotificationPermissionRequest`.
-- `Format.kt`: `formatBytes`, `uptimeLabel`, `displayAddress`, `checkServerAddress` (returns `AddressCheck`), `isLoopbackHost`.
+- `Format.kt`: `formatBytes`, `uptimeLabel` (localised units via `DurationUnits`), `displayAddress`, `checkServerAddress` (returns `AddressCheck`), `isLoopbackHost`.
 - `preview/`: Compose previews and fakes (not described here).
 
 ## Design

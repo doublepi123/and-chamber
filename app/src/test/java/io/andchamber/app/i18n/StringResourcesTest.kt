@@ -92,9 +92,9 @@ class StringResourcesTest {
 
     @Test
     fun `the number of translated strings is what the brief committed to`() {
-        // 265 entries: upstream launch copy plus 17 independent-browser strings (one plural) and 26
-        // OpenChamber/OpenCode update strings (three plurals).
-        assertEquals(265, english.size)
+        // 268 entries: upstream launch copy plus 17 independent-browser strings (one plural) and 26
+        // OpenChamber/OpenCode update strings (three plurals), plus 3 uptime duration units.
+        assertEquals(268, english.size)
     }
 
     private companion object {

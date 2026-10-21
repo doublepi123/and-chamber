@@ -85,6 +85,9 @@
     <string name="uptime">已运行 %1$s</string>
     <string name="port">端口 %1$d</string>
     <string name="just_started">刚刚启动</string>
+    <string name="duration_minutes">%1$d 分钟</string>
+    <string name="duration_hours_minutes">%1$d 小时 %2$d 分钟</string>
+    <string name="duration_days_hours">%1$d 天 %2$d 小时</string>
     <string name="copy_address">复制地址</string>
     <string name="copied">已复制</string>
     <string name="failed_title">OpenChamber 遇到了问题</string>

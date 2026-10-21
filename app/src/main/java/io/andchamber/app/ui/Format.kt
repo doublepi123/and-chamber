@@ -17,22 +17,30 @@ internal fun formatBytes(bytes: Long): String {
     return String.format(Locale.US, pattern, value, units[index])
 }
 
+/** Localised short duration forms: minutes; hours and minutes; days and hours. */
+internal class DurationUnits(
+    val minutes: (Long) -> String,
+    val hoursMinutes: (Long, Long) -> String,
+    val daysHours: (Long, Long) -> String,
+)
+
 /**
- * The uptime text. Pure: the caller passes the localised "just started" and "Up %1$s" texts, so this is
- * unit-tested without a Context. Duration units (m, h, d) are kept as the short English form.
+ * The uptime text. Pure: the caller passes the localised "just started", "Up %1$s" and duration texts,
+ * so this is unit-tested without a Context.
  */
 internal fun uptimeLabel(
     sinceEpochMs: Long,
     nowEpochMs: Long,
     justStarted: String,
     upTemplate: (String) -> String,
+    units: DurationUnits,
 ): String {
     val minutes = (nowEpochMs - sinceEpochMs).coerceAtLeast(0L) / 60_000L
     return when {
         minutes < 1 -> justStarted
-        minutes < 60 -> upTemplate("${minutes}m")
-        minutes < 60 * 24 -> upTemplate("${minutes / 60}h ${minutes % 60}m")
-        else -> upTemplate("${minutes / (60 * 24)}d ${(minutes / 60) % 24}h")
+        minutes < 60 -> upTemplate(units.minutes(minutes))
+        minutes < 60 * 24 -> upTemplate(units.hoursMinutes(minutes / 60, minutes % 60))
+        else -> upTemplate(units.daysHours(minutes / (60 * 24), (minutes / 60) % 24))
     }
 }
 
