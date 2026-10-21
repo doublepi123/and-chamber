@@ -16,6 +16,7 @@ Stateless top-level functions in `SafeFiles.kt`. Links are unlinked or measured 
 - `deleteTreeOrThrow(File)`: same, but throws if the tree remains.
 - `treeSize(File): Long`: total bytes of regular files, not following links. Symlinks count as 0. Unreadable entries are skipped, so the result is a best-effort disk-usage figure.
 - `copyTreeNoFollow(source, destination)`: copies files, directories and symlinks. Symlinks are recreated as links. Entries that fail are skipped. Used only for the non-essential home skeleton.
+- `copyTreeStrict(source, destination)`: the copy an update uses. The destination must not exist. Symlinks are recreated with their own target text and never followed. Regular files keep their POSIX mode. A directory's mode is applied after its children are copied. A directory without owner read is recreated empty with its mode (PRoot bind points). Any other error fails the copy. Nothing is skipped silently.
 - `writeFileReplacing(target, content)`: atomic replace. Writes a temp file in the same directory, then `Files.move(REPLACE_EXISTING)`. A directory or symlink at the target is removed first, so a link's destination is never written.
 
 Invariant: no operation follows a link. This also rules out loops.
@@ -24,7 +25,7 @@ Invariant: no operation follows a link. This also rules out loops.
 
 1. Environment swap and cleanup: `install/EnvironmentActivation.kt` and `install/OpenChamberInstaller.kt` call `deleteTree` or `deleteTreeOrThrow` on `staging`, `rollback` and the leftover staging tree.
 2. Disk usage: `LocalRuntimeController.refreshInfo` → `treeSize(paths.root)`.
-3. Home seeding: `OpenChamberInstaller.seedHome` → `copyTreeNoFollow` from the legacy `rootfs/root` or the Alpine skeleton, only when the home is empty.
+3. Home seeding: `OpenChamberInstaller.seedHome` → `copyTreeNoFollow` from the legacy `rootfs/root` or the Alpine skeleton, only when the home is empty. Update copy: `OpenChamberInstaller.update` → `copyTreeStrict(environment, staging)`.
 4. Git config and state files: `storage/GitConfigWriter` → `writeFileReplacing` for both `shared-storage.gitconfig` and `.gitconfig`.
 5. Removal: `RuntimeInstallerImpl.discardEnvironment/removeAll` use `deleteTreeOrThrow`. `ProotStaleServerCleaner` deletes only the stale pid file, with `File.delete`, not this package.
 

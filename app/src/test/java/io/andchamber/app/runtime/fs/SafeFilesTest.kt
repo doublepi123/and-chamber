@@ -167,4 +167,84 @@ class SafeFilesTest {
         assertEquals("f", destination.resolve("sub/file").readText())
         assertTrue(Files.isSymbolicLink(destination.resolve("sub/link").toPath()))
     }
+
+    @Test
+    fun `copyTreeStrict keeps symlinks as their own target text and never follows them`() {
+        val outside = temporaryFolder.newFolder("outside-strict").apply { resolve("keep.txt").writeText("precious") }
+        val source = temporaryFolder.newFolder("env-strict").apply {
+            resolve("rootfs/usr/bin").mkdirs()
+            resolve("rootfs/usr/bin/tool").writeText("#!/bin/sh\n")
+            Files.createSymbolicLink(resolve("rootfs/escape").toPath(), outside.toPath().toAbsolutePath())
+            Files.createSymbolicLink(resolve("rootfs/usr/bin/rel").toPath(), java.nio.file.Paths.get("../../../keep"))
+        }
+        val destination = temporaryFolder.root.resolve("copy-strict")
+
+        copyTreeStrict(source, destination)
+
+        assertTrue(Files.isSymbolicLink(destination.resolve("rootfs/escape").toPath()))
+        assertEquals(outside.toPath().toAbsolutePath(), Files.readSymbolicLink(destination.resolve("rootfs/escape").toPath()))
+        assertEquals(java.nio.file.Paths.get("../../../keep"), Files.readSymbolicLink(destination.resolve("rootfs/usr/bin/rel").toPath()))
+        assertEquals("precious", outside.resolve("keep.txt").readText())
+    }
+
+    @Test
+    fun `copyTreeStrict preserves the exec bit and the directory mode`() {
+        val source = temporaryFolder.newFolder("env-modes").apply {
+            resolve("bin").mkdirs()
+            resolve("bin/run").writeText("x")
+            resolve("data.txt").writeText("d")
+        }
+        setPosix(source.resolve("bin/run"), "rwxr-x---")
+        setPosix(source.resolve("data.txt"), "rw-r-----")
+        setPosix(source.resolve("bin"), "rwxr-x---")
+        val destination = temporaryFolder.root.resolve("copy-modes")
+
+        copyTreeStrict(source, destination)
+
+        assertEquals(
+            PosixFilePermissions.fromString("rwxr-x---"),
+            Files.getPosixFilePermissions(destination.resolve("bin/run").toPath()),
+        )
+        assertEquals(
+            PosixFilePermissions.fromString("rw-r-----"),
+            Files.getPosixFilePermissions(destination.resolve("data.txt").toPath()),
+        )
+        assertEquals(
+            PosixFilePermissions.fromString("rwxr-x---"),
+            Files.getPosixFilePermissions(destination.resolve("bin").toPath()),
+        )
+    }
+
+    @Test
+    fun `copyTreeStrict recreates a mode 000 bind point empty, with its mode`() {
+        val source = temporaryFolder.newFolder("env-bindpoint").apply {
+            resolve("proc").mkdirs()
+            resolve("proc/hidden").mkdirs()
+            resolve("proc/hidden/inside.txt").writeText("unreachable")
+        }
+        setPosix(source.resolve("proc/hidden"), "---------")
+        assumeTrue(!source.resolve("proc/hidden").canRead())
+        val destination = temporaryFolder.root.resolve("copy-bindpoint")
+
+        copyTreeStrict(source, destination)
+
+        val copied = destination.resolve("proc/hidden").toPath()
+        assertTrue(Files.isDirectory(copied, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertEquals(PosixFilePermissions.fromString("---------"), Files.getPosixFilePermissions(copied))
+        assertFalse(destination.resolve("proc/hidden/inside.txt").exists())
+        // Restore so the temporary folder can be cleaned up.
+        setPosix(source.resolve("proc/hidden"), "rwx------")
+        setPosix(destination.resolve("proc/hidden"), "rwx------")
+    }
+
+    @Test
+    fun `copyTreeStrict refuses an existing destination`() {
+        val source = temporaryFolder.newFolder("env-exists").apply { resolve("a").writeText("a") }
+        val destination = temporaryFolder.newFolder("already-here")
+
+        val error = runCatching { copyTreeStrict(source, destination) }.exceptionOrNull()
+
+        assertTrue(error is IllegalArgumentException)
+        assertEquals(0, destination.list()?.size ?: 0)
+    }
 }

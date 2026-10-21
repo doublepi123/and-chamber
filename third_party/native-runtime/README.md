@@ -9,7 +9,7 @@ byte, into the APK assets under `licenses/native/` (task `syncNativeLicenseAsset
 
 | file | component | SPDX | source |
 |---|---|---|---|
-| `proot/COPYING` | PRoot 5.1.107.97 | GPL-2.0-or-later | `COPYING` of the pinned archive |
+| `proot/COPYING` | PRoot 5.1.107.98 | GPL-2.0-or-later | `COPYING` of the pinned archive |
 | `talloc/LICENSE` | talloc 2.5.0 | LGPL-3.0-or-later | `LICENSE` of the pinned archive |
 | `talloc/GPL-3.0.txt` | talloc (referenced by LGPL-3.0) | GPL-3.0-only text | https://www.gnu.org/licenses/gpl-3.0.txt |
 | `libandroid-shmem/LICENSE` | libandroid-shmem 0.7 | BSD-3-Clause | `LICENSE` of the pinned archive |

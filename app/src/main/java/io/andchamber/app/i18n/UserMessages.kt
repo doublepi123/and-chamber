@@ -37,6 +37,8 @@ object UserMessages {
             MessageKey.ProgressVerifying -> R.string.msg_progress_verifying
             MessageKey.ProgressActivating -> R.string.msg_progress_activating
             MessageKey.ProgressDone -> R.string.msg_progress_done
+            MessageKey.ProgressCopyingEnvironment -> R.string.msg_progress_copying_environment
+            MessageKey.UpdateNotEnoughSpace -> R.string.msg_update_not_enough_space
         }
 
     /**
@@ -57,6 +59,7 @@ object UserMessages {
             InstallStep.DownloadRootfs -> R.string.step_download_rootfs
             InstallStep.ExtractRootfs -> R.string.step_extract_rootfs
             InstallStep.InstallPackages -> R.string.step_install_packages
+            InstallStep.CopyEnvironment -> R.string.step_copy_environment
             InstallStep.InstallOpenChamber -> R.string.step_install_openchamber
             InstallStep.BuildNativeModules -> R.string.step_build_native_modules
             InstallStep.Verify -> R.string.step_verify

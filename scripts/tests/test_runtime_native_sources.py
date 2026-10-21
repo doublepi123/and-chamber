@@ -411,7 +411,7 @@ class ProotVersionTests(unittest.TestCase):
 
     def test_version_comes_from_provenance(self) -> None:
         provenance = _valid_manifest(_lock_fixture())
-        self.assertEqual(build.proot_version(provenance), "5.1.107.97")
+        self.assertEqual(build.proot_version(provenance), "5.1.107.98")
 
     def test_makefile_git_override_is_passed_on_command_line(self) -> None:
         source = Path(build.__file__).read_text(encoding="utf-8")

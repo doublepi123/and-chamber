@@ -29,6 +29,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -474,6 +475,23 @@ internal class ChamberWebView(
             if (!request.isForMainFrame) return false
             if (gatewayHandoff.blocksDocuments) return request.url.toString() != handoffBlank(gatewayHandoff.ticket)
             return routeOutside(request.url)
+        }
+
+        override fun shouldInterceptRequest(
+            view: WebView,
+            request: WebResourceRequest,
+        ): WebResourceResponse? {
+            if (!LocalUpdateGate.interceptsLocalUpdateCheck(targetId, origin, request.method.orEmpty(), request.url.toString())) {
+                return null
+            }
+            return WebResourceResponse(
+                "application/json",
+                "utf-8",
+                200,
+                "OK",
+                mapOf("Cache-Control" to "no-store"),
+                LocalUpdateGate.UPDATE_CHECK_BODY.byteInputStream(Charsets.UTF_8),
+            )
         }
 
         // pageError is cleared only by load()/reload(): some WebView versions start their own error

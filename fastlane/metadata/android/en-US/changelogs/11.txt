@@ -1,0 +1,5 @@
+0.0.11
+
+New:
+- Every OpenChamber instance remembers its own last page. Switching between instances returns to where each one was left.
+- Removing a remote server also forgets its page.

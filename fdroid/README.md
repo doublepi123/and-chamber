@@ -2,6 +2,13 @@
 
 This directory contains candidate metadata for an initial `v0.0.8` submission. It is not an F-Droid approval, inclusion, or reproducibility claim. Consult the upstream merge request and official build logs for the current inclusion status.
 
+## Upstream merge request and CI status (2026-10-20)
+
+- Official draft merge request: <https://gitlab.com/fdroid/fdroiddata/-/merge_requests/53432>. It contains only the two metadata files and asks the maintainers for help with a FOSS namespace, as the official template describes. It is not ready, accepted, or approved.
+- The first hosted CI attempt on the fork failed on the `AutoUpdateMode: Version v%v` schema, formatter layout, and missing native host tools. The corrected recipe's fork and merge-request pipelines cannot create jobs because GitLab requires user verification, so its managed build-environment provisioning has not yet run.
+- This directory's metadata now matches the corrected candidate: a full 40-character commit selector (`4d57d233fc8c8379c28c359f82bae71b39dc6be0`), plain `AutoUpdateMode: Version`, and a `sudo` block that installs `make`, `patch` and `gawk` on the F-Droid managed VM (`apt-get update`, `apt-get install -y make patch gawk`). `init` and `UpdateCheckData` are folded in the official formatter's layout.
+- The current CI-compatibility gate has not passed yet. Do not describe the candidate as built, scanned or reviewed by F-Droid until the merge-request pipeline shows a pass.
+
 ## Files
 
 - `metadata/io.andchamber.app.yml`: candidate build recipe.
@@ -9,9 +16,9 @@ This directory contains candidate metadata for an initial `v0.0.8` submission. I
 
 ## Validation status
 
-All checks ran locally against an isolated fixture built from the working tree. The fixture is not a published tag and not an official build.
+The table records historical local validation before the hosted CI compatibility fixes. It includes initial fixtures and a later clean checkout of the published `v0.0.8` tag. These host results do not verify the corrected recipe's managed provisioning or establish that hosted CI will pass.
 
-| Check | Result |
+| Check (historical) | Result |
 |---|---|
 | `fdroid lint io.andchamber.app` (official categories and AntiFeatures config) | exit 0 |
 | `fdroid rewritemeta -l io.andchamber.app` | exit 0 |
@@ -19,6 +26,8 @@ All checks ran locally against an isolated fixture built from the working tree. 
 | `fdroid checkupdates io.andchamber.app` (v0.0.8 tag) | exit 0, resolves `v0.0.8` to 0.0.8 / 8 |
 | `fdroid checkupdates --auto` (synthetic v0.0.9 fixture) | exit 0, proposes 0.0.9 / 9 and a new build record |
 | `App.AntiFeatures` from `read_metadata` on this directory | contains `NonFreeNet` |
+
+The corrected file is byte-identical to the submission packet checked against the official metadata schema and the CI formatter at fdroidserver commit `0c3166f227d5917c913fa0d66a1ecab3bc7362b8`. Schema, lint, formatter fixed-point and version-detection checks passed locally. Stable fdroidserver 2.4.5 checks alone are not proof of compatibility with that CI revision. Hosted provisioning and build results remain pending.
 
 The local build environment was a single Linux host: JDK 17, Android SDK with build-tools 35.0.0, NDK 29.0.14206865, and the repo's Gradle 8.9 wrapper distribution. The official build server uses different tooling, SDK paths, and NDK installation, so these results do not prove what the official server will produce.
 
@@ -40,9 +49,9 @@ The source tarball that fdroidserver generates for a local test build contains f
 
 ## Version handling
 
-- The version is defined once, in the root `gradle.properties` (`andchamber.versionName`, `andchamber.versionCode`). The recipe does not repeat literal version properties, so auto-update does not copy a stale value.
-- `UpdateCheckData` reads both values from `gradle.properties` with two regexes. The auto-updater checks tags matching `^v[0-9]+\.[0-9]+\.[0-9]+$`.
-- The recipe keeps only `andchamber.runtimeSourcesDir=build/runtime-sources` as a Gradle property.
+- The version is defined once, in the root `gradle.properties` (`andchamber.versionName`, `andchamber.versionCode`). The recipe carries its own `versionName`/`versionCode` for the build entry, and `UpdateCheckData` reads both values from `gradle.properties` with two regexes, so auto-update compares against the source file.
+- The auto-updater checks tags matching `^v[0-9]+\.[0-9]+\.[0-9]+$`. `AutoUpdateMode` is plain `Version`; the earlier `Version v%v` form was rejected by the official schema.
+- The recipe keeps only `andchamber.runtimeSourcesDir=build/runtime-sources` as a Gradle property. `commit` is the full 40-character SHA of the published `v0.0.8` commit, not the tag name.
 
 ## Signing and distribution
 

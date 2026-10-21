@@ -5,14 +5,14 @@
 AndChamber is an Android app (`io.andchamber.app`, Kotlin + Jetpack Compose, minSdk 26, target 35) that runs the OpenChamber web server (OpenChamber 2.4.0 + OpenCode 2.0.32) natively on the phone and shows it in a profile-isolated full-screen WebView (AndroidX WebKit 1.14.0). It builds an Alpine Linux 3.24 userland (Node.js 24) in app-private storage, runs it under PRoot (no root), keeps the server alive with a foreground service, signs the bound WebView profile in automatically, bridges OpenChamber's notifications to Android notifications with quick replies, and can also connect to remote OpenChamber servers.
 
 Key constraints:
-- On-device mode is arm64-v8a only (x86_64 Android seccomp blocks `fork`, which PRoot does not translate); x86_64 builds can only use remote servers.
+- On-device mode runs on arm64-v8a and x86_64 (PRoot 5.1.107.98 rewrites the guest's raw `fork` to `clone`, which Android's x86_64 app seccomp policy allows). Other ABIs can only use remote servers. The x86_64 gate is the emulator probe in `docs/testing-x86-runtime.md`; it is not yet verified on a physical x86_64 device.
 - OpenCode stays on v2 (OpenChamber requires ≥ 2.0.20); no downgrades.
 - Optional shared storage `/sdcard/AndChamber`: `projects/` → `~/projects`, `opencode/` → `~/.config/opencode`. Secrets (`service.json`, `auth.json`, session DB, OpenChamber data) and `node_modules` stay private. The private workspace is `~/projects-private`.
 - Guest paths: home `~` = `/root` (bind of `<runtime>/home`), server working directory `/root`.
 - All embedded pages require `WebViewFeature.MULTI_PROFILE`: unsupported or failed binding blocks page loading before authentication. Home, notifications and the local runtime remain available; remote addresses can be opened explicitly in a browser without adding credentials.
 - Profiles are keyed by target ID and canonical origin. Old default-profile data is neither cleared nor migrated; isolation between target profiles does not change browser Cookie rules for subresources inside one profile.
 - Native HTTP downloads use controlled redirects and the app process; they do not resume after process death. Unknown notification-send outcomes preserve the draft and session entry instead of automatically replaying the operation.
-- Launch can restore the last used OpenChamber instance and page. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
+- Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
 
 ## System Entry Points
@@ -25,7 +25,7 @@ Key constraints:
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
 | `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); Sync task `syncNativeLicenseAssets` packages `third_party/native-runtime/` as `assets/licenses/native/` in every variant; env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
-| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.8 / 8); the release workflow checks them against the tag |
+| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.11 / 11); the release workflow checks them against the tag |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |

@@ -105,7 +105,7 @@ release 构建始终使用 `io.andchamber.app`，覆盖参数不影响 release�
 - **未验证远程连接。** 仅确认 x86_64 界面的显示内容，未测试任何远程 OpenChamber 服务器的连通性。
 - **不作可复现构建声明。** 仅记录了源码哈希与 NDK 版本，未比较不同机器或不同次构建的输出。
 - **Gradle 离线仅限原生阶段。** 原生编译步骤不访问网络。Gradle 自身的依赖解析（Maven、Google 仓库）仍需网络，不属于本实验的离线范围。
-- **F-Droid 提交未完成。** 候选元数据已存在（`fdroid/metadata/io.andchamber.app.yml`，以及 `fastlane/` 下的商店文案与图标）。本地候选配方的构建、源码扫描和 APK 扫描已通过，但这不代表官方构建环境、审核、签名或收录已通过；详见 [fdroid/README.md](../fdroid/README.md)。
+- **F-Droid 收录未完成。** 候选元数据已存在（`fdroid/metadata/io.andchamber.app.yml`，以及 `fastlane/` 下的商店文案与图标）。官方草稿合并请求为 <https://gitlab.com/fdroid/fdroiddata/-/merge_requests/53432>，已注明账号验证使 CI 无法创建任务，并请求维护者协助。CI 兼容性修正（完整提交哈希、普通 `AutoUpdateMode`、`sudo` 安装宿主工具）尚未通过托管流水线；本地校验和历史构建不能代替官方构建、审核与收录。详见 [fdroid/README.md](../fdroid/README.md)。
 - 当前发布版本为 `0.0.8 / 8`；SDK target 和原生运行逻辑未变，APK 新增许可证资源。
 
 ## 变更后需要做什么
@@ -116,7 +116,7 @@ release 构建始终使用 `io.andchamber.app`，覆盖参数不影响 release�
 
 ## 下一步（未完成）
 
-- 从已发布 tag 复核候选配方，再推进官方 CI、审核、签名和收录流程。
+- 在官方 CI 中复核修正后的候选配方（合并请求 53432），再推进审核、签名和收录流程。
 - 许可证交付已包含在 APK 中（见上文“许可证、版本与签名”），其法律合规复核由维护者负责。
 - 更多设备和 Android 版本覆盖、长期运行及其他未测功能。
 

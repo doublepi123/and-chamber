@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.unit.dp
 import io.andchamber.app.runtime.RuntimeInfo
 import io.andchamber.app.runtime.RuntimeState
+import io.andchamber.app.runtime.RuntimeUpdateState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageState
 import io.andchamber.app.runtime.SharedStorageStatus
@@ -84,6 +85,10 @@ internal class HomeActions(
     val onRestartLocal: () -> Unit = {},
     val onAutoOpenChange: (Boolean) -> Unit = {},
     val onOpenBrowser: () -> Unit = {},
+    /** Installs the available OpenChamber / OpenCode update (after the card has asked). */
+    val onUpdate: () -> Unit = {},
+    val onCheckForUpdates: () -> Unit = {},
+    val onDismissUpdateFailure: () -> Unit = {},
 )
 
 /** The storage card only makes sense where the local server can exist at all. */
@@ -110,6 +115,8 @@ internal fun HomeScreen(
     autoOpenLocal: Boolean? = null,
     /** New provider mode uses the chat window only, so the old Home card stays hidden. */
     providerBrowser: Boolean = false,
+    /** Update check and the outcome of the last update of the local server. */
+    updates: RuntimeUpdateState = RuntimeUpdateState(),
 ) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -166,6 +173,10 @@ internal fun HomeScreen(
                         sharedFolderInUse = storage?.status == SharedStorageStatus.Active,
                         autoOpenLocal = autoOpenLocal,
                         onAutoOpenChange = actions.onAutoOpenChange,
+                        updates = updates,
+                        onUpdate = actions.onUpdate,
+                        onCheckForUpdates = actions.onCheckForUpdates,
+                        onDismissUpdateFailure = actions.onDismissUpdateFailure,
                         modifier = Modifier.revealOnEnter(1, animate),
                     )
                     AnimatedVisibility(

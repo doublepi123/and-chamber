@@ -2,6 +2,8 @@ package io.andchamber.app.runtime
 
 import io.andchamber.app.runtime.install.InstallReporter
 import io.andchamber.app.runtime.install.InstalledRuntime
+import io.andchamber.app.runtime.install.PackageVersionSource
+import io.andchamber.app.runtime.install.PackageVersions
 import io.andchamber.app.runtime.install.RuntimeInstaller
 import io.andchamber.app.runtime.install.RuntimeMetadata
 import io.andchamber.app.runtime.process.HealthProbe
@@ -27,20 +29,25 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 
-private fun fakeRuntime(root: File) =
-    InstalledRuntime(
-        metadata =
-            RuntimeMetadata(
-                runtimeVersion = "r",
-                alpineVersion = "3.24.1",
-                abi = "arm64-v8a",
-                port = 3000,
-                openChamberVersion = "2.4.0",
-                openCodeVersion = "2.0.32",
-                installedAt = 1L,
-            ),
-        rootfs = File(root, "rootfs"),
-    )
+private fun fakeRuntime(root: File) = runtimeWith(root, versions = null)
+
+/** A runtime whose installed npm versions are [versions] (the manifest pins 2.4.0 / 2.0.32 when null). */
+private fun runtimeWith(
+    root: File,
+    versions: PackageVersions?,
+) = InstalledRuntime(
+    metadata =
+        RuntimeMetadata(
+            runtimeVersion = "r",
+            alpineVersion = "3.24.1",
+            abi = "arm64-v8a",
+            port = 3000,
+            openChamberVersion = versions?.openChamber ?: "2.4.0",
+            openCodeVersion = versions?.openCode ?: "2.0.32",
+            installedAt = 1L,
+        ),
+    rootfs = File(root, "rootfs"),
+)
 
 /**
  * Controller state machine tests. The watchdog is ENABLED here: its probe loop is driven with
@@ -81,6 +88,11 @@ class LocalRuntimeControllerTest {
         /** When set, install throws this instead of the generic network error. */
         var failWith: Throwable? = null
 
+        /** When set, update throws this; the active runtime is left as it was (like the real installer). */
+        var updateFailWith: Throwable? = null
+        val installCalls = mutableListOf<PackageVersions?>()
+        val updateCalls = mutableListOf<PackageVersions>()
+
         var discarded = 0
         var removed = 0
         var recovered = 0
@@ -92,11 +104,25 @@ class LocalRuntimeControllerTest {
 
         override fun installedRuntime(): InstalledRuntime? = installed
 
-        override suspend fun install(report: InstallReporter): InstalledRuntime {
+        override suspend fun install(
+            report: InstallReporter,
+            versions: PackageVersions?,
+        ): InstalledRuntime {
+            installCalls += versions
             report.step(InstallStep.DownloadRootfs, 0.5f, "half")
             failWith?.let { throw it }
             if (installFails) error("network down")
-            return fakeRuntime(root).also { installed = it }
+            return runtimeWith(root, versions).also { installed = it }
+        }
+
+        override suspend fun update(
+            report: InstallReporter,
+            versions: PackageVersions,
+        ): InstalledRuntime {
+            updateCalls += versions
+            report.step(InstallStep.CopyEnvironment, null, null, MessageKey.ProgressCopyingEnvironment)
+            updateFailWith?.let { throw it }
+            return runtimeWith(root, versions).also { installed = it }
         }
 
         override fun discardEnvironment() {
@@ -167,6 +193,8 @@ class LocalRuntimeControllerTest {
         killed: MutableList<Int>? = null,
         policy: RestartPolicy = RestartPolicy(listOf(1_000L, 2_000L), healthyResetMillis = 120_000L),
         watchdogPollMillis: Long = 500L,
+        versionSource: PackageVersionSource? = null,
+        pinnedVersions: PackageVersions? = null,
     ): DefaultLocalRuntimeController {
         val job = SupervisorJob()
         val scope = CoroutineScope(job + StandardTestDispatcher(testScheduler))
@@ -186,7 +214,10 @@ class LocalRuntimeControllerTest {
             nowMillis = { testScheduler.currentTime },
             restartPolicy = policy,
             watchdogPollMillis = watchdogPollMillis,
-            supportedAbis = setOf("arm64-v8a"),
+            // Mirrors the production gate (arm64-v8a and x86_64), so ABI-specific cases run against it.
+            supportedAbis = setOf("arm64-v8a", "x86_64"),
+            versionSource = versionSource,
+            pinnedVersions = pinnedVersions,
         )
     }
 
@@ -216,14 +247,73 @@ class LocalRuntimeControllerTest {
             assertEquals(RuntimeState.Detecting, controller.state.value)
         }
 
+    /** A genuinely unsupported ABI (not x86_64, which the runtime now supports) short-circuits. */
     @Test
     fun `unsupported abi short-circuits to UnsupportedAbi`() =
         controllerTest {
-            val controller = controller(FakeInstaller(folder.root), FakeServer(), abi = "x86_64")
+            val controller = controller(FakeInstaller(folder.root), FakeServer(), abi = "riscv64")
             controller.initialize()
             step()
 
             assertEquals(RuntimeState.UnsupportedAbi, controller.state.value)
+        }
+
+    /**
+     * The production default must include x86_64: this builds the controller WITHOUT overriding
+     * supportedAbis, so it checks the real gate. x86_64 with no install reports NotInstalled, not UnsupportedAbi.
+     */
+    @Test
+    fun `production default accepts x86_64 and reports NotInstalled when nothing is installed`() =
+        controllerTest {
+            val real =
+                DefaultLocalRuntimeController(
+                    paths = io.andchamber.app.runtime.RuntimePaths(folder.root),
+                    abi = "x86_64",
+                    installer = FakeInstaller(folder.root),
+                    server = FakeServer(),
+                    ioDispatcher = StandardTestDispatcher(testScheduler),
+                    scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)).also { scopes += it },
+                    nowMillis = { testScheduler.currentTime },
+                )
+            real.initialize()
+            step()
+
+            assertEquals(RuntimeState.NotInstalled, real.state.value)
+        }
+
+    /** x86_64 installed runtime reaches Stopped and starts, like arm64-v8a. */
+    @Test
+    fun `x86_64 installed runtime is detected as Stopped and starts`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val base = runtimeWith(root, versions = null)
+            val installed = FakeInstaller(root, installed = base.copy(metadata = base.metadata.copy(abi = "x86_64")))
+            val controller = controller(installed, server, abi = "x86_64")
+            controller.initialize()
+            step()
+            assertEquals(RuntimeState.Stopped, controller.state.value)
+
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            assertTrue("x86_64 runtime must reach Running, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    /** x86_64 fresh install follows the same install-then-start path and ends Running. */
+    @Test
+    fun `x86_64 install then start reaches Running`() =
+        controllerTest {
+            val server = FakeServer()
+            val controller = controller(FakeInstaller(folder.root), server, abi = "x86_64")
+            controller.perform(RuntimeOperation.Install)
+            step()
+
+            assertTrue("x86_64 install must reach Running, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
         }
 
     @Test
@@ -690,5 +780,252 @@ class LocalRuntimeControllerTest {
 
             assertTrue(sawCancel || controller.state.value !is RuntimeState.Running)
             assertTrue(controller.state.value !is RuntimeState.Starting)
+        }
+
+    // --- Updates ---
+
+    /** Registry answer fixed by the test. Throws when [error] is set, like a network failure. */
+    private class FixedSource(
+        var answer: PackageVersions? = null,
+        var error: Throwable? = null,
+    ) : PackageVersionSource {
+        var calls = 0
+
+        override suspend fun latest(pinned: PackageVersions): PackageVersions {
+            calls++
+            error?.let { throw it }
+            return answer ?: pinned
+        }
+    }
+
+    private val pins = PackageVersions(openChamber = "2.4.0", openCode = "2.0.32")
+
+    @Test
+    fun `bundled pins newer than the installed runtime are offered without network`() =
+        controllerTest {
+            val root = folder.root
+            val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            val controller = controller(installed, FakeServer(), pinnedVersions = pins)
+            controller.initialize()
+            step()
+
+            val available = controller.updates.value.available
+            assertEquals(VersionChange(current = "2.3.0", target = "2.4.0"), available?.openChamber)
+            assertEquals(VersionChange(current = "2.0.20", target = "2.0.32"), available?.openCode)
+            assertEquals(false, controller.updates.value.checkFailed)
+        }
+
+    @Test
+    fun `a failed registry check still offers the bundled pins and says the check failed`() =
+        controllerTest {
+            val root = folder.root
+            val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.32")))
+            val source = FixedSource(error = java.io.IOException("offline"))
+            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            // The automatic check after detect has already failed; a manual check made after it finished
+            // runs again. Both must leave the failure visible.
+            assertEquals("automatic check ran once", 1, source.calls)
+            assertTrue(controller.updates.value.checkFailed)
+            controller.checkForUpdates()
+            step()
+            assertEquals("manual check after the first finished runs again", 2, source.calls)
+            assertTrue(controller.updates.value.checkFailed)
+            assertEquals(false, controller.updates.value.checking)
+            assertEquals(VersionChange(current = "2.3.0", target = "2.4.0"), controller.updates.value.available?.openChamber)
+            // Unchanged packages stay as a VersionChange with changed == false; the UI filters on `changed`.
+            assertEquals(false, controller.updates.value.available?.openCode?.changed)
+        }
+
+    @Test
+    fun `a registry version newer than the pins is offered`() =
+        controllerTest {
+            val root = folder.root
+            val installed = FakeInstaller(root, installed = runtimeWith(root, pins))
+            val source = FixedSource(answer = PackageVersions("2.5.1", "2.0.40"))
+            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            controller.checkForUpdates()
+            step()
+
+            val update = controller.updates.value.available
+            assertEquals(VersionChange(current = "2.4.0", target = "2.5.1"), update?.openChamber)
+            assertEquals(VersionChange(current = "2.0.32", target = "2.0.40"), update?.openCode)
+            assertEquals(false, controller.updates.value.checkFailed)
+            assertTrue(controller.updates.value.lastCheckedAtMs != null)
+        }
+
+    @Test
+    fun `an older installed version is never offered a downgrade`() =
+        controllerTest {
+            val root = folder.root
+            // OpenCode was updated past the pin already; the pin must not pull it back down.
+            val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.4.0", "2.0.40")))
+            val controller = controller(installed, FakeServer(), pinnedVersions = pins)
+            controller.initialize()
+            step()
+
+            assertEquals(null, controller.updates.value.available)
+        }
+
+    @Test
+    fun `automatic check is throttled but a manual check ignores the throttle`() =
+        controllerTest {
+            val root = folder.root
+            val installed = FakeInstaller(root, installed = fakeRuntime(root))
+            val source = FixedSource(answer = pins)
+            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            assertEquals("the first detect checks automatically", 1, source.calls)
+
+            controller.perform(RuntimeOperation.Install)
+            step()
+            assertEquals("a second automatic check inside the interval is skipped", 1, source.calls)
+
+            controller.checkForUpdates()
+            step()
+            assertEquals("manual check runs regardless", 2, source.calls)
+        }
+
+    @Test
+    fun `update restarts the server when it was running and passes the target versions`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            val server = FakeServer()
+            val controller = controller(installer, server, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+            assertTrue(controller.state.value is RuntimeState.Running)
+
+            controller.perform(RuntimeOperation.Update)
+            step()
+
+            assertEquals(listOf(pins), installer.updateCalls)
+            assertTrue("running server is restarted", controller.state.value is RuntimeState.Running)
+            assertEquals(null, controller.updates.value.lastFailure)
+            assertEquals(null, controller.updates.value.available)
+            assertEquals("2.4.0", controller.info.value?.openChamberVersion)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `update leaves the runtime stopped when it was not running`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            val server = FakeServer()
+            val states = mutableListOf<RuntimeState>()
+            val controller = controller(installer, server, states = states, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            assertEquals(RuntimeState.Stopped, controller.state.value)
+
+            controller.perform(RuntimeOperation.Update)
+            step()
+
+            assertEquals(1, installer.updateCalls.size)
+            assertEquals(RuntimeState.Stopped, controller.state.value)
+            assertEquals(0, server.startAttempts)
+            assertTrue(states.any { it is RuntimeState.Installing && it.updating && it.step == InstallStep.CopyEnvironment })
+        }
+
+    @Test
+    fun `a failed update keeps the runtime usable and records the reason instead of Failed`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            installer.updateFailWith = UserFacingException(MessageKey.UpdateNotEnoughSpace, "no space", detail = "df")
+            val server = FakeServer()
+            val controller = controller(installer, server, pinnedVersions = pins)
+            controller.initialize()
+            step()
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            controller.perform(RuntimeOperation.Update)
+            step()
+
+            // The old environment is untouched and the server comes back up on it.
+            assertTrue("old runtime restarted, not Failed: ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            val failure = controller.updates.value.lastFailure
+            assertEquals(MessageKey.UpdateNotEnoughSpace, failure?.messageKey)
+            assertEquals("df", failure?.detail)
+            assertEquals("2.3.0", controller.info.value?.openChamberVersion)
+            assertTrue("the offer stays so the user can retry", controller.updates.value.available != null)
+
+            controller.dismissUpdateFailure()
+            assertEquals(null, controller.updates.value.lastFailure)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `a failed update when the runtime was stopped leaves it Stopped with the failure recorded`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            installer.updateFailWith = IllegalStateException("npm failed")
+            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            controller.initialize()
+            step()
+
+            controller.perform(RuntimeOperation.Update)
+            step()
+
+            assertEquals(RuntimeState.Stopped, controller.state.value)
+            assertEquals(MessageKey.Generic, controller.updates.value.lastFailure?.messageKey)
+        }
+
+    @Test
+    fun `repair installs at least the installed versions so OpenCode is never downgraded`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.4.0", "2.0.40")))
+            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            controller.initialize()
+            step()
+
+            controller.perform(RuntimeOperation.Repair)
+            step()
+
+            assertEquals(PackageVersions(openChamber = "2.4.0", openCode = "2.0.40"), installer.installCalls.last())
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `a fresh install takes the manifest pins`() =
+        controllerTest {
+            val installer = FakeInstaller(folder.root)
+            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            controller.perform(RuntimeOperation.Install)
+            step()
+
+            assertEquals(null, installer.installCalls.last())
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    @Test
+    fun `uninstall clears the update state`() =
+        controllerTest {
+            val root = folder.root
+            val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
+            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            controller.initialize()
+            step()
+            assertTrue(controller.updates.value.available != null)
+
+            controller.perform(RuntimeOperation.Uninstall)
+            step()
+
+            assertEquals(RuntimeUpdateState(), controller.updates.value)
         }
 }

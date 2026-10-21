@@ -12,9 +12,23 @@ enum class InstallStep {
     DownloadRootfs,
     ExtractRootfs,
     InstallPackages,
+
+    /** Update only: copy the active environment into staging. */
+    CopyEnvironment,
     InstallOpenChamber,
     BuildNativeModules,
     Verify,
+    ;
+
+    companion object {
+        /** Steps of a first setup or a repair, in order. */
+        val setupSteps: List<InstallStep> =
+            listOf(DownloadRootfs, ExtractRootfs, InstallPackages, InstallOpenChamber, BuildNativeModules, Verify)
+
+        /** Steps of an OpenChamber / OpenCode update, in order. */
+        val updateSteps: List<InstallStep> =
+            listOf(CopyEnvironment, InstallOpenChamber, BuildNativeModules, Verify)
+    }
 }
 
 /** Which part of the lifecycle a failure came from; drives what Retry does. */
@@ -46,6 +60,8 @@ sealed interface RuntimeState {
         val detail: String?,
         /** Localised progress phrase for the current sub-step, when there is one. */
         val messageKey: MessageKey? = null,
+        /** True while updating OpenChamber/OpenCode in an existing environment, not a first setup or repair. */
+        val updating: Boolean = false,
     ) : RuntimeState
 
     data object Stopped : RuntimeState
@@ -142,7 +158,53 @@ enum class MessageKey {
 
     /** Install finished. */
     ProgressDone,
+
+    /** Update sub-step: copying the current environment before changing it. */
+    ProgressCopyingEnvironment,
+
+    /** Not enough free space to copy the environment for an update. */
+    UpdateNotEnoughSpace,
 }
+
+/** One package's installed version and the version an update would install. */
+data class VersionChange(
+    /** Installed version, or null when unknown. */
+    val current: String?,
+    val target: String,
+) {
+    val changed: Boolean get() = current != target
+}
+
+/** Newer OpenChamber / OpenCode versions the installed runtime can move to. */
+data class RuntimeUpdate(
+    val openChamber: VersionChange,
+    val openCode: VersionChange,
+) {
+    val hasChanges: Boolean get() = openChamber.changed || openCode.changed
+}
+
+/** Why the last update attempt failed. The previous environment is kept and still usable. */
+data class UpdateFailure(
+    /** English, technical text. */
+    val reason: String,
+    val messageKey: MessageKey? = null,
+    /** Raw technical output; never translated. */
+    val detail: String? = null,
+)
+
+/** Update check and update outcome, separate from [RuntimeState] so a failed update never blocks the runtime. */
+data class RuntimeUpdateState(
+    /** A check against the npm registry is running. */
+    val checking: Boolean = false,
+    /** Non-null only when it has changes. */
+    val available: RuntimeUpdate? = null,
+    /** When the last check finished (success or failure), epoch ms. */
+    val lastCheckedAtMs: Long? = null,
+    /** The last check could not reach the registry. [available] may still come from the app's bundled versions. */
+    val checkFailed: Boolean = false,
+    /** Set when the last update failed; cleared by a new update or [LocalRuntimeController.dismissUpdateFailure]. */
+    val lastFailure: UpdateFailure? = null,
+)
 
 data class RuntimeInfo(
     val abi: String,
@@ -183,6 +245,20 @@ interface LocalRuntimeController {
 
     /** Stop and start again as one queued operation (applies new storage bindings). */
     fun restart()
+
+    /** Update check state and the outcome of the last update. */
+    val updates: StateFlow<RuntimeUpdateState>
+
+    /** Checks the npm registry for newer OpenChamber / OpenCode now (no-op while a check runs). */
+    fun checkForUpdates()
+
+    /**
+     * Installs [RuntimeUpdateState.available] into a copy of the environment and swaps it in. A running
+     * server is stopped first and started again afterwards; a failure keeps the old environment.
+     */
+    fun update()
+
+    fun dismissUpdateFailure()
 
     /**
      * Runs one operation inside the foreground service. Called by RuntimeService only, after it has

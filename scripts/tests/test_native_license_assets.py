@@ -106,8 +106,8 @@ class LockAndProvenanceTests(NoNetworkMixin, unittest.TestCase):
 
     def test_lock_pins_still_match_recorded_versions(self) -> None:
         pins = {
-            "proot": ("5.1.107.97", "4a27ca61ff7a800cdcac3bc616929bba7a484c74",
-                      "576b03182467101d444874f4a74e070b5cf9692d09f5f7c97578104f537f7f3d"),
+            "proot": ("5.1.107.98", "e2d843ee6dab076ea0ed1ffd5d0ea12232185499",
+                      "a1237d2039e0efedd1639aa4a99ac5e48a10f4c2e14cce445b2cbebedf32d22e"),
             "talloc": ("2.5.0", None, "912afa237510ae542a7733998eb18a12bcda35ab6729c8e2ddb43e8d0ebab007"),
             "libandroid-shmem": ("0.7", "7f0bd7e25dbdd146265aff7c6a890029e374622d",
                                  "1e5ff8459bc0a8c229dd8a94b27d119987e09ef3414331c2b5ebfff20b98e867"),
