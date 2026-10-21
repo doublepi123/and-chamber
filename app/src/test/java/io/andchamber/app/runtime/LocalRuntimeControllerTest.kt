@@ -214,7 +214,8 @@ class LocalRuntimeControllerTest {
             nowMillis = { testScheduler.currentTime },
             restartPolicy = policy,
             watchdogPollMillis = watchdogPollMillis,
-            supportedAbis = setOf("arm64-v8a"),
+            // Mirrors the production gate (arm64-v8a and x86_64), so ABI-specific cases run against it.
+            supportedAbis = setOf("arm64-v8a", "x86_64"),
             versionSource = versionSource,
             pinnedVersions = pinnedVersions,
         )
@@ -246,14 +247,73 @@ class LocalRuntimeControllerTest {
             assertEquals(RuntimeState.Detecting, controller.state.value)
         }
 
+    /** A genuinely unsupported ABI (not x86_64, which the runtime now supports) short-circuits. */
     @Test
     fun `unsupported abi short-circuits to UnsupportedAbi`() =
         controllerTest {
-            val controller = controller(FakeInstaller(folder.root), FakeServer(), abi = "x86_64")
+            val controller = controller(FakeInstaller(folder.root), FakeServer(), abi = "riscv64")
             controller.initialize()
             step()
 
             assertEquals(RuntimeState.UnsupportedAbi, controller.state.value)
+        }
+
+    /**
+     * The production default must include x86_64: this builds the controller WITHOUT overriding
+     * supportedAbis, so it checks the real gate. x86_64 with no install reports NotInstalled, not UnsupportedAbi.
+     */
+    @Test
+    fun `production default accepts x86_64 and reports NotInstalled when nothing is installed`() =
+        controllerTest {
+            val real =
+                DefaultLocalRuntimeController(
+                    paths = io.andchamber.app.runtime.RuntimePaths(folder.root),
+                    abi = "x86_64",
+                    installer = FakeInstaller(folder.root),
+                    server = FakeServer(),
+                    ioDispatcher = StandardTestDispatcher(testScheduler),
+                    scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)).also { scopes += it },
+                    nowMillis = { testScheduler.currentTime },
+                )
+            real.initialize()
+            step()
+
+            assertEquals(RuntimeState.NotInstalled, real.state.value)
+        }
+
+    /** x86_64 installed runtime reaches Stopped and starts, like arm64-v8a. */
+    @Test
+    fun `x86_64 installed runtime is detected as Stopped and starts`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val base = runtimeWith(root, versions = null)
+            val installed = FakeInstaller(root, installed = base.copy(metadata = base.metadata.copy(abi = "x86_64")))
+            val controller = controller(installed, server, abi = "x86_64")
+            controller.initialize()
+            step()
+            assertEquals(RuntimeState.Stopped, controller.state.value)
+
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            assertTrue("x86_64 runtime must reach Running, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
+    /** x86_64 fresh install follows the same install-then-start path and ends Running. */
+    @Test
+    fun `x86_64 install then start reaches Running`() =
+        controllerTest {
+            val server = FakeServer()
+            val controller = controller(FakeInstaller(folder.root), server, abi = "x86_64")
+            controller.perform(RuntimeOperation.Install)
+            step()
+
+            assertTrue("x86_64 install must reach Running, was ${controller.state.value}", controller.state.value is RuntimeState.Running)
+            controller.perform(RuntimeOperation.Stop)
+            step()
         }
 
     @Test

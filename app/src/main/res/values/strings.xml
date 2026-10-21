@@ -92,7 +92,7 @@
     <string name="repair">Repair</string>
     <string name="repair_explain">Repair reinstalls the Linux system. Your projects are kept when possible.</string>
     <string name="unsupported_title">Not available on this device</string>
-    <string name="unsupported_body">Running OpenChamber on the device needs an ARM64 (arm64-v8a) phone or tablet. You can still connect to OpenChamber on your computer below.</string>
+    <string name="unsupported_body">Running OpenChamber on the device needs an ARM64 (arm64-v8a) or x86_64 phone or tablet. You can still connect to OpenChamber on your computer below.</string>
     <string name="show_log">Log</string>
     <string name="details">Details</string>
     <string name="log_title">Log</string>

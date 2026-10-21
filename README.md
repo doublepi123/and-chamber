@@ -39,8 +39,8 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 | 项目 | 要求 |
 |---|---|
 | Android | 8.0（API 26）及以上 |
-| 本机运行 | **arm64-v8a** 设备 |
-| x86_64 设备 | 只能连接远程服务器（Android 的 x86_64 seccomp 策略拦截 `fork`，PRoot 无法转换） |
+| 本机运行 | **arm64-v8a** 或 **x86_64** 设备（x86_64 已通过模拟器探针验证，见 `docs/testing-x86-runtime.md`；未在实体 x86_64 设备上验证） |
+| 其他架构 | 只能连接远程服务器 |
 | 存储空间 | 约 1.2 GB（下载 + 安装） |
 | 网络 | 首次设置需要能访问 Alpine 软件源与 npm，建议使用 Wi-Fi |
 | WebView | 内嵌页面需要系统 WebView 支持多 Profile（`MULTI_PROFILE`）。不支持或绑定失败时，页面会提示更新 WebView 提供程序（Android System WebView 或 Chrome） |
@@ -95,7 +95,7 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 | Node.js | 24.x | Alpine `nodejs` 包 |
 | OpenChamber | 2.4.0 | npm `@openchamber/web` |
 | OpenCode | 2.0.32 | npm `@opencode/cli`（musl 版本） |
-| PRoot | 5.1.107.97 | 源码构建：固定版本源码归档，SHA-256 校验，编译为 jniLibs（与 talloc、libandroid-shmem 一起随 APK 分发） |
+| PRoot | 5.1.107.98 | 源码构建：固定版本源码归档，SHA-256 校验，编译为 jniLibs（与 talloc、libandroid-shmem 一起随 APK 分发） |
 
 ## 从源码构建
 

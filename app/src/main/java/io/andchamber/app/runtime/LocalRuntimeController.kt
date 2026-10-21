@@ -70,11 +70,12 @@ class DefaultLocalRuntimeController(
     /** Interval between watchdog probes while Running. */
     private val watchdogPollMillis: Long = 5_000L,
     /**
-     * Only arm64-v8a runs the on-device runtime. x86_64 is UnsupportedAbi (remote servers still work):
-     * Android's x86_64 seccomp filter blocks SYS_fork, which PRoot does not translate, so the guest
-     * cannot start. Do not add x86_64 here without verifying that path on hardware.
+     * The ABIs that run the on-device runtime. x86_64 is enabled because PRoot 5.1.107.98 rewrites the
+     * guest's fork(2) (syscall 57, which Android's app seccomp policy rejects on x86_64) to clone(2) with
+     * SIGCHLD, and it restores the child's registers (see docs/testing-x86-runtime.md for the probe gates).
+     * Other ABIs are UnsupportedAbi (remote servers still work).
      */
-    private val supportedAbis: Set<String> = setOf("arm64-v8a"),
+    private val supportedAbis: Set<String> = setOf("arm64-v8a", "x86_64"),
     /** Registry lookup for newer versions. Null disables the registry check; the bundled pins still apply. */
     private val versionSource: PackageVersionSource? = null,
     /**
