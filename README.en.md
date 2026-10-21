@@ -39,8 +39,8 @@ AndChamber builds an Alpine Linux userland with PRoot inside the app's private s
 | Item | Requirement |
 |---|---|
 | Android | 8.0 (API 26) or later |
-| On-device runtime | **arm64-v8a** devices |
-| x86_64 devices | Remote servers only (Android's x86_64 seccomp policy blocks `fork`, which PRoot cannot translate) |
+| On-device runtime | **arm64-v8a** or **x86_64** devices (x86_64 is verified with the emulator probe, see `docs/testing-x86-runtime.md`; not verified on a physical x86_64 device) |
+| Other ABIs | Remote servers only |
 | Storage | about 1.2 GB (download + install) |
 | Network | first setup needs the Alpine mirrors and npm; Wi-Fi recommended |
 | WebView | embedded pages need a system WebView with multi-profile support (`MULTI_PROFILE`). If it is missing or binding fails, the page asks you to update the WebView provider (Android System WebView or Chrome) |

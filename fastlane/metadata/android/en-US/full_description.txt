@@ -2,7 +2,7 @@ AndChamber brings OpenChamber, the web interface for OpenCode, to your Android p
 
 Two ways to use it:
 
-* Local mode (arm64-v8a devices only): AndChamber sets up a small Alpine Linux environment in its private storage and runs it with PRoot, without root. Setup downloads Alpine Linux, Node.js, Git and other runtime packages, then installs OpenChamber and OpenCode. It needs a network connection and some time.
+* Local mode (arm64-v8a and x86_64 devices): AndChamber sets up a small Alpine Linux environment in its private storage and runs it with PRoot, without root. Setup downloads Alpine Linux, Node.js, Git and other runtime packages, then installs OpenChamber and OpenCode. It needs a network connection and some time.
 * Remote mode: add the address of an OpenChamber server on your computer. Plain HTTP needs explicit confirmation.
 
 A foreground service runs the local server while the app is in the background. This is not a guarantee of 24/7 operation. On launch, the app can restore the last OpenChamber instance and page you used.

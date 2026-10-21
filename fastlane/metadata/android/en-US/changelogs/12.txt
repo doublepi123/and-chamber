@@ -1,0 +1,5 @@
+0.0.12
+
+New:
+- The on-device server now runs on x86_64 devices (for example x86_64 emulators) as well as arm64-v8a.
+- PRoot is updated to 5.1.107.98.
