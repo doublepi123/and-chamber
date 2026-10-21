@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -65,69 +66,103 @@ internal class UiPrefs(
     }
 
     private var lastId = prefs?.getString(KEY_LAST_TARGET_ID, null)
-    private var lastPath = prefs?.getString(KEY_LAST_TARGET_PATH, null)
-    private var lastOrigin = prefs?.getString(KEY_LAST_TARGET_ORIGIN, null)
+
+    /** Last page of every instance, by [ServerTarget] id. Snapshot state, so screens read the latest. */
+    private val pages = mutableStateMapOf<String, RememberedPage>()
+
+    init {
+        val stored = prefs?.all.orEmpty()
+        for ((key, value) in stored) {
+            if (!key.startsWith(PAGE_PATH_PREFIX) || value !is String) continue
+            val id = key.removePrefix(PAGE_PATH_PREFIX)
+            val origin = stored[PAGE_ORIGIN_PREFIX + id] as? String ?: continue
+            pages[id] = RememberedPage(value, origin)
+        }
+        // Before pages were kept per instance, only the last instance had one: move it over.
+        val legacyPath = prefs?.getString(KEY_LEGACY_TARGET_PATH, null)
+        val legacyOrigin = prefs?.getString(KEY_LEGACY_TARGET_ORIGIN, null)
+        if (prefs != null && (legacyPath != null || legacyOrigin != null)) {
+            val editor = prefs.edit().remove(KEY_LEGACY_TARGET_PATH).remove(KEY_LEGACY_TARGET_ORIGIN)
+            val id = lastId
+            if (id != null && legacyPath != null && legacyOrigin != null && id !in pages) {
+                pages[id] = RememberedPage(legacyPath, legacyOrigin)
+                editor.putString(PAGE_PATH_PREFIX + id, legacyPath).putString(PAGE_ORIGIN_PREFIX + id, legacyOrigin)
+            }
+            editor.apply()
+        }
+    }
 
     /** The instance the user last had open ([ServerTarget] id); null means they left from Home. */
     val lastTargetId: String? get() = lastId
 
-    /** The last page of that instance, path and query only (`/?session=…`). */
-    val lastTargetPath: String? get() = lastPath
-
-    /** Canonical origin the remembered page belonged to; a re-pointed server drops the page. */
-    val lastTargetOrigin: String? get() = lastOrigin
-
     fun setLastTargetId(targetId: String) {
         if (lastId == targetId) return
         lastId = targetId
-        // A different instance: its remembered page does not belong to this one.
-        lastPath = null
-        lastOrigin = null
-        prefs?.edit()
-            ?.putString(KEY_LAST_TARGET_ID, targetId)
-            ?.remove(KEY_LAST_TARGET_PATH)
-            ?.remove(KEY_LAST_TARGET_ORIGIN)
-            ?.apply()
+        prefs?.edit()?.putString(KEY_LAST_TARGET_ID, targetId)?.apply()
     }
 
-    /** Records [path] on [origin] as the last page of the current instance; null clears the page. */
-    fun setLastTargetPath(
-        path: String?,
-        origin: String?,
-    ) {
-        if (lastPath == path && lastOrigin == origin) return
-        lastPath = path
-        lastOrigin = origin
-        val editor = prefs?.edit() ?: return
-        if (path == null) {
-            editor.remove(KEY_LAST_TARGET_PATH).remove(KEY_LAST_TARGET_ORIGIN)
-        } else {
-            editor.putString(KEY_LAST_TARGET_PATH, path).putString(KEY_LAST_TARGET_ORIGIN, origin)
-        }
-        editor.apply()
-    }
-
-    /** Forgets the last instance and page (the user went Home). */
+    /** Forgets which instance was open (the user went Home); every instance keeps its page. */
     fun clearLastTarget() {
-        if (lastId == null && lastPath == null && lastOrigin == null) return
+        if (lastId == null) return
         lastId = null
-        lastPath = null
-        lastOrigin = null
+        prefs?.edit()?.remove(KEY_LAST_TARGET_ID)?.apply()
+    }
+
+    /** The last page of [targetId] (path and query only, `/?session=…`) and the origin it was on. */
+    fun pageFor(targetId: String): RememberedPage? = pages[targetId]
+
+    /** Records [path] on [origin] as the last page of [targetId]. */
+    fun setPage(
+        targetId: String,
+        path: String,
+        origin: String,
+    ) {
+        val page = RememberedPage(path, origin)
+        if (pages[targetId] == page) return
+        pages[targetId] = page
         prefs?.edit()
-            ?.remove(KEY_LAST_TARGET_ID)
-            ?.remove(KEY_LAST_TARGET_PATH)
-            ?.remove(KEY_LAST_TARGET_ORIGIN)
+            ?.putString(PAGE_PATH_PREFIX + targetId, path)
+            ?.putString(PAGE_ORIGIN_PREFIX + targetId, origin)
             ?.apply()
+    }
+
+    /** Drops the page of [targetId] (e.g. the server was removed). */
+    fun forgetPage(targetId: String) {
+        if (pages.remove(targetId) == null) return
+        prefs?.edit()
+            ?.remove(PAGE_PATH_PREFIX + targetId)
+            ?.remove(PAGE_ORIGIN_PREFIX + targetId)
+            ?.apply()
+    }
+
+    /** Drops the pages of instances not in [knownIds] (servers removed elsewhere). */
+    fun retainPages(knownIds: Set<String>) {
+        val stale = pages.keys.filterNot { it in knownIds }.toList()
+        if (stale.isEmpty()) return
+        val editor = prefs?.edit()
+        for (id in stale) {
+            pages.remove(id)
+            editor?.remove(PAGE_PATH_PREFIX + id)?.remove(PAGE_ORIGIN_PREFIX + id)
+        }
+        editor?.apply()
     }
 
     companion object {
         const val FILE = "ui_prefs"
         const val KEY_AUTO_OPEN_LOCAL = "auto_open_local"
         const val KEY_LAST_TARGET_ID = "last_target_id"
-        const val KEY_LAST_TARGET_PATH = "last_target_path"
-        const val KEY_LAST_TARGET_ORIGIN = "last_target_origin"
+        const val PAGE_PATH_PREFIX = "page_path:"
+        const val PAGE_ORIGIN_PREFIX = "page_origin:"
+        private const val KEY_LEGACY_TARGET_PATH = "last_target_path"
+        private const val KEY_LEGACY_TARGET_ORIGIN = "last_target_origin"
     }
 }
+
+/** A remembered page: [path] (`/?session=…`) on the server's canonical [origin] at the time. */
+internal data class RememberedPage(
+    val path: String,
+    val origin: String,
+)
 
 /** Read once per activity; the file is tiny, and the launch decision needs it for frame one. */
 @Composable

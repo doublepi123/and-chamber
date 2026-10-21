@@ -12,7 +12,7 @@ Key constraints:
 - All embedded pages require `WebViewFeature.MULTI_PROFILE`: unsupported or failed binding blocks page loading before authentication. Home, notifications and the local runtime remain available; remote addresses can be opened explicitly in a browser without adding credentials.
 - Profiles are keyed by target ID and canonical origin. Old default-profile data is neither cleared nor migrated; isolation between target profiles does not change browser Cookie rules for subresources inside one profile.
 - Native HTTP downloads use controlled redirects and the app process; they do not resume after process death. Unknown notification-send outcomes preserve the draft and session entry instead of automatically replaying the operation.
-- Launch can restore the last used OpenChamber instance and page. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
+- Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
 
 ## System Entry Points
@@ -25,7 +25,7 @@ Key constraints:
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
 | `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); Sync task `syncNativeLicenseAssets` packages `third_party/native-runtime/` as `assets/licenses/native/` in every variant; env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
-| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.10 / 10); the release workflow checks them against the tag |
+| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.11 / 11); the release workflow checks them against the tag |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |
