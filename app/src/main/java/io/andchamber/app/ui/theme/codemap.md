@@ -25,7 +25,7 @@ Files:
 1. `AndChamberApp` wraps all content in `AndChamberTheme {}` once.
 2. `AndChamberTheme` picks `DarkChamberColors` or `LightChamberColors`, provides `LocalChamberColors`, and wraps `MaterialTheme(colorScheme, typography, shapes)`.
 3. Components read `MaterialTheme.colorScheme.*` for Material roles and `ChamberTheme.colors.*` for extended roles.
-4. `WebScreen` reads `MaterialTheme.colorScheme.background`, converts it with `toArgb()`, and passes it to `WebViewPool.obtain`. It also uses `isSystemInDarkTheme()` for the WebView theme (`prefers-color-scheme`).
+4. `WebScreen` reads `MaterialTheme.colorScheme.background`, converts it with `toArgb()`, and passes it to `WebViewPool.obtain`. It also uses `isSystemInDarkTheme()` for the WebView theme (`prefers-color-scheme`). When either changes, `ChamberWebView.applyTheme` restyles the live WebView in place (no reload), since the activity handles `uiMode` itself and the pooled WebView outlives the flip.
 5. `SystemBarsEffect` uses the background luminance to choose bar icons, not `darkTheme` directly.
 
 ## Integration

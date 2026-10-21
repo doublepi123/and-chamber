@@ -87,8 +87,8 @@ internal class ChamberWebView(
     context: Context,
     /** The profile this WebView is bound to; its origin is fixed for the life of this object. */
     val binding: WebProfileBinding,
-    darkTheme: Boolean,
-    private val backgroundColor: Int,
+    private var darkTheme: Boolean,
+    private var backgroundColor: Int,
     private val downloads: HttpDownloadStarter,
 ) {
     val targetId: String = binding.identity.targetId
@@ -96,16 +96,9 @@ internal class ChamberWebView(
     /** The only origin this WebView may load. Never re-derived from a loaded URL. */
     private val origin: String = binding.identity.origin
 
-    // WebView derives prefers-color-scheme from the theme's isLightTheme, so match the app theme.
-    private val themedContext =
-        ContextThemeWrapper(
-            context,
-            if (darkTheme) {
-                android.R.style.Theme_Material_NoActionBar
-            } else {
-                android.R.style.Theme_Material_Light_NoActionBar
-            },
-        )
+    // WebView derives prefers-color-scheme from this context's isLightTheme, re-read on every
+    // configuration change, so [applyTheme] restyles it in place when the app theme flips.
+    private val themedContext = ContextThemeWrapper(context, webThemeRes(darkTheme))
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val bridge = Bridge()
@@ -337,6 +330,21 @@ internal class ChamberWebView(
         val webView = view ?: return null
         (webView.parent as? ViewGroup)?.removeView(webView)
         return webView
+    }
+
+    /**
+     * Follows the app theme without reloading the page: restyles the WebView's context and has it
+     * re-read prefers-color-scheme. Without this a pooled WebView keeps the theme it was created with.
+     */
+    fun applyTheme(dark: Boolean, background: Int) {
+        if (destroyed) return
+        val themeChanged = dark != darkTheme
+        darkTheme = dark
+        backgroundColor = background
+        if (themeChanged) themedContext.theme.applyStyle(webThemeRes(dark), true)
+        val webView = view ?: return
+        webView.setBackgroundColor(background)
+        if (themeChanged) webView.dispatchConfigurationChanged(webView.resources.configuration)
     }
 
     fun onResume() {
@@ -999,6 +1007,9 @@ internal class ChamberWebView(
     }
 }
 
+private fun webThemeRes(dark: Boolean): Int =
+    if (dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar
+
 /**
  * Keeps at most one live [ChamberWebView] (the last opened server), so coming back from Home is
  * instant and only one page uses memory.
@@ -1022,7 +1033,10 @@ internal class WebViewPool(private val downloads: HttpDownloadStarter) {
         darkTheme: Boolean,
         backgroundColor: Int,
     ): ChamberWebView {
-        current?.takeIf { it.binding.identity == binding.identity }?.let { return it }
+        current?.takeIf { it.binding.identity == binding.identity }?.let {
+            it.applyTheme(darkTheme, backgroundColor)
+            return it
+        }
         destroyAll()
         return ChamberWebView(context, binding, darkTheme, backgroundColor, downloads).also { current = it }
     }
