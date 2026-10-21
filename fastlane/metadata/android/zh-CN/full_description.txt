@@ -2,7 +2,7 @@ AndChamber 把 OpenChamber（OpenCode 的 Web 界面）带到你的 Android 手�
 
 两种使用方式：
 
-* 本机模式（仅 arm64-v8a 设备）：AndChamber 在应用私有目录中用 PRoot 搭建一个精简的 Alpine Linux 环境，无需 root。首次设置会下载 Alpine Linux、Node.js、Git 等运行时组件，再安装 OpenChamber 和 OpenCode，需要网络连接并需要一些时间。
+* 本机模式（arm64-v8a 和 x86_64 设备）：AndChamber 在应用私有目录中用 PRoot 搭建一个精简的 Alpine Linux 环境，无需 root。首次设置会下载 Alpine Linux、Node.js、Git 等运行时组件，再安装 OpenChamber 和 OpenCode，需要网络连接并需要一些时间。
 * 远程模式：添加你电脑或其他受控机器上 OpenChamber 服务的地址。明文 HTTP 需要手动确认。
 
 本机模式说明：
@@ -31,7 +31,7 @@ AndChamber 把 OpenChamber（OpenCode 的 Web 界面）带到你的 Android 手�
 
 * Android 8.0（API 26）或更高版本。
 * 内嵌页面需要支持多 Profile 的系统 WebView。页面提示更新时，请更新 Android System WebView 或 Chrome。
-* 本机模式需要 arm64-v8a 手机。
+* 本机模式需要 arm64-v8a 或 x86_64 设备。
 * 首次设置需要网络连接以下载运行时组件。
 * AndChamber 不包含模型、模型权重、模型服务、账号或订阅。请在 OpenChamber 中单独配置模型和服务商。模型运行在哪里（互联网服务商、你自己的服务器或局域网），以及费用如何，取决于你选择的服务商。
 
