@@ -59,6 +59,7 @@ class OpenChamberInstaller(
         versions: PackageVersions? = null,
     ): InstalledRuntime =
         withContext(Dispatchers.IO) {
+            val pinned = versions ?: manifestVersions()
             val architecture = manifest.architecture(abi)
             paths.cache.mkdirs()
             paths.logs.mkdirs()
@@ -99,7 +100,6 @@ class OpenChamberInstaller(
 
                 // Shim before npm: install-time scripts also run under node and benefit from it.
                 writeShim(rootfs)
-                val pinned = versions ?: manifestVersions()
                 finishEnvironment(
                     report = report,
                     proot = proot,
@@ -275,9 +275,10 @@ class OpenChamberInstaller(
         require(File(rootfs, "$OPENCHAMBER_MODULE_ROOT/dist/index.html").isFile) {
             "OpenChamber web bundle is missing after install"
         }
-        // Record what is actually on disk; the requested version is only the fallback.
+        // Stock npm install of the requested version. No patched artifact and no version pin.
         val installedOpenChamber =
-            runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull() ?: versions.openChamber
+            runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull()
+                ?: versions.openChamber
 
         val metadata =
             RuntimeMetadata(

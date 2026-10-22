@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-The control-room home screen (`Routes.HOME`). Shows the on-device OpenChamber runtime (setup, install progress, start and stop, failures, OpenChamber / OpenCode updates, details, log), the shared-storage folder card, saved remote servers with add, edit and remove, and a card that opens the independent browser.
+The control-room home screen (`Routes.HOME`). Shows the on-device OpenChamber runtime (setup, install progress, start and stop, failures, OpenChamber / OpenCode updates, details, log), the shared-storage folder card, and saved remote servers with add, edit and remove. The browser is the floating window over the local chat, so Home has no browser entry.
 
 Files:
 - `HomeScreen.kt`: `HomeScreen`, `HomeActions` (lambdas passed in from the root), header, one-shot `HomeEntrance`, `BrowserEntryCard`.
@@ -54,7 +54,7 @@ Remote servers:
 3. Row menu: Edit → `ServerEditorDialog`. Remove → `RemoveServerDialog` → `onRemoveRemote`, which discards the pooled WebView and calls `remotes.remove`.
 4. Save: `checkServerAddress` must return `Valid`. An insecure remote with a password needs the opt-in. Then `onSaveRemote(ServerTarget.Remote(...))`. New servers get a UUID, and the id is kept on edit.
 
-Independent browser: `BrowserEntryCard` calls `onOpenBrowser` → `Routes.BROWSER`. The card does not start the runtime and does not open a server page.
+The in-app browser is opened from the local chat's edge menu ("Open web page"), not from Home. Home never creates a browser page.
 
 Auto-open setting: `AutoOpenRow` appears in Details when `autoOpenLocal != null` and `info != null`. It calls `onAutoOpenChange`, which updates `UiPrefs`.
 

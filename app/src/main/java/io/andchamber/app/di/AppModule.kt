@@ -3,9 +3,6 @@ package io.andchamber.app.di
 import android.content.Context
 import android.os.Build
 import android.util.Log
-import io.andchamber.app.browser.BrowserController
-import io.andchamber.app.browser.BrowserControllerImpl
-import io.andchamber.app.browser.BrowserRpcServer
 import io.andchamber.app.data.AndroidHttpDownloadStarter
 import io.andchamber.app.data.DefaultWebSessionAuthenticator
 import io.andchamber.app.data.EncryptedRemoteServerStore
@@ -50,17 +47,19 @@ import io.andchamber.app.runtime.network.RuntimeDnsReporter
 import io.andchamber.app.runtime.network.ResolvConf
 import io.andchamber.app.runtime.install.VerifiedRuntimeDownloader
 import io.andchamber.app.runtime.manifest.RuntimeManifestReader
-import io.andchamber.app.runtime.process.BrowserToolAssets
+import io.andchamber.app.runtime.process.BrowserPluginAssets
+import io.andchamber.app.runtime.process.BrowserToolHost
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.process.HealthProbe
+import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.runtime.process.ProotOpenChamberServer
+import io.andchamber.app.runtime.process.ProviderPageRouter
+import io.andchamber.app.ui.browser.NativeBrowserPresenter
 import io.andchamber.app.runtime.process.ProotStaleServerCleaner
 import io.andchamber.app.service.RuntimeService
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import org.koin.dsl.module
 import java.io.File
@@ -141,20 +140,13 @@ val appModule =
 
         single<SharedStorageController> { get<SharedStorageControllerImpl>() }
 
-        single<BrowserController> {
-            val context = get<Context>()
-            val credential = BrowserToolAssets.endpointHostFile(RuntimePaths.under(context.filesDir).home)
-            BrowserControllerImpl(
-                credentialFile = credential,
-                mainContext = Dispatchers.Main.immediate,
-                currentRuntimeLaunchId = { get<OpenChamberServer>().readyLaunchId() },
-                trustedRoot = context.filesDir,
-            ).also { controller ->
-                BrowserRpcServer(controller).registerWithController()
-            }
-        }
+        single { NativeBrowserPresenter(scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)) }
 
-        single { BrowserLaunchRevoker(get()) }
+        single { ProviderPageRouter(get()) }
+
+        single { LocalBrowserProviderBinding(get(), get()) }
+
+        single<BrowserToolHost> { get<LocalBrowserProviderBinding>() }
 
         single<OpenChamberServer> {
             val context = get<Context>()
@@ -187,17 +179,20 @@ val appModule =
                     ).cleanBeforeStart(port, guestRunDir, proot)
                 },
                 notificationSink = { line -> get<NotificationSink>().accept(line) },
-                browserMcpAsset = {
-                    context.assets.open(BrowserToolAssets.ASSET_NAME).bufferedReader().use { it.readText() }
+                browserPluginAssets = {
+                    BrowserPluginAssets.Assets(
+                        packageJson =
+                            context.assets.open(BrowserPluginAssets.PACKAGE_ASSET).bufferedReader().use { it.readText() },
+                        indexJs =
+                            context.assets.open(BrowserPluginAssets.INDEX_ASSET).bufferedReader().use { it.readText() },
+                    )
                 },
                 browserTrustedRoot = context.filesDir,
                 onBrowserUnavailable = { reason -> Log.w("AndChamberBrowser", reason) },
+                browserTool = get(),
                 bindsForStart = { storage.prepareForStart() },
                 onStarted = { binds -> storage.recordStarted(binds) },
                 onStopped = { storage.recordStopped() },
-                onBrowserLaunchInvalidated = { launchId ->
-                    get<BrowserLaunchRevoker>().revoke(launchId)
-                },
             )
         }
 
@@ -259,22 +254,5 @@ val appModule =
     }
 
 private fun primaryAbi(): String = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
-
-/**
- * Asks the controller to revoke one runtime launch. The hop to Main is asynchronous, so a runtime
- * thread waiting on the UI cannot deadlock. [BrowserController.revokeRuntimeLaunch] ignores a lease
- * issued for a different launch, so a late callback for A does not revoke B.
- */
-internal class BrowserLaunchRevoker(
-    private val browser: BrowserController,
-    mainDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val mainScope: CoroutineScope = CoroutineScope(SupervisorJob() + mainDispatcher),
-) {
-    fun revoke(launchId: Long) {
-        mainScope.launch {
-            browser.revokeRuntimeLaunch(launchId)
-        }
-    }
-}
 
 private const val KEY_BOOTSTRAPPED = "notifications_bootstrapped"

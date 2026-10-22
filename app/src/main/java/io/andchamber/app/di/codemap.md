@@ -21,7 +21,7 @@ Koin graph (`single` declarations, all process-wide):
 - `NotificationObserver(runtime, notifier, api, bootstrap = NotificationSettingsBootstrap(api, store), watch = RuntimeErrorWatch(Titles(...)))`. Titles come from `R.string.alert_*`.
 - `NotificationBootstrapStore`: SharedPreferences `andchamber_notify`, key `notifications_bootstrapped` (private const in this file).
 - `SharedStorageControllerImpl` (paths, `SharedStorageAccess.defaultHostRoot()`, `PrefsSharedStoragePrefs`, `SharedStoragePermission`); also bound as `SharedStorageController`.
-- `BrowserController` → `BrowserControllerImpl(credentialFile, mainContext = Dispatchers.Main.immediate, currentRuntimeLaunchId = { OpenChamberServer.readyLaunchId() }, trustedRoot = context.filesDir)`. `BrowserRpcServer(controller).registerWithController()` runs in that constructor. `BrowserLaunchRevoker` posts `revokeRuntimeLaunch(launchId)` to Main without blocking the runtime thread. The getter stays free of browser calls.
+- `NativeBrowserPresenter` (Main dispatcher scope), `ProviderPageRouter(presenter)` and `LocalBrowserProviderBinding(presenter, router)`; the binding is also bound as `BrowserToolHost`. The binding owns the loopback tool server for one launch and follows presenter transport eligibility.
 - `OpenChamberServer` → `ProotOpenChamberServer`:
   - `suite = EmbeddedCommandSuite(nativeDir, paths).resolve()`.
   - `scanner = ProcessScanner(myUid, myPid)`, `health = HealthProbe.Loopback`.
@@ -30,8 +30,8 @@ Koin graph (`single` declarations, all process-wide):
   - `dnsMonitor = DnsRefresherMonitor(DnsRefresher(AndroidSystemDnsProvider, AndroidNetworkEvents, reporter → Log.w("AndChamberDns")))`: live refresh while the server runs. The server calls `start(rootfs)` once ready and `stop()` first in its own `stop()`, before process teardown.
   - `cleanBeforeStart` → `ProotStaleServerCleaner`.
   - `notificationSink = { NotificationSink.accept(line) }`.
-  - `browserMcpAsset` reads `BrowserToolAssets.ASSET_NAME` and refuses a blank asset.
-  - `onBrowserLaunchInvalidated` → `BrowserLaunchRevoker.revokePreviousLease()`.
+  - `browserPluginAssets` reads the two `browser-tool/` assets; a blank asset degrades that launch only.
+  - `browserTool = get()` starts and stops the loopback tool server with the launch.
   - `bindsForStart` / `onStarted` / `onStopped` → `SharedStorageControllerImpl.prepareForStart` / `recordStarted` / `recordStopped`.
 - `LocalRuntimeController` → `DefaultLocalRuntimeController`:
   - `installer = RuntimeInstallerImpl(paths, abi, manifest from assets, suite, VerifiedRuntimeDownloader(okHttp), shim asset "android-shim.cjs", dnsProvider)`.

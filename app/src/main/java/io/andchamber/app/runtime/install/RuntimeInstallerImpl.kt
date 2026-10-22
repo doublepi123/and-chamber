@@ -25,7 +25,15 @@ class RuntimeInstallerImpl(
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private val installer by lazy {
-        OpenChamberInstaller(paths, abi, manifest, downloader, shimAsset, dnsProvider, nowMillis)
+        OpenChamberInstaller(
+            paths,
+            abi,
+            manifest,
+            downloader,
+            shimAsset,
+            dnsProvider,
+            nowMillis,
+        )
     }
 
     override fun recover(): Boolean =

@@ -50,7 +50,6 @@
     <!-- Sections -->
     <string name="section_this_device">On this phone</string>
     <string name="section_servers">On other computers</string>
-    <string name="section_browser">Browser</string>
 
     <!-- Local runtime card -->
     <string name="local_title">OpenChamber</string>
@@ -306,19 +305,53 @@
 
     <!-- Independent browser. Not the OpenChamber page. -->
     <string name="browser_entry_title">Browser</string>
-    <string name="browser_entry_body">Open a public https page here. It stays separate from OpenChamber.</string>
-    <string name="browser_address_hint">https://</string>
-    <string name="browser_hint">Enter a public https address. Downloads, pop-ups and file uploads stay off. Complex forms and sign-in flows are not supported yet. What the page reports is not verified.</string>
-    <string name="browser_status_off">Agent control is off</string>
-    <string name="browser_status_on">Agent control is on for 10 minutes</string>
-    <string name="browser_status_taken">You have the page</string>
+    <string name="browser_status_on">Agent control is on</string>
     <string name="browser_turn_on">Allow agent</string>
     <string name="browser_take_over">Take over</string>
     <string name="browser_turn_off">Turn off</string>
-    <string name="browser_note">Send the task in chat first, then allow the agent here. Leaving this screen turns it off. You cannot allow it and then go back to chat.</string>
-    <string name="browser_agent_needs_local">Agent control needs OpenChamber running on this phone. You can still browse.</string>
-    <string name="browser_unavailable">Browser isn\'t available</string>
     <string name="browser_unavailable_body">This WebView can\'t keep the browser separate, so nothing is loaded.</string>
-    <string name="browser_controller_missing">Browser control isn\'t ready yet.</string>
-    <string name="browser_address_refused">That address can\'t be opened here.</string>
+    <string name="browser_enlarge">Enlarge</string>
+    <string name="browser_restore">Restore</string>
+    <string name="browser_float_status_manual">You are browsing. Allow the agent again after you sign in.</string>
+    <string name="browser_more">More</string>
+    <string name="browser_desktop_layout">Computer layout</string>
+    <string name="browser_phone_layout">Phone layout</string>
+    <string name="browser_mouse_mode">Mouse</string>
+    <string name="browser_touch_mode">Touch</string>
+    <string name="browser_keyboard_tight">The keyboard covers the browser. Enlarge it, or close it.</string>
+    <string name="browser_mode_change_title">Change page layout?</string>
+    <string name="browser_mode_change_body">This may reload the page and lose unsent changes. Agent control will need your permission again.</string>
+    <string name="browser_resize_window">Resize browser window</string>
+    <string name="browser_reopen_required">Reopen this page before allowing the agent.</string>
+    <string name="browser_mouse_unsupported">Mouse mode is not supported on this system. You can still use direct touch.</string>
+    <!-- Mouse mode status while any accessibility service is on. Keep it within two lines of the small window. -->
+    <string name="browser_mouse_hover_accessibility">With an accessibility service on, pages can\'t see hover. You can still click, drag and scroll.</string>
+    <string name="browser_page_loading">Page loading…</string>
+    <string name="browser_mode_reopen_required">Reopen this page to change the display mode.</string>
+    <string name="browser_scroll_waiting">The page is not ready yet. Scroll position was not saved.</string>
+    <string name="browser_scroll_not_saved">Scroll position was not saved.</string>
+    <string name="browser_scroll_clamped">The page cannot return to the previous scroll position.</string>
+    <string name="browser_scroll_not_restored">Scroll position was not restored.</string>
+    <string name="browser_mouse_gesture_interrupted">The drag was interrupted and the page was closed.</string>
+    <string name="browser_retired_page_details">Unsubmitted changes may be lost. Website storage was not cleared. Allow the agent again after reopening.</string>
+    <string name="browser_reopen_page">Reopen</string>
+    <string name="browser_finish_drag_first">Finish dragging on the page first.</string>
+    <string name="browser_reopen_failed">Could not reopen the page. You can try again.</string>
+
+    <!-- Open a page in this chat's browser window (edge menu item and dialog title) -->
+    <string name="browser_open_page">Open web page</string>
+    <string name="browser_open_page_hint">Opens in the browser window for this chat. The agent can use it only after you tap \"Allow agent\".</string>
+    <string name="browser_open_page_placeholder">example.com</string>
+    <string name="browser_open_page_invalid">Enter a web address.</string>
+    <string name="browser_open_page_refused">This window opens public https pages only.</string>
+    <!-- %1$s: the exact address that will be opened, e.g. https://example.com -->
+    <string name="browser_open_page_preview">Opens %1$s</string>
+    <string name="browser_clear_site_data">Clear site data</string>
+    <string name="browser_clear_site_data_title">Clear site data?</string>
+    <string name="browser_clear_site_data_body">This signs you out of websites opened in this browser window, for all chats on this phone, and removes their saved data. It can\'t be undone. Agent control turns off.</string>
+    <string name="browser_clear_site_data_confirm">Clear</string>
+    <string name="browser_site_data_cleared">Site data cleared.</string>
+    <string name="browser_site_data_cleared_no_reload">Site data cleared. The page was not reloaded.</string>
+    <string name="browser_site_data_partial">Cookies and storage cleared. Page cache not cleared.</string>
+    <string name="browser_site_data_failed">Could not clear site data.</string>
 </resources>

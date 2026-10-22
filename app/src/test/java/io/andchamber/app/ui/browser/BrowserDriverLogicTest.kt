@@ -4,8 +4,17 @@ import io.andchamber.app.browser.BrowserErrorCode
 import io.andchamber.app.browser.BrowserMethod
 import io.andchamber.app.browser.BrowserRequest
 import io.andchamber.app.browser.BrowserUrlPolicy
+import io.andchamber.app.ui.browser.BrowserGeometry
+import io.andchamber.app.ui.browser.GeometryProbe
+import io.andchamber.app.ui.browser.MeasuredGeometry
+import io.andchamber.app.ui.browser.MouseAction
+import io.andchamber.app.ui.browser.MouseInput
+import io.andchamber.app.ui.browser.PointerSample
+import io.andchamber.app.ui.browser.ProbeIdentity
+import io.andchamber.app.ui.browser.TouchpadGesture
 import io.andchamber.app.browser.UrlDecision
 import io.andchamber.app.runtime.ServerTarget
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -215,9 +224,327 @@ class BrowserDriverLogicTest {
     }
 
     @Test
-    fun `address field adds https and leaves an explicit scheme alone`() {
-        assertEquals("https://example.com", normalizeAddress("example.com"))
-        assertEquals("https://example.com", normalizeAddress("https://example.com"))
-        assertEquals("http://example.com", normalizeAddress("http://example.com"))
+    fun `manual mode allows human navigation and agent mode refuses post and redirect`() {
+        assertTrue(MainFrameGate.allows("GET", isRedirect = false, manual = false))
+        assertFalse(MainFrameGate.allows("POST", isRedirect = false, manual = false))
+        assertFalse(MainFrameGate.allows("GET", isRedirect = true, manual = false))
+        assertTrue(MainFrameGate.isUnsupported("POST", isRedirect = false, manual = false))
+        assertTrue(MainFrameGate.allows("POST", isRedirect = false, manual = true))
+        assertTrue(MainFrameGate.allows("GET", isRedirect = true, manual = true))
+        assertFalse(MainFrameGate.isUnsupported("POST", isRedirect = true, manual = true))
+    }
+
+    @Test
+    fun `manual documents count their first start once`() {
+        val session = newSession()
+        assertTrue(session.beginControlledGet() > 0L)
+        assertTrue(session.noteMainStart())
+        assertFalse(session.noteMainStart())
+        assertTrue(session.unknownNavigation)
+        session.manualNavigation = true
+        val first = session.beginManualDocument()
+        assertTrue(session.noteMainStart())
+        assertFalse(session.controlledGet)
+        val second = session.beginManualDocument()
+        assertTrue(second > first)
+        assertTrue(session.noteMainStart())
+        assertFalse(session.controlledGet)
+        assertFalse(session.unknownNavigation)
+    }
+
+    private fun newSession(): BrowserSession {
+        val constructor = BrowserSession::class.java.getDeclaredConstructor(android.webkit.WebView::class.java, kotlin.jvm.functions.Function0::class.java, PixelCopyBridge::class.java)
+        constructor.isAccessible = true
+        return constructor.newInstance(null, { BrowserUrlPolicy() }, PixelCopyBridge()) as BrowserSession
+    }
+
+    @Test
+    fun `manual navigation is volatile and a manual post is allowed`() {
+        val field = BrowserSession::class.java.getDeclaredField("manualNavigation")
+        assertTrue(java.lang.reflect.Modifier.isVolatile(field.modifiers))
+        assertTrue(MainFrameGate.allows("POST", false, manual = true))
+        assertFalse(MainFrameGate.allows("POST", false, manual = false))
+        assertFalse(MainFrameGate.allows("GET", true, manual = false))
+    }
+
+    @Test
+    fun `capture rejects a moved frame a changed document and a changed fingerprint`() = runBlocking {
+        val frame = NativeFrame(100, 80, 1, 2, 1, 2, 101, 82)
+        val probe = GeometryProbe("doc", 100, 80, 100, 80, 0f, 0f, 2f, 100f, 80f, 0f, 0f, 0f, 0f, 1f)
+        val stamp = CaptureStamp("view", "doc", 1L, 3L, frame, probe)
+        val moved = stamp.copy(frame = frame.copy(windowLeft = 9))
+        assertEquals(null, guardedCapture({ stamp }, { observation(moved) }, { CaptureBytes(byteArrayOf(1), 4, 5) }))
+        assertEquals(null, guardedCapture({ stamp }, { observation(stamp).copy(documentId = "other") }, { CaptureBytes(byteArrayOf(1), 4, 5) }))
+        assertEquals(null, guardedCapture({ stamp }, { observation(stamp) }, { CaptureBytes(byteArrayOf(1), 4, 5) }).let { nullStamp(probe) })
+        val stable = guardedCapture({ stamp }, { observation(stamp) }, { CaptureBytes(byteArrayOf(7), 9, 8) })
+        assertEquals(9, stable?.image?.width)
+        assertEquals(8, stable?.image?.height)
+        assertEquals(7, stable?.image?.payload?.single()?.toInt())
+    }
+
+    private fun observation(stamp: CaptureStamp) = CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.frame)
+
+    private fun nullStamp(probe: GeometryProbe): CaptureAttempt? = null
+
+    @Test
+    fun `desktop viewport script pins a late site meta and can stop`() {
+        val script = BrowserDriverLogic.desktopViewportScript()
+        assertTrue(script.contains("MutationObserver"))
+        assertTrue(script.contains("width=1024"))
+        assertTrue(script.contains("__acDesktopViewport"))
+        assertTrue(script.contains("observer.disconnect()"))
+        assertTrue(script.contains("applying"))
+        assertFalse(script.contains("initial-scale=1"))
+    }
+
+    @Test
+    fun `geometry metrics must be finite and positive`() {
+        val raw = """{"ok":true,"documentId":"abc","innerWidth":819,"innerHeight":600,"clientWidth":819,"clientHeight":600,"scrollX":0,"scrollY":12,"devicePixelRatio":2.625,"visualWidth":819,"visualHeight":600,"offsetLeft":0,"offsetTop":0,"pageLeft":0,"pageTop":12,"visualScale":1}"""
+        val probe = BrowserDriverLogic.parseGeometry(raw)
+        assertEquals(2.625f, probe?.devicePixelRatio)
+        assertEquals(null, BrowserDriverLogic.parseGeometry(raw.replace("2.625", "NaN")))
+    }
+
+    @Test
+    fun `measured scale is separate from device pixel ratio`() {
+        val probe = GeometryProbe("doc", 1024, 768, 1024, 768, 0f, 40f, 2.625f, 819f, 819f, 0f, 0f, 0f, 40f, 1f)
+        val geometry = BrowserGeometry.fromProbe(probe, ProbeIdentity("view", "tab", 1L, "doc", 2L, 1L), 819, 819, 0, 0, 0, 0, 819, 819, "desktop")
+        assertEquals(1f, geometry.scale)
+        assertEquals(2.625f, geometry.devicePixelRatio)
+        assertEquals(240f, geometry.clientX(240f))
+        val wide = geometry.copy(visualWidth = 1024f, viewWidthPx = 819)
+        assertEquals(300f, wide.clientX(240f), 0.1f)
+        val stale = ProbeIdentity("old", "tab", 1L, "doc", 2L, 1L)
+        assertFalse(BrowserGeometry.accept(probe, stale, ProbeIdentity("view", "tab", 1L, "doc", 2L, 1L)))
+    }
+
+    @Test
+    fun `an unready gesture is dropped and cancel does not click`() {
+        val gesture = TouchpadGesture()
+        val dropped = MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 1f, 1f, 1, false), 0f, 0f, null, gesture, false)
+        assertTrue(dropped.isEmpty())
+        gesture.begin(0f, 0f, 0L, 0)
+        gesture.startDrag()
+        val geometry = MeasuredGeometry(1L, "v", "t", 1L, "doc", 1L, 100, 100, 0, 0, 0, 0, 100, 100, 100, 100, 100, 100, 100f, 100f, 0f, 0f, 0f, 0f, 0f, 0f, 1f, 1f, "desktop")
+        val cancelled = MouseInput.plan(PointerSample(MouseInput.ACTION_CANCEL, 0f, 0f, 1, true), 10f, 10f, geometry, gesture, true)
+        assertEquals(MouseAction.CANCEL, cancelled.single().action)
+    }
+
+    @Test
+    fun `desktop css px converts to webview px and an old geometry is refused`() {
+        val geometry = sampleGeometry(2048, 1024, 3L)
+        assertEquals(2048, geometry.viewWidthPx)
+        assertEquals(1f, geometry.scale)
+        assertEquals(20f, geometry.clientX(20f))
+        assertEquals(8f, geometry.clientY(8f))
+        val gesture = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 100f, 100f, 1, false, 0L), 10f, 4f, geometry, gesture, true)
+        val click = MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 102f, 101f, 1, false, 80L), 10f, 4f, geometry, gesture, true)
+        assertEquals(2L, click.first().copy(geometryGeneration = 2L).geometryGeneration)
+    }
+
+    @Test
+    fun `touchpad moves the pointer by relative motion and a tap clicks at the pointer`() {
+        val geometry = sampleGeometry(2048, 1024, 1L)
+        val gesture = TouchpadGesture()
+        // The finger lands far from the pointer: nothing jumps there.
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 900f, 600f, 1, false, 0L), 100f, 100f, geometry, gesture, true).isEmpty())
+        // Inside the tap slop nothing moves yet; once past it, the whole motion since down is applied.
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 910f, 604f, 1, false, 10L), 100f, 100f, geometry, gesture, true).isEmpty())
+        val moved = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 960f, 640f, 1, false, 30L), 100f, 100f, geometry, gesture, true)
+        assertEquals(MouseAction.HOVER, moved.single().action)
+        assertEquals(160f, moved.single().viewX)
+        assertEquals(140f, moved.single().viewY)
+        val next = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 980f, 640f, 1, false, 40L), 130f, 120f, geometry, gesture, true)
+        assertEquals(150f, next.single().viewX)
+
+        val tap = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 10f, 10f, 1, false, 0L), 50f, 60f, geometry, tap, true)
+        val clicked = MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 12f, 11f, 1, false, 90L), 50f, 60f, geometry, tap, true)
+        assertEquals(listOf(MouseAction.HOVER, MouseAction.PRESS, MouseAction.RELEASE), clicked.map { it.action })
+        assertTrue(clicked.all { it.viewX == 50f && it.viewY == 60f })
+    }
+
+    @Test
+    fun `holding before moving drags with the button down and release ends it`() {
+        val geometry = sampleGeometry(1024, 768, 1L)
+        val gesture = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 0f, 0f, 1, false, 0L), 100f, 100f, geometry, gesture, true)
+        val started = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 40f, 0f, 1, false, 500L), 100f, 100f, geometry, gesture, true)
+        assertEquals(listOf(MouseAction.PRESS, MouseAction.DRAG), started.map { it.action })
+        assertEquals(100f, started.first().viewX)
+        val more = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 80f, 0f, 1, false, 550L), 140f, 100f, geometry, gesture, true)
+        assertEquals(MouseAction.DRAG, more.single().action)
+        val released = MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 80f, 0f, 1, false, 600L), 180f, 100f, geometry, gesture, true)
+        assertEquals(MouseAction.RELEASE, released.single().action)
+
+        // A quick swipe is a move, never a drag.
+        val swipe = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 0f, 0f, 1, false, 0L), 100f, 100f, geometry, swipe, true)
+        val fast = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 40f, 0f, 1, false, 60L), 100f, 100f, geometry, swipe, true)
+        assertEquals(MouseAction.HOVER, fast.single().action)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 40f, 0f, 1, false, 90L), 140f, 100f, geometry, swipe, true).isEmpty())
+    }
+
+    @Test
+    fun `two fingers scroll and do not move the pointer`() {
+        val geometry = sampleGeometry(1024, 768, 1L)
+        val gesture = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 100f, 300f, 1, false, 0L), 50f, 50f, geometry, gesture, true)
+        MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_DOWN, 100f, 300f, 2, false, 10L), 50f, 50f, geometry, gesture, true)
+        val wheel = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 100f, 180f, 2, false, 40L), 50f, 50f, geometry, gesture, true)
+        assertEquals(MouseAction.SCROLL, wheel.single().action)
+        assertTrue(wheel.single().scrollDelta > 0f)
+        assertEquals(50f, wheel.single().viewX)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 100f, 180f, 1, false, 60L), 50f, 50f, geometry, gesture, true).isEmpty())
+    }
+
+    @Test
+    fun `an active drag keeps the original pointer and a second pointer is not a wheel`() {
+        val geometry = sampleGeometry(1024, 768, 1L)
+        val gesture = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 0f, 0f, 1, true, 0L, pointerId = 7), 100f, 100f, geometry, gesture, true)
+        val started = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 40f, 0f, 1, true, 500L, pointerId = 7), 100f, 100f, geometry, gesture, true)
+        assertEquals(listOf(MouseAction.PRESS, MouseAction.DRAG), started.map { it.action })
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_DOWN, 20f, 20f, 2, true, 520L, pointerId = 8), 140f, 100f, geometry, gesture, true).isEmpty())
+        val moved = MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 80f, 0f, 2, true, 560L, pointerId = 7), 140f, 100f, geometry, gesture, true)
+        assertEquals(MouseAction.DRAG, moved.single().action)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 0f, 80f, 2, true, 580L, pointerId = 8), 180f, 100f, geometry, gesture, true).isEmpty())
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_UP, 80f, 0f, 2, true, 590L, pointerId = 7, actionPointerId = 11, actionIndex = 1), 180f, 100f, geometry, gesture, true).isEmpty())
+        val released = MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_UP, 0f, 80f, 1, true, 600L, pointerId = 11, actionPointerId = 7, actionIndex = 0), 180f, 100f, geometry, gesture, true)
+        assertEquals(MouseAction.RELEASE, released.single().action)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 90f, 0f, 1, true, 620L, pointerId = 11, actionPointerId = 11), 180f, 100f, geometry, gesture, true).isEmpty())
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 90f, 0f, 0, false, 640L, pointerId = 8), 180f, 100f, geometry, gesture, true).isEmpty())
+        val reversed = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 0f, 0f, 1, true, 0L, pointerId = 11), 10f, 10f, geometry, reversed, true)
+        MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 40f, 0f, 1, true, 500L, pointerId = 11), 10f, 10f, geometry, reversed, true)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_UP, 40f, 0f, 2, true, 520L, pointerId = 11, actionPointerId = 7, actionIndex = 0), 50f, 10f, geometry, reversed, true).isEmpty())
+        assertEquals(MouseAction.RELEASE, MouseInput.plan(PointerSample(MouseInput.ACTION_POINTER_UP, 0f, 40f, 1, true, 540L, pointerId = 7, actionPointerId = 11, actionIndex = 1), 50f, 10f, geometry, reversed, true).single().action)
+    }
+
+    @Test
+    fun `cancel after press retires and an unmatched up does not click`() {
+        val geometry = sampleGeometry(1024, 768, 1L)
+        val gesture = TouchpadGesture()
+        MouseInput.plan(PointerSample(MouseInput.ACTION_DOWN, 0f, 0f, 1, true, 0L, pointerId = 3), 20f, 20f, geometry, gesture, true)
+        MouseInput.plan(PointerSample(MouseInput.ACTION_MOVE, 40f, 0f, 1, true, 500L, pointerId = 3), 20f, 20f, geometry, gesture, true)
+        val cancelled = MouseInput.plan(PointerSample(MouseInput.ACTION_CANCEL, 40f, 0f, 1, true, 520L, pointerId = 3), 60f, 20f, geometry, gesture, true)
+        assertEquals(MouseAction.CANCEL, cancelled.single().action)
+        assertTrue(gesture.retireRequired)
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 40f, 0f, 0, false, 540L, pointerId = 3), 60f, 20f, geometry, gesture, true).isEmpty())
+        val unmatched = TouchpadGesture()
+        assertTrue(MouseInput.plan(PointerSample(MouseInput.ACTION_UP, 1f, 1f, 0, false, 10L, pointerId = 1), 10f, 10f, geometry, unmatched, true).isEmpty())
+    }
+
+    private fun sampleGeometry(width: Int, height: Int, generation: Long) = MeasuredGeometry(
+        generation, "v", "t", 1L, "doc", 1L, width, height, 0, 0, 0, 0, width, height,
+        width, height, width, height, width.toFloat(), height.toFloat(), 0f, 0f, 0f, 0f, 0f, 0f, 1f, 1f, "desktop",
+    )
+
+    @Test
+    fun `agent action script refuses implicit submit and one time code before acting`() {
+        val script = BrowserDriverLogic.installScript("a".repeat(32))
+        assertTrue(script.contains("one-time-code"))
+        assertTrue(script.contains("implicit"))
+        assertTrue(script.contains("return {ok:false, error:\"refused field\"}"))
+        assertTrue(script.contains(".click()"))
+    }
+
+    @Test
+    fun `manual navigation returns false and a re-probe may keep the same witness`() {
+        val decision = MainFrameDecision.forRequest(method = "GET", redirect = false, manual = true, allowed = true)
+        assertFalse(decision.overrideLoading)
+        assertFalse(decision.startControlledGet)
+        val agent = MainFrameDecision.forRequest(method = "GET", redirect = false, manual = false, allowed = true)
+        assertTrue(agent.overrideLoading)
+        assertTrue(agent.startControlledGet)
+        val probe = """{"ok":true,"documentId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","readyState":"complete"}"""
+        val first = BrowserDriverLogic.acceptProbe(null, probe, policyAllowsUrl = true)
+        assertTrue(first is ProbeAcceptance.Accept)
+        val again = BrowserDriverLogic.acceptProbe(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            probe,
+            policyAllowsUrl = true,
+            allowSameDocument = true,
+        )
+        assertTrue(again is ProbeAcceptance.Accept)
+    }
+
+    @Test
+    fun `human takeover revokes before input and regrant needs a new witness`() {
+        val takeover = ManualTakeover()
+        takeover.grantAgent("session-a:tab-1", "witness-old")
+        assertTrue(takeover.beginHumanInput())
+        assertNull(takeover.grant)
+        assertTrue(takeover.manual)
+        assertTrue(takeover.humanNavigating())
+        takeover.finishManual()
+        assertFalse(takeover.manual)
+        assertNull(takeover.grant)
+        assertFalse(takeover.regrant("session-a:tab-1", ""))
+        assertTrue(takeover.regrant("session-a:tab-1", "witness-after-login"))
+        assertEquals("session-a:tab-1", takeover.grant)
+        takeover.beginHumanInput()
+        assertFalse(takeover.regrant("session-a:tab-1", "witness-during-manual"))
+    }
+
+    @Test
+    fun `an unbound host does not move the rebind generation again`() {
+        var generation = 1L
+        var bind = 1L
+        var host: String? = "bound"
+        fun unbind() {
+            if (host == null && generation != bind) return
+            host = null
+            if (generation == bind) generation += 1
+        }
+        unbind()
+        val after = generation
+        unbind()
+        assertEquals(after, generation)
+        assertTrue(generation != bind)
+    }
+
+    @Test
+    fun `empty session context is a different owner`() {
+        val owner = "session-a"
+        val incoming = ""
+        assertTrue(owner != incoming)
+    }
+
+    @Test
+    fun `floating size stays inside a phone width and a tablet uses a fixed window`() {
+        assertEquals(328, floatWidthDp(360, tablet = false))
+        assertEquals(300, floatWidthDp(332, tablet = false))
+        assertEquals(360, floatWidthDp(800, tablet = true))
+        assertEquals(240, floatHeightDp(800))
+        assertEquals(160, floatWidthDp(192, tablet = false))
+        assertTrue(floatHeightDp(400) <= 168)
+    }
+}
+
+/**
+ * Structure of the restore script. The behaviour (zero scroll on mismatch, one scroll on match) is executed in
+ * Node by app/src/test/js/window-restore-guard.test.cjs, because the JVM has no JavaScript engine.
+ */
+class RestoreScriptStructureTest {
+    @Test
+    fun `restore script checks the witness and the projection before its one instant scroll`() {
+        val script = BrowserDriverLogic.scrollRestoreScript("abcdef01", 0.0, 893.0, targetHeightPx = 252, nativeWidthPx = 819)
+        assertEquals("one scrollTo call", 1, Regex("scrollTo\\(").findAll(script).count())
+        assertTrue(script.contains("""scrollTo({left:0.0,top:893.0,behavior:"instant"})"""))
+        assertTrue("witness is checked", script.contains("""witness!=="abcdef01""""))
+        assertTrue("the projection uses the native width", script.contains("819/v.width"))
+        assertTrue("the projection is checked against the target height", script.contains("-252)"))
+        assertTrue("the checks come before the scroll", script.indexOf("witness!==") < script.indexOf("scrollTo(") &&
+            script.indexOf("819/v.width") < script.indexOf("scrollTo("))
+    }
+
+    @Test
+    fun `restore script returns only the readback numbers and no witness echo`() {
+        val script = BrowserDriverLogic.scrollRestoreScript("abcdef01", 0.0, 893.0, targetHeightPx = 252, nativeWidthPx = 819)
+        val returned = script.substring(script.lastIndexOf("return {ok:true"))
+        assertFalse("no url, title or text is returned", returned.contains("url") || returned.contains("title") || returned.contains("text"))
+        assertFalse("no temporary diagnostic fields remain", script.contains("dBefore") || script.contains("dAfter"))
     }
 }

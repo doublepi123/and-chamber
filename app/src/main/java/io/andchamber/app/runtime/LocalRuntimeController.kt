@@ -475,6 +475,12 @@ class DefaultLocalRuntimeController(
             wantsRunning = true
             restartPolicy.reset()
         }
+        // A second Start queued behind the first (UI launch and a notification or test racing through
+        // the service) must not tear down the server that just came up: start() stops the old child.
+        if (mutableState.value is RuntimeState.Running && runCatching { server.isAlive() }.getOrDefault(false)) {
+            appendLog("Start ignored: OpenChamber is already running")
+            return
+        }
         val port = runtime.metadata.port
         publish(RuntimeState.Starting("Starting OpenChamber on port $port"))
         val password = withContext(ioDispatcher) { uiPassword(paths) }

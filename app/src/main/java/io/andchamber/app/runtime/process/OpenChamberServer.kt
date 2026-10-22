@@ -73,29 +73,23 @@ class ProotOpenChamberServer(
     /** Receives raw `[OpenChamberDesktopNotify] ` lines, which carry user text and never reach the log. */
     private val notificationSink: (line: String) -> Unit = {},
     /**
-     * Reads the packaged browser MCP adapter. Production passes the asset reader; tests pass a
-     * fixture. A missing, blank, or unwritable asset degrades this launch: no endpoint env and no
-     * config overlay. It does not fail the OpenChamber start.
+     * Reads the two packaged plugin files. Production passes the asset reader; tests pass fixtures.
+     * A missing or blank asset degrades this launch: no endpoint env and no config overlay. It does
+     * not fail the OpenChamber start.
      */
-    private val browserMcpAsset: () -> String = { error("browser-control asset unavailable") },
+    private val browserPluginAssets: () -> BrowserPluginAssets.Assets = { error("browser-tool assets unavailable") },
     /**
      * App-private boundary. Ancestors of this directory may be symlinks; only the suffix below it
      * is checked without following links. Production passes `context.filesDir`.
      */
     private val browserTrustedRoot: File = paths.root.parentFile ?: paths.root,
-    /**
-     * Drops a leftover browser-control credential. Called only while [readyLaunchId] is null, so a
-     * controller that consults that id cannot issue a replacement lease during the delete.
-     */
-    private val invalidateBrowserEndpoint: (File, File) -> Boolean = BrowserToolAssets::invalidateEndpoint,
-    /**
-     * Drops the controller's lease for one launch id. The id is captured under [lock] before this
-     * runs, and this is never called while [lock] is held. A late callback for launch A must not
-     * revoke a lease issued for launch B.
-     */
-    private val onBrowserLaunchInvalidated: (Long) -> Unit = {},
     /** Receives a short, non-sensitive reason when browser control is skipped for this launch. */
     private val onBrowserUnavailable: (String) -> Unit = {},
+    /**
+     * The plugin tool server for local launches. It listens only after this server is ready, follows
+     * presenter transport eligibility, and is stopped with the launch.
+     */
+    private val browserTool: BrowserToolHost = BrowserToolHost.None,
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -151,15 +145,21 @@ class ProotOpenChamberServer(
         // a new enable for the whole prepare. Revoke first; a failed file delete must not skip it.
         // Delete only while this start still owns the slot. A newer start may already have revoked.
         revokeBrowserLease(synchronized(lock) { launchId })
-        val credentialCleared = synchronized(lock) { process == null && readyId == null } &&
-            runCatching { invalidateBrowserEndpoint(paths.home, browserTrustedRoot) }.getOrDefault(false)
+        // The binding owns the shared endpoint file. Revoking the previous launch above already
+        // removed its file; this only clears a stale file that no installed launch owns, so a
+        // concurrent newer launch's endpoint is never deleted here.
+        val endpointCleared = synchronized(lock) { process == null && readyId == null } &&
+            browserTool.clearStaleEndpoint(paths.home, browserTrustedRoot)
         runCatching { refreshDns(runtime) }
         // Best effort: an install from before the policy existed gets it here, and a failure must not block
         // the start. Without it OpenChamber offers its own OpenCode/OpenChamber update paths.
         runCatching { OpenChamberPolicy.write(runtime.rootfs) }
             .onFailure { onLog("Could not write the OpenChamber policy file: ${it.message}") }
         val resolved = suite()
-        val browserPrepared = prepareBrowserAdapter(credentialCleared)
+        // Upgrade cleanup runs once per start and only touches the old browser-control artefacts.
+        runCatching { BrowserPluginAssets.cleanupLegacy(paths.home, browserTrustedRoot) }
+        openChamberSettingsDefault()
+        val pluginMode = prepareBrowserPlugin(endpointCleared)
 
         paths.logs.mkdirs()
         paths.workspace.mkdirs()
@@ -175,11 +175,24 @@ class ProotOpenChamberServer(
                 extraBinds = emptyList(),
                 port = port,
             )
+        val suiteEnvironment = resolved.environment()
+        val pluginEnvironment =
+            if (pluginMode == BrowserControlMode.PLUGIN) {
+                val environment = BrowserPluginAssets.launchEnvironment(suiteEnvironment[BrowserPluginAssets.CONFIG_ENV])
+                if (environment == null) {
+                    onBrowserUnavailable("browser-tool skipped: invalid existing OPENCODE_CONFIG_CONTENT")
+                    emptyMap()
+                } else {
+                    environment
+                }
+            } else {
+                emptyMap()
+            }
         val env = ProotCommands.serverEnvironment(
-            resolved.environment(),
+            suiteEnvironment,
             paths.prootTmp,
             uiPassword,
-            browserControl = browserPrepared,
+            browserTool = pluginEnvironment,
         )
         val signal = CompletableDeferred<Unit>()
         val started = spawn(command, env, paths.root)
@@ -198,9 +211,19 @@ class ProotOpenChamberServer(
             stop()
             throw error
         }
-        synchronized(lock) {
+        val stillCurrent = synchronized(lock) {
             // Only the launch that is still the current child becomes trusted.
-            if (process === started) readyId = id
+            if (process === started) {
+                readyId = id
+                true
+            } else {
+                false
+            }
+        }
+        if (stillCurrent && pluginMode == BrowserControlMode.PLUGIN && pluginEnvironment.isNotEmpty()) {
+            val running =
+                runCatching { browserTool.start(id, paths.home, browserTrustedRoot) }.getOrDefault(false)
+            if (!running) onBrowserUnavailable("browser-tool server did not start")
         }
         // Watch the network only for a server that is ready. A failure here is reported by the monitor
         // itself; it must not fail a start that already succeeded.
@@ -253,20 +276,38 @@ class ProotOpenChamberServer(
                 true
             }
         }
-        if (should) onBrowserLaunchInvalidated(launch)
+        if (should) {
+            // The binding deletes the endpoint only when this launch still owns it; the routed
+            // stale clear only removes a file no installed launch owns.
+            runCatching { browserTool.stop(launch) }
+            runCatching { browserTool.clearStaleEndpoint(paths.home, browserTrustedRoot) }
+        }
     }
 
-    private fun prepareBrowserAdapter(credentialCleared: Boolean): Boolean =
+    /**
+     * Writes the OpenChamber "agent web tool" default before start. A present value is respected; a
+     * missing key becomes false. Any skip is logged with a fixed reason and never fails the start.
+     */
+    private fun openChamberSettingsDefault() {
+        val skipped = runCatching {
+            BrowserPluginAssets.ensureDefaultAgentWebTool(paths.home, browserTrustedRoot)
+        }.getOrElse { error ->
+            onBrowserUnavailable("openchamber settings skipped: ${error.javaClass.simpleName}")
+            return
+        }
+        if (skipped != null) onBrowserUnavailable("openchamber settings skipped: $skipped")
+    }
+
+    private fun prepareBrowserPlugin(endpointCleared: Boolean): BrowserControlMode =
         runCatching {
-            check(credentialCleared) { "browser-control credential was not cleared" }
-            val asset = browserMcpAsset()
-            check(asset.isNotBlank()) { "browser-control asset is empty" }
-            BrowserToolAssets.sync(paths.home, asset, browserTrustedRoot)
+            check(endpointCleared) { "browser-tool endpoint was not cleared" }
+            val assets = browserPluginAssets()
+            BrowserPluginAssets.sync(paths.home, assets, browserTrustedRoot)
         }.fold(
-            onSuccess = { true },
+            onSuccess = { BrowserControlMode.PLUGIN },
             onFailure = { error ->
-                onBrowserUnavailable("browser-control skipped: ${error.javaClass.simpleName}")
-                false
+                onBrowserUnavailable("browser-tool skipped: ${error.javaClass.simpleName}")
+                BrowserControlMode.NONE
             },
         )
 

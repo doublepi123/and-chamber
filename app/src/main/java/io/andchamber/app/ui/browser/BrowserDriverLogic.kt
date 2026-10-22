@@ -33,6 +33,44 @@ import java.security.SecureRandom
  */
 internal object BrowserDriverLogic {
     const val PROFILE_NAME = "andchamber_browser_v1"
+    const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    fun desktopViewportScript(): String = """
+        (function(){
+          if (window.__acDesktopViewport) return;
+          var owned = null;
+          var applying = false;
+          function pin(){
+            if (applying) return;
+            applying = true;
+            try {
+              var head = document.head || document.documentElement;
+              if (!head) return;
+              if (!owned || !owned.isConnected) {
+                owned = document.createElement('meta');
+                owned.name = 'viewport';
+                owned.setAttribute('data-ac-viewport', 'desktop');
+                head.appendChild(owned);
+              }
+              var nodes = document.querySelectorAll('meta[name="viewport"]');
+              for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i].getAttribute('content') !== 'width=1024') {
+                  nodes[i].setAttribute('content', 'width=1024');
+                }
+              }
+              if (owned.getAttribute('content') !== 'width=1024') {
+                owned.setAttribute('content', 'width=1024');
+              }
+            } finally { applying = false; }
+          }
+          pin();
+          var root = document.documentElement;
+          if (root && window.MutationObserver) {
+            var observer = new MutationObserver(function(){ pin(); });
+            observer.observe(root, {childList:true, subtree:true, attributes:true, attributeFilter:['content','name']});
+            window.__acDesktopViewport = {stop:function(){ observer.disconnect(); if (owned) owned.remove(); window.__acDesktopViewport = null; }};
+          }
+        })()
+    """.trimIndent()
     const val PARAM_URL = "url"
     const val PARAM_REF = "ref"
     const val PARAM_TEXT = "text"
@@ -174,6 +212,8 @@ internal object BrowserDriverLogic {
         require(at >= 0 && template.indexOf(ARG_TOKEN, at + ARG_TOKEN.length) < 0) { "template marker" }
         return template.substring(0, at) + json + template.substring(at + ARG_TOKEN.length)
     }
+
+    fun jsonString(vararg values: String): String = values.joinToString(",") { jsonQuote(it) }
 
     fun jsonQuote(value: String): String = buildString {
         append('"')
@@ -341,6 +381,18 @@ internal object BrowserDriverLogic {
           }
           window[key] = {
             doc: doc,
+            inspect: function(ref){
+              var found = nodes.get(ref);
+              if (!found || !found.isConnected) return {ok:false, error:"missing field"};
+              var type = ((found.getAttribute("type") || "") + "").toLowerCase();
+              var tag = (found.tagName || "").toLowerCase();
+              var name = ((found.getAttribute("name") || found.getAttribute("aria-label") || "") + "").replace(/\s+/g, " ").trim().slice(0, 120);
+              // A <button> inside a form without an explicit type submits it.
+              var submit = type === "submit" || type === "image" || (tag === "button" && !!found.form && type === "");
+              var auto = ((found.getAttribute("autocomplete") || "") + "").toLowerCase();
+              if (auto === "one-time-code" || auto === "current-password" || auto === "new-password") type = auto;
+              return {ok:true, role: roleOf(found), type: type, name: name, submit: submit};
+            },
             take: function(nonce){
               nodes = new Map();
               var out = [];
@@ -364,13 +416,20 @@ internal object BrowserDriverLogic {
               return {ok:true, doc:doc, nonce:nonce, url: String(location.href || ""), title: document.title || "", text: text, elements: out, truncated: list.length > out.length};
             },
             act: function(action, ref, text, direction){
+              function refused(el){
+                var type = ((el.getAttribute("type") || "") + "").toLowerCase();
+                var tag = (el.tagName || "").toLowerCase();
+                var auto = ((el.getAttribute("autocomplete") || "") + "").toLowerCase();
+                var implicit = tag === "button" && el.form && type === "";
+                return type === "password" || type === "file" || type === "hidden" || type === "submit" || type === "image" ||
+                  implicit || auto === "one-time-code" || auto === "current-password" || auto === "new-password";
+              }
               if (action !== "scroll"){
                 if (!ref) return {ok:false, error:"missing ref"};
                 var el = nodes.get(ref);
                 if (!el || !el.isConnected) return {ok:false, error:"ref expired"};
                 if (!box(el) || el.disabled) return {ok:false, error:"not actionable"};
-                var type = ((el.getAttribute("type") || "") + "").toLowerCase();
-                if (type === "password" || type === "file") return {ok:false, error:"refused field"};
+                if (refused(el)) return {ok:false, error:"refused field"};
               }
               if (action === "click"){
                 nodes.get(ref).click();
@@ -380,7 +439,7 @@ internal object BrowserDriverLogic {
                 var field = nodes.get(ref);
                 var tag = (field.tagName || "").toLowerCase();
                 if (tag !== "input" && tag !== "textarea") return {ok:false, error:"not editable"};
-                if (type === "password" || type === "file" || type === "hidden") return {ok:false, error:"refused field"};
+                if (refused(field)) return {ok:false, error:"refused field"};
                 var proto = tag === "textarea" ? window.HTMLTextAreaElement : window.HTMLInputElement;
                 var desc = proto && Object.getOwnPropertyDescriptor(proto.prototype, "value");
                 if (!desc || !desc.set) return {ok:false, error:"not editable"};
@@ -411,11 +470,35 @@ internal object BrowserDriverLogic {
 
     fun probeScript(): String = PROBE_TEMPLATE
 
+    fun geometryScript(): String = GEOMETRY_TEMPLATE
+
+    /**
+     * Restore script. Re-checks the witness and the restore-only CSS projection in the same evaluate, before the
+     * single instant scrollTo. A mismatch returns without any scroll (zero scrollTo). A match performs one instant
+     * scrollTo and returns the real readback. Numeric fields only. The returned documentId is returned to the Session
+     * for internal verification only; it is never sent to the agent.
+     */
+    fun scrollRestoreScript(documentId: String, x: Double, y: Double, targetHeightPx: Int, nativeWidthPx: Int): String =
+        """(function(){var witness=window.__acWitness&&window.__acWitness.documentId;if(witness!==${jsonQuote(documentId)})return {ok:false,reason:"witness"};var v=window.visualViewport;if(!v||!(v.width>0)||!(v.height>0))return {ok:false,reason:"no-visual"};var s=$nativeWidthPx/v.width;if(!isFinite(s)||!(s>0)||Math.abs(s*v.height-$targetHeightPx)>${WindowRestoreTolerance.PROJECTION_PX})return {ok:false,reason:"projection"};scrollTo({left:$x,top:$y,behavior:"instant"});return {ok:true,documentId:witness,scrollX:scrollX,scrollY:scrollY};})()"""
+
+    /**
+     * Reads one node already stored by the current document install. The ref is one JSON argument.
+     * Password, file and submit controls are reported so the caller can refuse them before acting.
+     */
+    fun fieldScript(documentNonce: String, ref: String): String =
+        FIELD_TEMPLATE.replace(ARG_TOKEN, "{doc:${jsonQuote(documentNonce)},ref:${jsonQuote(ref)}}")
+
     /**
      * [acceptedDocumentId] is null until the first ready probe. Loading is pending, not unknown.
      * A later probe must keep the same page-generated id. A changed id is rejected for good.
+     * [allowSameDocument] is only for a re-probe of the document that is already accepted.
      */
-    fun acceptProbe(acceptedDocumentId: String?, raw: String?, policyAllowsUrl: Boolean): ProbeAcceptance {
+    fun acceptProbe(
+        acceptedDocumentId: String?,
+        raw: String?,
+        policyAllowsUrl: Boolean,
+        allowSameDocument: Boolean = false,
+    ): ProbeAcceptance {
         val parsed = parseScriptResult(raw)
         if (parsed is ScriptResult.Failed) {
             return if (parsed.message == "loading") ProbeAcceptance.Pending else ProbeAcceptance.Reject(parsed.message)
@@ -425,6 +508,9 @@ internal object BrowserDriverLogic {
         val state = json["readyState"]?.jsonPrimitive?.contentOrNull
         if (id.isNullOrBlank() || !id.isHex()) return ProbeAcceptance.Reject("no witness")
         if (acceptedDocumentId != null && id != acceptedDocumentId) return ProbeAcceptance.Reject("document changed")
+        if (acceptedDocumentId != null && id == acceptedDocumentId && !allowSameDocument) {
+            return ProbeAcceptance.Reject("witness already used")
+        }
         if (state == "loading") return ProbeAcceptance.Pending
         if (state != "interactive" && state != "complete") return ProbeAcceptance.Reject("not ready")
         if (!policyAllowsUrl) return ProbeAcceptance.Reject("url refused")
@@ -457,6 +543,73 @@ internal object BrowserDriverLogic {
           return {ok:true, documentId: witness.documentId, readyState: state};
         })()
     """.trimIndent()
+
+    private val FIELD_TEMPLATE = """
+        (function(){
+          var arg = __AC_ARG__;
+          var slot = window["__acB_" + arg.doc];
+          if (!slot || slot.doc !== arg.doc || !slot.inspect) return {ok:false, error:"missing field"};
+          return slot.inspect(arg.ref);
+        })()
+    """.trimIndent()
+
+    private val GEOMETRY_TEMPLATE = """
+        (function(){
+          var witness = window.__acWitness;
+          var visual = window.visualViewport || {};
+          function finite(value){
+            return typeof value === "number" && isFinite(value) && value >= 0;
+          }
+          return {
+            ok: true,
+            documentId: witness && witness.documentId,
+            innerWidth: innerWidth,
+            innerHeight: innerHeight,
+            clientWidth: document.documentElement ? document.documentElement.clientWidth : 0,
+            clientHeight: document.documentElement ? document.documentElement.clientHeight : 0,
+            scrollX: scrollX,
+            scrollY: scrollY,
+            devicePixelRatio: devicePixelRatio,
+            visualWidth: visual.width,
+            visualHeight: visual.height,
+            offsetLeft: visual.offsetLeft,
+            offsetTop: visual.offsetTop,
+            pageLeft: visual.pageLeft,
+            pageTop: visual.pageTop,
+            visualScale: visual.scale
+          };
+        })()
+    """.trimIndent()
+
+    fun parseGeometry(raw: String?): GeometryProbe? {
+        val parsed = parseScriptResult(raw)
+        val json = (parsed as? ScriptResult.Ok)?.json ?: return null
+        fun positive(name: String): Float? = json[name]?.jsonPrimitive?.contentOrNull?.toFloatOrNull()?.takeIf { it.isFinite() && it > 0f }
+        fun nonNegative(name: String): Float? = json[name]?.jsonPrimitive?.contentOrNull?.toFloatOrNull()?.takeIf { it.isFinite() && it >= 0f }
+        val innerWidth = positive("innerWidth") ?: return null
+        val innerHeight = positive("innerHeight") ?: return null
+        val visualWidth = positive("visualWidth") ?: return null
+        val visualHeight = positive("visualHeight") ?: return null
+        val dpr = positive("devicePixelRatio") ?: return null
+        val scale = positive("visualScale") ?: return null
+        return GeometryProbe(
+            documentId = json["documentId"]?.jsonPrimitive?.contentOrNull,
+            innerWidth = innerWidth.toInt(),
+            innerHeight = innerHeight.toInt(),
+            clientWidth = (positive("clientWidth") ?: return null).toInt(),
+            clientHeight = (positive("clientHeight") ?: return null).toInt(),
+            scrollX = nonNegative("scrollX") ?: return null,
+            scrollY = nonNegative("scrollY") ?: return null,
+            devicePixelRatio = dpr,
+            visualWidth = visualWidth,
+            visualHeight = visualHeight,
+            offsetLeft = nonNegative("offsetLeft") ?: return null,
+            offsetTop = nonNegative("offsetTop") ?: return null,
+            pageLeft = nonNegative("pageLeft") ?: return null,
+            pageTop = nonNegative("pageTop") ?: return null,
+            visualScale = scale,
+        )
+    }
 
     private val READ_TEMPLATE = """
         (function(){
@@ -494,18 +647,51 @@ internal sealed class ScriptResult {
     data class Failed(val message: String) : ScriptResult()
 }
 
-internal sealed class ProbeAcceptance {
+data class ReadyProbeIdentity(val viewId: String, val ticket: Long, val sessionEpoch: Long)
+
+sealed class ProbeAcceptance {
     data class Accept(val documentId: String) : ProbeAcceptance()
     data object Pending : ProbeAcceptance()
     data class Reject(val message: String) : ProbeAcceptance()
 }
 
-/** Whether a main-frame request may start a new controlled GET. Anything else is unsupported. */
+/**
+ * Agent mode accepts only a controlled top-level GET. Manual mode lets a person navigate, submit
+ * a form, or follow a redirect. Both still go through the public-https and TLS checks elsewhere.
+ * A redirect or a non-GET in agent mode is unsupported and must not be saved by a later finish.
+ */
 internal object MainFrameGate {
     fun isPlainGet(method: String?, isRedirect: Boolean): Boolean =
         !isRedirect && method.equals("GET", ignoreCase = true)
 
-    fun isUnsupported(method: String?, isRedirect: Boolean): Boolean = !isPlainGet(method, isRedirect)
+    fun isUnsupported(method: String?, isRedirect: Boolean, manual: Boolean = false): Boolean =
+        if (manual) false else !isPlainGet(method, isRedirect)
+
+    /** True when this main-frame request may proceed under the current interaction mode. */
+    fun allows(method: String?, isRedirect: Boolean, manual: Boolean): Boolean =
+        !isUnsupported(method, isRedirect, manual)
+}
+
+/**
+ * Manual navigation must not be rewritten into a controlled GET. Agent mode still intercepts a
+ * plain GET so the presenter can load it once through the controlled session.
+ */
+internal data class MainFrameDecision(
+    val overrideLoading: Boolean,
+    val startControlledGet: Boolean,
+) {
+    companion object {
+        fun forRequest(method: String?, redirect: Boolean, manual: Boolean, allowed: Boolean): MainFrameDecision {
+            if (!allowed || !MainFrameGate.allows(method, redirect, manual)) {
+                return MainFrameDecision(overrideLoading = true, startControlledGet = false)
+            }
+            return if (manual) {
+                MainFrameDecision(overrideLoading = false, startControlledGet = false)
+            } else {
+                MainFrameDecision(overrideLoading = true, startControlledGet = true)
+            }
+        }
+    }
 }
 
 internal sealed class Observe {
@@ -631,4 +817,52 @@ internal object BrowserControlRules {
         committed && epoch == expectedEpoch
 
     fun takeOverEnabledWhileBusy(): Boolean = true
+}
+
+/**
+ * Manual login is a person using the page, not an agent grant.
+ *
+ * Takeover clears the grant before any input is accepted. Leaving manual mode does not restore
+ * that grant. A later grant is valid only against a document witness read after the human finished.
+ */
+internal class ManualTakeover {
+    var manual: Boolean = false
+        private set
+    var grant: String? = null
+        private set
+    var witness: String? = null
+        private set
+
+    fun grantAgent(sessionTab: String, documentWitness: String) {
+        manual = false
+        grant = sessionTab
+        witness = documentWitness
+    }
+
+    /** Revokes first. Returns false when there was nothing to revoke. */
+    /** Clears the grant before the method returns, so the following touch cannot ride an agent lease. */
+    fun beginHumanInput(): Boolean {
+        val had = grant != null
+        grant = null
+        witness = null
+        manual = true
+        return had
+    }
+
+    fun humanNavigating(): Boolean = manual && grant == null
+
+    /** Completing manual login does not regrant. The caller must read a new witness first. */
+    fun finishManual() {
+        manual = false
+        grant = null
+        witness = null
+    }
+
+    fun regrant(sessionTab: String, documentWitness: String): Boolean {
+        if (manual) return false
+        if (documentWitness.isBlank() || documentWitness == witness) return false
+        grant = sessionTab
+        witness = documentWitness
+        return true
+    }
 }

@@ -48,11 +48,13 @@ import io.andchamber.app.data.WebIsolationException
 import io.andchamber.app.data.WebIsolationFailure
 import io.andchamber.app.data.WebProfileBinding
 import io.andchamber.app.data.canonicalWebOrigin
+import io.andchamber.app.ui.browser.BrowserHostSurface
 import io.andchamber.app.runtime.WebSessionCookies
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -76,6 +78,21 @@ internal interface WebHost {
 internal fun originOf(url: String?): String {
     if (url.isNullOrEmpty()) return ""
     return canonicalWebOrigin(url) ?: ""
+}
+
+/**
+ * Chat session carried by the console URL's `session` query parameter (`/?session=<id>`), or null
+ * when [url] is not on [trustedOrigin] or has no non-blank value. The page writes it with
+ * history.pushState/replaceState on every chat switch; a draft chat has no parameter. Pure, so it
+ * is unit tested without a WebView.
+ */
+internal fun consoleSessionIdFromUrl(
+    url: String?,
+    trustedOrigin: String,
+): String? {
+    if (url.isNullOrEmpty() || trustedOrigin.isEmpty()) return null
+    if (canonicalWebOrigin(url) != trustedOrigin) return null
+    return url.toHttpUrlOrNull()?.queryParameter("session")?.takeIf { it.isNotBlank() }
 }
 
 /**
@@ -132,6 +149,57 @@ internal class ChamberWebView(
     var onPageLocation: ((String) -> Unit)? = null
 
     var host: WebHost? = null
+
+    /** Local trusted chat only. Target-site pages never receive this. */
+    var browserHost: BrowserHostSurface? = null
+
+    /**
+     * Chat session the trusted local console currently shows, from the page URL. Null means no
+     * session (e.g. a new-chat draft) or that none was reported yet.
+     */
+    var consoleSessionId by mutableStateOf<String?>(null)
+        private set
+
+    /** Called on the UI thread when [consoleSessionId] changes, including the first report. */
+    var onConsoleSessionChanged: ((String?) -> Unit)? = null
+
+    @Volatile private var consoleSessionReported = false
+    private var lastConsoleSession: String? = null
+    @Volatile var browserConsoleGeneration: Long = 0L
+    var composerMeasurement by mutableStateOf<ComposerMeasurement?>(null)
+        private set
+    var browserBindGeneration by androidx.compose.runtime.mutableLongStateOf(0L)
+        private set
+
+    fun acceptsBrowserHost(generation: Long): Boolean =
+        generation == browserConsoleGeneration && mainTrusted && !gatewayLoginMode && !destroyed && browserHost != null
+
+    /** Already-unbound calls do not move [browserBindGeneration], so a refuse path cannot loop. */
+    fun unbindBrowserHost() {
+        composerMeasurement = null
+        if (browserHost == null && browserConsoleGeneration != browserBindGeneration) return
+        browserHost = null
+        if (browserConsoleGeneration == browserBindGeneration) browserConsoleGeneration += 1
+    }
+
+    /** Trusted local document committed. Only this moves the rebind key. */
+    fun noteTrustedDocument() {
+        if (!mainTrusted || gatewayLoginMode || destroyed) return
+        if (origin.isEmpty()) return
+        composerMeasurement = null
+        browserConsoleGeneration += 1
+        browserBindGeneration = browserConsoleGeneration
+    }
+
+    var onConsoleDocumentInvalidated: (() -> Unit)? = null
+
+    /** A native layout change needs a fresh report even when CSS dimensions happened to stay equal. */
+    fun requestComposerMeasurement() {
+        composerMeasurement = null
+        if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID ||
+            !acceptsBrowserHost(browserConsoleGeneration)) return
+        view?.evaluateJavascript("window.dispatchEvent(new Event('andchamber-composer-measure'));", null)
+    }
 
     /** Cookie capability of this WebView's profile. Set only after a successful bind; null otherwise. */
     var sessionCookies: WebSessionCookies? = null
@@ -311,6 +379,7 @@ internal class ChamberWebView(
     }
 
     private fun rotateToken() {
+        composerMeasurement = null
         bridgeToken = UUID.randomUUID().toString()
     }
 
@@ -360,8 +429,10 @@ internal class ChamberWebView(
         gatewayHandoff.cancel(gatewayHandoff.ticket)
         onGatewayCompleted = null
         onPageLocation = null
+        onConsoleSessionChanged = null
         destroyed = true
         mainTrusted = false
+        composerMeasurement = null
         host = null
         val old = view ?: return
         (old.parent as? ViewGroup)?.removeView(old)
@@ -447,6 +518,22 @@ internal class ChamberWebView(
         }
     }
 
+    /**
+     * Reports the chat session of a trusted local console location. Repeats are dropped, so a
+     * history entry that only changes other parameters does not re-notify the presenter.
+     */
+    private fun reportConsoleSession(url: String?) {
+        if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID) return
+        if (!mainTrusted || gatewayLoginMode || gatewayHandoff.blocksDocuments) return
+        if (origin.isEmpty() || originOf(url) != origin) return
+        val session = consoleSessionIdFromUrl(url, origin)
+        if (consoleSessionReported && session == lastConsoleSession) return
+        consoleSessionReported = true
+        lastConsoleSession = session
+        consoleSessionId = session
+        onConsoleSessionChanged?.invoke(session)
+    }
+
     private inner class Client : WebViewClient() {
         override fun shouldOverrideUrlLoading(
             view: WebView,
@@ -483,6 +570,7 @@ internal class ChamberWebView(
             favicon: Bitmap?,
         ) {
             if (!isCurrent(view)) return
+            composerMeasurement = null
             if (gatewayHandoff.blocksDocuments) {
                 mainTrusted = false
                 view.removeJavascriptInterface(BRIDGE_NAME)
@@ -496,6 +584,8 @@ internal class ChamberWebView(
             // Every main-frame document starts with a fresh token and no bridge unless it is ours.
             rotateToken()
             mainTrusted = false
+            onConsoleDocumentInvalidated?.invoke()
+            unbindBrowserHost()
             if (url.isNullOrEmpty() || url == BLANK) {
                 view.removeJavascriptInterface(BRIDGE_NAME)
                 return
@@ -541,6 +631,12 @@ internal class ChamberWebView(
             if (gatewayHandoff.blocksDocuments || isHandoffBlank(url)) return
             if (isCurrent(view)) {
                 committed = true
+                val trusted = origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode
+                if (trusted) {
+                    noteTrustedDocument()
+                    // A newly committed document may already carry a session (reload, deep link).
+                    reportConsoleSession(url)
+                }
             }
         }
 
@@ -558,9 +654,11 @@ internal class ChamberWebView(
             if (isHandoffBlank(url)) return
             progress = 100
             committed = true
+            if (origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode) noteTrustedDocument()
             val trusted = origin.isNotEmpty() && originOf(url) == origin
             mainTrusted = trusted
             if (!trusted) return
+            reportConsoleSession(url)
             if (!url.isNullOrEmpty() && url != BLANK) currentUrl = url
             if (clearHistoryAfterLoad) {
                 // A new session must not let Back walk into pages of the previous one.
@@ -582,6 +680,10 @@ internal class ChamberWebView(
             mainFrameErrors.started(view, generation, url, view.url)
             currentUrl = url
             reportPageLocation(url)
+            // Chat switches are pushState/replaceState navigations: the session rides in the query.
+            // Some WebView versions also report subframe history; only the main frame's own URL is
+            // allowed to change (or clear) the console session.
+            if (url == view.url) reportConsoleSession(url)
         }
 
         override fun onReceivedError(
@@ -888,6 +990,31 @@ internal class ChamberWebView(
         // UI thread before any state changes.
         private fun trusted(token: String?): Boolean = mainTrusted && !destroyed && token == bridgeToken
 
+        /** Read-only layout data; fixed arity prevents oversized text/JSON payloads. */
+        @JavascriptInterface
+        fun composerBounds(
+            token: String?, top: Double, bottom: Double,
+            viewportWidth: Double, viewportHeight: Double, visible: Boolean,
+        ) {
+            if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID ||
+                !trusted(token) || gatewayLoginMode) return
+            val metrics = ComposerMetrics(top, bottom, viewportWidth, viewportHeight, visible)
+            if (!metrics.valid()) return
+            val console = browserConsoleGeneration
+            val nativeGeneration = generation
+            main.post {
+                // Token belongs to the document, generation to the console binding. Recheck both
+                // after the UI hop; do not query WebView APIs on the bridge thread.
+                val current = view ?: return@post
+                if (!trusted(token) || !acceptsBrowserHost(console) || gatewayHandoff.blocksDocuments ||
+                    !matchesComposerDocument(console, browserConsoleGeneration, nativeGeneration, generation) ||
+                    originOf(current.url) != origin) return@post
+                composerMeasurement = if (visible) ComposerMeasurement(
+                    metrics, console, nativeGeneration, current.width, current.height,
+                ) else null
+            }
+        }
+
         @JavascriptInterface
         fun saveFile(
             token: String?,
@@ -926,6 +1053,7 @@ internal class ChamberWebView(
           var bridge = window.$BRIDGE_NAME;
           if (!bridge) return;
           var token = ${JSONObject.quote(bridgeToken)};
+          ${if (targetId == io.andchamber.app.runtime.ServerTarget.LOCAL_ID && !gatewayLoginMode) composerBoundsObserverScript else ""}
           function save(blob, name) {
             var reader = new FileReader();
             reader.onloadend = function () {

@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.net.Uri
 import android.net.http.SslError
+import android.view.MotionEvent
 import android.view.PixelCopy
 import android.view.ViewGroup
 import android.webkit.SslErrorHandler
@@ -24,6 +25,8 @@ import androidx.compose.runtime.setValue
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import io.andchamber.app.browser.BrowserUrlPolicy
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import io.andchamber.app.ui.findActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -42,6 +45,7 @@ import kotlin.coroutines.resume
 internal class BrowserSession private constructor(
     val view: WebView,
     private val policyProvider: () -> BrowserUrlPolicy,
+    private val copyBridge: PixelCopyBridge = PixelCopyBridge(),
 ) {
     var progress by mutableIntStateOf(0)
         private set
@@ -69,7 +73,7 @@ internal class BrowserSession private constructor(
     var ticket by mutableLongStateOf(0L)
         private set
     var acceptedDocumentId by mutableStateOf<String?>(null)
-        private set
+        internal set
     var mainStarts by mutableIntStateOf(0)
         private set
     var unknownNavigation by mutableStateOf(false)
@@ -84,8 +88,17 @@ internal class BrowserSession private constructor(
     private var destroyed = false
     var onFatal: (() -> Unit)? = null
     var onMainGet: ((String) -> Unit)? = null
+    var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
+
+    /**
+     * Human interaction mode. When true, a person may start a normal top-level navigation, submit
+     * a form, or follow a redirect, still under the public-https and TLS policy. Agent mode keeps
+     * only controlled GETs. This flag is not an agent grant.
+     */
+    @Volatile
+    var manualNavigation: Boolean = false
 
     fun epoch(): Long = epoch
 
@@ -120,10 +133,34 @@ internal class BrowserSession private constructor(
 
     fun beginLoad(): Long = beginControlledGet()
 
+    fun beginManualDocument(): Long {
+        loadSeq += 1
+        ticket = loadSeq
+        acceptedDocumentId = null
+        committed = false
+        // The onPageStarted caller records this document's first start through noteMainStart().
+        mainStarts = 0
+        unknownNavigation = false
+        clearControlledGet()
+        beginDocument()
+        return ticket
+    }
+
+    fun readyIdentity(): ReadyProbeIdentity = ReadyProbeIdentity(viewId, ticket, epoch)
+
+    fun matchesReady(identity: ReadyProbeIdentity): Boolean =
+        !destroyed && !fatal && !unknownNavigation && !automationBlocked &&
+            identity.viewId == viewId && identity.ticket == ticket && identity.sessionEpoch == epoch
+
     fun owns(view: String, openTicket: Long): Boolean =
         !destroyed && !fatal && view == viewId && openTicket == ticket && !unknownNavigation
 
-    fun markUnknownNavigation() {
+    fun markUnknownNavigation(source: String = "unspecified") {
+        android.util.Log.i(
+            "AndChamberProvider",
+            "unknown source=$source ticket=$ticket epoch=$epoch starts=$mainStarts thread=${if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) "Main" else "IO"}",
+        )
+        clearControlledGet()
         unknownNavigation = true
         committed = false
         installedNonce = null
@@ -133,19 +170,20 @@ internal class BrowserSession private constructor(
         if (destroyed) return false
         mainStarts += 1
         if (mainStarts == 1 && ticket > 0) return true
-        markUnknownNavigation()
+        markUnknownNavigation("page-started-extra")
         return false
     }
 
-    fun acceptReady(openTicket: Long, witnessedId: String) {
-        if (!owns(viewId, openTicket)) return
+    fun acceptReady(openTicket: Long, witnessedId: String): Boolean {
+        if (!owns(viewId, openTicket) || unknownNavigation || fatal || automationBlocked) return false
         if (acceptedDocumentId == null) acceptedDocumentId = witnessedId
         if (acceptedDocumentId != witnessedId) {
-            markUnknownNavigation()
-            return
+            markUnknownNavigation("ready-witness-mismatch")
+            return false
         }
         committed = true
         progress = 100
+        return true
     }
 
     /**
@@ -188,10 +226,74 @@ internal class BrowserSession private constructor(
 
     fun requestProbe() {
         if (destroyed || fatal || unknownNavigation) return
-        onProbe?.invoke(viewId, ticket)
+        val identity = readyIdentity()
+        if (onReadyProbe != null) onReadyProbe?.invoke(identity) else onProbe?.invoke(viewId, ticket)
+    }
+
+    fun requestGeometry(identity: ProbeIdentity) {
+        if (destroyed || fatal || unknownNavigation || acceptedDocumentId == null) return
+        val serial = identity.probeSerial
+        val sessionEpoch = epoch
+        geometrySerial = serial
+        val before = nativeFrame()
+        view.evaluateJavascript(BrowserDriverLogic.geometryScript()) { raw ->
+            val after = nativeFrame()
+            if (serial != geometrySerial || epoch != sessionEpoch || before != after || acceptedDocumentId == null) return@evaluateJavascript
+            val probe = BrowserDriverLogic.parseGeometry(raw) ?: return@evaluateJavascript
+            if (probe.documentId != acceptedDocumentId) return@evaluateJavascript
+            val sample = GeometrySample(identity.viewId, identity.tabId, identity.ticket, identity.documentId, identity.generation, serial, before, probe)
+            latestGeometry = sample
+            onGeometry?.invoke(sample)
+        }
+    }
+
+    fun currentFrame(): NativeFrame = nativeFrame()
+
+    private fun nativeFrame(): NativeFrame {
+        val location = IntArray(2)
+        view.getLocationInWindow(location)
+        val visible = android.graphics.Rect()
+        view.getGlobalVisibleRect(visible)
+        return NativeFrame(view.width, view.height, location[0], location[1], visible.left, visible.top, visible.right, visible.bottom)
     }
 
     var onProbe: ((String, Long) -> Unit)? = null
+    var onReadyProbe: ((ReadyProbeIdentity) -> Unit)? = null
+    var onGeometry: ((GeometrySample) -> Unit)? = null
+    var onGeometryRequested: (() -> Unit)? = null
+    var latestGeometry: GeometrySample? = null
+        private set
+
+    fun clearGeometryCache() { latestGeometry = null }
+
+    suspend fun readScroll(): ScrollSample? {
+        val epochBefore = epoch
+        val witnessBefore = acceptedDocumentId
+        if (witnessBefore.isNullOrBlank()) return ScrollSample.Unavailable(ScrollNotSavedReason.NO_WITNESS)
+        val raw = eval(BrowserDriverLogic.geometryScript(), epochBefore) ?: return ScrollSample.Unavailable(ScrollNotSavedReason.TIMEOUT)
+        if (epoch != epochBefore || acceptedDocumentId != witnessBefore) return ScrollSample.Unavailable(ScrollNotSavedReason.CAPTURE_EPOCH_CHANGED)
+        val probe = BrowserDriverLogic.parseGeometry(raw) ?: return ScrollSample.Unavailable(ScrollNotSavedReason.NO_WITNESS)
+        if (probe.documentId != witnessBefore) return ScrollSample.Unavailable(ScrollNotSavedReason.NO_WITNESS)
+        return ScrollSample.Captured(ScrollAnchor(probe.scrollX.toDouble(), probe.scrollY.toDouble()))
+    }
+
+    /**
+     * One restore dispatch. [targetHeightPx] and [nativeWidthPx] are the restore target's projection inputs, checked
+     * inside the same evaluate before the single scrollTo. A refusal returns null and scrolls nothing.
+     */
+    suspend fun restoreScroll(x: Double, y: Double, targetHeightPx: Int, nativeWidthPx: Int): ScrollAnchor? {
+        val witness = acceptedDocumentId ?: return null
+        val epochBefore = epoch
+        val raw = eval(BrowserDriverLogic.scrollRestoreScript(witness, x, y, targetHeightPx, nativeWidthPx), epochBefore) ?: return null
+        if (epoch != epochBefore || acceptedDocumentId != witness) return null
+        val parsed = BrowserDriverLogic.parseScriptResult(raw) as? ScriptResult.Ok ?: return null
+        val returned = parsed.json["documentId"]?.jsonPrimitive?.contentOrNull
+        if (returned != witness) return null
+        val actualX = parsed.json["scrollX"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return null
+        val actualY = parsed.json["scrollY"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return null
+        return ScrollAnchor(actualX, actualY)
+    }
+    private var geometrySerial = 0L
 
     fun fail(message: String) {
         if (destroyed) return
@@ -214,6 +316,9 @@ internal class BrowserSession private constructor(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        // Destroy always closes native input admission, even when no press was active.
+        inputGateClosed = true
+        (view as? FencedWebView)?.gate?.close()
         epoch += 1
         installedNonce = null
         committed = false
@@ -223,6 +328,222 @@ internal class BrowserSession private constructor(
         view.webViewClient = WebViewClient()
         view.destroy()
     }
+
+    /**
+     * Desktop layout is a real CSS viewport, not only a UA string. The document-start script sets
+     * a 1024 CSS px viewport and the WebView scale is reset, so `innerWidth` can match that width.
+     * A POST page is not reloaded by this call.
+     */
+    fun configureDesktop(enabled: Boolean) {
+        desktopConfigured = enabled
+        view.settings.userAgentString = if (enabled) BrowserDriverLogic.DESKTOP_UA else null
+        view.settings.useWideViewPort = true
+        view.settings.loadWithOverviewMode = true
+        view.setInitialScale(0)
+        if (enabled) installDesktopViewport() else removeDesktopViewport()
+    }
+
+    fun setDesktopMode(enabled: Boolean) = configureDesktop(enabled)
+
+    private var desktopScript: androidx.webkit.ScriptHandler? = null
+
+    private fun installDesktopViewport() {
+        removeDesktopViewport()
+        if (!androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        desktopScript = runCatching {
+            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view, BrowserDriverLogic.desktopViewportScript(), setOf("*"))
+        }.getOrNull()
+    }
+
+    private fun removeDesktopViewport() {
+        runCatching { desktopScript?.remove() }
+        desktopScript = null
+    }
+
+
+    /**
+     * True while this session dispatches its own mouse events. The page's touch listener must let those
+     * through to the WebView instead of reading them as a new finger gesture.
+     */
+    var injectingMouse = false
+        private set
+    var controlledGet = false
+        private set
+    var controlledGetUrl: String? = null
+        private set
+    var controlledGetTicket: Long = 0L
+        private set
+    var controlledGetDocument: String? = null
+        private set
+    var desktopConfigured = false
+        private set
+
+    /**
+     * Delivers one planned mouse event the way a physical mouse reaches a WebView. Buttons are
+     * ACTION_BUTTON_PRESS/RELEASE through the generic-motion path with the primary action button set
+     * (Chromium ignores a mouse ACTION_DOWN without them); wheel is ACTION_SCROLL with AXIS_VSCROLL.
+     *
+     * Moves are split by whether a button is held. A plain hover stays an ACTION_HOVER_MOVE on the
+     * generic-motion path. A drag (button held) is an ACTION_MOVE with SOURCE_MOUSE/TOOL_TYPE_MOUSE
+     * and the held buttonState, sent through dispatchTouchEvent: Chromium's EventForwarder then
+     * treats it as a mouse move with a button and routes it to native onMouseEvent, not as a touch.
+     * The generic hover path cannot carry a drag under accessibility because Chromium hands every
+     * HOVER_* event to accessibility, which consumes it, so the page never sees pointermove. A pure
+     * hover is left on that path on purpose: a buttonless ACTION_MOVE would be read as a touchpad
+     * scroll or a touch. Verified on the emulator WebView: the page receives
+     * pointerdown/mousedown/pointerup/mouseup/click with pointerType "mouse".
+     */
+    private var pressState: NativeMousePressState? = null
+    private var inputGateClosed = false
+
+    fun mousePressActive(): Boolean = pressState?.activePress == true
+
+    var onMouseRetirement: ((String) -> Unit)? = null
+
+    /**
+     * Idempotent: the first unavoidable interruption closes input and calls back once. Repeats (the
+     * presenter's own retire, the callback's re-entry) return the recorded outcome without a callback.
+     */
+    fun retireMouse(reason: String, unavoidable: Boolean): MousePressOutcome {
+        val state = pressState ?: return MousePressOutcome.NoActivePress
+        if (state.retired) return state.outcome
+        val outcome = state.interrupt(reason, unavoidable)
+        if (outcome is MousePressOutcome.RetireRequired) closeInput(outcome)
+        return outcome
+    }
+
+    fun admitNativeInput(): Boolean = !destroyed && !inputGateClosed && pressState?.retired != true
+
+    fun injectMouse(plan: MouseEventPlan): Boolean {
+        if (!admitNativeInput()) return false
+        val now = android.os.SystemClock.uptimeMillis()
+        val props = arrayOf(MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_MOUSE })
+        fun coords(scroll: Float = 0f) = arrayOf(MotionEvent.PointerCoords().apply {
+            x = plan.viewX
+            y = plan.viewY
+            pressure = if (mouseButtons != 0) 1f else 0f
+            size = 1f
+            if (scroll != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, -scroll)
+        })
+        fun obtain(action: Int, buttons: Int, scroll: Float = 0f): MotionEvent =
+            MotionEvent.obtain(now, now, action, 1, props, coords(scroll), 0, buttons, 1f, 1f, 0, 0, android.view.InputDevice.SOURCE_MOUSE, 0)
+        val primary = MotionEvent.BUTTON_PRIMARY
+        val route = mouseRoute(plan.action, mouseButtons)
+        val events = when (plan.action) {
+            MouseAction.HOVER -> listOf(obtain(MotionEvent.ACTION_HOVER_MOVE, mouseButtons))
+            MouseAction.DRAG -> listOf(
+                if (route == MouseRoute.TOUCH_MOVE_WITH_BUTTON) obtain(MotionEvent.ACTION_MOVE, mouseButtons)
+                else obtain(MotionEvent.ACTION_HOVER_MOVE, mouseButtons),
+            )
+            MouseAction.PRESS -> {
+                val identity = pressIdentity() ?: return false
+                val current = pressState
+                if (current?.retired == true) return false
+                if (current == null || (!current.activePress && current.identity != identity)) {
+                    pressState = NativeMousePressState(identity)
+                }
+                listOf(obtain(MotionEvent.ACTION_BUTTON_PRESS, primary))
+            }
+            MouseAction.RELEASE -> listOf(obtain(MotionEvent.ACTION_BUTTON_RELEASE, 0))
+            MouseAction.SCROLL -> listOf(obtain(MotionEvent.ACTION_SCROLL, mouseButtons, plan.scrollDelta))
+            MouseAction.CANCEL -> {
+                val outcome = retireMouse("cancel", unavoidable = pressState?.activePress == true)
+                if (outcome is MousePressOutcome.RetireRequired) return false
+                emptyList()
+            }
+        }
+        injectingMouse = true
+        try {
+            for (event in events) {
+                if (plan.action == MouseAction.PRESS || plan.action == MouseAction.RELEASE) {
+                    val applied = mouseSupport.applyActionButton(event, primary)
+                    val constructed = event.action == if (plan.action == MouseAction.PRESS) MotionEvent.ACTION_BUTTON_PRESS else MotionEvent.ACTION_BUTTON_RELEASE
+                    if (applied !is MouseSupport.Supported || event.actionButton != primary || !constructed) {
+                        event.recycle()
+                        if (pressState?.activePress == true) retireMouse("apply-failed", unavoidable = true)
+                        return false
+                    }
+                    if (plan.action == MouseAction.PRESS && pressState?.beforePressDispatch(true, true) != true) {
+                        event.recycle()
+                        return false
+                    }
+                    mouseButtons = if (plan.action == MouseAction.PRESS) primary else 0
+                }
+                if (!admitNativeInput()) {
+                    event.recycle()
+                    return false
+                }
+                val dispatched = try {
+                    if (route == MouseRoute.TOUCH_MOVE_WITH_BUTTON) view.dispatchTouchEvent(event)
+                    else view.dispatchGenericMotionEvent(event)
+                } catch (_: RuntimeException) {
+                    event.recycle()
+                    retireMouse("dispatch-failed", unavoidable = true)
+                    return false
+                }
+                dispatched.hashCode()
+                if (plan.action == MouseAction.RELEASE) pressState?.releaseDelivered()
+                event.recycle()
+            }
+        } finally {
+            injectingMouse = false
+        }
+        return true
+    }
+
+    fun lastMouseRetirement(): String? = pendingRetirement?.reason
+
+    private var pendingRetirement: MouseDelivery.RetireRequired? = null
+
+    private fun closeInput(outcome: MousePressOutcome.RetireRequired) {
+        inputGateClosed = true
+        (view as? FencedWebView)?.gate?.close()
+        pendingRetirement = MouseDelivery.RetireRequired(outcome.originalViewIdentity, outcome.reason)
+        onMouseRetirement?.invoke(outcome.reason)
+    }
+
+    private fun retireDelivery(reason: String): MouseDelivery.RetireRequired {
+        val outcome = retireMouse(reason, unavoidable = true)
+        val required = outcome as? MousePressOutcome.RetireRequired
+            ?: MousePressOutcome.RetireRequired(pressState?.identity ?: MouseDocumentIdentity(viewId, ticket, acceptedDocumentId.orEmpty()), reason, false)
+        return MouseDelivery.RetireRequired(required.originalViewIdentity, required.reason)
+    }
+
+    private fun pressIdentity(): MouseDocumentIdentity? {
+        val witness = acceptedDocumentId?.takeIf { it.isNotBlank() } ?: return null
+        if (ticket <= 0L || viewId.isBlank()) return null
+        return MouseDocumentIdentity(viewId, ticket, witness)
+    }
+
+    private val mouseSupport = NativeMouseSupport()
+
+    /** Buttons held by the injected mouse, carried on every move so a held move is a drag. */
+    private var mouseButtons = 0
+
+    fun clearMouseButtons() {
+        if (pressState?.activePress == true) retireMouse("clear-buttons", unavoidable = true)
+    }
+
+    fun markControlledGet(url: String? = displayUrl) {
+        controlledGet = url != null
+        controlledGetUrl = url
+        controlledGetTicket = ticket
+        controlledGetDocument = null
+    }
+
+    fun noteControlledDocument(documentId: String?) {
+        if (controlledGet && documentId != null && controlledGetDocument == null) controlledGetDocument = documentId
+    }
+
+    fun clearControlledGet() {
+        controlledGet = false
+        controlledGetUrl = null
+        controlledGetTicket = 0L
+        controlledGetDocument = null
+    }
+
+    fun applyActionButton(event: MotionEvent, button: Int): MouseSupport =
+        NativeMouseSupport().applyActionButton(event, button)
 
     fun load(url: String, requestEpoch: Long) {
         if (destroyed || requestEpoch != epoch) return
@@ -251,51 +572,56 @@ internal class BrowserSession private constructor(
      * fallback can miss GPU layers.
      */
     suspend fun captureViewport(): CaptureImage? {
-        if (destroyed) return null
-        if (view.width <= 1 || view.height <= 1) return null
-        if (!view.isAttachedToWindow || !view.isShown) return null
-        val requestEpoch = epoch
-        val bitmap = withContext(Dispatchers.Main.immediate) {
-            if (requestEpoch != epoch) return@withContext null
-            pixelCopy() ?: softwareDraw()
-        } ?: return null
-        if (requestEpoch != epoch) {
-            bitmap.recycle()
-            return null
-        }
+        if (destroyed || view.width <= 1 || view.height <= 1 || !view.isAttachedToWindow || !view.isShown) return null
+        val attempt = guardedCapture(
+            sample = { freshCaptureStamp() },
+            current = { captureObservation() },
+            copy = { stamp -> copyForStamp(stamp) },
+        ) ?: return null
+        val encoded = android.util.Base64.encodeToString(attempt.image.payload, android.util.Base64.NO_WRAP)
+        if (encoded.length > BrowserDriverLogic.MAX_CAPTURE_CHARS) return null
+        return CaptureImage(encoded, attempt.image.width, attempt.image.height, attempt.stamp.probe, attempt.stamp)
+    }
+
+    private suspend fun freshCaptureStamp(): CaptureStamp? {
+        val before = captureObservation()
+        val raw = eval(BrowserDriverLogic.geometryScript(), before.refEpoch) ?: return null
+        val after = captureObservation()
+        if (before != after) return null
+        val probe = BrowserDriverLogic.parseGeometry(raw) ?: return null
+        if (probe.documentId != acceptedDocumentId) return null
+        return CaptureStamp(viewId, acceptedDocumentId, ticket, epoch, currentFrame(), probe)
+    }
+
+    private fun captureObservation() = CaptureObservation(viewId, acceptedDocumentId, ticket, epoch, currentFrame())
+
+    private suspend fun copyForStamp(stamp: CaptureStamp): CaptureBytes? {
+        if (captureObservation() != observationOf(stamp)) return null
+        val bitmap = pixelCopy(stamp) ?: softwareDraw(stamp) ?: return null
         return try {
-            val bytes = ByteArrayOutputStream()
-            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes)) return null
-            val encoded = android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
-            if (encoded.length > BrowserDriverLogic.MAX_CAPTURE_CHARS) null else CaptureImage(encoded)
+            if (captureObservation() != observationOf(stamp)) null else encode(bitmap)
         } finally {
-            bitmap.recycle()
+            if (!bitmap.isRecycled) bitmap.recycle()
         }
     }
 
-    private suspend fun pixelCopy(): Bitmap? {
+    private fun observationOf(stamp: CaptureStamp) = CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.frame)
+
+    private fun encode(bitmap: Bitmap): CaptureBytes? {
+        val bytes = ByteArrayOutputStream()
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes)) return null
+        return CaptureBytes(bytes.toByteArray(), bitmap.width, bitmap.height)
+    }
+
+    private suspend fun pixelCopy(stamp: CaptureStamp): Bitmap? {
         if (!view.isAttachedToWindow || view.width <= 1 || view.height <= 1) return null
         val handler = view.handler ?: return null
-        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-        val ok = suspendCancellableCoroutine { continuation ->
-            val listener = PixelCopy.OnPixelCopyFinishedListener { result ->
-                if (continuation.isActive) continuation.resume(result == PixelCopy.SUCCESS)
-            }
-            try {
-                val window = view.context.findActivity()?.window
-                val rect = webViewRectInWindow()
-                if (window == null || rect == null) {
-                    continuation.resume(false)
-                } else {
-                    PixelCopy.request(window, rect, bitmap, listener, handler)
-                }
-            } catch (_: Exception) {
-                if (continuation.isActive) continuation.resume(false)
-            }
-        }
-        return if (ok) bitmap else {
-            bitmap.recycle()
-            null
+        val window = view.context.findActivity()?.window ?: return null
+        val rect = webViewRectInWindow() ?: return null
+        if (view.rootView !== window.decorView.rootView) return null
+        return copyBridge.copy(window, rect, stamp.frame.width, stamp.frame.height, handler) {
+            view.isAttachedToWindow && view.isShown && captureObservation() == observationOf(stamp) &&
+                view.rootView === window.decorView.rootView
         }
     }
 
@@ -314,7 +640,8 @@ internal class BrowserSession private constructor(
      * Software fallback. Hardware-accelerated WebView contents are often blank here. Callers must
      * not treat a successful encode as proof the pixels match the screen.
      */
-    private fun softwareDraw(): Bitmap? {
+    private fun softwareDraw(stamp: CaptureStamp): Bitmap? {
+        if (captureObservation() != observationOf(stamp)) return null
         if (view.width <= 1 || view.height <= 1) return null
         return try {
             val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
@@ -324,6 +651,18 @@ internal class BrowserSession private constructor(
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun logNav(source: String, method: String?, redirect: Boolean, manual: Boolean, captured: Long = ticket) {
+        val normalized = when {
+            method.equals("GET", true) -> "GET"
+            method.equals("POST", true) -> "POST"
+            else -> "OTHER"
+        }
+        android.util.Log.i(
+            "AndChamberProvider",
+            "nav source=$source method=$normalized redirect=$redirect manual=$manual captured=$captured current=$ticket epoch=$epoch starts=$mainStarts thread=${if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) "Main" else "IO"}",
+        )
     }
 
     private inner class Client : WebViewClient() {
@@ -340,18 +679,29 @@ internal class BrowserSession private constructor(
                 )
                 return true
             }
-            if (MainFrameGate.isPlainGet(request.method, request.isRedirect)) {
-                onMainGet?.invoke(raw)
-            } else {
+            val manualAtDecision = manualNavigation
+            if (!MainFrameGate.allows(request.method, request.isRedirect, manualAtDecision)) {
+                logNav("override-unsupported", request.method, request.isRedirect, manualAtDecision)
                 onUnknown?.invoke()
-                markUnknownNavigation()
+                markUnknownNavigation("override-unsupported")
+                return true
             }
+            // Manual mode is a person navigating. Do not rewrite the request or start a controlled GET.
+            if (manualNavigation) return false
+            onMainGet?.invoke(raw)
             return true
         }
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-            if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect)) {
-                view.post { markUnknownNavigation(); onUnknown?.invoke() }
+            val manualAtDecision = manualNavigation
+            if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect, manualAtDecision)) {
+                val captured = ticket
+                logNav("intercept-unsupported", request.method, request.isRedirect, manualAtDecision)
+                view.post {
+                    logNav("intercept-posted", request.method, request.isRedirect, manualNavigation, captured)
+                    markUnknownNavigation("intercept-unsupported")
+                    onUnknown?.invoke()
+                }
                 return emptyBlocked()
             }
             if (request.isForMainFrame) return null
@@ -365,6 +715,16 @@ internal class BrowserSession private constructor(
 
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             if (destroyed) return
+            // A new document under a pressed mouse is an unavoidable interruption. Retire before the
+            // ticket or witness moves, so the old press cannot be completed on the new document.
+            if (pressState?.activePress == true) {
+                retireMouse("document-start", unavoidable = true)
+                return
+            }
+            if (manualNavigation) {
+                beginManualDocument()
+                onManualDocument?.invoke()
+            }
             if (!noteMainStart()) {
                 onUnknown?.invoke()
                 return
@@ -373,10 +733,15 @@ internal class BrowserSession private constructor(
             applyProgress(5)
         }
 
+        override fun onScaleChanged(view: WebView, oldScale: Float, newScale: Float) {
+            if (oldScale != newScale) onGeometryRequested?.invoke()
+        }
+
         override fun onPageCommitVisible(view: WebView, url: String?) {
             if (destroyed || unknownNavigation) return
             noteMainFrame(url)
             requestProbe()
+            onGeometryRequested?.invoke()
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
@@ -470,10 +835,16 @@ internal class BrowserSession private constructor(
         /**
          * Main thread. Returns null when the profile cannot be bound. The caller must not load anything.
          */
-        fun tryCreate(context: Context, policyProvider: () -> BrowserUrlPolicy): BrowserSession? {
+        internal fun tryCreate(context: Context, policyProvider: () -> BrowserUrlPolicy, bridge: PixelCopyBridge): BrowserSession? =
+            create(context, policyProvider, bridge)
+
+        fun tryCreate(context: Context, policyProvider: () -> BrowserUrlPolicy): BrowserSession? =
+            create(context, policyProvider, PixelCopyBridge())
+
+        private fun create(context: Context, policyProvider: () -> BrowserUrlPolicy, bridge: PixelCopyBridge): BrowserSession? {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) return null
             val webView = try {
-                WebView(context)
+                FencedWebView(context)
             } catch (_: RuntimeException) {
                 return null
             }
@@ -488,7 +859,7 @@ internal class BrowserSession private constructor(
                 bound.cookieManager.setAcceptCookie(true)
                 bound.cookieManager.setAcceptThirdPartyCookies(webView, false)
                 harden(webView)
-                val session = BrowserSession(webView, policyProvider)
+                val session = BrowserSession(webView, policyProvider, bridge)
                 webView.tag = session
                 webView.webViewClient = session.Client()
                 webView.webChromeClient = Chrome()
@@ -504,7 +875,10 @@ internal class BrowserSession private constructor(
         private fun harden(webView: WebView) {
             webView.settings.apply {
                 javaScriptEnabled = true
-                domStorageEnabled = false
+                // Site storage (localStorage/sessionStorage) persists per instance like Cookies, as
+                // the approved plan requires. It lives in this WebView's own named profile, so the
+                // console and other instances stay isolated. Legacy WebSQL stays off.
+                domStorageEnabled = true
                 @Suppress("DEPRECATION")
                 databaseEnabled = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -520,8 +894,8 @@ internal class BrowserSession private constructor(
                 mediaPlaybackRequiresUserGesture = true
                 useWideViewPort = true
                 loadWithOverviewMode = true
-                setSupportZoom(false)
-                builtInZoomControls = false
+                setSupportZoom(true)
+                builtInZoomControls = true
                 displayZoomControls = false
                 safeBrowsingEnabled = true
             }
@@ -535,4 +909,82 @@ internal class BrowserSession private constructor(
     }
 }
 
-internal data class CaptureImage(val base64: String)
+internal class NativeInputGate {
+    var closed: Boolean = false
+        private set
+    fun close() { closed = true }
+    fun admit(): Boolean = !closed
+}
+
+internal class FencedWebView(context: Context) : WebView(context) {
+    val gate = NativeInputGate()
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean = if (gate.admit()) super.dispatchTouchEvent(event) else true
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean = if (gate.admit()) super.dispatchGenericMotionEvent(event) else true
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean = if (gate.admit()) super.dispatchKeyEvent(event) else true
+}
+
+/** How [BrowserSession.injectMouse] carries one planned mouse action to the WebView. */
+internal enum class MouseRoute {
+    /** SOURCE_MOUSE ACTION_HOVER_MOVE through dispatchGenericMotionEvent. */
+    GENERIC_HOVER,
+
+    /** SOURCE_MOUSE/TOOL_TYPE_MOUSE ACTION_MOVE with the held button through dispatchTouchEvent. */
+    TOUCH_MOVE_WITH_BUTTON,
+
+    GENERIC_BUTTON_PRESS,
+    GENERIC_BUTTON_RELEASE,
+    GENERIC_SCROLL,
+    CANCEL,
+}
+
+/**
+ * A drag must not stay on the hover path: when accessibility is enabled, Chromium hands every
+ * HOVER_* event to accessibility, which consumes it, so a held-button move never reaches the page.
+ * A button move on the touch path is routed by Chromium to a native mouse move with that button.
+ * A DRAG without a held button falls back to hover, because a buttonless ACTION_MOVE would be read
+ * as a touchpad scroll or a touch.
+ */
+internal fun mouseRoute(action: MouseAction, buttons: Int): MouseRoute = when (action) {
+    MouseAction.HOVER -> MouseRoute.GENERIC_HOVER
+    MouseAction.DRAG -> if (buttons != 0) MouseRoute.TOUCH_MOVE_WITH_BUTTON else MouseRoute.GENERIC_HOVER
+    MouseAction.PRESS -> MouseRoute.GENERIC_BUTTON_PRESS
+    MouseAction.RELEASE -> MouseRoute.GENERIC_BUTTON_RELEASE
+    MouseAction.SCROLL -> MouseRoute.GENERIC_SCROLL
+    MouseAction.CANCEL -> MouseRoute.CANCEL
+}
+
+internal sealed interface MouseDelivery {
+    data object Delivered : MouseDelivery
+    data object Rejected : MouseDelivery
+    data class RetireRequired(val identity: MouseDocumentIdentity, val reason: String) : MouseDelivery
+}
+
+internal data class CaptureImage(
+    val base64: String,
+    val width: Int = 0,
+    val height: Int = 0,
+    val probe: GeometryProbe? = null,
+    val stamp: CaptureStamp? = null,
+)
+
+data class NativeFrame(
+    val width: Int,
+    val height: Int,
+    val windowLeft: Int,
+    val windowTop: Int,
+    val visibleLeft: Int,
+    val visibleTop: Int,
+    val visibleRight: Int,
+    val visibleBottom: Int,
+)
+
+data class GeometrySample(
+    val viewId: String,
+    val tabId: String? = null,
+    val ticket: Long,
+    val documentId: String?,
+    val epoch: Long,
+    val serial: Long,
+    val frame: NativeFrame,
+    val probe: GeometryProbe,
+)

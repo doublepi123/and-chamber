@@ -137,17 +137,30 @@ internal class BrowserPageDriver(
     }
 
     private suspend fun capture(page: BrowserSession): BrowserReply {
-        val epoch = page.epoch()
         val image = withTimeoutOrNull(BrowserLimits.DEFAULT_TIMEOUT_MS) { page.captureViewport() }
-        if (page.epoch() != epoch) return stale()
-        if (image == null) {
-            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "the page could not be captured")
+        val probe = image?.probe
+        val stamp = image?.stamp
+        if (image == null || probe == null || stamp == null || stamp.viewId != page.viewId || stamp.documentId != page.acceptedDocumentId) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.NOT_VISIBLE, "geometry not ready")
         }
         return BrowserReply(
             ok = true,
             result = mapOf(
                 BrowserDriverLogic.RESULT_MIME to BrowserDriverLogic.MIME_PNG,
                 BrowserDriverLogic.RESULT_DATA to image.base64,
+                BrowserDriverLogic.RESULT_URL to page.displayUrl.orEmpty(),
+                "title" to page.view.title.orEmpty(),
+                "width" to image.width.toString(),
+                "height" to image.height.toString(),
+                "cssWidth" to probe.innerWidth.toString(),
+                "cssHeight" to probe.innerHeight.toString(),
+                "visualWidth" to probe.visualWidth.toString(),
+                "visualHeight" to probe.visualHeight.toString(),
+                "offsetLeft" to probe.offsetLeft.toString(),
+                "offsetTop" to probe.offsetTop.toString(),
+                "dpr" to probe.devicePixelRatio.toString(),
+                "scale" to probe.visualScale.toString(),
+                "viewport" to if (page.desktopConfigured) "desktop" else "mobile",
             ),
         )
     }

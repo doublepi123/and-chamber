@@ -92,9 +92,11 @@ class StringResourcesTest {
 
     @Test
     fun `the number of translated strings is what the brief committed to`() {
-        // 268 entries: upstream launch copy plus 17 independent-browser strings (one plural) and 26
-        // OpenChamber/OpenCode update strings (three plurals), plus 3 uptime duration units.
-        assertEquals(268, english.size)
+        // 297 unique keys on both sides: upstream launch/update copy and uptime units, the plugin
+        // transport's browser strings (floating window, modes and status), the "Open web page" entry
+        // and dialog, and the floating window's "Clear site data" action with its partial result.
+        // One entry per key, as the loader keeps them.
+        assertEquals(297, english.size)
     }
 
     private companion object {

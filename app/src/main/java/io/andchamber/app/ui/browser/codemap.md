@@ -2,37 +2,78 @@
 
 ## Responsibility
 
-The independent in-app browser (`Routes.BROWSER`). One public-https page the user can browse, and that an agent may use only after the user turns control on. It is not the OpenChamber page, not the WebView pool, and not a `WebSessionProfiles` profile.
+The in-app floating browser over the local chat. One public-https page the user can browse, and that
+an agent may use only after the user taps **Allow agent**. It is not the OpenChamber page, not the
+WebView pool, and not a `WebSessionProfiles` profile.
 
 Files:
-- `BrowserScreen.kt`: address bar, load and error line, control buttons, lifecycle revoke, `BrowserUnavailable`.
+- `NativeBrowserPresenter.kt`: the single authority. Owns pages, tabs, grants, connection ids and
+  transport eligibility; implements the provider page executor.
+- `BrowserFloatWindow.kt`, `BrowserFloatPage.kt`, `BrowserFloatLayout.kt`, `BrowserHostSurface.kt`:
+  the Compose window, its header/menu/status and the host surface that reports the console session.
 - `BrowserSession.kt`: one WebView, profile bind, clients, viewport capture.
+- `BrowserSiteData.kt`: the "Clear site data" action. Revokes the agent grant, then clears this
+  profile's cookies and JavaScript storage, then the shown page's cache and history, then reloads it as
+  a person's navigation. If the page cache/history step fails after cookies and storage are gone, the
+  result is partial and the page is not reloaded.
 - `BrowserPageDriver.kt`: the single `BrowserDriver` implementation.
-- `BrowserDriverLogic.kt`: pure URL, ref, script-template and snapshot rules. Unit-tested without a WebView.
+- `BrowserDriverLogic.kt`: pure URL, ref, script-template and snapshot rules. Unit-tested without a
+  WebView.
+- Support: `BrowserGeometry.kt`, `BrowserTouchFocus.kt`, `MouseInput.kt`, `ScrollMemory.kt`,
+  `WindowRestoreTargetGate.kt`, `PixelCopyBridge.kt`, `BrowserRetiredPage.kt`.
 
 ## Design
 
-- The screen takes the app's `BrowserController` from `rememberBrowserDependencies()` (Koin). It does not construct a second one, and it does not start or stop the command listener. A missing controller (previews) shows `BrowserUnavailable` and loads nothing.
-- Profile name is the fixed `andchamber_browser_v1`. A fresh WebView is bound with `WebViewCompat.setProfile` before settings, clients or any load. `MULTI_PROFILE` missing or a bind failure destroys the view and shows the unavailable body. There is no fallback to `Default`, the pool, or a server profile.
-- Hardening after a successful bind: JavaScript on, file and content access off, mixed content never, third-party cookies off on this profile's cookie manager, safe browsing on, DOM storage off. SSL errors are cancelled. Permission, popup, file chooser, download and new-window requests are refused. No `addJavascriptInterface`, no `setWebContentsDebuggingEnabled`, no global `CookieManager`, no proxy override, no `pauseTimers`.
-- Navigation allow-list is `BrowserUrlPolicy` (public https only) plus forbidden origins for the local OpenChamber URL and saved remotes. The driver preflights DNS off the main thread before `loadUrl`. Subresource and frame loads are syntax-checked in `shouldInterceptRequest` and replaced with an empty 403 when refused. This is not a complete outbound firewall.
-- A controlled top-level GET always replaces the WebView with a new one on `andchamber_browser_v1`. The replacement does not call `attach`, so it does not revoke the lease. Each view has an immutable `viewId` and one navigation ticket. Only the latest ticket may replace the holder. `DOCUMENT_START_SCRIPT` installs a read-only document id before the first load. Without that feature, automation fails closed. Ready requires a probe of that witness on the current view and ticket, plus a policy-allowed URL. Callback URLs do not prove the document. A POST or an unknown main-document start is NotReady and cannot be saved by a later finished event. Enable and generation changes call `invalidateRefs` only. Page-reported text is not treated as verified. Caller values are inserted once as one JSON argument. Type uses the native input value setter. Password and file fields are refused. Forms and pages that navigate themselves need the user to take over.
-- A navigation invalidates refs before `loadUrl`. Same-URL reload and a changed main-frame URL invalidate in `onPageStarted`. `execute` drops a result whose epoch no longer matches. `BrowserState.viewInvalidated` destroys the WebView and attaches a replacement, which is the only thing that clears that flag.
-- Capture uses `PixelCopy.request(window, webViewRect, ...)`. The rectangle must be exactly the WebView and fully inside the window; otherwise capture is refused, so the rest of the app is not copied. A view with no size, or one that is detached or not shown, is refused. The software `draw` fallback can miss GPU layers. There is no device test for the pixels.
-- Agent control is off by default. Enable needs a running local runtime and a non-null `readyLaunchId()`. Send the task in chat first: leaving this screen revokes the lease, so control cannot be enabled and then used from chat. Pause calls `setVisible(false)` immediately, then `disable`. A runtime drop or launch-id change calls `disable` only and does not mark the page invisible. Resume sets visible again and does not enable. Take over stays enabled while busy. A finger down, the Take over button and a manual Go call `takeOverFromUi()` on the main thread before the touch continues. `bindSession` installs the fatal callback on every view, including a timeout replacement. A callback from an older view does not clear the replacement. A renderer crash detaches and does not recreate an authorized view.
+- The presenter is created once in `di/AppModule.kt`. The local web route resolves it from Koin and
+  passes it to `BrowserHostSurface` / the floating window. No other component creates a second one.
+- Profile name is the fixed `andchamber_browser_v1`. A fresh WebView is bound with
+  `WebViewCompat.setProfile` before settings, clients or any load. `MULTI_PROFILE` missing or a bind
+  failure destroys the view and shows the unavailable body. There is no fallback to `Default`, the
+  pool, or a server profile.
+- Hardening after a successful bind: JavaScript on, file and content access off, mixed content never,
+  third-party cookies off on this profile's cookie manager, safe browsing on, DOM storage on (this
+  profile's `localStorage`/`sessionStorage`; legacy WebSQL stays off), legacy database storage off. SSL
+  errors are cancelled. Permission, popup, file chooser, download and new-window requests are refused.
+  No `addJavascriptInterface`, no `setWebContentsDebuggingEnabled`, no global `CookieManager`, no proxy
+  override, no `pauseTimers`.
+- Navigation allow-list is `BrowserUrlPolicy` (public https only) plus forbidden origins for the local
+  OpenChamber URL and saved remotes. The driver preflights DNS off the main thread before `loadUrl`.
+  Subresource and frame loads are syntax-checked in `shouldInterceptRequest` and replaced with an empty
+  403 when refused. This is not a complete outbound firewall.
+- A controlled top-level GET always replaces the WebView with a new one on `andchamber_browser_v1`.
+  Each view has an immutable `viewId` and one navigation ticket. Only the latest ticket may replace
+  the holder. `DOCUMENT_START_SCRIPT` installs a read-only document id before the first load. Without
+  that feature, automation fails closed. Ready requires a probe of that witness on the current view
+  and ticket, plus a policy-allowed URL. Callback URLs do not prove the document. A POST or an unknown
+  main-document start is NotReady and cannot be saved by a later finished event. Page-reported text is
+  not treated as verified. Caller values are inserted once as one JSON argument. Type uses the native
+  input value setter. Password and file fields are refused. Forms and pages that navigate themselves
+  need the user to take over.
+- Capture uses `PixelCopy.request(window, webViewRect, ...)`. The rectangle must be exactly the WebView
+  and fully inside the window; otherwise capture is refused, so the rest of the app is not copied.
+- Agent control is off by default. A grant binds one runtime launch, connection id, console session
+  and visible tab. The plugin tool server connects only while the presenter reports
+  `transportEligible`; losing eligibility (background, console change, detach) clears the connection
+  and revokes the grant. A reconnect never restores a grant. A touch on the page, Take over, or the
+  window closing revokes as before.
+- Test entry points (`attachHostForTest`, `installPageDecorator`, `beginForTest`,
+  `acceptProbeForTest`) refuse to run outside a debug build.
 
 ## Flow
 
-1. Home card → `Routes.BROWSER`.
-2. If `browser == null`, show the not-ready panel. Else create the session, attach the driver, `setVisible(true)`.
-3. Address bar Go: syntax plus DNS preflight, then load. A refusal stays on the current page and shows the refused line.
-4. Allow agent: `enableFromUi()` only while local OpenChamber is running and the page is visible.
-5. Take over / Turn off / Back: revoke. Back also leaves the route.
-6. Commands arrive only through the controller, on the main dispatcher, as `BrowserRequest`.
+1. `BrowserHostSurface` reports the trusted console's session id; the presenter revokes on an owner
+   change. The console page also offers "Open web page" for a public `https` URL.
+2. The agent calls the plugin tool `andchamber_web`; the App tool server maps it to a
+   `ProviderRequest` and the presenter executes it.
+3. A page opens unauthorized. Snapshot, click, type, scroll, capture and resize are refused until the
+   user taps **Allow agent** in the window.
+4. Take over / Turn off: revoke. Leaving the local chat revokes through transport eligibility.
 
 ## Integration
 
-- `ui/AndChamberApp.kt` owns the route and passes `BrowserController?`, `RuntimeState`, `readyLaunchId` and the remote list. It does not create the controller.
-- `browser/BrowserContract.kt` is the frozen controller and driver contract. This folder does not modify it.
+- `ui/web/WebScreen.kt` and `ui/web/ChamberWebView.kt` pass the console session id and the
+  "Open web page" action; they do not create a page.
+- `browser/BrowserContract.kt` is the frozen driver contract. This folder does not modify it.
 - `browser/BrowserUrlPolicy.kt` is called, not modified. DNS preflight runs on `Dispatchers.IO`.
+- `runtime/process/LocalBrowserProviderBinding.kt` owns the loopback tool server for one launch.
 - Strings live in `values/strings.xml` and `values-zh/strings.xml` under the `browser_` keys.

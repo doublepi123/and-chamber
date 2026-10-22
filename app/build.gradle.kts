@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 // AndChamber app module. Native PRoot pipeline ported from AndCode (MIT); see NOTICE.
@@ -161,10 +162,11 @@ android {
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
-        testInstrumentationRunner = if (useBrowserSmokeRunner) {
-            "io.andchamber.app.browser.BrowserSmokeInstrumentation"
-        } else {
-            "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = when {
+            useBrowserSmokeRunner ->
+                "io.andchamber.app.browser.BrowserSmokeInstrumentation"
+            else ->
+                "androidx.test.runner.AndroidJUnitRunner"
         }
 
         // The on-device runtime only exists for these two ABIs (see prepare_android_runtime_native_libs.py).
@@ -223,6 +225,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     sourceSets {

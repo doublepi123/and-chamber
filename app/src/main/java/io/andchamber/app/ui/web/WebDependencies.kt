@@ -3,7 +3,6 @@ package io.andchamber.app.ui.web
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalInspectionMode
-import io.andchamber.app.browser.BrowserController
 import io.andchamber.app.data.HttpDownloadRequest
 import io.andchamber.app.data.HttpDownloadResult
 import io.andchamber.app.data.HttpDownloadStarter
@@ -12,7 +11,6 @@ import io.andchamber.app.data.WebIsolationFailure
 import io.andchamber.app.data.WebProfileBinding
 import io.andchamber.app.data.WebSessionProfiles
 import io.andchamber.app.runtime.ServerTarget
-import io.andchamber.app.runtime.process.OpenChamberServer
 import io.andchamber.app.runtime.WebSessionCookies
 import org.koin.core.context.GlobalContext
 
@@ -35,33 +33,6 @@ internal fun rememberWebDependencies(): WebDependencies {
         } else {
             val koin = GlobalContext.get()
             WebDependencies(profiles = koin.get<WebSessionProfiles>(), downloads = koin.get<HttpDownloadStarter>())
-        }
-    }
-}
-
-/**
- * The app's single browser controller and the local runtime's ready launch id. Both come from
- * di/AppModule.kt. Previews get neither: no controller means the browser route loads nothing.
- * The screen never starts or stops the command listener; the controller owns that.
- */
-internal class BrowserDependencies(
-    val controller: BrowserController?,
-    val readyLaunchId: () -> Long?,
-)
-
-@Composable
-internal fun rememberBrowserDependencies(): BrowserDependencies {
-    val inspection = LocalInspectionMode.current
-    return remember(inspection) {
-        if (inspection) {
-            BrowserDependencies(controller = null, readyLaunchId = { null })
-        } else {
-            val koin = GlobalContext.get()
-            val server = koin.get<OpenChamberServer>()
-            BrowserDependencies(
-                controller = koin.get(),
-                readyLaunchId = { runCatching { server.readyLaunchId() }.getOrNull() },
-            )
         }
     }
 }

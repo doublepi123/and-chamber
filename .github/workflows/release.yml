@@ -105,8 +105,8 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Browser MCP adapter tests
-        run: node --test scripts/tests/browser-mcp.test.cjs scripts/tests/verify_browser_mcp_emulator.test.cjs
+      - name: Browser tool and UI script tests
+        run: node --test app/src/test/js/*.cjs scripts/tests/browser-tool-plugin.test.cjs
 
       - uses: gradle/actions/setup-gradle@v4
 

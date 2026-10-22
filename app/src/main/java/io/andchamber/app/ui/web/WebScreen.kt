@@ -28,12 +28,15 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
@@ -45,6 +48,7 @@ import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -54,10 +58,14 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -81,6 +89,7 @@ import io.andchamber.app.ui.findActivity
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.withSessionPath
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 private sealed interface SessionPhase {
@@ -139,6 +148,7 @@ internal fun WebScreen(
     onSystemBarColor: (Color?) -> Unit,
     /** A path such as `/?session=…` to show instead of the start page; reported back once used. */
     deepLinkPath: String? = null,
+    browserPresenter: io.andchamber.app.ui.browser.NativeBrowserPresenter? = null,
     onDeepLinkUsed: () -> Unit = {},
     /** The remembered page of this instance, for the first load only; a deep link wins over it. */
     resumePath: String? = null,
@@ -336,6 +346,73 @@ internal fun WebScreen(
 
     WebLifecycleEffect(web)
     WebHostEffect(web)
+    val localTrusted = isLocal &&
+        target is io.andchamber.app.runtime.ServerTarget.Local &&
+        localState is RuntimeState.Running &&
+        web?.gatewayLoginMode != true &&
+        phase !is SessionPhase.Unreachable
+    val consoleGeneration = web?.browserBindGeneration ?: sessionKey.hashCode().toLong()
+    // Leaving the trusted console (or this screen) detaches the host: grant revoked, pages destroyed.
+    // A new document of the same console is not a departure; the binding effect below hands over.
+    val hostActivity = context.findActivity()
+    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, hostActivity) {
+        onDispose {
+            web?.unbindBrowserHost()
+            browserPresenter?.detachHostAny(targetId)
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, consoleGeneration) {
+        val presenter = browserPresenter
+        val activity = hostActivity
+        val view = web
+        var sessionCallback: ((String?) -> Unit)? = null
+        if (localTrusted && presenter != null && activity != null && view != null) {
+            val host = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
+            val reportSession: (String?) -> Unit = { session ->
+                if (view.acceptsBrowserHost(consoleGeneration)) view.browserHost?.context(session.orEmpty())
+            }
+            sessionCallback = reportSession
+            view.browserHost = host
+            view.browserConsoleGeneration = consoleGeneration
+            view.onConsoleSessionChanged = reportSession
+            view.onConsoleDocumentInvalidated = { presenter.invalidateConsoleDocument(targetId) }
+            presenter.attachHost(activity, targetId, consoleGeneration)
+            // The page may already show a chat (reload, deep link, a pooled view): report it now.
+            host.context(view.consoleSessionId.orEmpty())
+        } else if (web?.browserHost != null) {
+            web.unbindBrowserHost()
+            presenter?.detachHostAny(targetId)
+        }
+        // Generation hand-over: attachHost with the next generation revokes the grant and keeps the
+        // tabs. `paused` follows only the activity lifecycle observer below.
+        onDispose {
+            val callback = sessionCallback
+            if (callback != null && web?.onConsoleSessionChanged === callback) web.onConsoleSessionChanged = null
+        }
+    }
+    val hostLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(browserPresenter, localTrusted, hostLifecycle) {
+        val presenter = browserPresenter
+        if (presenter == null || !localTrusted) return@DisposableEffect onDispose {}
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> presenter.onHostPaused()
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> presenter.onHostResumed()
+                else -> Unit
+            }
+        }
+        // Start from the real lifecycle state; addObserver replays events up to it.
+        if (!hostLifecycle.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) presenter.onHostPaused()
+        hostLifecycle.lifecycle.addObserver(observer)
+        onDispose { hostLifecycle.lifecycle.removeObserver(observer) }
+    }
+    // "Open web page" is offered only for the local console, with a native presenter and a chat the
+    // page says it is showing: the open belongs to that chat and never grants it.
+    val consoleSession = web?.consoleSessionId
+    val canOpenWebPage = isLocal && localTrusted && browserPresenter != null && web != null && consoleSession != null
+    val scope = rememberCoroutineScope()
+    var openUrlDialog by remember(web) { mutableStateOf(false) }
+    LaunchedEffect(canOpenWebPage) { if (!canOpenWebPage) openUrlDialog = false }
 
     val pageError = web?.pageError
     val overlay: WebOverlay? =
@@ -381,7 +458,25 @@ internal fun WebScreen(
                 WindowInsets.systemBars
                     .union(WindowInsets.displayCutout)
                     .union(WindowInsets.imeAnimationTarget)
-            Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(pageInsets)) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize().windowInsetsPadding(pageInsets)) {
+                // Both the main WebView and native overlay fill this same inset-consumed content box.
+                var consoleSize by remember(web, web.generation) { mutableStateOf(IntSize.Zero) }
+                val density = LocalDensity.current
+                val measurement = web.composerMeasurement
+                val topPx = measurement?.topPx(web.browserConsoleGeneration, web.generation,
+                    consoleSize.width, consoleSize.height)
+                val measuredClearance = composerClearancePx(topPx, consoleSize.height, with(density) { 12.dp.toPx() })
+                val composerClearance = measuredClearance?.let { with(density) { it.toDp() } }
+                    ?: if (maxWidth >= 600.dp) 72.dp else 136.dp
+                androidx.compose.runtime.SideEffect {
+                    web.view?.tag = ComposerLayoutSnapshot(
+                        measurement, web.browserConsoleGeneration, web.generation,
+                        consoleSize.width, consoleSize.height, with(density) { composerClearance.toPx() },
+                        measuredClearance == null,
+                        measurement?.validityReason(web.browserConsoleGeneration, web.generation,
+                            consoleSize.width, consoleSize.height) ?: "measurement-missing",
+                    )
+                }
                 key(web, web.generation) {
                     // Only a WebView bound to this server's profile is ever attached; after a failed
                     // rebind there is none, and the isolation panel covers the screen instead.
@@ -389,11 +484,21 @@ internal fun WebScreen(
                         AndroidView(
                             // Detached from any earlier holder only here, never during recomposition.
                             factory = { viewContext -> web.attachableView() ?: View(viewContext) },
-                            modifier = Modifier.fillMaxSize().clipToBounds(),
+                            modifier = Modifier.fillMaxSize().clipToBounds().onSizeChanged {
+                                if (consoleSize != it) {
+                                    consoleSize = it
+                                    web.requestComposerMeasurement()
+                                }
+                            },
                             // The WebView outlives this screen in the pool; never destroy it here.
                             onRelease = {},
                         )
                     }
+                }
+                if (localTrusted && browserPresenter != null) {
+                    // Includes the actual multiline editor + footer. Missing/stale measurements use
+                    // a conservative fallback; focus itself never changes the agent grant.
+                    io.andchamber.app.ui.browser.BrowserFloatPage(browserPresenter, bottomClearance = composerClearance)
                 }
 
                 AnimatedVisibility(
@@ -421,7 +526,23 @@ internal fun WebScreen(
                         onReload = reload,
                         // The local server's password is internal, so a browser couldn't sign in.
                         onOpenInBrowser = if (shownTarget is ServerTarget.Remote) web::openInBrowser else null,
+                        onOpenUrl = if (canOpenWebPage) ({ openUrlDialog = true }) else null,
                     )
+                }
+
+                if (openUrlDialog) {
+                    val presenter = browserPresenter
+                    val session = consoleSession
+                    if (presenter != null && session != null) {
+                        OpenBrowserUrlDialog(
+                            onOpen = { url ->
+                                openUrlDialog = false
+                                // Opens in this chat's window; the person still has to Allow it.
+                                scope.launch { presenter.openUser(url, session) }
+                            },
+                            onDismiss = { openUrlDialog = false },
+                        )
+                    }
                 }
             }
         }
