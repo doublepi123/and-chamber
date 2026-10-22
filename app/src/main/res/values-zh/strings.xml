@@ -350,4 +350,5 @@
     <string name="browser_site_data_cleared_no_reload">网站数据已清除，页面未重新加载。</string>
     <string name="browser_site_data_partial">Cookie 和存储已清除，页面缓存未清除。</string>
     <string name="browser_site_data_failed">无法清除网站数据。</string>
+    <string name="browser_float_status_agent_waiting">代理打开了这个页面。点“允许代理”后，它才能操作。</string>
 </resources>

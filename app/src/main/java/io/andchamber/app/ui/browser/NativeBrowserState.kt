@@ -29,6 +29,11 @@ data class NativeBrowserState(
     /** Binding-only monotonic true-to-false transport signal; UI does not use this value. */
     internal val transportInvalidation: Long = 0L,
     val eligible: Boolean = false,
+    /**
+     * The selected tab was opened by an agent `open` and the person has not allowed, taken over or
+     * navigated it by hand since. Presentation only: it is not authority and grants nothing.
+     */
+    val awaitingAllow: Boolean = false,
     /** A provider connection is live. Only a flag: the connection id itself is not exposed. */
     val connected: Boolean = false,
     val pageRetired: Boolean = false,

@@ -14,7 +14,7 @@ One tool, one action per call:
 
 | Action | Purpose |
 |---|---|
-| `open` | Open one public `https` URL in the in-app window |
+| `open` | Open one public `https` URL in the in-app window, then wait about a minute for the person's Allow |
 | `snapshot` | Read a text snapshot and element refs |
 | `click` | Activate a ref from the latest snapshot |
 | `type` | Type into a ref from the latest snapshot |
@@ -35,7 +35,12 @@ returns a plain "not available" text error. It never prints the token, and it do
    endpoint file, loopback peers, and no `Origin` header.
 3. The user asks in chat. A page opens unauthorized. The agent can open it, but snapshot, click,
    type, scroll and capture are refused until the person taps **Allow agent** in the window.
-4. Control is revoked when the browser leaves the foreground, the activity pauses, the user touches
+4. `open` does not return at once: after the page loads it waits up to about a minute for that tap.
+   When the person allows the page during the wait, `open` answers `drivable:true`; otherwise it
+   answers `drivable:false` with `reason:"authorization_required"` and the agent asks the person to
+   tap Allow. The wait never grants anything; it only observes the presenter. Until the person allows
+   it, the floating window says "The agent opened this page. Tap Allow agent to let it use the page."
+5. Control is revoked when the browser leaves the foreground, the activity pauses, the user touches
    the page, the user takes over, the connection changes, or the runtime stops. A new grant is
    required after every revoke. There is no silent re-enable.
 

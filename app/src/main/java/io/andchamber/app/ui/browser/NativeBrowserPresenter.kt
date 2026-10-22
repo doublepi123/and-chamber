@@ -18,6 +18,7 @@ import io.andchamber.app.browser.provider.ProviderRegistry
 import io.andchamber.app.browser.provider.ProviderRequest
 import io.andchamber.app.browser.provider.ProviderResult
 import io.andchamber.app.browser.provider.ProviderTab
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -32,10 +33,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 
@@ -78,6 +81,11 @@ class NativeBrowserPresenter(
     /** Presentation gate set by the floating window. It is not a grant and never creates a page. */
     private var presentationBlocked = false
     private val tabModes = linkedMapOf<String, Boolean>()
+    /**
+     * Tabs an agent `open` created or selected that nobody has allowed, taken over or navigated by
+     * hand since. Presentation only, per tab: it never grants and never changes authority.
+     */
+    private val awaitingAllowTabs = linkedSetOf<String>()
     private var mouseMode = false
     private var pointerViewX = 0f
     private var pointerViewY = 0f
@@ -118,6 +126,8 @@ class NativeBrowserPresenter(
     private val _windowRestoreResult = MutableStateFlow<RestoreResult?>(null)
     internal val windowRestoreResult: StateFlow<RestoreResult?> = _windowRestoreResult.asStateFlow()
     private var activeRequestId: String? = null
+    /** True while a tool `open` is only watching for the person's Allow tap: nothing is in flight. */
+    private var allowWaitActive = false
     private var viewGeneration = 0L
     private var witnessForGrant: String? = null
 
@@ -808,7 +818,9 @@ class NativeBrowserPresenter(
 
     /**
      * Single revoke path. [keepRequestId] is the caller's own request: an open that revokes the
-     * previous grant must not cancel itself. Every other in-flight page action is cancelled.
+     * previous grant must not cancel itself. Every other in-flight page action is cancelled, except
+     * an `open` that is only waiting for the person's Allow tap: it holds no page command, so the
+     * revoke lets it answer with its current payload and the wait ends on the new state.
      */
     private fun revokeAll(reason: String, keepRequestId: String?) {
         // Reasons are fixed internal strings; no page or request content is logged.
@@ -832,6 +844,12 @@ class NativeBrowserPresenter(
             loadJob?.cancel()
             val running = activeJob
             if (running != null && keepRequestId != null && activeRequestId == keepRequestId) return@synchronized null
+            // An open that is only watching for the person's Allow tap has nothing in flight. A
+            // revoke (takeover, tab close, background, another tab) must let it answer with its
+            // current payload instead of killing the response. Real cancellation comes from the
+            // tool transport (a cancel request, a dropped connection or the launch ending), which
+            // cancels this job itself.
+            if (running != null && allowWaitActive && activeAction == "browser.open") return@synchronized null
             // Reason is a fixed internal string; nothing from the page or the request is logged.
             if (running != null) android.util.Log.i("AndChamberProvider", "revoke cancels active action reason=$reason")
             activeJob = null
@@ -1115,6 +1133,7 @@ class NativeBrowserPresenter(
         // Closing a tab whose page is pressed destroys that page: retire the press first.
         if (pages[tabId]?.page?.mousePressActive() == true) retireBound(pages[tabId]?.page, "tab-closed")
         val removed = synchronized(lock) { registry.close(tabId) } ?: return false
+        synchronized(lock) { awaitingAllowTabs.remove(removed.tabId) }
         pages.remove(removed.tabId)?.page?.destroy()
         if (selectedTabId == removed.tabId) {
             synchronized(lock) {
@@ -1149,6 +1168,7 @@ class NativeBrowserPresenter(
             mode = ProviderMode.MANUAL
             page?.manualNavigation = true
             pages[selectedTabId]?.page?.manualNavigation = true
+            selectedTabId?.let { awaitingAllowTabs.remove(it) }
         }
         revokeAll("takeover")
         synchronized(lock) { publishLocked() }
@@ -1227,6 +1247,7 @@ class NativeBrowserPresenter(
             registry.grant(runtimeLaunchId, snapshot.connection, snapshot.tab.ownerSessionId, snapshot.tab.tabId)
             grantEpoch = registry.currentGrant()?.grantEpoch ?: 0L
             mode = ProviderMode.AGENT
+            awaitingAllowTabs.remove(snapshot.tab.tabId)
             pages[snapshot.tab.tabId]?.modeNotice = null
             publishLocked()
         }
@@ -1290,6 +1311,7 @@ class NativeBrowserPresenter(
                 activeDispatched = false
                 activePageAccess = false
                 activeTab = null
+                allowWaitActive = false
             }
         }
     }
@@ -1416,8 +1438,13 @@ class NativeBrowserPresenter(
             val parkedDesktop = viewport == "desktop" || (viewport != "mobile" && tabModes[selectedTabId] == true)
             val parked = OpenChamberPageAdapter(driver = UnavailableDriver, present = { true })
                 .openClaimed(request, registry, session)
-            parked.tab?.tabId?.let { tabModes[it] = parkedDesktop }
-            synchronized(lock) { publishLocked() }
+            synchronized(lock) {
+                parked.tab?.tabId?.let {
+                    tabModes[it] = parkedDesktop
+                    if (parked.result.ok) noteOpenedByAgent(request, it)
+                }
+                publishLocked()
+            }
             return@withContext parked.result
         }
         if (!foreground) return@withContext unavailable()
@@ -1460,13 +1487,84 @@ class NativeBrowserPresenter(
                 mode = ProviderMode.MANUAL
                 created.manualNavigation = false
                 bind(created)
+                noteOpenedByAgent(request, tabId)
             } else {
                 created.destroy()
             }
             publishLocked(shown = opened.result.ok)
         }
-        opened.result
+        if (!opened.result.ok || tabId == null || request.allowWaitMs <= 0) return@withContext opened.result
+        // Wait only for the person's own tap; this never grants. A tab that is not the visible page,
+        // or whose page/connection changed, ends the wait at once.
+        val budget = minOf(request.allowWaitMs.toLong(), (deadlineElapsed - now()).coerceAtLeast(0L))
+        synchronized(lock) { allowWaitActive = true }
+        val granted = try {
+            awaitOpenGrant(session, tabId, created, request.connectionId, budget)
+        } finally {
+            synchronized(lock) { allowWaitActive = false }
+        }
+        if (!granted) return@withContext opened.result
+        ProviderResult(ok = true, data = drivableOpenPayload(opened.result.data))
     }
+
+    /** An agent `open` makes its tab await Allow; a person's own open (or reopen) never does. */
+    private fun noteOpenedByAgent(request: ProviderRequest, tabId: String) {
+        if (request.serverEpoch == "user") awaitingAllowTabs.remove(tabId) else awaitingAllowTabs.add(tabId)
+    }
+
+    private enum class OpenWait { WAITING, GRANTED, STOPPED }
+
+    /**
+     * Watches the opened page until the person allows it. It observes only: the presenter's own
+     * grant is the success signal, and any other outcome leaves authority exactly as it was.
+     */
+    private suspend fun awaitOpenGrant(
+        session: String,
+        tabId: String,
+        page: ControlledBrowserPage,
+        connection: String,
+        waitMs: Long,
+    ): Boolean {
+        if (waitMs <= 0) return false
+        withTimeoutOrNull(waitMs) {
+            state.first { openWaitState(it, session, tabId, page, connection) != OpenWait.WAITING }
+        } ?: return false
+        return openWaitState(state.value, session, tabId, page, connection) == OpenWait.GRANTED
+    }
+
+    private fun openWaitState(
+        current: NativeBrowserState,
+        session: String,
+        tabId: String,
+        page: ControlledBrowserPage,
+        connection: String,
+    ): OpenWait = synchronized(lock) {
+        val grant = registry.currentGrant()
+        val bound = pages[tabId]
+        // A hidden window, another selection, a replaced/retired page, a hand navigation or a lost
+        // connection can no longer become this open's Allow: end the wait.
+        val watchable = current.shown && selectedTabId == tabId && bound != null && !bound.retired &&
+            bound.page === page && !page.manualNavigation && page.tabId == tabId &&
+            connectionId == connection && host != null && !paused && !consoleInvalidated &&
+            !presentationBlocked
+        when {
+            !watchable -> OpenWait.STOPPED
+            grant != null && grant.connectionId == connection && grant.sessionId == session &&
+                grant.tabId == tabId && mode == ProviderMode.AGENT -> OpenWait.GRANTED
+            // Any other live grant belongs to somebody else and can never become this page's grant.
+            grant != null -> OpenWait.STOPPED
+            else -> OpenWait.WAITING
+        }
+    }
+
+    /** The normal open payload with the one difference a waited-for Allow makes. */
+    private fun drivableOpenPayload(data: JsonObject): JsonObject =
+        JsonObject(
+            data.toMutableMap().apply {
+                put("drivable", JsonPrimitive(true))
+                remove("reason")
+            },
+        )
 
     private fun bind(created: ControlledBrowserPage) {
         created.onReadyProbe = { identity -> scope.launch(main) { acceptProbe(created, identity) } }
@@ -1665,6 +1763,7 @@ class NativeBrowserPresenter(
     private fun onManualDocument(source: ControlledBrowserPage) {
         synchronized(lock) {
             if (page !== source || !source.manualNavigation) return
+            source.tabId?.let { awaitingAllowTabs.remove(it) }
             source.clearAcceptedWitness()
             inflightGeometry = null
             scrollMemory.observePage(scrollIdentity())
@@ -1796,6 +1895,7 @@ class NativeBrowserPresenter(
             pointerY = geometry?.clientY(pointerViewY) ?: 0f,
             pointerUi = PointerUi(page?.handle ?: 0, geometryGeneration, pointerViewX, pointerViewY, geometry?.ready == true),
             connected = connectionId != null,
+            awaitingAllow = selectedTabId != null && selectedTabId in awaitingAllowTabs,
         )
     }
 

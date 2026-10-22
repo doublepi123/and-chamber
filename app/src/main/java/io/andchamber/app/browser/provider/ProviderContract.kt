@@ -35,6 +35,12 @@ data class ProviderRequest(
     val directory: String,
     val sessionId: String?,
     val timeoutMs: Long,
+    /**
+     * How long an `open` may observe its page for the person's Allow tap. Internal transport
+     * detail: it is carried in the `/v1/tool` body, never in the tool's input schema, and it never
+     * grants anything. Zero means do not wait.
+     */
+    val allowWaitMs: Int = 0,
 )
 
 /** Page actions the POC may execute. Presenting a tab is not a grant. */

@@ -74,6 +74,7 @@ internal fun BrowserFloatPage(
         pageRetired = state.pageRetired,
         mouseMode = state.mouseMode,
         accessibilityEnabled = accessibilityEnabled,
+        awaitingAllow = state.awaitingAllow,
     )
     // No resource: the page's own error text, shown as it was reported.
     val status = if (statusResource != null) stringResource(statusResource) else state.pageError.orEmpty()
@@ -308,7 +309,8 @@ internal fun browserFloatErrorResource(error: String?): Int? = when (error) {
  *    scrolling still work. A retired page has nothing to hover and never shows it. Loading does not
  *    replace it, so the line stays put while links load.
  * 4. Page loading.
- * 5. Browsing by hand.
+ * 5. The agent opened the page and the person has not allowed it yet.
+ * 6. Browsing by hand.
  * With Mouse mode or accessibility off, the line is exactly what it was before the notice existed.
  * When the keyboard covers the window, its own notice hides this line.
  */
@@ -319,11 +321,13 @@ internal fun browserFloatStatusResource(
     pageRetired: Boolean,
     mouseMode: Boolean,
     accessibilityEnabled: Boolean,
+    awaitingAllow: Boolean = false,
 ): Int? = when {
     pageError != null -> browserFloatErrorResource(pageError)
     agentOn -> R.string.browser_status_on
     mouseMode && accessibilityEnabled && !pageRetired -> R.string.browser_mouse_hover_accessibility
     !pageReady -> R.string.browser_page_loading
+    awaitingAllow -> R.string.browser_float_status_agent_waiting
     else -> R.string.browser_float_status_manual
 }
 

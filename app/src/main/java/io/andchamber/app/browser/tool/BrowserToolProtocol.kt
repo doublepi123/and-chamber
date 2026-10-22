@@ -20,6 +20,8 @@ data class ToolCall(
     val sessionId: String,
     val callId: String,
     val input: JsonObject,
+    /** Transport-only `open` wait, already range-checked. Never part of `input`. */
+    val allowWaitMs: Int = 0,
 ) {
     val action: String get() = input.getValue("action").jsonPrimitive.content
 }
@@ -36,6 +38,8 @@ object BrowserToolProtocol {
     const val MAX_CALL_ID_CHARS = 256
     const val OPEN_TIMEOUT_MS = 45_000L
     const val ACTION_TIMEOUT_MS = 20_000L
+    /** Upper bound for the transport-only `open` allow wait. The server timeout adds it on top. */
+    const val MAX_ALLOW_WAIT_MS = 120_000
 
     /** Placeholder action for a request that failed before its action could be read. */
     const val UNKNOWN_ACTION = "browser.unknown"
@@ -64,7 +68,16 @@ object BrowserToolProtocol {
             val action = input["action"]?.jsonPrimitive?.takeIf { it.isString }?.content
                 ?: return@runCatching null
             if (action !in ACTIONS) return@runCatching null
-            ToolCall(sessionId = sessionId, callId = callId, input = input)
+            // Transport-only and optional. Absent is zero; anything else must be a plain integer in
+            // range, so a malformed wait is refused instead of being silently ignored.
+            val allowWaitMs = when (val raw = root["allowWaitMs"]) {
+                null -> 0
+                is JsonPrimitive -> raw.takeIf { !it.isString }?.intOrNull
+                    ?.takeIf { it in 0..MAX_ALLOW_WAIT_MS }
+                    ?: return@runCatching null
+                else -> return@runCatching null
+            }
+            ToolCall(sessionId = sessionId, callId = callId, input = input, allowWaitMs = allowWaitMs)
         }.getOrNull()
 
     /** Returns null when a parameter cannot be represented (too long, or a nested value). */
@@ -95,7 +108,14 @@ object BrowserToolProtocol {
             parameters = parameters,
             directory = "",
             sessionId = call.sessionId,
-            timeoutMs = if (call.action == "open") OPEN_TIMEOUT_MS else ACTION_TIMEOUT_MS,
+            // The page load keeps its own budget; an open allow wait is added on top so a person's
+            // tap is never cut off by the load deadline.
+            timeoutMs = if (call.action == "open") {
+                OPEN_TIMEOUT_MS + call.allowWaitMs.toLong()
+            } else {
+                ACTION_TIMEOUT_MS
+            },
+            allowWaitMs = call.allowWaitMs,
         )
 
     fun encodeResult(
