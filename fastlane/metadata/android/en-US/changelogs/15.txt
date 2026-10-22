@@ -1,0 +1,5 @@
+0.0.15
+
+Improved:
+- After the agent opens a page, the browser window says so and asks you to tap Allow agent.
+- Once you tap Allow agent, the agent carries on by itself; no need to tell it to continue.
