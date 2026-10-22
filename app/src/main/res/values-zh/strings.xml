@@ -50,7 +50,6 @@
     <!-- 分区 -->
     <string name="section_this_device">本机</string>
     <string name="section_servers">其他电脑</string>
-    <string name="section_browser">浏览器</string>
 
     <!-- 本地运行时卡片 -->
     <string name="local_title">OpenChamber</string>
@@ -299,21 +298,11 @@
 
     <!-- 独立浏览器，不是 OpenChamber 页面。 -->
     <string name="browser_entry_title">浏览器</string>
-    <string name="browser_entry_body">在这里打开公网 https 页面。它与 OpenChamber 分开保存。</string>
-    <string name="browser_address_hint">https://</string>
-    <string name="browser_hint">输入公网 https 地址。下载、弹窗和文件上传保持关闭。暂不支持复杂表单和登录流程。页面返回的内容未经核实。</string>
-    <string name="browser_status_off">代理控制已关闭</string>
     <string name="browser_status_on">代理控制已开启</string>
-    <string name="browser_status_taken">页面已回到你这里</string>
     <string name="browser_turn_on">允许代理</string>
     <string name="browser_take_over">接管</string>
     <string name="browser_turn_off">关闭</string>
-    <string name="browser_note">先在聊天里发出任务，再回到这里允许代理。离开此页面就会关闭。不能先允许再回聊天。</string>
-    <string name="browser_agent_needs_local">代理控制需要 OpenChamber 在本机运行。你仍可以自己浏览。</string>
-    <string name="browser_unavailable">浏览器不可用</string>
     <string name="browser_unavailable_body">当前 WebView 无法把这个浏览器分开保存，因此没有加载任何页面。</string>
-    <string name="browser_controller_missing">浏览器控制尚未就绪。</string>
-    <string name="browser_address_refused">此地址不能在这里打开。</string>
     <string name="browser_enlarge">放大</string>
     <string name="browser_restore">还原</string>
     <string name="browser_float_status_manual">你正在自己浏览。登录完成后，需要再次允许代理。</string>
@@ -341,4 +330,21 @@
     <string name="browser_reopen_page">重新打开</string>
     <string name="browser_finish_drag_first">请先结束页面中的拖动。</string>
     <string name="browser_reopen_failed">无法重新打开页面，请重试。</string>
+
+    <!-- 在本对话的浏览器小窗中打开网页（边缘菜单项和对话框标题） -->
+    <string name="browser_open_page">打开网页</string>
+    <string name="browser_open_page_hint">在本对话的浏览器小窗中打开。点“允许代理”后，代理才能操作它。</string>
+    <string name="browser_open_page_placeholder">example.com</string>
+    <string name="browser_open_page_invalid">请输入网址。</string>
+    <string name="browser_open_page_refused">小窗只能打开公网 https 页面。</string>
+    <!-- %1$s：将要打开的完整地址，例如 https://example.com -->
+    <string name="browser_open_page_preview">将打开 %1$s</string>
+    <string name="browser_clear_site_data">清除网站数据</string>
+    <string name="browser_clear_site_data_title">清除网站数据？</string>
+    <string name="browser_clear_site_data_body">这会退出你在浏览器小窗中登录的所有网站，并删除它们保存的数据。本机所有对话都会受影响，且无法撤销。代理控制也会关闭。</string>
+    <string name="browser_clear_site_data_confirm">清除</string>
+    <string name="browser_site_data_cleared">网站数据已清除。</string>
+    <string name="browser_site_data_cleared_no_reload">网站数据已清除，页面未重新加载。</string>
+    <string name="browser_site_data_partial">Cookie 和存储已清除，页面缓存未清除。</string>
+    <string name="browser_site_data_failed">无法清除网站数据。</string>
 </resources>

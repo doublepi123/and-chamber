@@ -9,7 +9,7 @@ const path = require('node:path');
 
 const {
   createCaseFence,
-} = require('../verify_openchamber_provider_emulator.cjs');
+} = require('./provider_gate_adapters.cjs');
 const { validateExportedTarget, redact } = require('../verify_local_provider_emulator.cjs');
 
 const PRODUCT = Object.freeze({
@@ -26,17 +26,12 @@ const PRODUCT = Object.freeze({
 });
 
 const CHAT_LABELS = Object.freeze([
-  'Browser', 'New chat', 'New session', 'Open sessions and projects',
-  'Open workspace panel', 'Open workspace panel, uncommitted changes',
-  'Browser address', 'Open',
+  'Open sessions and projects', 'New chat',
+  'AndChamber menu', 'Open web page', 'Address', 'Open', 'Cancel',
 ]);
 
-// The workspace drawer is a portal <section role="dialog"> that Chromium keeps out of its
-// accessibility tree, so exactly these two drawer controls are read as a fixed DOM rect instead.
-const CHAT_DOM_LABELS = Object.freeze(['Browser', 'Browser address', 'Open']);
-
 function chatTargetCommand(label) {
-  return CHAT_DOM_LABELS.includes(label) ? `chat-dom-target:${label}` : `ui-target-chat:${label}`;
+  return `ui-target-chat:${label}`;
 }
 
 const PRODUCT_CASE_NAMES = Object.freeze([
@@ -83,10 +78,6 @@ function isText(value) {
 
 function isBool(value) {
   return typeof value === 'boolean';
-}
-
-function documentReadyOk(value) {
-  return value === true || value === 'complete' || value === 'interactive';
 }
 
 function missing(value) {
@@ -236,61 +227,52 @@ function createProductIo({
     return rejection ? { ok: false, reason: rejection, target } : { ok: true, target };
   }
 
-  /** Read-only pinned chat browser state. Sensitive non-FOCUS URLs are never exported. */
-  async function chatState() {
-    const data = await deviceData('chat-browser-state', 'chat-browser-state');
-    if (!data || data.phase !== 'chat-browser-state') return { ok: false, reason: 'chat-state-missing', data };
-    const safeUrl = (value) => (typeof value === 'string' && (value === '' || value === PRODUCT.focusUrl) ? value : null);
-    // The console URL itself is never exported; the device only reports the validated session query.
-    if (data.consoleUrl !== undefined) return { ok: false, reason: 'chat-state-url-exported', data: { phase: data.phase } };
-    const main = isObject(data.main) ? data.main : null;
-    const address = isObject(data.address) ? data.address : null;
-    if (!isText(data.sessionId) || data.querySession !== data.sessionId || !main || !address ||
-        !isNum(main.viewHandle) || !isBool(main.hasFocus) || !isBool(main.hasWindowFocus) ||
-        !isBool(data.documentHasFocus) || !isBool(address.present) || typeof address.value !== 'string' ||
-        !isBool(address.focused) || !isText(address.tag) || !isText(address.type) ||
-        !isBool(address.enabled) || !isBool(address.readOnly)) {
-      return { ok: false, reason: 'chat-state-schema', data };
+  /** Read-only state of the App's OpenBrowserUrlDialog; the typed value is never exported. */
+  async function nativeEntryState() {
+    const data = await deviceData('native-entry-state', 'native-entry-state');
+    if (!data || data.phase !== 'native-entry-state' || !isObject(data.address) || !isObject(data.open)) {
+      return { ok: false, reason: 'native-entry-state-missing', data };
     }
-    const addressValue = safeUrl(address.value);
-    if (addressValue === null) return { ok: false, reason: 'chat-address-value-unsafe', data };
+    const address = data.address;
+    if (!isBool(data.dialog) || !isBool(data.titlePresent) ||
+        !isBool(address.present) || !isBool(address.focused) || !isBool(address.editable) ||
+        !isBool(address.enabled) || !isBool(address.valueExact) || !isNum(address.valueLength) ||
+        !isBool(data.open.present) || !isBool(data.open.enabled)) {
+      return { ok: false, reason: 'native-entry-state-schema', data };
+    }
     return {
       ok: true,
-      sessionId: data.sessionId,
-      querySession: data.querySession,
-      documentReady: data.documentReady,
-      documentHasFocus: data.documentHasFocus,
-      main: {
-        viewHandle: main.viewHandle,
-        hasFocus: main.hasFocus,
-        hasWindowFocus: main.hasWindowFocus,
-      },
+      dialog: data.dialog,
+      titlePresent: data.titlePresent,
       address: {
         present: address.present,
-        value: addressValue,
         focused: address.focused,
-        tag: address.tag,
-        type: address.type,
+        editable: address.editable,
         enabled: address.enabled,
-        readOnly: address.readOnly,
+        valueLength: address.valueLength,
+        valueExact: address.valueExact,
       },
+      open: { present: data.open.present, enabled: data.open.enabled },
+      selectedTabId: isText(data.selectedTabId) ? data.selectedTabId : null,
     };
   }
 
-  /** One fixed exact-URL ADB text entry through the driver; never arbitrary text or JS. */
-  async function typeChatAddress(url) {
-    if (url !== PRODUCT.focusUrl) return { ok: false, reason: 'chat-address-url-not-allowed' };
-    const before = await chatState();
+  /** One fixed exact-URL ADB text entry into the dialog's Address field; no other text is allowed. */
+  async function typeAddress(url) {
+    if (url !== PRODUCT.focusUrl) return { ok: false, reason: 'dialog-url-not-allowed' };
+    const before = await nativeEntryState();
     if (!before.ok) return before;
-    if (before.address.value === PRODUCT.focusUrl) {
+    if (!before.dialog || !before.address.present || !before.address.editable) {
+      return { ok: false, reason: 'dialog-address-missing', before };
+    }
+    if (before.address.valueExact === true) {
       return { ok: true, typed: false, alreadyExact: true, before };
     }
-    if (before.address.value !== '') return { ok: false, reason: 'chat-address-not-empty', before };
-    if (!before.address.present || !before.address.enabled || before.address.readOnly ||
-        !before.address.focused || !before.documentHasFocus || !before.main.hasFocus) {
-      return { ok: false, reason: 'chat-address-not-focused', before };
+    if (before.address.valueLength !== 0) return { ok: false, reason: 'dialog-address-not-empty', before };
+    if (!before.address.focused || !before.address.enabled) {
+      return { ok: false, reason: 'dialog-address-not-focused', before };
     }
-    // The chat-state read is async; fence again at the actual human text mutation point.
+    // The state read is async; fence again at the actual human text mutation point.
     if (!canSend()) return { ...fenced(), before };
     if (typeof humanText !== 'function') return { ok: false, reason: 'human-text-missing', before };
     const text = await humanText(PRODUCT.focusUrl);
@@ -503,8 +485,8 @@ function createProductIo({
     tapUi,
     tapChat,
     chatTarget,
-    chatState,
-    typeChatAddress,
+    nativeEntryState,
+    typeAddress,
     fixtureFieldTarget,
     tapFixtureField,
     siteState,
@@ -1410,7 +1392,7 @@ function nativeEntryCase(io) {
       return { ok: false, reason: 'new-chat-created-native-tab', oldTabs, draft: draftDiag };
     }
 
-    // Actual B: production create + OpenSessionLink UI select; no LLM prompt, no bridge mutation.
+    // Actual B: production create + the existing production Session UI select; no LLM prompt.
     const created = await io.sessionNew();
     if (!created.ok || !isObject(created.data) || !isText(created.data.sessionId)) {
       return { ok: false, reason: 'session-new-failed', created };
@@ -1421,54 +1403,49 @@ function nativeEntryCase(io) {
       return { ok: false, reason: 'session-b-old-tab-missing', oldTab, afterSession };
     }
 
-    // Exactly one visible workspace label is chosen from the two fixed candidates; no failed tap
-    // then fallback. Only then is the Browser tab tapped.
-    const workspace = await waitFor(io, async () => {
-      for (const label of ['Open workspace panel', 'Open workspace panel, uncommitted changes']) {
-        const target = await io.chatTarget(label);
-        if (target.ok) return { ok: true, label, target: target.target };
-      }
-      return { ok: false };
-    }, (value) => value.ok === true, 'native-entry-workspace-target', 15000);
-    if (!workspace.ok) return { ok: false, reason: 'workspace-panel-target-missing', workspace };
-    const workspaceTap = await io.tapChat(workspace.value.label);
-    if (!workspaceTap.ok) return { ok: false, reason: 'workspace-panel-tap-failed', workspace: workspace.value, workspaceTap };
+    // New native entry: the App-owned right-edge handle (onClickLabel = menu_description) opens its
+    // menu; "Open web page" opens OpenBrowserUrlDialog; the fixed URL is typed through real ADB text;
+    // Open creates a tab for the current console session and never grants it.
+    const handleTarget = await waitFor(io, () => io.chatTarget('AndChamber menu'), (target) => target.ok === true, 'native-entry-handle-target', 15000);
+    if (!handleTarget.ok) return { ok: false, reason: 'edge-handle-target-missing', handleTarget };
+    const handleTap = await io.tapChat('AndChamber menu');
+    if (!handleTap.ok) return { ok: false, reason: 'edge-handle-tap-failed', handleTap };
 
-    const browserTarget = await waitFor(io, () => io.chatTarget('Browser'), (target) => target.ok === true, 'native-entry-browser-tab', 12000);
-    if (!browserTarget.ok) return { ok: false, reason: 'browser-tab-target-missing', browserTarget };
-    const browserTap = await io.tapChat('Browser');
-    if (!browserTap.ok) return { ok: false, reason: 'browser-tab-tap-failed', browserTap };
+    const menuTarget = await waitFor(io, () => io.chatTarget('Open web page'), (target) => target.ok === true, 'native-entry-menu-target', 12000);
+    if (!menuTarget.ok) return { ok: false, reason: 'open-web-page-target-missing', menuTarget };
+    const menuTap = await io.tapChat('Open web page');
+    if (!menuTap.ok) return { ok: false, reason: 'open-web-page-tap-failed', menuTap };
 
-    const addressTarget = await waitFor(io, () => io.chatTarget('Browser address'), (target) => target.ok === true, 'native-entry-address-target', 12000);
-    if (!addressTarget.ok) return { ok: false, reason: 'browser-address-target-missing', addressTarget };
-    const addressTap = await io.tapChat('Browser address');
-    if (!addressTap.ok) return { ok: false, reason: 'browser-address-tap-failed', addressTap };
+    const addressTarget = await waitFor(io, () => io.chatTarget('Address'), (target) => target.ok === true, 'native-entry-address-target', 12000);
+    if (!addressTarget.ok) return { ok: false, reason: 'dialog-address-target-missing', addressTarget };
+    const addressTap = await io.tapChat('Address');
+    if (!addressTap.ok) return { ok: false, reason: 'dialog-address-tap-failed', addressTap };
 
-    const focusedAddress = await waitFor(io, () => io.chatState(), (state) => Boolean(state && state.ok === true &&
-      state.sessionId === sessionB && state.address.present === true && state.address.focused === true &&
-      state.address.enabled === true && state.address.readOnly === false &&
-      state.main.hasFocus === true && state.documentHasFocus === true &&
-      (state.address.value === '' || state.address.value === PRODUCT.focusUrl)), 'native-entry-address-focus', 15000);
-    if (!focusedAddress.ok) return { ok: false, reason: 'browser-address-not-focused', sessionB, focusedAddress };
-    const addressView = focusedAddress.value.main.viewHandle;
+    const focused = await waitFor(io, () => io.nativeEntryState(), (state) => Boolean(state && state.ok === true &&
+      state.dialog === true && state.address.present === true && state.address.focused === true &&
+      state.address.editable === true && state.address.enabled === true && state.address.valueLength === 0),
+    'native-entry-dialog-focus', 15000);
+    // Open is disabled (not clickable) while the address is empty; it is required after typing.
+    if (!focused.ok) return { ok: false, reason: 'dialog-address-not-focused', sessionB, focused };
 
-    const typed = await io.typeChatAddress(PRODUCT.focusUrl);
-    if (!typed.ok) return { ok: false, reason: typed.reason || 'browser-address-type-failed', typed, sessionB };
-    const exact = await waitFor(io, () => io.chatState(), (state) => Boolean(state && state.ok === true &&
-      state.sessionId === sessionB && state.main.viewHandle === addressView &&
-      documentReadyOk(state.documentReady) && state.address.value === PRODUCT.focusUrl), 'native-entry-address-value', 12000);
-    if (!exact.ok) return { ok: false, reason: 'browser-address-value-not-exact', typed, sessionB, exact };
+    const typed = await io.typeAddress(PRODUCT.focusUrl);
+    if (!typed.ok) return { ok: false, reason: typed.reason || 'dialog-address-type-failed', typed, sessionB };
+    const exact = await waitFor(io, () => io.nativeEntryState(), (state) => Boolean(state && state.ok === true &&
+      state.dialog === true && state.address.valueExact === true &&
+      state.open.present === true && state.open.enabled === true), 'native-entry-address-value', 12000);
+    if (!exact.ok) return { ok: false, reason: 'dialog-address-value-not-exact', typed, sessionB, exact };
 
     const openTarget = await waitFor(io, () => io.chatTarget('Open'), (target) => target.ok === true, 'native-entry-open-target', 12000);
-    if (!openTarget.ok) return { ok: false, reason: 'chat-open-target-missing', openTarget };
+    if (!openTarget.ok) return { ok: false, reason: 'dialog-open-target-missing', openTarget };
     const open = await io.tapChat('Open');
-    if (!open.ok) return { ok: false, reason: 'chat-open-tap-failed', open };
+    if (!open.ok) return { ok: false, reason: 'dialog-open-tap-failed', open };
 
     const entered = await waitFor(io, () => io.readDiag(), (state) => Boolean(state &&
       isText(state.selectedTabId) && state.selectedTabId !== oldTab && state.selectedTabId !== draftDiag.selectedTabId &&
+      state.selectedTabOwner === sessionB &&
       state.grantForSelected === false && state.agentOn === false &&
       Array.isArray(state.tabIds) && state.tabIds.includes(oldTab)), 'native-entry-open-tab', 20000);
-    if (!entered.ok) return { ok: false, reason: 'native-entry-tab-not-created', oldTab, entered };
+    if (!entered.ok) return { ok: false, reason: 'native-entry-tab-not-created', oldTab, sessionB, entered };
     const afterRect = await waitFor(io, () => io.pageRect(), (state) => Boolean(state &&
       isNum(state.viewHandle) && state.viewHandle !== oldView), 'native-entry-view', 15000);
     if (!afterRect.ok) return { ok: false, reason: 'native-entry-same-view', beforeView: oldView, afterRect };
@@ -1476,6 +1453,7 @@ function nativeEntryCase(io) {
     if (afterView === oldView) return { ok: false, reason: 'native-entry-same-view', beforeView: oldView, afterRect };
     const afterDiag = await io.readDiag();
     if (!afterDiag || afterDiag.grantForSelected !== false || afterDiag.agentOn !== false ||
+        afterDiag.selectedTabOwner !== sessionB ||
         !Array.isArray(afterDiag.tabIds) || !afterDiag.tabIds.includes(oldTab)) {
       return { ok: false, reason: 'native-entry-after-identity', afterDiag };
     }
@@ -1490,15 +1468,14 @@ function nativeEntryCase(io) {
       afterView,
       oldTabsStillListed: afterDiag.tabIds.includes(oldTab),
       draftTabIds: draftDiag.tabIds,
-      workspaceLabel: workspace.value.label,
-      address: exact.value.address,
+      addressValueExact: exact.value.address.valueExact === true,
+      addressTyped: typed.typed === true,
       addressCommand: typed.text || null,
-      addressAlreadyExact: typed.alreadyExact === true,
       commands: {
         sessionsTap: sessions.commandId || null,
         newChatTap: newChat.commandId || null,
-        workspaceTap: workspaceTap.commandId || null,
-        browserTap: browserTap.commandId || null,
+        handleTap: handleTap.commandId || null,
+        menuTap: menuTap.commandId || null,
         addressTap: addressTap.commandId || null,
         openTap: open.commandId || null,
       },

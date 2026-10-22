@@ -1,7 +1,7 @@
 'use strict';
 
 // Flow logic for the lifecycle gate (B3 mode/tab switching, B5 enlarge/restore scroll memory).
-// The device side is createLifecycleGateAdapters() in verify_openchamber_provider_emulator.cjs.
+// The device side is createLifecycleGateAdapters() in provider_gate_adapters.cjs.
 // Every value used here is an awaited, normalised reply: tool results, lifecycle-diag fields, page JS
 // metrics (__report/__geometry/__loads/__posts) and real status phases. Nothing is hard-coded to pass.
 // A missing producer field is null and refuses the case; it is never coerced to false or to a pass.

@@ -24,7 +24,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,6 +48,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -88,6 +91,9 @@ internal fun BrowserFloatWindow(
     onScrollNotSaved: (ScrollNotSavedReason) -> Unit,
     onDesktopMode: (Boolean) -> Unit = {},
     onMouseMode: (Boolean) -> Unit = {},
+    /** Runs only after the person confirms. Null hides the menu item. */
+    onClearSiteData: (() -> Unit)? = null,
+    clearingSiteData: Boolean = false,
     bottomClearance: Dp = 72.dp,
     content: @Composable (WindowChangeToken?, (WindowChangeToken) -> Boolean, Boolean) -> Unit,
 ) {
@@ -108,6 +114,7 @@ internal fun BrowserFloatWindow(
     var dragY by remember { mutableStateOf(0f) }
     var menu by remember { mutableStateOf(false) }
     var confirmDesktop by remember { mutableStateOf<Boolean?>(null) }
+    var confirmClearSiteData by remember { mutableStateOf(false) }
     var requestedWidth by remember { mutableStateOf<Float?>(null) }
     var requestedHeight by remember { mutableStateOf<Float?>(null) }
     var lastBounds by remember { mutableStateOf<Rect?>(null) }
@@ -218,6 +225,20 @@ internal fun BrowserFloatWindow(
                                     enabled = desktopOn && !mousePressActive && !expansion.busy,
                                     onClick = { if (!latestPressCheck()) { menu = false; onMouseMode(!mouseOn) } },
                                 )
+                                if (onClearSiteData != null) {
+                                    HorizontalDivider()
+                                    val clearEnabled = !mousePressActive && !clearingSiteData
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                stringResource(R.string.browser_clear_site_data),
+                                                color = if (clearEnabled) MaterialTheme.colorScheme.error else Color.Unspecified,
+                                            )
+                                        },
+                                        enabled = clearEnabled,
+                                        onClick = { if (!latestPressCheck()) { menu = false; confirmClearSiteData = true } },
+                                    )
+                                }
                             }
                         }
                     }
@@ -314,6 +335,25 @@ internal fun BrowserFloatWindow(
                 onDesktopMode(requested)
             }) { Text(stringResource(R.string.confirm)) } },
             dismissButton = { TextButton(onClick = { confirmDesktop = null }) { Text(stringResource(R.string.cancel)) } },
+        )
+    }
+    if (confirmClearSiteData && onClearSiteData != null) {
+        AlertDialog(
+            onDismissRequest = { confirmClearSiteData = false },
+            title = { Text(stringResource(R.string.browser_clear_site_data_title)) },
+            text = { Text(stringResource(R.string.browser_clear_site_data_body)) },
+            confirmButton = {
+                TextButton(
+                    enabled = !mousePressActive && !clearingSiteData,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    onClick = {
+                        if (latestPressCheck()) return@TextButton
+                        confirmClearSiteData = false
+                        onClearSiteData()
+                    },
+                ) { Text(stringResource(R.string.browser_clear_site_data_confirm)) }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearSiteData = false }) { Text(stringResource(R.string.cancel)) } },
         )
     }
 }

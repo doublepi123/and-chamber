@@ -6,7 +6,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const harness = require('../verify_openchamber_provider_emulator.cjs');
+const harness = require('../lib/provider_gate_adapters.cjs');
 const lifecycle = require('../lib/provider_lifecycle_gate_probe.cjs');
 
 /**

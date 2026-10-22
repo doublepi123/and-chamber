@@ -1,7 +1,7 @@
 'use strict';
 
 // Flow logic for the B4 retirement gate. The device side is createRetirementGateAdapters() in
-// verify_openchamber_provider_emulator.cjs. Every value used here is a real read: lifecycle-diag (producer),
+// provider_gate_adapters.cjs. Every value used here is a real read: lifecycle-diag (producer),
 // fixture-state, the RETIRE fixture's own __report() observations, and the native recorder counters. A
 // missing value is null and refuses the step; it is never coerced to 0 or false to pass.
 //

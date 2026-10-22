@@ -127,10 +127,6 @@ val resolvedApplicationId: String =
         }
     } ?: productionApplicationId
 val isTestIdRequested = testApplicationId != null
-val providerArtifactDir: java.io.File? =
-    providers.gradleProperty("andchamber.providerArtifactDir").orNull
-        ?.takeIf { it.isNotBlank() }
-        ?.let { File(it) }
 val browserSmokeRunnerRequested = providers.gradleProperty("andchamber.browserSmokeRunner").orNull
 val useBrowserSmokeRunner = when (browserSmokeRunnerRequested) {
     null, "false" -> false
@@ -167,8 +163,6 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = when {
-            providers.gradleProperty("andchamber.providerRunner").orNull == "true" ->
-                "io.andchamber.app.browser.OpenChamberProviderInstrumentation"
             useBrowserSmokeRunner ->
                 "io.andchamber.app.browser.BrowserSmokeInstrumentation"
             else ->
@@ -200,14 +194,6 @@ android {
                 enableV2Signing = true
                 enableV3Signing = true
             }
-        }
-    }
-
-    sourceSets {
-        if (providerArtifactDir != null) {
-            // Debug/emulator provisioning only. Release must not embed the patched server+dist pair.
-            check(providerArtifactDir.isDirectory) { "andchamber.providerArtifactDir is not a directory" }
-            getByName("debug").assets.srcDir(File(providerArtifactDir, "apk-asset"))
         }
     }
 

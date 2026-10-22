@@ -103,8 +103,7 @@ object ProotCommands {
         suiteEnvironment: Map<String, String>,
         prootTmp: File,
         uiPassword: String,
-        browserControl: Boolean = true,
-        providerToken: String? = null,
+        browserTool: Map<String, String> = emptyMap(),
     ): Map<String, String> =
         buildMap {
             putAll(suiteEnvironment)
@@ -122,17 +121,9 @@ object ProotCommands {
             put("OPENCHAMBER_OPENCODE_HEALTH_TIMEOUT_MS", "15000")
             // Android's SELinux makes os.networkInterfaces() throw; the shim supplies a loopback list.
             put("NODE_OPTIONS", "--require $SHIM_PATH")
-            // Browser MCP is optional. A failed prepare leaves the user's inline config untouched and
-            // injects neither the endpoint path nor an overlay.
-            when (BrowserControlSelection.select(providerToken != null, browserControl)) {
-                BrowserControlMode.NATIVE_PROVIDER -> {
-                    put(BrowserProviderSession.MODE_ENV, BrowserProviderSession.MODE_ANDROID)
-                    put(BrowserProviderSession.TOKEN_ENV, providerToken!!)
-                }
-                BrowserControlMode.LEGACY_MCP ->
-                    putAll(BrowserToolAssets.launchEnvironment(existingConfig = get(BrowserToolAssets.CONFIG_ENV)))
-                BrowserControlMode.NONE -> Unit
-            }
+            // The plugin entry and its endpoint-file path. A failed prepare passes an empty map, so
+            // the user's inline config stays untouched and no overlay is injected.
+            putAll(browserTool)
         }
 
     /** Environment for installer steps (apk, npm): no server secrets, no shim. */

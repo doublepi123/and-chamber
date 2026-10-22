@@ -1,10 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const harness = require('../verify_openchamber_provider_emulator.cjs');
+const harness = require('../lib/provider_gate_adapters.cjs');
 const probe = require('../lib/provider_geometry_gate_probe.cjs');
 
 test('geometry input reads preserve fixture strings through WebView JSON encoding', async () => {
@@ -285,17 +283,3 @@ test('gate report never claims a phase pass', () => {
   assert.equal(pass.scope, 'geometry-race-targeted');
 });
 
-test('instrumentation: PixelCopy runs on an owned HandlerThread, no hardcoded recycle count', () => {
-  const kt = fs.readFileSync(path.join(__dirname, '../../app/src/androidTest/java/io/andchamber/app/browser/OpenChamberProviderInstrumentation.kt'), 'utf8');
-  assert.match(kt, /HandlerThread\("oc-provider-pixelcopy"\)/);
-  assert.match(kt, /quitSafely/);
-  assert.doesNotMatch(kt, /recycleCount/);
-  assert.doesNotMatch(kt, /Thread\.sleep\(50\)\s*\}\s*listener/);
-});
-
-test('verify script runs the real adapter and no hardcoded recycle or selector shortcut', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../verify_openchamber_provider_emulator.cjs'), 'utf8');
-  assert.match(src, /createGeometryGateAdapters/);
-  assert.doesNotMatch(src, /recycleCount: async \(\) => 0/);
-  assert.doesNotMatch(src, /data\.selectors/);
-});

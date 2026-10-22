@@ -9,7 +9,8 @@
 // coordinate. A missing producer reader/field is recorded and the affected case refuses.
 //
 // Preconditions are owned by the parent lane: a fresh debug build of io.andchamber.localprovider with
-// the provider artifact staged, the installed runtime already applied, and the test package present.
+// the stock @openchamber/web runtime installed, the guest browser-tool plugin files synced, and the
+// test package present.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -38,7 +39,7 @@ const {
   createCaseFence,
 } = require('./lib/local_provider_matrix_io.cjs');
 
-const harness = require('./verify_openchamber_provider_emulator.cjs');
+const harness = require('./lib/provider_gate_adapters.cjs');
 const lifecycleProbe = require('./lib/provider_lifecycle_gate_probe.cjs');
 const retirementProbe = require('./lib/provider_retirement_gate_probe.cjs');
 const {
@@ -197,19 +198,39 @@ async function checkPreconditions({ adbFn, pkg, log }) {
   const metadata = parseJson(metadataRaw);
   if (!metadata) throw new Error('installed runtime metadata missing');
   if (metadata.abi !== 'x86_64') throw new Error(`installed runtime abi is ${metadata.abi}, expected x86_64`);
-  if (metadata.openChamberVersion !== '2.4.0') {
-    throw new Error(`installed OpenChamber is ${metadata.openChamberVersion}, expected 2.4.0`);
+  const manifest = parseJson(fs.readFileSync(path.resolve(__dirname, '..', 'app/src/main/assets/runtime-manifest.json'), 'utf8'));
+  if (!manifest) throw new Error('runtime manifest asset is missing');
+  // The in-app update may move past the bundled pin; it must never be older.
+  const versionParts = (value) => String(value || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const notOlder = (a, b) => {
+    const x = versionParts(a); const y = versionParts(b);
+    for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+      if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+    }
+    return true;
+  };
+  if (!notOlder(metadata.openChamberVersion, manifest.openChamberVersion)) {
+    throw new Error(`installed OpenChamber is ${metadata.openChamberVersion}, older than pin ${manifest.openChamberVersion}`);
   }
-  // Paired asset presence: the installed package must carry the deployed provider marker. The in-process
-  // test re-verifies every pin against the APK asset (that full hash check is not duplicated on the host).
+  // Stock npm package recorded in the runtime manifest; no patched marker is expected. The guest
+  // plugin directory carries the APK's browser-tool files (bytes re-checked in-process).
   const moduleRoot = 'files/runtime/environment/rootfs/usr/local/lib/node_modules/@openchamber/web';
-  const markerRaw = await readPrivateText(adbFn, pkg, `${moduleRoot}/provider-artifact.json`);
-  const marker = parseJson(markerRaw);
-  if (!marker) throw new Error('installed provider-artifact.json missing (paired asset not applied)');
   const packageRaw = await readPrivateText(adbFn, pkg, `${moduleRoot}/package.json`);
   const packageJson = parseJson(packageRaw);
-  if (!packageJson || packageJson.name !== '@openchamber/web' || packageJson.version !== '2.4.0') {
-    throw new Error('installed @openchamber/web package.json is missing or not 2.4.0');
+  if (!packageJson || packageJson.name !== '@openchamber/web' ||
+      packageJson.version !== metadata.openChamberVersion) {
+    throw new Error('installed @openchamber/web package.json is missing or not the recorded runtime version');
+  }
+  // The retired patched build shared a version number; its marker and provider module must be gone.
+  const marker = await adbFn(['shell', 'run-as', pkg, 'ls', `${moduleRoot}/provider-artifact.json`, `${moduleRoot}/server/lib/browser-control/android-provider.js`], 15000);
+  if (marker.code === 0 && /provider-artifact\.json|android-provider\.js/.test(String(marker.stdout || ''))) {
+    throw new Error('installed @openchamber/web still carries the retired patched build');
+  }
+  const pluginDir = 'files/runtime/home/.local/share/andchamber/browser-tool';
+  const pluginPackage = await readPrivateText(adbFn, pkg, `${pluginDir}/package.json`);
+  const pluginIndex = await readPrivateText(adbFn, pkg, `${pluginDir}/index.js`);
+  if (pluginPackage == null || pluginIndex == null) {
+    throw new Error('guest browser-tool plugin files missing');
   }
   const installLog = await readPrivateText(adbFn, pkg, 'files/runtime/logs/install.log');
   const prootInLog = /5\.1\.107\.98/.test(String(installLog || ''));
@@ -234,7 +255,7 @@ async function checkPreconditions({ adbFn, pkg, log }) {
       openCodeVersion: metadata.openCodeVersion,
       nodeVersion: metadata.nodeVersion,
     },
-    providerMarker: { packageName: marker.packageName || null, version: marker.version || null },
+    pluginAssets: { package: pluginPackage != null, index: pluginIndex != null },
     prootPinnedInLog: prootInLog,
     instrumentationRunner: COMPONENT,
     hostServerStarted: false,

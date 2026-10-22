@@ -84,7 +84,6 @@ internal class HomeActions(
     /** Stops the local server and starts it again, so new folder settings apply. */
     val onRestartLocal: () -> Unit = {},
     val onAutoOpenChange: (Boolean) -> Unit = {},
-    val onOpenBrowser: () -> Unit = {},
     /** Installs the available OpenChamber / OpenCode update (after the card has asked). */
     val onUpdate: () -> Unit = {},
     val onCheckForUpdates: () -> Unit = {},
@@ -113,8 +112,6 @@ internal fun HomeScreen(
     storage: SharedStorageState? = null,
     /** "Open OpenChamber when the app starts"; null hides the setting. */
     autoOpenLocal: Boolean? = null,
-    /** New provider mode uses the chat window only, so the old Home card stays hidden. */
-    providerBrowser: Boolean = false,
     /** Update check and the outcome of the last update of the local server. */
     updates: RuntimeUpdateState = RuntimeUpdateState(),
 ) {
@@ -226,16 +223,6 @@ internal fun HomeScreen(
                         modifier = Modifier.revealOnEnter(3, animate),
                     )
 
-                    if (!providerBrowser) {
-                        SectionHeader(
-                            text = stringResource(R.string.section_browser),
-                            modifier = Modifier.padding(top = 28.dp, bottom = 10.dp).revealOnEnter(4, animate),
-                        )
-                        BrowserEntryCard(
-                            onOpen = actions.onOpenBrowser,
-                            modifier = Modifier.revealOnEnter(4, animate),
-                        )
-                    }
                     Spacer(Modifier.height(32.dp))
                 }
                 Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.safeDrawing))
@@ -292,35 +279,6 @@ private fun HomeHeader(modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-    }
-}
-
-/** A separate public browser. It does not open OpenChamber and does not share its sign-in. */
-@Composable
-private fun BrowserEntryCard(
-    onOpen: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    ChamberCard(onClick = onOpen, modifier = modifier) {
-        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconTile {
-                Icon(Icons.Rounded.Language, contentDescription = null, modifier = Modifier.size(22.dp))
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = stringResource(R.string.browser_entry_title),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = stringResource(R.string.browser_entry_body),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
     }
 }

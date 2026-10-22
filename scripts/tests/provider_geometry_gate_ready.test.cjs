@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const harness = require('../verify_openchamber_provider_emulator.cjs');
+const harness = require('../lib/provider_gate_adapters.cjs');
 
 // Fake clock: sleeping advances time, so the bounded waits are exercised without real delays.
 function clock() {

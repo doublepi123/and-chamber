@@ -458,6 +458,7 @@ internal class LifecycleGateCommands(
         return JSONObject()
             .put("phase", "lifecycle-diag")
             .put("selectedTabId", state.selectedTabId ?: JSONObject.NULL)
+            .put("selectedTabOwner", selected?.owner ?: JSONObject.NULL)
             .put("tabIds", JSONArray(state.tabs.map { it.id }))
             .put("pageRetired", state.pageRetired)
             .put("agentOn", state.agentOn)

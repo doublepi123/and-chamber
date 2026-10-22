@@ -22,11 +22,10 @@ import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.WebSessionCookies
 import io.andchamber.app.runtime.WebSessionResult
-import io.andchamber.app.runtime.install.OpenChamberProviderArtifact
 import io.andchamber.app.runtime.install.RuntimeMetadata
 import io.andchamber.app.runtime.manifest.RuntimeManifest
 import io.andchamber.app.runtime.manifest.RuntimeManifestReader
-import io.andchamber.app.runtime.process.BrowserProviderSession
+import io.andchamber.app.runtime.process.BrowserPluginAssets
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.process.OpenChamberServer
 import io.andchamber.app.ui.browser.NativeBrowserPresenter
@@ -39,9 +38,17 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.koin.core.context.GlobalContext
 import java.io.File
+import java.net.URI
 import java.net.URLEncoder
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.UUID
+
+/** The `id` exported by app/src/main/assets/browser-tool/index.js, as OpenCode lists it. */
+private const val PLUGIN_ID = "andchamber-browser"
 
 /**
  * androidTest-only support for the true-local entry gate. It never replaces a Koin definition:
@@ -108,7 +115,9 @@ internal class LocalProviderRun(
 
     fun readTapTarget(label: String, phase: String, sourceViewHandle: Int?): TapRead {
         val root = try {
-            instrumentation.uiAutomation.rootInActiveWindow
+            instrumentation.uiAutomation.also {
+                if (android.os.Build.VERSION.SDK_INT >= 34) runCatching { it.clearCache() }
+            }.rootInActiveWindow
         } catch (error: Throwable) {
             return TapRead(null, "accessibility-unavailable:${error.javaClass.simpleName}")
         } ?: return TapRead(null, "no-active-window")
@@ -276,14 +285,6 @@ internal class LocalProviderRun(
     fun controller(): LocalRuntimeController = GlobalContext.get().get()
     fun server(): OpenChamberServer = GlobalContext.get().get()
     fun presenter(): NativeBrowserPresenter = GlobalContext.get().get()
-    fun providerSession(): BrowserProviderSession {
-        // This credential owner is private to the real server, not a separately registered Koin bean.
-        val actualServer = server()
-        val field = actualServer.javaClass.getDeclaredField("browserProvider").apply { isAccessible = true }
-        return field.get(actualServer) as? BrowserProviderSession
-            ?: fail("production-provider-session-unavailable")
-    }
-
     inline fun <reified T : Any> service(): T = GlobalContext.get().get()
 
     fun <T> onMain(block: () -> T): T {
@@ -366,94 +367,273 @@ internal class LocalProviderRun(
         val metadata = runCatching { json.decodeFromString<RuntimeMetadata>(metadataFile.readText()) }.getOrNull()
             ?: return null
         val moduleRoot = File(paths.rootfs, "usr/local/lib/node_modules/@openchamber/web")
+        val packageJson = File(moduleRoot, "package.json")
+        val parsed = packageJson.takeIf { it.isFile }
+            ?.let { runCatching { JSONObject(it.readText()) }.getOrNull() }
         return InstalledInspection(
             metadata = metadata,
             moduleRoot = moduleRoot,
-            packageVersion = packageVersion(moduleRoot),
-            applied = OpenChamberProviderArtifact.isApplied(moduleRoot, OpenChamberProviderArtifact.PACKAGE_VERSION),
+            packageName = parsed?.optString("name")?.takeIf { it.isNotBlank() },
+            packageVersion = parsed?.optString("version")?.takeIf { it.isNotBlank() },
         )
     }
 
-    fun packageVersion(moduleRoot: File): String? {
-        val file = File(moduleRoot, "package.json")
-        if (!file.isFile) return null
-        return runCatching { JSONObject(file.readText()).optString("version").takeIf { it.isNotBlank() } }.getOrNull()
-    }
-
-    fun providerManifestFromApk(): OpenChamberProviderArtifact.LaneManifest {
-        val raw = runCatching {
-            context.assets.open("openchamber-provider/manifest.json").bufferedReader().use { it.readText() }
-        }.getOrNull() ?: fail("apk-provider-manifest-missing: build with -Pandchamber.providerArtifactDir")
-        val manifest = runCatching { OpenChamberProviderArtifact.parse(raw) }
-            .getOrElse { fail("apk-provider-manifest-invalid: ${it.javaClass.simpleName}") }
-        OpenChamberProviderArtifact.manifestRejection(manifest)?.let { fail("apk-provider-manifest-rejected: $it") }
-        return manifest
-    }
-
-    fun verifyAssetPayload(manifest: OpenChamberProviderArtifact.LaneManifest): Int {
-        var files = 0
-        for (pin in manifest.server + manifest.dist) {
-            val bytes = runCatching { context.assets.open("openchamber-provider/${pin.path}").use { it.readBytes() } }
-                .getOrElse { fail("apk-provider-file-missing: ${pin.path}") }
-            if (bytes.size.toLong() != pin.bytes) fail("apk-provider-file-size: ${pin.path}")
-            if (sha256(bytes) != pin.sha256) fail("apk-provider-file-hash: ${pin.path}")
-            files += 1
-        }
-        return files
-    }
-
-    fun verifyInstalledPayload(
-        manifest: OpenChamberProviderArtifact.LaneManifest,
+    /**
+     * The installed console is the stock npm @openchamber/web recorded in the runtime manifest. No
+     * patched payload, marker or provider file is expected any more.
+     */
+    fun verifyStockOpenChamber(
+        manifest: RuntimeManifest,
         paths: RuntimePaths,
     ): InstalledInspection {
         val inspection = installed(paths) ?: fail("installed-runtime-missing")
         val metadata = inspection.metadata
         if (metadata.abi != "x86_64") fail("installed-abi-not-x86_64: ${metadata.abi}")
         if (!inspection.moduleRoot.isDirectory) fail("installed-openchamber-package-missing")
-        val packageJson = File(inspection.moduleRoot, "package.json")
-        if (!packageJson.isFile) fail("installed-package-json-missing")
-        val parsed = runCatching { JSONObject(packageJson.readText()) }
-            .getOrElse { fail("installed-package-json-invalid") }
-        if (parsed.optString("name") != OpenChamberProviderArtifact.PACKAGE_NAME) {
-            fail("installed-package-name: ${parsed.optString("name")}")
+        if (inspection.packageName != "@openchamber/web") {
+            fail("installed-package-name: ${inspection.packageName}")
         }
-        if (parsed.optString("version") != OpenChamberProviderArtifact.PACKAGE_VERSION) {
-            fail("installed-package-version: ${parsed.optString("version")}")
+        // Installed package must be exactly what the runtime recorded (an in-app update may be newer
+        // than the bundled pin, never older).
+        if (inspection.packageVersion != metadata.openChamberVersion) {
+            fail("installed-package-version: ${inspection.packageVersion} recorded ${metadata.openChamberVersion}")
         }
-        if (!OpenChamberProviderArtifact.isApplied(inspection.moduleRoot, OpenChamberProviderArtifact.PACKAGE_VERSION)) {
-            fail("installed-provider-marker-not-applied")
+        val installedVersion = inspection.packageVersion
+            ?: fail("installed-package-version-missing")
+        if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(installedVersion, manifest.openChamberVersion) < 0) {
+            fail("installed-package-below-pin: $installedVersion")
         }
-        if (!OpenChamberProviderArtifact.verifyInstalled(inspection.moduleRoot, OpenChamberProviderArtifact.PACKAGE_VERSION)) {
-            fail("installed-provider-payload-hash-mismatch")
+        // A version match alone does not prove stock: the retired patched build was also 2.4.0. Its
+        // marker file and the provider module must be absent.
+        if (File(inspection.moduleRoot, "provider-artifact.json").exists()) fail("installed-patched-marker-present")
+        if (File(inspection.moduleRoot, "server/lib/browser-control/android-provider.js").exists()) {
+            fail("installed-patched-provider-module-present")
         }
-        val markerFile = File(inspection.moduleRoot, OpenChamberProviderArtifact.MARKER)
-        val marker = runCatching { OpenChamberProviderArtifact.parse(markerFile.readText()) }
-            .getOrElse { fail("installed-provider-marker-invalid") }
-        if (marker != manifest) fail("installed-provider-marker-differs-from-apk")
-        // Re-hash every installed pin independently of the production helper and keep only a digest.
-        val digest = MessageDigest.getInstance("SHA-256")
-        for (pin in manifest.server + manifest.dist) {
-            val relative = OpenChamberProviderArtifact.guestPath(pin.path) ?: fail("installed-provider-path-outside: ${pin.path}")
-            val file = OpenChamberProviderArtifact.containedFile(inspection.moduleRoot, relative)
-                ?: fail("installed-provider-path-unsafe: ${pin.path}")
-            if (!file.isFile) fail("installed-provider-file-missing: ${pin.path}")
-            if (file.length() != pin.bytes) fail("installed-provider-file-size: ${pin.path}")
-            val hash = fileSha256(file)
-            if (hash != pin.sha256) fail("installed-provider-file-hash: ${pin.path}")
-            digest.update("${pin.path}:$hash\n".toByteArray())
-        }
-        record("installedProviderPayloadDigest", digest.digest().joinToString("") { "%02x".format(it) })
-        record("installedProviderFiles", manifest.server.size + manifest.dist.size)
-        record("installedMetadata", JSONObject()
-            .put("runtimeVersion", metadata.runtimeVersion)
-            .put("alpineVersion", metadata.alpineVersion)
-            .put("abi", metadata.abi)
-            .put("port", metadata.port)
-            .put("openChamberVersion", metadata.openChamberVersion)
-            .put("openCodeVersion", metadata.openCodeVersion)
-            .put("nodeVersion", metadata.nodeVersion)
-            .put("installedAt", metadata.installedAt))
+        record(
+            "installedPackage",
+            JSONObject()
+                .put("name", inspection.packageName)
+                .put("version", inspection.packageVersion)
+                .put("stock", true),
+        )
+        record(
+            "installedMetadata",
+            JSONObject()
+                .put("runtimeVersion", metadata.runtimeVersion)
+                .put("alpineVersion", metadata.alpineVersion)
+                .put("abi", metadata.abi)
+                .put("port", metadata.port)
+                .put("openChamberVersion", metadata.openChamberVersion)
+                .put("openCodeVersion", metadata.openCodeVersion)
+                .put("nodeVersion", metadata.nodeVersion)
+                .put("installedAt", metadata.installedAt),
+        )
         return inspection
+    }
+
+    /**
+     * The guest plugin directory must hold exactly the two APK assets after every start. Bytes are
+     * compared, not hashes from a patch manifest: the asset is the source of truth.
+     */
+    fun verifyPluginSync(paths: RuntimePaths): JSONObject {
+        val dir = BrowserPluginAssets.pluginDir(paths.home)
+        if (!dir.isDirectory) fail("guest-plugin-dir-missing")
+        val files = org.json.JSONArray()
+        fun check(
+            asset: String,
+            file: File,
+        ) {
+            val expected = runCatching { context.assets.open(asset).use { it.readBytes() } }
+                .getOrElse { fail("apk-plugin-asset-missing: $asset") }
+            if (!file.isFile) fail("guest-plugin-file-missing: $asset")
+            val actual = runCatching { file.readBytes() }.getOrElse { fail("guest-plugin-file-unreadable: $asset") }
+            if (!actual.contentEquals(expected)) fail("guest-plugin-bytes-differ: $asset")
+            files.put(
+                JSONObject()
+                    .put("asset", asset)
+                    .put("bytes", actual.size)
+                    .put("sha256", sha256(actual)),
+            )
+        }
+        check(BrowserPluginAssets.PACKAGE_ASSET, File(dir, "package.json"))
+        check(BrowserPluginAssets.INDEX_ASSET, File(dir, "index.js"))
+        return JSONObject()
+            .put("guestDir", BrowserPluginAssets.GUEST_DIR)
+            .put("files", files)
+    }
+
+    /**
+     * The launch endpoint exists only after the loopback tool server listens. It is owner-only; the
+     * token is validated but never recorded.
+     */
+    fun waitToolEndpoint(
+        paths: RuntimePaths,
+        budgetMs: Long = 30_000L,
+    ): JSONObject {
+        val deadline = SystemClock.elapsedRealtime() + budgetMs
+        var last: AssertionError? = null
+        while (SystemClock.elapsedRealtime() < deadline) {
+            try {
+                return verifyToolEndpoint(paths)
+            } catch (error: AssertionError) {
+                last = error
+            }
+            SystemClock.sleep(250)
+        }
+        throw last ?: AssertionError("browser-tool-endpoint-missing")
+    }
+
+    fun verifyToolEndpoint(paths: RuntimePaths): JSONObject {
+        val file = BrowserPluginAssets.endpointHostFile(paths.home)
+        val path = file.toPath()
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) fail("browser-tool-endpoint-missing")
+        if (Files.isSymbolicLink(path)) fail("browser-tool-endpoint-symlink")
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) fail("browser-tool-endpoint-not-a-file")
+        val mode = runCatching {
+            PosixFilePermissions.toString(Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS))
+        }.getOrElse { fail("browser-tool-endpoint-mode-unreadable") }
+        if (mode != "rw-------") fail("browser-tool-endpoint-mode: $mode")
+        val body = runCatching { JSONObject(file.readText()) }.getOrElse { fail("browser-tool-endpoint-not-json") }
+        if (body.optInt("version", -1) != 1) fail("browser-tool-endpoint-version")
+        val token = body.optString("token")
+        if (!Regex("^[0-9a-f]{64}$").matches(token)) fail("browser-tool-endpoint-token-shape")
+        val url = body.optString("url")
+        val cancelUrl = body.optString("cancelUrl")
+        val parsed = runCatching { URI(url) }.getOrNull() ?: fail("browser-tool-endpoint-url-invalid")
+        val cancel = runCatching { URI(cancelUrl) }.getOrNull() ?: fail("browser-tool-endpoint-cancel-invalid")
+        if (parsed.scheme != "http" || parsed.host != "127.0.0.1" || parsed.port !in 1..65535 ||
+            parsed.path != "/v1/tool" || parsed.rawQuery != null
+        ) {
+            fail("browser-tool-endpoint-url-shape")
+        }
+        if (cancel.scheme != "http" || cancel.host != "127.0.0.1" || cancel.port != parsed.port ||
+            cancel.path != "/v1/cancel" || cancel.rawQuery != null
+        ) {
+            fail("browser-tool-endpoint-cancel-shape")
+        }
+        return JSONObject()
+            .put("guestFile", BrowserPluginAssets.GUEST_ENDPOINT_FILE)
+            .put("mode", mode)
+            .put("version", 1)
+            .put("port", parsed.port)
+            .put("tokenLength", token.length)
+    }
+
+    /**
+     * The OpenChamber instance setting controls its own `openchamber_web` agent tool. The app writes
+     * `false` only when the key is absent, so a user's value must be recorded and respected.
+     */
+    fun verifyAgentWebSetting(paths: RuntimePaths): JSONObject {
+        val file = BrowserPluginAssets.settingsFile(paths.home)
+        if (!file.isFile) fail("openchamber-settings-missing")
+        val root = runCatching { JSONObject(file.readText()) }.getOrElse { fail("openchamber-settings-not-json") }
+        if (!root.has(BrowserPluginAssets.AGENT_WEB_TOOL_KEY)) fail("openchamber-settings-key-missing")
+        val value = root.opt(BrowserPluginAssets.AGENT_WEB_TOOL_KEY)
+        if (value !is Boolean) fail("openchamber-settings-key-not-boolean")
+        return JSONObject()
+            .put("key", BrowserPluginAssets.AGENT_WEB_TOOL_KEY)
+            .put("value", value)
+    }
+
+    /**
+     * Same-uid process environments are readable through /proc. The OpenChamber/OpenCode process
+     * must carry our guest plugin directory in `plugins`, and the overlay must not add `mcp`,
+     * `permission(s)` or `tools` relative to the value the app merged into.
+     */
+    fun verifyPluginConfig(paths: RuntimePaths): JSONObject {
+        val configs = mutableListOf<Pair<Int, JSONObject>>()
+        for (pid in sameUidProcessEnvironments()) {
+            val raw = readProcessEnv(pid) ?: continue
+            val value = raw[BrowserPluginAssets.CONFIG_ENV] ?: continue
+            val parsed = runCatching { JSONObject(value) }.getOrNull() ?: continue
+            configs.add(pid to parsed)
+        }
+        if (configs.isEmpty()) fail("opencode-config-env-missing")
+        val withPlugin = configs.filter { entry -> pluginList(entry.second).contains(io.andchamber.app.runtime.process.BrowserPluginAssets.GUEST_DIR) }
+        if (withPlugin.isEmpty()) fail("opencode-config-plugin-missing")
+        val baseline = configs.filter { entry -> !pluginList(entry.second).contains(BrowserPluginAssets.GUEST_DIR) }
+        fun expectedFrom(source: JSONObject): JSONObject {
+            val plugins = linkedSetOf<String>()
+            plugins += pluginList(source)
+            (source.opt("plugin") as? org.json.JSONArray)?.let { legacy ->
+                for (index in 0 until legacy.length()) {
+                    (legacy.opt(index) as? String)?.let { plugins += it }
+                }
+            }
+            plugins += BrowserPluginAssets.GUEST_DIR
+            val copy = JSONObject(source.toString())
+            copy.remove("plugin")
+            copy.put("plugins", org.json.JSONArray(plugins.toList()))
+            return copy
+        }
+        if (baseline.isNotEmpty() && baseline.none { sameExceptPluginLists(expectedFrom(it.second), withPlugin.first().second) }) {
+            fail("opencode-config-overlay-shape")
+        }
+        val chosen = withPlugin.first().second
+        val plugins = pluginList(chosen)
+        if (plugins.count { it == BrowserPluginAssets.GUEST_DIR } != 1) fail("opencode-config-plugin-duplicate")
+        if (baseline.isNotEmpty()) {
+            val source = baseline.first().second
+            for (key in chosen.keys()) {
+                if (key == "plugins" || key == "plugin") continue
+                if (!source.has(key) || !source.opt(key).toString().equals(chosen.opt(key).toString())) {
+                    fail("opencode-config-key-added: $key")
+                }
+            }
+        } else {
+            for (key in listOf("mcp", "permissions", "permission", "tools")) {
+                if (chosen.has(key)) fail("opencode-config-key-added: $key")
+            }
+        }
+        if (chosen.has("plugin")) fail("opencode-config-legacy-plugin-key")
+        return JSONObject()
+            .put("variable", BrowserPluginAssets.CONFIG_ENV)
+            .put("processes", configs.size)
+            .put("baselinePresent", baseline.isNotEmpty())
+            .put("pluginListed", true)
+            .put("pluginCount", plugins.size)
+            .put("keys", chosen.keys().asSequence().sorted().joinToString(","))
+    }
+
+    private fun pluginList(config: JSONObject): List<String> {
+        val array = config.opt("plugins") as? org.json.JSONArray ?: return emptyList()
+        val values = ArrayList<String>()
+        for (index in 0 until array.length()) {
+            (array.opt(index) as? String)?.let { values += it }
+        }
+        return values
+    }
+
+    /** Equal document except the plugin lists, which the overlay is allowed to change. */
+    private fun sameExceptPluginLists(
+        left: JSONObject,
+        right: JSONObject,
+    ): Boolean {
+        val leftKeys = left.keys().asSequence().filter { it != "plugins" && it != "plugin" }.toSet()
+        val rightKeys = right.keys().asSequence().filter { it != "plugins" && it != "plugin" }.toSet()
+        if (leftKeys != rightKeys) return false
+        return leftKeys.all { key -> left.opt(key).toString() == right.opt(key).toString() }
+    }
+
+    private fun sameUidProcessEnvironments(): List<Int> {
+        val ownUid = android.os.Process.myUid()
+        val pids = File("/proc").listFiles()?.mapNotNull { it.name.toIntOrNull() } ?: emptyList()
+        return pids.filter { pid ->
+            val status = runCatching { File("/proc/$pid/status").readText() }.getOrNull() ?: return@filter false
+            val uid = Regex("^Uid:\\s*(\\d+)", RegexOption.MULTILINE)
+                .find(status)?.groupValues?.get(1)?.toIntOrNull()
+            uid == ownUid
+        }
+    }
+
+    private fun readProcessEnv(pid: Int): Map<String, String>? {
+        val bytes = runCatching { File("/proc/$pid/environ").readBytes() }.getOrNull() ?: return null
+        val values = HashMap<String, String>()
+        for (part in bytes.toString(Charsets.UTF_8).split('\u0000')) {
+            val index = part.indexOf('=')
+            if (index > 0) values[part.substring(0, index)] = part.substring(index + 1)
+        }
+        return values
     }
 
     fun runtimeManifest(): RuntimeManifest =
@@ -574,10 +754,82 @@ internal class LocalProviderRun(
         return runCatching { JSONObject(reply.body) }.getOrDefault(JSONObject())
     }
 
-    fun get(url: String, cookie: String? = null): HttpReply {
+    /**
+     * OpenCode 2.0.32's HTTP API has no tool-list route (the protocol groups are agent, command,
+     * config, credential, debug, event, form, fs, generate, integration, location, mcp, message,
+     * migration, model, permission, persistent-pty, plugin, project, provider, pty, reference, rpc,
+     * server, session, shell, skill, vcs, voice, websearch, worktree). `GET /api/plugin` is the
+     * closest observable proof that OpenCode loaded the plugin: it lists loaded local plugins with
+     * their state. Tool names themselves are not exposed, so no tool-name assertion is fabricated
+     * here; the config overlay check proves the plugin directory is named to OpenCode.
+     */
+    /**
+     * OpenCode loads plugins lazily, on the first request for an instance, so a fresh launch can
+     * list the built-ins before ours. Polls the read-only inventory for a bounded time.
+     */
+    fun pluginInventory(base: String, cookie: String, budgetMs: Long = 30_000L): JSONObject {
+        val deadline = SystemClock.elapsedRealtime() + budgetMs
+        var attempts = 0
+        while (true) {
+            attempts += 1
+            val last = SystemClock.elapsedRealtime() >= deadline
+            pluginInventoryOnce(base, cookie, finalAttempt = last)?.let { return it.put("attempts", attempts) }
+            SystemClock.sleep(1_000)
+        }
+    }
+
+    /** Null while our plugin is not listed yet (only when [finalAttempt] is false). */
+    private fun pluginInventoryOnce(base: String, cookie: String, finalAttempt: Boolean): JSONObject? {
+        val reply = get("$base/api/plugin", cookie, mapOf("x-opencode-directory" to "/root"))
+        if (reply.code != 200) fail("plugin-list-http-${reply.code}")
+        val body = runCatching { JSONObject(reply.body) }.getOrElse { fail("plugin-list-not-json") }
+        val data = body.optJSONArray("data") ?: fail("plugin-list-schema")
+        var pluginState = ""
+        val localPaths = org.json.JSONArray()
+        for (index in 0 until data.length()) {
+            val item = data.optJSONObject(index) ?: continue
+            val source = item.optJSONObject("source") ?: continue
+            if (source.optString("type") != "local") continue
+            val path = source.optString("path")
+            localPaths.put(path)
+            // OpenCode 2.1.2 reports the resolved entry file (<dir>/index.js) and the package id.
+            val ours = path == BrowserPluginAssets.GUEST_DIR || path == "${BrowserPluginAssets.GUEST_DIR}/index.js"
+            if (ours) {
+                if (item.optString("id") != PLUGIN_ID) fail("browser-plugin-id: ${item.optString("id").take(80)}")
+                if (pluginState.isNotEmpty()) fail("browser-plugin-listed-twice")
+                pluginState = item.optJSONObject("state")?.optString("status").orEmpty()
+            }
+        }
+        if (pluginState.isEmpty() && !finalAttempt) return null
+        if (pluginState.isEmpty()) {
+            // Keep the actual inventory shape (paths/types/states only, no secrets) for diagnosis.
+            val shape = org.json.JSONArray()
+            for (index in 0 until data.length()) {
+                val item = data.optJSONObject(index) ?: continue
+                shape.put(JSONObject()
+                    .put("id", item.optString("id").take(160))
+                    .put("source", item.optJSONObject("source")?.toString()?.take(240) ?: JSONObject.NULL)
+                    .put("state", item.optJSONObject("state")?.toString()?.take(120) ?: JSONObject.NULL))
+            }
+            record("pluginInventoryShape", shape)
+            fail("browser-plugin-not-loaded")
+        }
+        if (pluginState != "active") fail("browser-plugin-state: $pluginState")
+        return JSONObject()
+            .put("endpoint", "GET /api/plugin")
+            .put("localPlugin", BrowserPluginAssets.GUEST_DIR)
+            .put("pluginId", PLUGIN_ID)
+            .put("state", pluginState)
+            .put("localPluginCount", localPaths.length())
+            .put("toolNamesObservable", false)
+            .put("toolNameAssertion", "unavailable-in-opencode-2.0.32")
+    }
+
+    fun get(url: String, cookie: String? = null, extraHeaders: Map<String, String> = emptyMap()): HttpReply {
         val request = Request.Builder().url(url).get().apply {
             if (cookie != null) header("Cookie", cookie)
             header("Connection", "close")
+            extraHeaders.forEach { (name, value) -> header(name, value) }
         }.build()
         return execute(request, url)
     }
@@ -615,10 +867,26 @@ internal class LocalProviderRun(
         }
     }
 
-    fun recordedCookieHash(base: String, auth: WebSessionAuth): String {
+    /**
+     * Hash of the profile's current Cookie header for [base]. [excludingCookie] drops one named
+     * cookie first, so a test sentinel can be proven present without hiding a real session rotation.
+     */
+    fun recordedCookieHash(
+        base: String,
+        auth: WebSessionAuth,
+        excludingCookie: String? = null,
+    ): String {
         val header = runBlocking { auth.cookies.cookieHeader(base) } ?: fail("profile-cookie-missing")
         if (header.isEmpty()) fail("profile-cookie-empty")
-        return sha256(header.toByteArray())
+        val retained = if (excludingCookie == null) {
+            header
+        } else {
+            header.split(';').map { it.trim() }
+                .filterNot { it.startsWith("$excludingCookie=") }
+                .joinToString("; ")
+        }
+        if (retained.isEmpty()) fail("profile-cookie-empty")
+        return sha256(retained.toByteArray())
     }
 
     fun capturePath(raw: String?): File? {
@@ -633,8 +901,22 @@ internal class LocalProviderRun(
         }
         if (!relative.startsWith(".openchamber/screenshots/")) return null
         val home = RuntimePaths.under(context.filesDir).home
-        val file = OpenChamberProviderArtifact.containedFile(home, relative) ?: return null
+        val file = containedFile(home, relative) ?: return null
         return file.takeIf { it.isFile }
+    }
+
+    /** Contained path below [root]; refuses absolute paths, `..` and a symlinked escape. */
+    private fun containedFile(
+        root: File,
+        relative: String,
+    ): File? {
+        if (relative.isEmpty() || relative.startsWith("/") || relative.contains('\u0000')) return null
+        if (relative.split('/').any { it == ".." }) return null
+        return runCatching {
+            val base = root.canonicalFile
+            val file = File(root, relative).canonicalFile
+            file.takeIf { it.path.startsWith(base.path + File.separator) }
+        }.getOrNull()
     }
 
     fun eval(view: WebView, script: String): String? {
@@ -769,6 +1051,26 @@ internal class LocalProviderRun(
             .put("before", before?.toJson() ?: JSONObject.NULL)
             .put("after", after?.toJson() ?: JSONObject.NULL)
 
+    /** Decodes an inline capture; records only size and hash, never the bytes. */
+    fun verifyPngBase64(encoded: String): Pair<Int, Int> {
+        if (encoded.isBlank()) fail("capture-base64-missing")
+        val bytes = runCatching { android.util.Base64.decode(encoded, android.util.Base64.DEFAULT) }
+            .getOrElse { fail("capture-base64-invalid") }
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        if (bytes.size < png.size || !bytes.copyOfRange(0, png.size).contentEquals(png)) fail("capture-not-png")
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: fail("capture-decode-null")
+        if (bitmap.width <= 0 || bitmap.height <= 0) fail("capture-empty")
+        record("capture", JSONObject()
+            .put("bytes", bytes.size)
+            .put("width", bitmap.width)
+            .put("height", bitmap.height)
+            .put("sha256", sha256(bytes))
+            .put("delivery", "inline-base64"))
+        val size = bitmap.width to bitmap.height
+        bitmap.recycle()
+        return size
+    }
+
     fun verifyPng(file: File): Pair<Int, Int> {
         val signature = ByteArray(8)
         runCatching { java.io.DataInputStream(file.inputStream()).use { it.readFully(signature) } }
@@ -809,8 +1111,8 @@ internal class LocalProviderRun(
     data class InstalledInspection(
         val metadata: RuntimeMetadata,
         val moduleRoot: File,
+        val packageName: String?,
         val packageVersion: String?,
-        val applied: Boolean,
     )
 
     data class WebSessionAuth(
@@ -990,47 +1292,40 @@ private const val FIXTURE_DOCUMENT_SCRIPT = """
 })()
 """
 
-/** Real tool endpoint discovery inside the app's own uid; the token is never written or logged. */
-internal object LocalAgentTool {
-    data class Endpoint(val url: String, val token: String, val pid: Int)
+/**
+ * The plugin transport's endpoint file, read directly by the same-uid app context. The test stands
+ * in for the model/plugin here: it posts the exact plugin envelope to `127.0.0.1` only. This is
+ * marked `plugin-transport-direct` in every record; it is NOT an LLM-driven tool call.
+ */
+internal object LocalBrowserTool {
+    data class Endpoint(val url: String, val token: String, val port: Int)
 
-    fun discover(
-        ownPid: Int = android.os.Process.myPid(),
-        ownUid: Int = android.os.Process.myUid(),
-        listPids: () -> List<Int> = {
-            File("/proc").listFiles()?.mapNotNull { it.name.toIntOrNull() } ?: emptyList()
-        },
-        readFile: (File) -> ByteArray? = { file -> runCatching { file.readBytes() }.getOrNull() },
-    ): Endpoint? {
-        for (pid in listPids()) {
-            if (pid == ownPid) continue
-            val status = readFile(File("/proc/$pid/status"))?.toString(Charsets.UTF_8) ?: continue
-            val uid = Regex("^Uid:\\s*(\\d+)", RegexOption.MULTILINE)
-                .find(status)?.groupValues?.get(1)?.toIntOrNull() ?: continue
-            if (uid != ownUid) continue
-            val env = readFile(File("/proc/$pid/environ")) ?: continue
-            val values = HashMap<String, String>()
-            for (part in env.toString(Charsets.UTF_8).split('\u0000')) {
-                val index = part.indexOf('=')
-                if (index > 0) values[part.substring(0, index)] = part.substring(index + 1)
+    fun discover(home: File): Endpoint? {
+        val file = BrowserPluginAssets.endpointHostFile(home)
+        if (!file.isFile) return null
+        return runCatching {
+            val body = JSONObject(file.readText())
+            if (body.optInt("version", -1) != 1) return@runCatching null
+            val url = body.optString("url")
+            val token = body.optString("token")
+            val uri = runCatching { URI(url) }.getOrNull() ?: return@runCatching null
+            if (uri.scheme != "http" || uri.host != "127.0.0.1" || uri.port !in 1..65535 ||
+                uri.path != "/v1/tool" || uri.rawQuery != null
+            ) {
+                return@runCatching null
             }
-            val url = values["OPENCHAMBER_AGENT_TOOL_URL"] ?: continue
-            val token = values["OPENCHAMBER_AGENT_TOOL_TOKEN"] ?: continue
-            if (url.isBlank() || token.isBlank()) continue
-            if (!url.startsWith("http://127.0.0.1:") && !url.startsWith("http://localhost:")) continue
-            return Endpoint(url, token, pid)
-        }
-        return null
+            if (!Regex("^[0-9a-f]{64}$").matches(token)) return@runCatching null
+            Endpoint(url, token, uri.port)
+        }.getOrNull()
     }
 }
 
 internal object AgentToolResponse {
     /**
-     * Final envelope, mirroring the real service/HTTP shape:
-     * `{schemaVersion:1, ok:boolean, action, data}` or `{ok:false, error:{message,kind,code}}`.
-     * The OpenCode tool layer may carry the same envelope under `content` (JSON text) or `output`;
-     * both are unwrapped here. A missing envelope, a nested failing envelope, or a wrapper with no
-     * boolean `ok` is never a success.
+     * Plugin envelope, mirroring `BrowserToolServer`:
+     * `{version:1, ok:boolean, action, data}` or `{version:1, ok:false, action, error:{code,message}}`.
+     * A wrapper with no boolean `ok` is never a success. The envelope may still arrive under
+     * `content` or `output` from a model-facing layer, so both are unwrapped.
      */
     fun decode(raw: String, httpStatus: Int? = null): Decoded {
         val root = runCatching { JSONObject(raw) }.getOrNull()
@@ -1125,20 +1420,31 @@ internal object AgentToolResponse {
     )
 }
 
-internal class LocalAgentClient(
+internal class LocalBrowserToolClient(
     private val run: LocalProviderRun,
-    private val endpoint: LocalAgentTool.Endpoint,
+    private val endpoint: LocalBrowserTool.Endpoint,
     private val sessionId: String,
 ) {
+    private var calls = 0
+
+    /**
+     * One call per command, no retries. The body is the plugin's own shape; the action is the
+     * provider spelling (`browser.x`) while the wire input carries the bare action. The call id is
+     * unique per call and matches the server's safe request-id grammar.
+     */
     fun call(action: String, input: JSONObject = JSONObject()): AgentReply {
-        if (!endpoint.url.startsWith("http://127.0.0.1:") && !endpoint.url.startsWith("http://localhost:")) {
-            run.fail("agent-tool-url-not-loopback")
-        }
-        val actionInput = JSONObject().put("action", action)
+        if (!action.startsWith("browser.")) run.fail("tool-action-not-browser: ${action.take(40)}")
+        if (!endpoint.url.startsWith("http://127.0.0.1:")) run.fail("tool-endpoint-not-loopback")
+        calls += 1
+        val actionInput = JSONObject().put("action", action.removePrefix("browser."))
         input.keys().forEach { key -> actionInput.put(key, input.get(key)) }
+        val callId = "e2e-${android.os.Process.myPid()}-$calls-${UUID.randomUUID().toString().take(8)}"
         val payload = JSONObject()
-            .put("tool", "openchamber_web")
+            .put("version", 1)
             .put("sessionID", sessionId)
+            .put("callID", callId)
+            .put("messageID", "e2e-message-$calls")
+            .put("agent", "build")
             .put("input", actionInput)
         val request = Request.Builder()
             .url(endpoint.url)
@@ -1157,12 +1463,12 @@ internal class LocalAgentClient(
             .execute()
             .use { response ->
                 val text = response.body?.string().orEmpty()
-                if (text.length > 262_144) run.fail("agent-response-too-large")
+                if (text.length > 262_144) run.fail("tool-response-too-large")
                 response.code to text
             }
         val decoded = AgentToolResponse.decode(reply.second, reply.first)
         if (decoded.action != null && decoded.action != action) {
-            run.fail("agent-action-mismatch: expected $action got ${decoded.action}")
+            run.fail("tool-action-mismatch: expected $action got ${decoded.action}")
         }
         return AgentReply(
             status = reply.first,
@@ -1181,7 +1487,12 @@ internal class LocalAgentClient(
         val error: String,
         val errorKind: String = "",
         val errorCode: String = "",
-    )
+        val transport: String = TRANSPORT,
+    ) {
+        companion object {
+            const val TRANSPORT = "plugin-transport-direct"
+        }
+    }
 }
 
 internal fun sha256(bytes: ByteArray): String =

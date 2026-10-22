@@ -163,7 +163,14 @@ test('normalized evidence from a failed test is never a pass', () => {
   const normalized = driver.normalizeEvidence({
     phase: 'failed',
     failure: 'snapshot-not-drivable: No Android browser provider',
-    facts: { installedProviderFiles: 2, installedProviderPayloadDigest: 'abc', authCookieLength: 64 },
+    facts: {
+      installedPackage: { name: '@openchamber/web', version: '2.4.0', stock: true },
+      pluginAssets: { files: [{ asset: 'browser-tool/package.json' }, { asset: 'browser-tool/index.js' }] },
+      toolEndpoint: { mode: 'rw-------', port: 41000 },
+      pluginConfig: { pluginListed: true },
+      toolTransport: 'plugin-transport-direct',
+      authCookieLength: 64,
+    },
     actions: { open: 1, type: 0, click: 0, scroll: 0, capture: 0 },
   }, {
     instrumentation: { pass: true },

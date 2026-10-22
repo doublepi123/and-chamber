@@ -54,6 +54,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -77,6 +78,21 @@ internal interface WebHost {
 internal fun originOf(url: String?): String {
     if (url.isNullOrEmpty()) return ""
     return canonicalWebOrigin(url) ?: ""
+}
+
+/**
+ * Chat session carried by the console URL's `session` query parameter (`/?session=<id>`), or null
+ * when [url] is not on [trustedOrigin] or has no non-blank value. The page writes it with
+ * history.pushState/replaceState on every chat switch; a draft chat has no parameter. Pure, so it
+ * is unit tested without a WebView.
+ */
+internal fun consoleSessionIdFromUrl(
+    url: String?,
+    trustedOrigin: String,
+): String? {
+    if (url.isNullOrEmpty() || trustedOrigin.isEmpty()) return null
+    if (canonicalWebOrigin(url) != trustedOrigin) return null
+    return url.toHttpUrlOrNull()?.queryParameter("session")?.takeIf { it.isNotBlank() }
 }
 
 /**
@@ -143,7 +159,19 @@ internal class ChamberWebView(
 
     /** Local trusted chat only. Target-site pages never receive this. */
     var browserHost: BrowserHostSurface? = null
-    var browserTabsJson: () -> String = { "[]" }
+
+    /**
+     * Chat session the trusted local console currently shows, from the page URL. Null means no
+     * session (e.g. a new-chat draft) or that none was reported yet.
+     */
+    var consoleSessionId by mutableStateOf<String?>(null)
+        private set
+
+    /** Called on the UI thread when [consoleSessionId] changes, including the first report. */
+    var onConsoleSessionChanged: ((String?) -> Unit)? = null
+
+    @Volatile private var consoleSessionReported = false
+    private var lastConsoleSession: String? = null
     @Volatile var browserConsoleGeneration: Long = 0L
     var composerMeasurement by mutableStateOf<ComposerMeasurement?>(null)
         private set
@@ -393,6 +421,7 @@ internal class ChamberWebView(
         gatewayHandoff.cancel(gatewayHandoff.ticket)
         onGatewayCompleted = null
         onPageLocation = null
+        onConsoleSessionChanged = null
         destroyed = true
         mainTrusted = false
         composerMeasurement = null
@@ -479,6 +508,22 @@ internal class ChamberWebView(
             if (isCurrent(expectedView) && generation == expectedGeneration && mainTrusted &&
                 !gatewayLoginMode && !gatewayHandoff.blocksDocuments) onPageLocation?.invoke(url)
         }
+    }
+
+    /**
+     * Reports the chat session of a trusted local console location. Repeats are dropped, so a
+     * history entry that only changes other parameters does not re-notify the presenter.
+     */
+    private fun reportConsoleSession(url: String?) {
+        if (targetId != io.andchamber.app.runtime.ServerTarget.LOCAL_ID) return
+        if (!mainTrusted || gatewayLoginMode || gatewayHandoff.blocksDocuments) return
+        if (origin.isEmpty() || originOf(url) != origin) return
+        val session = consoleSessionIdFromUrl(url, origin)
+        if (consoleSessionReported && session == lastConsoleSession) return
+        consoleSessionReported = true
+        lastConsoleSession = session
+        consoleSessionId = session
+        onConsoleSessionChanged?.invoke(session)
     }
 
     private inner class Client : WebViewClient() {
@@ -578,7 +623,12 @@ internal class ChamberWebView(
             if (gatewayHandoff.blocksDocuments || isHandoffBlank(url)) return
             if (isCurrent(view)) {
                 committed = true
-                if (origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode) noteTrustedDocument()
+                val trusted = origin.isNotEmpty() && originOf(url) == origin && !gatewayLoginMode
+                if (trusted) {
+                    noteTrustedDocument()
+                    // A newly committed document may already carry a session (reload, deep link).
+                    reportConsoleSession(url)
+                }
             }
         }
 
@@ -600,6 +650,7 @@ internal class ChamberWebView(
             val trusted = origin.isNotEmpty() && originOf(url) == origin
             mainTrusted = trusted
             if (!trusted) return
+            reportConsoleSession(url)
             if (!url.isNullOrEmpty() && url != BLANK) currentUrl = url
             if (clearHistoryAfterLoad) {
                 // A new session must not let Back walk into pages of the previous one.
@@ -621,6 +672,10 @@ internal class ChamberWebView(
             mainFrameErrors.started(view, generation, url, view.url)
             currentUrl = url
             reportPageLocation(url)
+            // Chat switches are pushState/replaceState navigations: the session rides in the query.
+            // Some WebView versions also report subframe history; only the main frame's own URL is
+            // allowed to change (or clear) the console session.
+            if (url == view.url) reportConsoleSession(url)
         }
 
         override fun onReceivedError(
@@ -968,52 +1023,6 @@ internal class ChamberWebView(
         }
 
         @JavascriptInterface
-        fun browserPresent(token: String?, url: String?, ownerSessionId: String?) {
-            if (!trusted(token) || url.isNullOrBlank() || ownerSessionId.isNullOrBlank()) return
-            val generation = browserConsoleGeneration
-            main.post {
-                if (!acceptsBrowserHost(generation)) return@post
-                browserHost?.present(url, ownerSessionId)
-            }
-        }
-
-        @JavascriptInterface
-        fun browserContext(token: String?, sessionId: String?, directory: String?) {
-            if (!trusted(token)) return
-            val generation = browserConsoleGeneration
-            main.post {
-                if (!acceptsBrowserHost(generation)) return@post
-                browserHost?.context(sessionId.orEmpty())
-            }
-        }
-
-        @JavascriptInterface
-        fun browserTabs(token: String?): String {
-            if (!trusted(token)) return "[]"
-            return browserTabsJson()
-        }
-
-        @JavascriptInterface
-        fun browserSelect(token: String?, tabId: String?) {
-            if (!trusted(token) || tabId.isNullOrBlank()) return
-            val generation = browserConsoleGeneration
-            main.post {
-                if (!acceptsBrowserHost(generation)) return@post
-                browserHost?.select(tabId)
-            }
-        }
-
-        @JavascriptInterface
-        fun browserClose(token: String?, tabId: String?) {
-            if (!trusted(token) || tabId.isNullOrBlank()) return
-            val generation = browserConsoleGeneration
-            main.post {
-                if (!acceptsBrowserHost(generation)) return@post
-                browserHost?.close(tabId)
-            }
-        }
-
-        @JavascriptInterface
         fun themeColor(
             token: String?,
             rgb: Int,
@@ -1037,14 +1046,6 @@ internal class ChamberWebView(
           if (!bridge) return;
           var token = ${JSONObject.quote(bridgeToken)};
           ${if (targetId == io.andchamber.app.runtime.ServerTarget.LOCAL_ID && !gatewayLoginMode) composerBoundsObserverScript else ""}
-          window.AndChamberBrowserHost = {
-            present: function(tab){ bridge.browserPresent(token, tab && tab.url, tab && tab.ownerSessionId); },
-            select: function(tabId){ bridge.browserSelect(token, tabId); },
-            close: function(tabId){ bridge.browserClose(token, tabId); },
-            tabs: function(){ return JSON.parse(bridge.browserTabs(token) || "[]"); },
-            context: function(ctx){ bridge.browserContext(token, ctx && ctx.sessionId || "", ctx && ctx.directory || ""); }
-          };
-          window.dispatchEvent(new Event("andchamber-browser-host-ready"));
           function save(blob, name) {
             var reader = new FileReader();
             reader.onloadend = function () {

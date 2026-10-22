@@ -38,14 +38,14 @@ MainActivity ──► ui/ (Compose: home, web WebView, independent browser, lau
                    │  runtime contract (LocalRuntimeController, SharedStorageController,
                    │  RemoteServerStore, WebSessionAuthenticator, WebSessionCookies)
                    │
-                   │  Home Browser ──► ui/browser (one public-https WebView, profile andchamber_browser_v1)
-                   │                     │ enable only while local runtime readyLaunchId is set
+                   │  Local chat ──► ui/browser (one public-https WebView, profile andchamber_browser_v1)
+                   │                     │ agent may act only after the user taps Allow agent
                    │                     ▼
-                   │                  browser/ (lease, loopback command server, private credential file)
+                   │                  browser/ (driver contract, URL policy, provider registry and page adapter)
                    │                     ▲
-                   │                     │ stdio MCP andchamber_browser, six tools, no CDP
+                   │                     │ loopback tool server, plugin tool andchamber_web, no CDP
                    │                     │
-                   └─ runtime/process syncs the MCP adapter and injects an in-memory overlay
+                   └─ runtime/process syncs the OpenCode plugin and writes the launch endpoint file
                    ▼
 service/RuntimeService (FGS) ──► runtime/LocalRuntimeController (state machine, watchdog)
                                    ├─ runtime/install   (download → extract → apk/npm → node-pty → verify → atomic swap)
@@ -81,10 +81,10 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 | `…/app/ui/` | Compose root: navigation (home, web, browser), launch decision and cover, notification deep links, system bars, permission requests | [View Map](app/src/main/java/io/andchamber/app/ui/codemap.md) |
 | `…/app/ui/home/` | Control-room home: local runtime card, shared-storage card, remote servers | [View Map](app/src/main/java/io/andchamber/app/ui/home/codemap.md) |
 | `…/app/ui/web/` | Profile-bound WebView pool, session/page loading, navigation and JS bridge, HTTP download handoff, visibility reporting and isolation/error overlays | [View Map](app/src/main/java/io/andchamber/app/ui/web/codemap.md) |
-| `…/app/ui/browser/` | Independent public-https browser screen and its single WebView driver. Agent control is off until the user enables it. | [View Map](app/src/main/java/io/andchamber/app/ui/browser/codemap.md) |
+| `…/app/ui/browser/` | Floating in-app browser window, its single WebView driver and the presenter that binds grants to the chat view. Agent control is off until the user enables it. | [View Map](app/src/main/java/io/andchamber/app/ui/browser/codemap.md) |
 | `…/app/ui/components/` | Stateless shared Compose widgets | [View Map](app/src/main/java/io/andchamber/app/ui/components/codemap.md) |
 | `…/app/ui/theme/` | Material 3 color schemes, typography, shapes, extended `ChamberColors` | [View Map](app/src/main/java/io/andchamber/app/ui/theme/codemap.md) |
-| `app/src/main/assets/` | Runtime manifest pins, the Node preload shim, and the embedded-browser MCP adapter | [View Map](app/src/main/assets/codemap.md) |
+| `app/src/main/assets/` | Runtime manifest pins, the Node preload shim, and the App-injected OpenCode browser-tool plugin | [View Map](app/src/main/assets/codemap.md) |
 | `scripts/` | Build-time tools: network source preparation for the native runtime, offline NDK compilation, the legacy Termux pipeline, and mirror health checks | [View Map](scripts/codemap.md) |
 | `runtime_tools/` | Python library and SHA-256 lock files for the PRoot build (Termux lock and runtime source lock) | [View Map](runtime_tools/codemap.md) |
 | `third_party/native-runtime/` | License texts (PRoot COPYING, talloc LGPL-3.0 and GPL-3.0, libandroid-shmem BSD-3-Clause) and the provenance record for native components; packaged into the APK by `syncNativeLicenseAssets` | [View README](third_party/native-runtime/README.md) |
@@ -93,9 +93,9 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 ## Not Mapped
 
 - `app/src/test/` — JVM unit tests (runtime, storage, notifications, i18n string parity).
-- `scripts/tests/` — offline Python tests for the native source build, the license assets and the legacy mirror diagnostics, plus Node tests for the browser MCP adapter (see [scripts/codemap.md](scripts/codemap.md)).
+- `scripts/tests/` — offline Python tests for the native source build and the license assets, plus Node tests for the browser-tool plugin and the local-provider gate adapters (see [scripts/codemap.md](scripts/codemap.md)).
 - `app/src/main/java/io/andchamber/app/ui/preview/` — Compose previews and fake contract implementations.
 - `app/src/main/res/` — resources (`values/` English, `values-zh/` Simplified Chinese, launcher/notification icons).
-- `docs/` — icon, screenshots, release notes, and `docs/embedded-browser-control.md`. After v0.0.6 integration, 471 JVM checks, 17 emulator smoke checks, and 26 host-to-emulator MCP/WebView checks passed. The arm64 OpenCode → MCP → WebView loop is not verified.
+- `docs/` — icon, screenshots, release notes, and `docs/embedded-browser-control.md`. The plugin transport passed the emulator acceptance run on the current tree; the arm64 phone runtime is not verified.
 
 Change detection excludes tests, documentation and translations. The current codemap utility skips dot-directories, so review `.github/workflows/` directly when checking mapping changes.

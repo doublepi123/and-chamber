@@ -55,13 +55,11 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.WebSessionAuthenticator
-import io.andchamber.app.ui.browser.BrowserScreen
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.theme.AndChamberTheme
 import io.andchamber.app.ui.web.WebScreen
 import io.andchamber.app.ui.web.WebViewPool
-import io.andchamber.app.ui.web.rememberBrowserDependencies
 import io.andchamber.app.ui.web.rememberWebDependencies
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +74,6 @@ internal object Routes {
     const val HOME = "home"
     const val ARG_TARGET = "targetId"
     const val WEB = "web/{$ARG_TARGET}"
-    const val BROWSER = "browser"
 
     fun web(targetId: String) = "web/${Uri.encode(targetId)}"
 }
@@ -204,7 +201,6 @@ fun AndChamberApp(
         val nav = rememberNavController()
         // Per-server WebView profiles and the app-wide downloader (both from di/AppModule.kt).
         val webDeps = rememberWebDependencies()
-        val browserDeps = rememberBrowserDependencies()
         val pool = remember(webDeps) { WebViewPool(webDeps.downloads) }
         DisposableEffect(pool) { onDispose { pool.destroyAll() } }
 
@@ -332,9 +328,6 @@ fun AndChamberApp(
                             val id = entry.arguments?.getString(Routes.ARG_TARGET) ?: return@collect
                             uiPrefs.setLastTargetId(id)
                         }
-                        // The independent browser is not an OpenChamber instance. Leaving it must
-                        // not forget the server the user had open, and must not navigate there.
-                        Routes.BROWSER -> Unit
                         else -> uiPrefs.clearLastTarget()
                     }
                 }
@@ -374,7 +367,7 @@ fun AndChamberApp(
         var webBarColor by remember { mutableStateOf<Color?>(null) }
         val background = MaterialTheme.colorScheme.background
         val currentEntry by nav.currentBackStackEntryAsState()
-        val onWeb = currentEntry?.destination?.route == Routes.WEB || currentEntry?.destination?.route == Routes.BROWSER
+        val onWeb = currentEntry?.destination?.route == Routes.WEB
         WindowBackgroundEffect(background)
         SystemBarsEffect(darkIcons = ((if (onWeb) webBarColor else null) ?: background).luminance() > 0.5f)
 
@@ -426,7 +419,6 @@ fun AndChamberApp(
                                     onCheckStorageAgain = refreshStorage,
                                     onRestartLocal = local::restart,
                                     onAutoOpenChange = uiPrefs::updateAutoOpenLocal,
-                                    onOpenBrowser = { nav.openIfResumed(entry, Routes.BROWSER) },
                                     onUpdate = local::update,
                                     onCheckForUpdates = local::checkForUpdates,
                                     onDismissUpdateFailure = local::dismissUpdateFailure,
@@ -441,9 +433,6 @@ fun AndChamberApp(
                             actions = actions,
                             storage = storageState,
                             autoOpenLocal = uiPrefs.autoOpenLocal,
-                            providerBrowser = io.andchamber.app.runtime.process.BrowserControlSelection
-                                .select(patchedArtifactVerified = true, legacyPrepared = false) ==
-                                io.andchamber.app.runtime.process.BrowserControlMode.NATIVE_PROVIDER,
                             updates = updates,
                         )
                     }
@@ -507,32 +496,6 @@ fun AndChamberApp(
                                 sanitizedPagePath(url, base)?.let { uiPrefs.setPage(targetId, it, origin) }
                             },
                         )
-                    }
-
-                    composable(Routes.BROWSER) { entry ->
-                        val state by runtime.state.collectAsStateWithLifecycle()
-                        val servers by remotes.servers.collectAsStateWithLifecycle()
-                        val running = state as? RuntimeState.Running
-                        var launchId by remember(running?.sinceEpochMs) { mutableStateOf(browserDeps.readyLaunchId()) }
-                        LaunchedEffect(running?.sinceEpochMs, browserDeps) {
-                            while (true) {
-                                val next = browserDeps.readyLaunchId()
-                                if (next != launchId) launchId = next
-                                delay(1_000)
-                            }
-                        }
-                        val browserController = browserDeps.controller
-                        if (browserController == null) {
-                            io.andchamber.app.ui.browser.BrowserUnavailable(onExit = { nav.closeIfResumed(entry) })
-                        } else {
-                            BrowserScreen(
-                                controller = browserController,
-                                localState = shownLocalState(state, local.pendingStartFrom),
-                                launchId = launchId,
-                                remotes = servers,
-                                onExit = { nav.closeIfResumed(entry) },
-                            )
-                        }
                     }
                 }
             }

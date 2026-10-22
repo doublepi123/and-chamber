@@ -5,7 +5,8 @@
 // The device side is LocalProviderRegressionTest (AndroidJUnitRunner). The host writes one fixed
 // command at a time into the app-private test directory (command.json, atomic rename through stdin),
 // and reads exactly that command's result (result.json). There is no host Node server, no relay and no
-// provider token in this process: browser tool actions are executed inside the app by LocalAgentClient.
+// provider token in this process: browser tool actions are executed inside the app by
+// LocalBrowserToolClient (plugin transport, direct /v1/tool).
 // Anything the producer does not expose is null and is recorded as a missing reader/field; it is never
 // defaulted to a passing value.
 //
@@ -21,7 +22,7 @@ const {
   createCaseFence,
   createRetirementPointerIO,
   currentRecordOf,
-} = require('../verify_openchamber_provider_emulator.cjs');
+} = require('./provider_gate_adapters.cjs');
 const { validateExportedTarget, redact } = require('../verify_local_provider_emulator.cjs');
 
 const MATRIX = Object.freeze({

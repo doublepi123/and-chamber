@@ -1,9 +1,6 @@
 package io.andchamber.app.runtime.install
 
-import io.andchamber.app.runtime.MessageKey
 import io.andchamber.app.runtime.RuntimePaths
-import io.andchamber.app.runtime.UserFacingException
-import io.andchamber.app.runtime.fs.deleteTree
 import io.andchamber.app.runtime.fs.deleteTreeOrThrow
 import io.andchamber.app.runtime.manifest.RuntimeManifest
 import io.andchamber.app.runtime.process.EmbeddedCommandSuite
@@ -24,7 +21,6 @@ class RuntimeInstallerImpl(
     private val dnsProvider: io.andchamber.app.runtime.network.SystemDnsProvider =
         io.andchamber.app.runtime.network.SystemDnsProvider { emptyList() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
-    private val providerArtifactSource: () -> Pair<OpenChamberProviderArtifact.LaneManifest, java.io.File>? = { null },
 ) : RuntimeInstaller {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -63,17 +59,8 @@ class RuntimeInstallerImpl(
     ): InstalledRuntime {
         paths.root.mkdirs()
         recover()
-        val artifact = loadProviderArtifact()
-        try {
-            artifact?.let {
-                val requested = versions ?: PackageVersions(manifest.openChamberVersion, manifest.openCodeVersion)
-                ProviderArtifactPolicy.requireDeployable(it.manifest, requested.openChamber)
-            }
-            val proot = suite()
-            return installer.install(report, proot, versions, artifact)
-        } finally {
-            artifact?.close()
-        }
+        val proot = suite()
+        return installer.install(report, proot, versions)
     }
 
     override suspend fun update(
@@ -82,47 +69,8 @@ class RuntimeInstallerImpl(
     ): InstalledRuntime {
         paths.root.mkdirs()
         recover()
-        val artifact = loadProviderArtifact()
-        try {
-            artifact?.let { ProviderArtifactPolicy.requireDeployable(it.manifest, versions.openChamber) }
-            val proot = suite()
-            return installer.update(report, proot, versions, artifact)
-        } finally {
-            artifact?.close()
-        }
-    }
-
-    /**
-     * Materializes the provisioned artifact once per operation. A missing asset returns null (stock
-     * npm, unchanged). A declared artifact that cannot be read or whose metadata/pins/paths are bad
-     * throws: it is never treated as absent and never silently falls back to stock or legacy.
-     */
-    private fun loadProviderArtifact(): LoadedProviderArtifact? {
-        val loaded = try {
-            providerArtifactSource()
-        } catch (error: UserFacingException) {
-            throw error
-        } catch (error: Exception) {
-            throw UserFacingException(
-                MessageKey.OpenChamberInstallFailed,
-                "The bundled OpenChamber provider artifact could not be read",
-                detail = error.javaClass.simpleName,
-            )
-        }
-        if (loaded == null) return null
-        val (manifest, source) = loaded
-        return try {
-            OpenChamberProviderArtifact.manifestRejection(manifest)?.let { reason ->
-                throw UserFacingException(
-                    MessageKey.OpenChamberInstallFailed,
-                    "The bundled OpenChamber provider artifact is invalid: $reason",
-                )
-            }
-            LoadedProviderArtifact(manifest, source)
-        } catch (error: Throwable) {
-            deleteTree(source)
-            throw error
-        }
+        val proot = suite()
+        return installer.update(report, proot, versions)
     }
 
     override fun discardEnvironment() {

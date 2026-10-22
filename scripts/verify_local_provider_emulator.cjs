@@ -8,8 +8,8 @@
 // HTTP/PTY checks over adb forward, and the official instrumentation counts.
 //
 // Required preconditions:
-//  - emulator-5582 (x86_64 Android 15), package installed from a debug build without
-//    -Pandchamber.providerRunner=true, with the provider artifact asset staged.
+//  - emulator-5582 (x86_64 Android 15), package installed from a debug build with the stock runtime
+//    and the browser-tool plugin assets.
 //  - port 23000 is not forwarded by anyone else.
 //
 // This file is deliberately device-free for its tests: every helper that touches a device takes an
@@ -532,9 +532,16 @@ function normalizeEvidence(raw, { instrumentation, cold, host } = {}) {
       secondLaunchId: facts.secondRuntimeLaunchId || null,
     },
     artifact: {
-      verified: !failed && Number(facts.installedProviderFiles || 0) > 0 && Boolean(facts.installedProviderPayloadDigest),
-      installedFiles: Number(facts.installedProviderFiles || 0),
-      apkFiles: Number((facts.apkProvider && facts.apkProvider.verifiedFiles) || 0),
+      verified: !failed &&
+        Boolean(facts.installedPackage && facts.installedPackage.stock === true) &&
+        Boolean(facts.pluginAssets && Array.isArray(facts.pluginAssets.files) && facts.pluginAssets.files.length === 2) &&
+        Boolean(facts.toolEndpoint && facts.toolEndpoint.mode === 'rw-------') &&
+        Boolean(facts.pluginConfig && facts.pluginConfig.pluginListed === true),
+      installedPackage: facts.installedPackage || null,
+      pluginFiles: facts.pluginAssets && Array.isArray(facts.pluginAssets.files) ? facts.pluginAssets.files.length : 0,
+      endpointMode: facts.toolEndpoint ? facts.toolEndpoint.mode || null : null,
+      configPluginListed: Boolean(facts.pluginConfig && facts.pluginConfig.pluginListed === true),
+      transport: facts.toolTransport || null,
     },
     auth: {
       status: !failed && Number(facts.authCookieLength || 0) > 0 ? 'pass' : 'fail',

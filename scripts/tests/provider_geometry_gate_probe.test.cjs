@@ -1,8 +1,6 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
 const probe = require('../lib/provider_geometry_gate_probe.cjs');
 
@@ -90,11 +88,4 @@ test('capture geometry: a late bitmap that is not queued once cannot pass', asyn
 test('refusal is a real page refusal, not NO_PROVIDER', () => {
   assert.equal(probe.refused({ ok: false, code: 'AUTHORIZATION_REQUIRED' }), true);
   assert.equal(probe.refused({ ok: false, code: 'NO_PROVIDER', detail: 'No Android browser provider' }), false);
-});
-
-test('verify script keeps geometry-gate as a focused, non-phase result', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../verify_openchamber_provider_emulator.cjs'), 'utf8');
-  assert.match(src, /focus === 'geometry-gate'/);
-  assert.doesNotMatch(src, /prepared\.typeInput/);
-  assert.doesNotMatch(src, /\.fresh\.nonce|\.before\.nonce/);
 });

@@ -302,6 +302,27 @@ class LocalRuntimeControllerTest {
             step()
         }
 
+    /** Two Start requests racing through the service must not restart a server that is already up. */
+    @Test
+    fun `a second Start while Running does not restart the server`() =
+        controllerTest {
+            val root = folder.root
+            val server = FakeServer()
+            val controller = controller(FakeInstaller(root, installed = runtimeWith(root, versions = null)), server)
+            controller.initialize()
+            step()
+
+            controller.perform(RuntimeOperation.Start)
+            controller.perform(RuntimeOperation.Start)
+            step()
+
+            assertTrue(controller.state.value is RuntimeState.Running)
+            assertEquals(1, server.startAttempts)
+            assertEquals(0, server.stops)
+            controller.perform(RuntimeOperation.Stop)
+            step()
+        }
+
     /** x86_64 fresh install follows the same install-then-start path and ends Running. */
     @Test
     fun `x86_64 install then start reaches Running`() =

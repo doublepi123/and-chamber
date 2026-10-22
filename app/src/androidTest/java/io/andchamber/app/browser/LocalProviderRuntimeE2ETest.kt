@@ -11,12 +11,18 @@ import androidx.webkit.WebViewFeature
 import io.andchamber.app.MainActivity
 import io.andchamber.app.runtime.RuntimePaths
 import io.andchamber.app.runtime.RuntimeState
+import io.andchamber.app.runtime.process.BrowserPluginAssets
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.UUID
+
+/** Non-auth cookie used only to prove the console profile's cookie store survived a stop. */
+private const val SENTINEL_COOKIE = "ac_sentinel"
 
 /**
  * True-local entry gate. Uses the default AndroidJUnitRunner and AndChamberApplication's production
@@ -25,9 +31,10 @@ import java.io.File
  * server. The only fixture is the target browser page's HTTPS response, attached after a real
  * `browser.open`, and the only human grant is a host `adb shell input tap` on "Allow agent".
  *
- * The test deliberately FAILS (never skips) when the APK has no provider artifact, the guest is not
- * x86_64, the installed marker/package/hash does not match, health/auth/tool transport fails, or the
- * host tap is not observed. Build without -Pandchamber.providerRunner=true.
+ * The test deliberately FAILS (never skips) when the guest is not x86_64, the installed
+ * @openchamber/web is not the stock npm version from the runtime manifest, the guest plugin files
+ * differ from the APK assets, the launch endpoint/settings/config overlay is missing, health/auth/
+ * tool transport fails, or the host tap is not observed.
  */
 @RunWith(AndroidJUnit4::class)
 class LocalProviderRuntimeE2ETest {
@@ -61,34 +68,38 @@ class LocalProviderRuntimeE2ETest {
                 .put("port", manifest.port))
             run.verifyProotProvenance()
 
-            run.phase("apk-asset-pins")
-            val provider = run.providerManifestFromApk()
-            val assetFiles = run.verifyAssetPayload(provider)
-            run.record("apkProvider", JSONObject()
-                .put("version", provider.version)
-                .put("baseCommit", provider.baseCommit)
-                .put("sourcePatchSha256", provider.sourcePatchSha256)
-                .put("serverFiles", provider.server.size)
-                .put("distFiles", provider.dist.size)
-                .put("verifiedFiles", assetFiles))
-
             // A visible activity makes the foreground-service start legal, then the production
             // launcher decides from the real state.
             val initial = run.launchActivity()
             run.phase("runtime-install-start")
             ensureRunning(run)
 
-            run.phase("installed-pins")
+            run.phase("installed-stock")
             val paths = RuntimePaths.under(context.filesDir)
-            val inspection = run.verifyInstalledPayload(provider, paths)
+            val inspection = run.verifyStockOpenChamber(manifest, paths)
             val metadata = inspection.metadata
             if (metadata.port != manifest.port) run.fail("metadata-port: ${metadata.port}")
             if (metadata.alpineVersion != manifest.alpineVersion) run.fail("metadata-alpine: ${metadata.alpineVersion}")
-            if (metadata.openChamberVersion != manifest.openChamberVersion) run.fail("metadata-openchamber: ${metadata.openChamberVersion}")
-            if (metadata.openCodeVersion != manifest.openCodeVersion) run.fail("metadata-opencode: ${metadata.openCodeVersion}")
+            // The in-app update may have moved past the bundled pin; never below it.
+            if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(metadata.openChamberVersion, manifest.openChamberVersion) < 0) {
+                run.fail("metadata-openchamber-below-pin: ${metadata.openChamberVersion}")
+            }
+            if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(metadata.openCodeVersion, manifest.openCodeVersion) < 0) {
+                run.fail("metadata-opencode-below-pin: ${metadata.openCodeVersion}")
+            }
             val firstLaunch = run.server().readyLaunchId() ?: run.fail("launch-id-missing")
             run.record("firstRuntimeLaunchId", firstLaunch)
             run.record("firstRunningState", stateSnapshot(run))
+
+            run.phase("plugin-sync")
+            run.record("pluginAssets", run.verifyPluginSync(paths))
+            run.phase("plugin-endpoint")
+            run.record("toolEndpoint", run.waitToolEndpoint(paths))
+            run.phase("openchamber-settings")
+            val agentWeb = run.verifyAgentWebSetting(paths)
+            run.record("agentWebToolEnabled", agentWeb)
+            run.phase("opencode-config")
+            run.record("pluginConfig", run.verifyPluginConfig(paths))
 
             run.phase("health-auth")
             val running = run.controller().state.value as? RuntimeState.Running
@@ -128,15 +139,28 @@ class LocalProviderRuntimeE2ETest {
             if (!attached) run.fail("local-chat-host-not-attached: ${presenter.state.value}")
             run.phase("runtime-ready")
 
+            run.phase("plugin-loaded")
+            run.record("pluginInventory", run.pluginInventory(base, auth.header))
+            run.record("agentWebExpectation", JSONObject()
+                .put("agentWebToolEnabled", agentWeb.optBoolean("value"))
+                .put("openchamberWebToolExpected", !agentWeb.optBoolean("value"))
+                .put("toolNamesObservable", false)
+                .put("reason", "opencode-2.0.32-has-no-tool-list-route"))
+
             val sessionId = run.createSession(base, auth.header)
-            var endpoint: LocalAgentTool.Endpoint? = null
-            val endpointFound = run.waitFor("agent-tool", 120_000) {
-                endpoint = LocalAgentTool.discover()
+            // The agent's session must be the chat the person is looking at: the console reports its
+            // session from the stock `?session=` URL and a different one revokes the grant. Use the
+            // production notification link (no presenter or bridge call) to show it.
+            showChatSession(run, initial, presenter, base, sessionId)
+            val home = RuntimePaths.under(context.filesDir).home
+            var endpoint: LocalBrowserTool.Endpoint? = null
+            val endpointFound = run.waitFor("plugin-transport", 120_000) {
+                endpoint = LocalBrowserTool.discover(home)
                 endpoint != null
             }
-            if (!endpointFound) run.fail("agent-tool-endpoint-missing")
-            run.record("agentToolPort", runCatching { java.net.URI(endpoint!!.url).port }.getOrDefault(-1))
-            val agent = LocalAgentClient(run, endpoint!!, sessionId)
+            if (!endpointFound) run.fail("plugin-endpoint-missing")
+            run.record("toolTransport", LocalBrowserToolClient.AgentReply.TRANSPORT)
+            val agent = LocalBrowserToolClient(run, endpoint!!, sessionId)
 
             run.countOnce("open")
             val opened = agent.call("browser.open", JSONObject().put("url", "https://example.com/"))
@@ -202,22 +226,16 @@ class LocalProviderRuntimeE2ETest {
             if (!scrolled.ok) run.fail("browser-scroll-failed: ${scrolled.error}")
 
             run.countOnce("capture")
-            val captured = agent.call("browser.capture", JSONObject().put("label", "local-provider-e2e"))
+            // Only fields the plugin schema allows (action, selector...); no free-form label.
+            val captured = agent.call("browser.capture")
             if (!captured.ok) run.fail("browser-capture-failed: ${captured.error}")
-            val captureRaw = captured.data?.optString("path").orEmpty()
-            if (captureRaw.isBlank()) run.fail("capture-path-missing")
-            if (!captureRaw.startsWith(".openchamber/screenshots/") &&
-                !captureRaw.startsWith("/root/.openchamber/screenshots/")
-            ) {
-                run.fail("capture-path-outside-session: ${captureRaw.take(160)}")
-            }
-            val captureFile = run.capturePath(captureRaw) ?: run.fail("capture-file-missing: ${captureRaw.take(120)}")
-            val captureSize = run.verifyPng(captureFile)
-            run.record("capturePathKind", if (captureFile.absolutePath.startsWith(context.filesDir.absolutePath)) "runtime-home" else "unexpected")
-            captured.data?.optJSONObject("png")?.let { claimed ->
-                if (claimed.optInt("width") != captureSize.first || claimed.optInt("height") != captureSize.second) {
-                    run.fail("capture-png-metrics-mismatch")
-                }
+            // Plugin contract: capture returns the PNG inline (data.base64, mime image/png); the plugin
+            // turns it into a file part for the model. No guest file path is involved any more.
+            val captureData = captured.data ?: run.fail("capture-data-missing")
+            if (captureData.optString("mime") != "image/png") run.fail("capture-mime: ${captureData.optString("mime").take(40)}")
+            val captureSize = run.verifyPngBase64(captureData.optString("base64"))
+            if (captureData.optInt("width") != captureSize.first || captureData.optInt("height") != captureSize.second) {
+                run.fail("capture-png-metrics-mismatch")
             }
             captured.data?.optJSONObject("css")?.let { css ->
                 val required = listOf("width", "height", "visualWidth", "visualHeight", "offsetLeft", "offsetTop", "dpr", "scale", "mode")
@@ -282,8 +300,6 @@ class LocalProviderRuntimeE2ETest {
             run.phase("cold-device")
             requireX86(run)
             val manifest = run.runtimeManifest()
-            val provider = run.providerManifestFromApk()
-            run.verifyAssetPayload(provider)
             run.verifyProotProvenance()
             val paths = RuntimePaths.under(context.filesDir)
             if (run.installed(paths) == null) run.fail("cold-start-without-installed-runtime")
@@ -295,7 +311,7 @@ class LocalProviderRuntimeE2ETest {
             run.phase("cold-starting")
             val running = run.waitFor("cold-running", 150_000) { controller.state.value is RuntimeState.Running }
             if (!running) run.fail("cold-start-timeout: ${run.stateName(controller.state.value)}")
-            val inspection = run.verifyInstalledPayload(provider, paths)
+            val inspection = run.verifyStockOpenChamber(manifest, paths)
             if (inspection.metadata.port != manifest.port) run.fail("cold-metadata-port: ${inspection.metadata.port}")
             val launch = run.server().readyLaunchId() ?: run.fail("cold-launch-id-missing")
             run.record("coldRuntimeLaunchId", launch)
@@ -305,6 +321,11 @@ class LocalProviderRuntimeE2ETest {
             run.health(base)
             val auth = run.authenticate(base)
             run.openCodeVersion(base, auth.header, inspection.metadata.openCodeVersion)
+            run.record("pluginAssets", run.verifyPluginSync(paths))
+            run.record("toolEndpoint", run.waitToolEndpoint(paths))
+            run.record("agentWebToolEnabled", run.verifyAgentWebSetting(paths))
+            run.record("pluginConfig", run.verifyPluginConfig(paths))
+            run.record("pluginInventory", run.pluginInventory(base, auth.header))
             val presenter = run.presenter()
             val attached = run.waitFor("cold-chat-host", 120_000) {
                 presenter.state.value.eligible && presenter.state.value.connected
@@ -370,23 +391,10 @@ class LocalProviderRuntimeE2ETest {
                     run.fail("runtime-failed: ${state.phase}:${state.reason}")
                 }
                 is RuntimeState.Running -> {
-                    val inspection = run.installed(paths)
-                    if (inspection == null) run.fail("running-without-installed-runtime")
-                    if (!inspection.applied) {
-                        if (action != null) run.fail("running-stock-runtime-after-$action")
-                        val version = inspection.packageVersion
-                        if (version != null && compareVersions(version, io.andchamber.app.runtime.install.OpenChamberProviderArtifact.PACKAGE_VERSION) > 0) {
-                            run.fail("incompatible-installed-package-$version: refusing downgrade to 2.4.0")
-                        }
-                        action = "repair"
-                        run.phase("runtime-repairing", "stock/legacy runtime needs the patched pair")
-                        controller.repair()
-                        SystemClock.sleep(500)
-                    } else {
-                        val ready = run.waitFor("launch-id", 30_000) { run.server().readyLaunchId() != null }
-                        if (!ready) run.fail("running-without-launch-id")
-                        return
-                    }
+                    if (run.installed(paths) == null) run.fail("running-without-installed-runtime")
+                    val ready = run.waitFor("launch-id", 30_000) { run.server().readyLaunchId() != null }
+                    if (!ready) run.fail("running-without-launch-id")
+                    return
                 }
                 is RuntimeState.Installing -> {
                     if (budget.installTimedOut()) {
@@ -435,18 +443,10 @@ class LocalProviderRuntimeE2ETest {
                         action = "install"
                         run.phase("runtime-installing", "empty runtime")
                         controller.install()
-                    } else if (inspection.applied) {
-                        action = "start"
-                        run.phase("runtime-starting", "installed patched runtime")
-                        controller.start()
                     } else {
-                        val version = inspection.packageVersion
-                        if (version != null && compareVersions(version, io.andchamber.app.runtime.install.OpenChamberProviderArtifact.PACKAGE_VERSION) > 0) {
-                            run.fail("incompatible-installed-package-$version: refusing downgrade to 2.4.0")
-                        }
-                        action = "repair"
-                        run.phase("runtime-repairing", "stock/legacy runtime needs the patched pair")
-                        controller.repair()
+                        action = "start"
+                        run.phase("runtime-starting", "installed stock runtime")
+                        controller.start()
                     }
                     SystemClock.sleep(500)
                 }
@@ -476,8 +476,8 @@ class LocalProviderRuntimeE2ETest {
                 .put("openChamberVersion", inspection.metadata.openChamberVersion)
                 .put("openCodeVersion", inspection.metadata.openCodeVersion)
                 .put("nodeVersion", inspection.metadata.nodeVersion)
-                .put("packageVersion", inspection.packageVersion)
-                .put("providerApplied", inspection.applied))
+                .put("packageName", inspection.packageName)
+                .put("packageVersion", inspection.packageVersion))
         }
     }
 
@@ -528,19 +528,32 @@ class LocalProviderRuntimeE2ETest {
         firstLaunch: Long,
     ) {
         val controller = run.controller()
-        val cookieBefore = run.recordedCookieHash(base, auth)
-        val session = run.providerSession()
+        val cookieBefore = run.recordedCookieHash(base, auth, excludingCookie = SENTINEL_COOKIE)
+        // A non-auth cookie proves the profile store itself survived the stop. A silent re-login
+        // would restore the session cookie but could not recreate this value. storeCookies flushes.
+        val sentinelValue = UUID.randomUUID().toString()
+        runBlocking {
+            auth.cookies.storeCookies(base, listOf("$SENTINEL_COOKIE=$sentinelValue; Path=/"))
+        }
+        val home = RuntimePaths.under(context.filesDir).home
+        val endpointBefore = LocalBrowserTool.discover(home) ?: run.fail("plugin-endpoint-missing-before-stop")
         run.phase("stop")
         controller.stop()
         val stopped = run.waitFor("stopped", 90_000) { controller.state.value is RuntimeState.Stopped }
         if (!stopped) run.fail("stop-timeout: ${run.stateName(controller.state.value)}")
         if (run.server().readyLaunchId() != null) run.fail("stopped-server-still-ready")
-        if (session.currentToken() != null) run.fail("stopped-provider-token-still-issued")
+        // Stop tears the tool server down and deletes the endpoint: the old token reaches nothing.
+        if (BrowserPluginAssets.endpointHostFile(home).exists()) run.fail("stopped-endpoint-still-present")
+        val stale = runCatching {
+            java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", endpointBefore.port), 2_000) }
+        }
+        if (stale.isSuccess) run.fail("stopped-tool-port-still-listening")
+        run.record("stopToolEndpoint", JSONObject().put("endpointDeleted", true).put("portClosed", true))
         val cleared = run.waitFor("stop-clears-grant", 20_000) {
             !presenter.state.value.agentOn && !presenter.state.value.connected
         }
         if (!cleared) run.fail("stop-did-not-clear-grant: ${presenter.state.value}")
-        val cookieAfterStop = run.recordedCookieHash(base, auth)
+        val cookieAfterStop = run.recordedCookieHash(base, auth, excludingCookie = SENTINEL_COOKIE)
         if (cookieAfterStop != cookieBefore) run.fail("cookie-not-preserved-by-stop")
 
         run.phase("restart")
@@ -551,19 +564,51 @@ class LocalProviderRuntimeE2ETest {
         if (secondLaunch == firstLaunch) run.fail("restart-reused-launch-id")
         run.record("secondRuntimeLaunchId", secondLaunch)
         if (presenter.state.value.agentOn) run.fail("restart-restored-agent-grant")
-        val reconnected = run.waitFor("provider-reconnect", 90_000) { presenter.state.value.connected }
+        // The console reloads after a restart and briefly drops the connection again; require the
+        // re-established connection to hold for 3s so the denial below is about authorization.
+        var connectedSince = 0L
+        val reconnected = run.waitFor("provider-reconnect", 90_000) {
+            val now = SystemClock.elapsedRealtime()
+            if (!presenter.state.value.connected) {
+                connectedSince = 0L
+                false
+            } else {
+                if (connectedSince == 0L) connectedSince = now
+                now - connectedSince >= 3_000L
+            }
+        }
         if (!reconnected) run.fail("provider-not-connected-after-restart: transport-failure-not-auth")
-        val cookieAfterRestart = run.recordedCookieHash(base, auth)
-        if (cookieAfterRestart != cookieBefore) run.fail("cookie-not-preserved-across-restart")
+        // The login must survive the restart. OpenChamber may refresh its session cookie when the
+        // console reloads, so require that the profile's current cookie still authenticates (no new
+        // password login by the test) and record whether the value was rotated.
+        val headerAfterRestart = runBlocking { auth.cookies.cookieHeader(base) } ?: run.fail("profile-cookie-missing-after-restart")
+        run.systemInfo(base, headerAfterRestart)
+        // The sentinel has to come back byte-for-byte: re-authentication would prove only that the
+        // password still works, not that this profile's cookie store persisted. Only the boolean is
+        // recorded, never the value.
+        val sentinelPersisted = headerAfterRestart.split(';').any {
+            it.trim() == "$SENTINEL_COOKIE=$sentinelValue"
+        }
+        // Remove the sentinel so later checks see only the console's own cookies.
+        runCatching {
+            runBlocking { auth.cookies.storeCookies(base, listOf("$SENTINEL_COOKIE=; Path=/; Max-Age=0")) }
+        }
+        val cookieAfterRestart = run.recordedCookieHash(base, auth, excludingCookie = SENTINEL_COOKIE)
+        run.record("cookieAcrossRestart", JSONObject()
+            .put("stillAuthenticates", true)
+            .put("sentinelPersisted", sentinelPersisted)
+            .put("rotated", cookieAfterRestart != cookieBefore))
+        if (!sentinelPersisted) run.fail("cookie-sentinel-not-persisted")
 
-        var endpoint: LocalAgentTool.Endpoint? = null
-        val endpointFound = run.waitFor("agent-tool-after-restart", 90_000) {
-            endpoint = LocalAgentTool.discover()
+        var endpoint: LocalBrowserTool.Endpoint? = null
+        val endpointFound = run.waitFor("plugin-transport-after-restart", 90_000) {
+            endpoint = LocalBrowserTool.discover(home)
             endpoint != null
         }
-        if (!endpointFound) run.fail("agent-tool-endpoint-missing-after-restart")
+        if (!endpointFound) run.fail("plugin-endpoint-missing-after-restart")
+        run.record("restartToolEndpoint", run.waitToolEndpoint(RuntimePaths.under(context.filesDir)))
         val sessionId = run.createSession(base, auth.header)
-        val agent = LocalAgentClient(run, endpoint!!, sessionId)
+        val agent = LocalBrowserToolClient(run, endpoint!!, sessionId)
         run.bump("unauthorizedSnapshot")
         val denied = agent.call("browser.snapshot")
         if (denied.ok) run.fail("restart-auto-granted: old token or browser read succeeded")
@@ -572,6 +617,62 @@ class LocalProviderRuntimeE2ETest {
         } else {
             run.fail("restart-denial-not-auth: ${denied.error.take(200)}")
         }
+    }
+
+    private fun showChatSession(
+        run: LocalProviderRun,
+        activity: MainActivity,
+        presenter: io.andchamber.app.ui.browser.NativeBrowserPresenter,
+        base: String,
+        sessionId: String,
+    ) {
+        run.phase("chat-session")
+        val intent = android.content.Intent(context, MainActivity::class.java)
+            .setAction(io.andchamber.app.notify.OpenChamberNotifier.ACTION_OPEN_SESSION)
+            .putExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_SESSION_ID, sessionId)
+            .putExtra(io.andchamber.app.notify.OpenChamberNotifier.EXTRA_DIRECTORY, "/root")
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        context.startActivity(intent)
+        // Settled, not just seen: the link may reload the console document after the URL first
+        // shows the session. Require the same console WebView, URL and complete document for 3s.
+        var lastKey: String? = null
+        var stableSince = 0L
+        val shown = run.waitFor("chat-session-shown", 120_000) {
+            val view = if (run.isActivityResumed(activity)) {
+                run.onMain { consoleView(activity.window.decorView, presenter.currentView(), base, sessionId) }
+            } else {
+                null
+            }
+            val state = presenter.state.value
+            val ready = view != null && state.eligible && state.connected &&
+                run.eval(view, "document.readyState")?.trim('"') == "complete"
+            val key = if (ready) "${System.identityHashCode(view)}|${run.onMain { view!!.url }}|${state.viewGeneration}" else null
+            val now = SystemClock.elapsedRealtime()
+            if (key == null || key != lastKey) {
+                lastKey = key
+                stableSince = now
+                false
+            } else {
+                now - stableSince >= 3_000L
+            }
+        }
+        if (!shown) run.fail("chat-session-not-shown")
+        run.record("chatSessionShown", true)
+    }
+
+    private fun consoleView(root: android.view.View?, excluded: android.view.View?, base: String, sessionId: String): WebView? {
+        if (root == null) return null
+        if (root is WebView && root !== excluded &&
+            LocalProviderConsoleSetup.consoleSession(root.url.orEmpty(), base, sessionId) != null
+        ) {
+            return root
+        }
+        if (root is android.view.ViewGroup) {
+            for (index in 0 until root.childCount) {
+                consoleView(root.getChildAt(index), excluded, base, sessionId)?.let { return it }
+            }
+        }
+        return null
     }
 
     private fun stateSnapshot(run: LocalProviderRun): JSONObject {
@@ -600,15 +701,4 @@ class LocalProviderRuntimeE2ETest {
 
     private fun lastNumber(text: String, prefix: String): Int? =
         Regex("${Regex.escape(prefix)}(\\d+)").findAll(text).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
-
-    private fun compareVersions(a: String, b: String): Int {
-        val left = a.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        val right = b.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-        for (index in 0 until maxOf(left.size, right.size)) {
-            val l = left.getOrElse(index) { 0 }
-            val r = right.getOrElse(index) { 0 }
-            if (l != r) return l.compareTo(r)
-        }
-        return 0
-    }
 }

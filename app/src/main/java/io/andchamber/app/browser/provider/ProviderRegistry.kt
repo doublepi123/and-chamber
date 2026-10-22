@@ -8,7 +8,6 @@ class ProviderRegistry(
     private val tabs = linkedMapOf<String, ProviderTab>()
     private var grant: ProviderGrant? = null
     private var epoch = 0L
-    private val seen = mutableSetOf<String>()
 
     fun tabs(): List<ProviderTab> = tabs.values.toList()
 
@@ -61,7 +60,6 @@ class ProviderRegistry(
     fun clear() {
         tabs.clear()
         grant = null
-        seen.clear()
     }
 
     /**
@@ -107,5 +105,4 @@ class ProviderRegistry(
             tab.tabId == visibleTabId
     }
 
-    fun claimKey(epoch: String, requestId: String): Boolean = seen.add("$epoch:$requestId")
 }

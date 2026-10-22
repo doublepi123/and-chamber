@@ -1,7 +1,7 @@
 'use strict';
 
 // Flow order for the geometry race gate. The device side is createGeometryGateAdapters() in
-// verify_openchamber_provider_emulator.cjs. Every value used here is a normalised, awaited tool
+// provider_gate_adapters.cjs. Every value used here is a normalised, awaited tool
 // reply, a real geometry-diag read, or a real status phase. Nothing is hard-coded to pass.
 
 const STAGE_MS = 20000;

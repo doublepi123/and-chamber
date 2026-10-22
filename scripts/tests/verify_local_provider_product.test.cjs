@@ -574,23 +574,23 @@ test('session storage keeps the same profile/hash only and clears its fixed mark
   assert.equal(corrupt.clearCalls, 1);
 });
 
-function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, drawerOk = true, workspaceLabel = 'Open workspace panel' } = {}) {
+function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, drawerOk = true, menuMissing = false, handleMissing = false } = {}) {
   const clock = clocked();
   const state = {
-    grant: true, selectedTab: 'tab-old', viewHandle: 7, tabIds: ['tab-old'],
-    drawer: false, workspace: false, browserTab: false, addressFocused: false,
-    addressValue: '', openTapped: 0, typeCalls: 0, sessionNewCalls: 0,
+    grant: true, selectedTab: 'tab-old', selectedOwner: 'ses-a', viewHandle: 7, tabIds: ['tab-old'],
+    drawer: false, menu: false, dialog: false, addressFocused: false, addressLength: 0,
+    openTapped: 0, typeCalls: 0, sessionNewCalls: 0,
     order: [],
   };
   const target = (label) => {
+    if (label === 'Open sessions and projects') return { ok: state.drawer === false, target: { label } };
     if (label === 'New chat') return { ok: state.drawer, target: { label } };
-    if (label === 'Open workspace panel' || label === 'Open workspace panel, uncommitted changes') {
-      return { ok: state.drawer && !state.workspace && label === workspaceLabel, target: { label } };
-    }
-    if (label === 'Browser') return { ok: state.workspace && state.browserTab === false, target: { label } };
-    if (label === 'Browser address') return { ok: state.browserTab, target: { label } };
-    if (label === 'Open') return { ok: state.addressValue === 'https://example.com/openchamber-provider-focused', target: { label } };
-    return { ok: label === 'Open sessions and projects' && state.drawer === false, target: { label } };
+    if (label === 'AndChamber menu') return { ok: !handleMissing && state.sessionNewCalls === 1, target: { label } };
+    if (label === 'Open web page') return { ok: !menuMissing && state.menu, target: { label } };
+    if (label === 'Address') return { ok: state.dialog, target: { label } };
+    if (label === 'Open') return { ok: state.dialog && state.addressLength > 0, target: { label } };
+    if (label === 'Cancel') return { ok: state.dialog, target: { label } };
+    return { ok: false };
   };
   return {
     now: clock.now,
@@ -599,13 +599,17 @@ function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, dr
     async tapUi(label) { if (label === 'Allow agent') state.grant = true; return { ok: true, commandId: `ui-${label}` }; },
     async presentation() {
       return {
-        fixture: { native: { ...readyNative(state.selectedTab, state.viewHandle), owner: 'ses-a', grantForSelected: state.grant }, outerime: { shown: false } },
+        fixture: { native: { ...readyNative(state.selectedTab, state.viewHandle), owner: 'ses-a', grantForSelected: state.grant }, outer: { shown: false } },
         observe: {}, ui: readyUi(), composer: {},
       };
     },
     async pageRect() { return { viewHandle: state.viewHandle, pointerUi: { viewHandle: state.viewHandle, geometryReady: true } }; },
     async readDiag() {
-      return { ...readyNative(state.selectedTab, state.viewHandle), tabIds: [...state.tabIds], grantForSelected: state.grant };
+      return {
+        ...readyNative(state.selectedTab, state.viewHandle),
+        tabIds: [...state.tabIds], grantForSelected: state.grant,
+        selectedTabOwner: state.selectedOwner,
+      };
     },
     async chatTarget(label) { return target(label); },
     async tapChat(label) {
@@ -616,43 +620,45 @@ function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, dr
         if (!drawerOk) return { ok: false, reason: 'drawer-failed' };
         state.drawer = true;
       } else if (label === 'New chat') {
-        state.selectedTab = 'draft';
+        state.selectedTab = null;
+        state.selectedOwner = null;
         state.grant = false;
-      } else if (label.startsWith('Open workspace panel')) {
-        state.workspace = true;
-      } else if (label === 'Browser') {
-        state.browserTab = true;
-      } else if (label === 'Browser address') {
+      } else if (label === 'AndChamber menu') {
+        state.menu = true;
+      } else if (label === 'Open web page') {
+        state.menu = false;
+        state.dialog = true;
+      } else if (label === 'Address') {
         state.addressFocused = true;
       } else if (label === 'Open') {
         state.openTapped += 1;
         if (skipOpen) return { ok: false, reason: 'open-tap-failed' };
         state.selectedTab = 'tab-new';
+        state.selectedOwner = 'ses-product-b';
         state.viewHandle = 8;
         state.tabIds.push('tab-new');
         state.grant = false;
       }
       return { ok: true, commandId: `chat-${label}` };
     },
-    async chatState() {
+    async nativeEntryState() {
       return {
         ok: true,
-        sessionId: 'ses-product-b',
-        querySession: 'ses-product-b',
-        documentReady: 'complete',
-        documentHasFocus: state.addressFocused,
-        main: { viewHandle: 7, hasFocus: state.addressFocused, hasWindowFocus: true },
+        dialog: state.dialog,
+        titlePresent: state.dialog,
         address: {
-          present: true, value: state.addressValue, focused: state.addressFocused,
-          tag: 'INPUT', type: 'text', enabled: true, readOnly: false,
+          present: state.dialog, focused: state.addressFocused, editable: true, enabled: true,
+          valueLength: state.addressLength, valueExact: state.addressLength > 0 && !wrongValue,
         },
+        open: { present: state.dialog, enabled: state.addressLength > 0 && !wrongValue },
+        selectedTabId: state.selectedTab,
       };
     },
-    async typeChatAddress(url) {
+    async typeAddress(url) {
       state.typeCalls += 1;
       if (!typeOk) return { ok: false, reason: 'type-failed' };
       if (url !== 'https://example.com/openchamber-provider-focused') return { ok: false, reason: 'wrong-url' };
-      state.addressValue = wrongValue ? 'https://wrong.example/not-focus' : url;
+      state.addressLength = url.length;
       return { ok: true, typed: true, text: { ok: true, command: 'shell input text <fixed-focus-url>', elapsedMs: 1 } };
     },
     async sessionNew() {
@@ -664,7 +670,7 @@ function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, dr
   };
 }
 
-test('native entry follows pinned sessions/drawer/workspace/address/Open and never uses tool.open', async () => {
+test('native entry follows the edge handle, dialog Address and Open, and never uses tool.open', async () => {
   const io = nativeEntryIo();
   const ok = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](io, {});
   assert.equal(ok.ok, true, JSON.stringify(ok));
@@ -673,31 +679,41 @@ test('native entry follows pinned sessions/drawer/workspace/address/Open and nev
   assert.equal(ok.oldTab, 'tab-old');
   assert.equal(ok.afterTab, 'tab-new');
   assert.notEqual(ok.afterView, ok.oldView);
-  assert.deepEqual(io.state.order, ['Open sessions and projects', 'New chat', 'Open workspace panel', 'Browser', 'Browser address', 'Open']);
+  assert.equal(ok.addressValueExact, true);
+  assert.deepEqual(io.state.order, ['Open sessions and projects', 'New chat', 'AndChamber menu', 'Open web page', 'Address', 'Open']);
   assert.equal(io.state.sessionNewCalls, 1);
   assert.equal(io.state.typeCalls, 1);
   assert.equal(io.state.openTapped, 1);
-  const suffix = nativeEntryIo({ workspaceLabel: 'Open workspace panel, uncommitted changes' });
-  const suffixResult = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](suffix, {});
-  assert.equal(suffixResult.ok, true, JSON.stringify(suffixResult));
-  assert.equal(suffixResult.workspaceLabel, 'Open workspace panel, uncommitted changes');
+
+  const noHandle = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](nativeEntryIo({ handleMissing: true }), {});
+  assert.equal(noHandle.ok, false);
+  assert.equal(noHandle.reason, 'edge-handle-target-missing');
+
+  const noMenu = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](nativeEntryIo({ menuMissing: true }), {});
+  assert.equal(noMenu.ok, false);
+  assert.equal(noMenu.reason, 'open-web-page-target-missing');
+  assert.equal(noMenu.commands, undefined);
+
   const noEntry = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](nativeEntryIo({ skipOpen: true }), {});
   assert.equal(noEntry.ok, false);
-  assert.equal(noEntry.reason, 'chat-open-tap-failed');
+  assert.equal(noEntry.reason, 'dialog-open-tap-failed');
+
   const drawer = nativeEntryIo({ drawerOk: false });
   const drawerResult = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](drawer, {});
   assert.equal(drawerResult.ok, false);
   assert.equal(drawerResult.reason, 'sessions-drawer-missing');
-  assert.equal(drawer.state.sessionNewCalls, 0, 'failed drawer never continues into New chat');
+  assert.equal(drawer.state.sessionNewCalls, 0, 'failed drawer never continues into a new session');
+
   const typeFail = nativeEntryIo({ typeOk: false });
   const typeResult = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](typeFail, {});
   assert.equal(typeResult.ok, false);
   assert.equal(typeResult.reason, 'type-failed');
   assert.equal(typeFail.state.openTapped, 0, 'type failure never taps Open');
+
   const wrong = nativeEntryIo({ wrongValue: true });
   const wrongResult = await product.PRODUCT_CASE_FUNCTIONS['product-native-entry'](wrong, {});
   assert.equal(wrongResult.ok, false);
-  assert.equal(wrongResult.reason, 'browser-address-value-not-exact');
+  assert.equal(wrongResult.reason, 'dialog-address-value-not-exact');
   assert.equal(wrong.state.openTapped, 0);
 });
 
@@ -845,14 +861,14 @@ test('delayed UI target read is fenced before any ADB tap', async () => {
   assert.equal(taps, 0);
 });
 
-test('chat DOM targets are used only for the drawer address and Open labels, and stay fenced', async () => {
+test('native entry targets use ui-target-chat only and stay fenced before the tap', async () => {
   const sent = [];
   let taps = 0;
   const targetJson = (label) => ({
-    runId: 'product-chat-dom', phase: 'ui-target-chat', label,
+    runId: 'product-native-target', phase: 'ui-target-chat', label,
     ownerPackage: 'io.andchamber.localprovider', windowId: 1, enabled: true,
-    editable: label === 'Browser address', observedAtMs: 1000, ageMs: 0, fresh: true,
-    left: 10, top: 100, right: 110, bottom: 160, source: 'main-chat-dom',
+    editable: label === 'Address', observedAtMs: 1000, ageMs: 0, fresh: true,
+    left: 10, top: 100, right: 110, bottom: 160, source: 'native-ui',
   });
   const client = {
     async sendDevice(text) {
@@ -862,27 +878,28 @@ test('chat DOM targets are used only for the drawer address and Open labels, and
   };
   const io = product.createProductIo({
     client,
-    runId: 'product-chat-dom',
+    runId: 'product-native-target',
     screen: { width: 1080, height: 2400 },
     tapScreen: async () => { taps += 1; },
     now: () => 1000,
   });
-  assert.equal((await io.chatTarget('Browser address')).ok, true);
-  assert.equal((await io.chatTarget('Open')).ok, true);
-  assert.equal((await io.chatTarget('Browser')).ok, true);
-  assert.equal((await io.tapChat('Browser address')).ok, true);
-  assert.equal((await io.tapChat('Open')).ok, true);
+  for (const label of ['AndChamber menu', 'Open web page', 'Address', 'Open']) {
+    assert.equal((await io.chatTarget(label)).ok, true, label);
+  }
+  assert.equal((await io.tapChat('AndChamber menu')).ok, true);
+  assert.equal((await io.tapChat('Open web page')).ok, true);
   assert.deepEqual(sent, [
-    'chat-dom-target:Browser address',
-    'chat-dom-target:Open',
-    'chat-dom-target:Browser',
-    'chat-dom-target:Browser address',
-    'chat-dom-target:Open',
+    'ui-target-chat:AndChamber menu',
+    'ui-target-chat:Open web page',
+    'ui-target-chat:Address',
+    'ui-target-chat:Open',
+    'ui-target-chat:AndChamber menu',
+    'ui-target-chat:Open web page',
   ]);
-  assert.equal(taps, 2, 'one real ADB tap per validated drawer target (reads do not tap)');
+  assert.equal(taps, 2, 'one real ADB tap per validated native target (reads do not tap)');
   const bad = product.createProductIo({
     client: { async sendDevice() { return { ok: true, data: { ...targetJson('Open'), windowId: -1 } }; } },
-    runId: 'product-chat-dom',
+    runId: 'product-native-target',
     screen: { width: 1080, height: 2400 },
     tapScreen: async () => { taps += 1; },
     now: () => 1000,
@@ -893,7 +910,7 @@ test('chat DOM targets are used only for the drawer address and Open labels, and
   const fence = product.createCaseFence();
   const fencedIo = product.createProductIo({
     client: { async sendDevice() { fence.stop(); return { ok: true, data: targetJson('Open') }; } },
-    runId: 'product-chat-dom',
+    runId: 'product-native-target',
     screen: { width: 1080, height: 2400 },
     tapScreen: async () => { taps += 1; },
     fence,
@@ -902,7 +919,7 @@ test('chat DOM targets are used only for the drawer address and Open labels, and
   const fenced = await fencedIo.tapChat('Open');
   assert.equal(fenced.ok, false);
   assert.equal(fenced.code, 'FENCED');
-  assert.equal(taps, 2, 'a fence closed during the DOM read sends no ADB touch');
+  assert.equal(taps, 2, 'a fence closed during the target read sends no ADB touch');
 });
 
 test('WM restore runs even when the fence closed, while a new resize is refused', async () => {
@@ -1040,17 +1057,17 @@ test('baseOpen reads ready/source/geometry/UI before exactly one Allow tap', asy
   assert.equal(state.taps, 1, 'the case performs one actual Allow tap after readiness');
 });
 
-function chatStateData(overrides = {}) {
+function nativeEntryStateData(overrides = {}) {
   return {
-    phase: 'chat-browser-state', sessionId: 'ses-product-b', querySession: 'ses-product-b',
-    documentReady: true, documentHasFocus: true,
-    main: { viewHandle: 7, hasFocus: true, hasWindowFocus: true },
-    address: { present: true, value: '', focused: true, tag: 'INPUT', type: 'text', enabled: true, readOnly: false },
+    phase: 'native-entry-state', dialog: true, titlePresent: true,
+    address: { present: true, focused: true, editable: true, enabled: true, valueLength: 0, valueExact: false },
+    open: { present: true, enabled: false },
+    selectedTabId: 'tab-ses-b',
     ...overrides,
   };
 }
 
-test('chat address reader stays safe and typeChatAddress sends exactly one fixed URL', async () => {
+test('native dialog reader stays value-blind and typeAddress sends exactly one fixed URL', async () => {
   let humanCalls = 0;
   const humanText = async (text) => {
     humanCalls += 1;
@@ -1060,46 +1077,54 @@ test('chat address reader stays safe and typeChatAddress sends exactly one fixed
   const make = (data, fence = null) => {
     const client = {
       async sendDevice(text) {
-        if (text === 'chat-browser-state') {
+        if (text === 'native-entry-state') {
           if (fence) fence.stop();
           return { ok: true, data };
         }
         return { ok: false, code: 'UNEXPECTED', detail: text };
       },
     };
-    return product.createProductIo({ client, runId: 'product-chat', screen: { width: 1080, height: 2400 }, humanText, fence });
+    return product.createProductIo({ client, runId: 'product-dialog', screen: { width: 1080, height: 2400 }, humanText, fence });
   };
-  const io = make(chatStateData());
-  const before = await io.chatState();
+  const io = make(nativeEntryStateData());
+  const before = await io.nativeEntryState();
   assert.equal(before.ok, true, JSON.stringify(before));
-  assert.equal(before.address.value, '');
-  const typed = await io.typeChatAddress('https://example.com/openchamber-provider-focused');
+  assert.equal(before.address.valueLength, 0);
+  assert.equal(before.address.valueExact, false);
+  assert.equal('value' in before.address, false, 'the typed text is never exported');
+  const typed = await io.typeAddress('https://example.com/openchamber-provider-focused');
   assert.equal(typed.ok, true, JSON.stringify(typed));
   assert.equal(typed.typed, true);
   assert.equal(humanCalls, 1);
-  const exactIo = make(chatStateData({ address: { ...chatStateData().address, value: 'https://example.com/openchamber-provider-focused' } }));
-  const exact = await exactIo.typeChatAddress('https://example.com/openchamber-provider-focused');
+  const exactIo = make(nativeEntryStateData({
+    address: { present: true, focused: true, editable: true, enabled: true, valueLength: 49, valueExact: true },
+    open: { present: true, enabled: true },
+  }));
+  const exact = await exactIo.typeAddress('https://example.com/openchamber-provider-focused');
   assert.equal(exact.ok, true);
   assert.equal(exact.alreadyExact, true);
   assert.equal(humanCalls, 1, 'already exact URL is a recorded no-type continuation');
-  const wrong = await make(chatStateData({ address: { ...chatStateData().address, value: 'https://wrong.example/' } })).typeChatAddress('https://example.com/openchamber-provider-focused');
+  const wrong = await make(nativeEntryStateData({
+    address: { present: true, focused: true, editable: true, enabled: true, valueLength: 20, valueExact: false },
+  })).typeAddress('https://example.com/openchamber-provider-focused');
   assert.equal(wrong.ok, false);
-  const unsafe = await make(chatStateData({ consoleUrl: 'https://private.example/secret' })).chatState();
-  assert.equal(unsafe.ok, false);
-  assert.equal(unsafe.reason, 'chat-state-url-exported');
-  assert.equal(JSON.stringify(unsafe).includes('private.example'), false, 'exported URL is never echoed');
-  const mismatch = await make(chatStateData({ querySession: 'ses-other' })).chatState();
+  assert.equal(wrong.reason, 'dialog-address-not-empty');
+  const closed = await make(nativeEntryStateData({ dialog: false, address: { present: false, focused: false, editable: false, enabled: false, valueLength: 0, valueExact: false } }))
+    .typeAddress('https://example.com/openchamber-provider-focused');
+  assert.equal(closed.ok, false);
+  assert.equal(closed.reason, 'dialog-address-missing');
+  const mismatch = await make({ ...nativeEntryStateData(), address: { present: true } }).nativeEntryState();
   assert.equal(mismatch.ok, false);
-  assert.equal(mismatch.reason, 'chat-state-schema');
+  assert.equal(mismatch.reason, 'native-entry-state-schema');
   const fence = product.createCaseFence();
-  const fencedIo = make(chatStateData(), fence);
-  const fenced = await fencedIo.typeChatAddress('https://example.com/openchamber-provider-focused');
+  const fencedIo = make(nativeEntryStateData(), fence);
+  const fenced = await fencedIo.typeAddress('https://example.com/openchamber-provider-focused');
   assert.equal(fenced.ok, false);
   assert.equal(fenced.code, 'FENCED');
   assert.equal(humanCalls, 1, 'fenced type sends no ADB text');
-  const wrongUrl = await fencedIo.typeChatAddress('https://example.com/openchamber-provider-second');
+  const wrongUrl = await make(nativeEntryStateData()).typeAddress('https://example.com/openchamber-provider-second');
   assert.equal(wrongUrl.ok, false);
-  assert.equal(wrongUrl.reason, 'chat-address-url-not-allowed');
+  assert.equal(wrongUrl.reason, 'dialog-url-not-allowed');
 });
 
 test('human text helper accepts only the one fixed focus URL and records command/timing', async () => {

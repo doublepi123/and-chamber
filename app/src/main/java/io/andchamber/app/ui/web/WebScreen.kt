@@ -58,6 +58,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -88,6 +89,7 @@ import io.andchamber.app.ui.findActivity
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.withSessionPath
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 private sealed interface SessionPhase {
@@ -359,32 +361,31 @@ internal fun WebScreen(
     androidx.compose.runtime.DisposableEffect(web, browserPresenter, localTrusted, consoleGeneration) {
         val presenter = browserPresenter
         val activity = hostActivity
-        if (localTrusted && presenter != null && activity != null && web != null) {
+        val view = web
+        var sessionCallback: ((String?) -> Unit)? = null
+        if (localTrusted && presenter != null && activity != null && view != null) {
             val host = io.andchamber.app.ui.browser.BrowserHostSurface(presenter)
-            host.opener = { url, owner -> presenter.openUser(url, owner) }
-            web.browserHost = host
-            web.browserConsoleGeneration = consoleGeneration
-            web.browserTabsJson = { io.andchamber.app.ui.browser.BrowserHostEvents.tabsJson(presenter.state.value) }
-            web.onConsoleDocumentInvalidated = { presenter.invalidateConsoleDocument(targetId) }
-            presenter.attachHost(activity, targetId, consoleGeneration)
-            web.view?.evaluateJavascript(io.andchamber.app.ui.browser.BrowserHostEvents.readyScript(), null)
-            web.view?.evaluateJavascript(
-                io.andchamber.app.ui.browser.BrowserHostEvents.stateScript(presenter.state.value),
-                null,
-            )
-            host.onChanged = {
-                web.view?.evaluateJavascript(
-                    io.andchamber.app.ui.browser.BrowserHostEvents.stateScript(presenter.state.value),
-                    null,
-                )
+            val reportSession: (String?) -> Unit = { session ->
+                if (view.acceptsBrowserHost(consoleGeneration)) view.browserHost?.context(session.orEmpty())
             }
+            sessionCallback = reportSession
+            view.browserHost = host
+            view.browserConsoleGeneration = consoleGeneration
+            view.onConsoleSessionChanged = reportSession
+            view.onConsoleDocumentInvalidated = { presenter.invalidateConsoleDocument(targetId) }
+            presenter.attachHost(activity, targetId, consoleGeneration)
+            // The page may already show a chat (reload, deep link, a pooled view): report it now.
+            host.context(view.consoleSessionId.orEmpty())
         } else if (web?.browserHost != null) {
             web.unbindBrowserHost()
             presenter?.detachHostAny(targetId)
         }
         // Generation hand-over: attachHost with the next generation revokes the grant and keeps the
         // tabs. `paused` follows only the activity lifecycle observer below.
-        onDispose { }
+        onDispose {
+            val callback = sessionCallback
+            if (callback != null && web?.onConsoleSessionChanged === callback) web.onConsoleSessionChanged = null
+        }
     }
     val hostLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(browserPresenter, localTrusted, hostLifecycle) {
@@ -402,11 +403,13 @@ internal fun WebScreen(
         hostLifecycle.lifecycle.addObserver(observer)
         onDispose { hostLifecycle.lifecycle.removeObserver(observer) }
     }
-    if (localTrusted && browserPresenter != null && web != null) {
-        io.andchamber.app.ui.browser.PublishHostState(browserPresenter) { script ->
-            if (web.acceptsBrowserHost(consoleGeneration)) web.view?.evaluateJavascript(script, null)
-        }
-    }
+    // "Open web page" is offered only for the local console, with a native presenter and a chat the
+    // page says it is showing: the open belongs to that chat and never grants it.
+    val consoleSession = web?.consoleSessionId
+    val canOpenWebPage = isLocal && localTrusted && browserPresenter != null && web != null && consoleSession != null
+    val scope = rememberCoroutineScope()
+    var openUrlDialog by remember(web) { mutableStateOf(false) }
+    LaunchedEffect(canOpenWebPage) { if (!canOpenWebPage) openUrlDialog = false }
 
     val pageError = web?.pageError
     val overlay: WebOverlay? =
@@ -520,7 +523,23 @@ internal fun WebScreen(
                         onReload = reload,
                         // The local server's password is internal, so a browser couldn't sign in.
                         onOpenInBrowser = if (shownTarget is ServerTarget.Remote) web::openInBrowser else null,
+                        onOpenUrl = if (canOpenWebPage) ({ openUrlDialog = true }) else null,
                     )
+                }
+
+                if (openUrlDialog) {
+                    val presenter = browserPresenter
+                    val session = consoleSession
+                    if (presenter != null && session != null) {
+                        OpenBrowserUrlDialog(
+                            onOpen = { url ->
+                                openUrlDialog = false
+                                // Opens in this chat's window; the person still has to Allow it.
+                                scope.launch { presenter.openUser(url, session) }
+                            },
+                            onDismiss = { openUrlDialog = false },
+                        )
+                    }
                 }
             }
         }

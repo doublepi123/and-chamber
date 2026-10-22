@@ -5,6 +5,7 @@ import android.app.UiAutomation
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
+import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.InputDevice
@@ -14,7 +15,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 import android.webkit.CookieManager
 import android.webkit.WebView
 import androidx.webkit.WebViewCompat
@@ -39,7 +39,6 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
-import kotlin.math.roundToInt
 
 /** Main-thread, test-only structural readback. Never read text, tags, URLs or input values. */
 internal object NativeFixtureFocusDiagnostics {
@@ -259,6 +258,7 @@ internal class LocalProviderRegressionSession(
             // Activity instead of from the instrumentation process in the background.
             activity = run.launchActivity()
             startProductionRuntime()
+            verifyLaunchArtifacts()
             awaitChatHost()
             createInitialSession()
             writeStatus("ready")
@@ -360,14 +360,21 @@ internal class LocalProviderRegressionSession(
 
     private fun verifyEnvironment() {
         val manifest = run.runtimeManifest()
-        val provider = run.providerManifestFromApk()
-        run.verifyAssetPayload(provider)
         run.verifyProotProvenance()
         val paths = RuntimePaths.under(context.filesDir)
         val inspection = run.installed(paths) ?: fail("runtime-not-installed: run the basic entry first")
-        if (!inspection.applied) fail("installed-provider-not-applied")
         if (inspection.metadata.port != manifest.port) fail("metadata-port")
-        run.verifyInstalledPayload(provider, paths)
+        run.verifyStockOpenChamber(manifest, paths)
+    }
+
+    /** Launch-scoped evidence; the endpoint file exists only while a launch is ready. */
+    private fun verifyLaunchArtifacts() {
+        val paths = RuntimePaths.under(context.filesDir)
+        run.record("pluginAssets", run.verifyPluginSync(paths))
+        run.record("toolEndpoint", run.waitToolEndpoint(paths))
+        run.record("agentWebToolEnabled", run.verifyAgentWebSetting(paths))
+        run.record("pluginConfig", run.verifyPluginConfig(paths))
+        run.record("pluginInventory", run.pluginInventory(base, auth!!.header))
     }
 
     private fun installDecorator() {
@@ -602,14 +609,21 @@ internal class LocalProviderRegressionSession(
     private fun executeTool(command: LocalProviderRegressionProtocol.Command): JSONObject {
         val session = command.sessionId ?: selectedSessionId ?: throw CommandFailure("no-session", "no session")
         if (session !in createdSessions) throw CommandFailure("unknown-session", "unknown session")
-        val endpoint = LocalAgentTool.discover() ?: throw CommandFailure("agent-tool-endpoint-missing", "missing")
-        val agent = LocalAgentClient(run, endpoint, session)
+        val home = RuntimePaths.under(context.filesDir).home
+        val endpoint = LocalBrowserTool.discover(home)
+            ?: throw CommandFailure("plugin-endpoint-missing", "missing")
+        val agent = LocalBrowserToolClient(run, endpoint, session)
         val reply = agent.call(command.action!!, command.input)
         toolCommands += 1
+        run.record("toolTransport", reply.transport)
+        run.record("toolCallCount", toolCommands)
         if (!reply.ok) {
-            throw CommandFailure(reply.errorCode.ifBlank { "agent-error" }, reply.error.take(300))
+            throw CommandFailure(reply.errorCode.ifBlank { "tool-error" }, reply.error.take(300))
         }
-        return reply.data ?: JSONObject()
+        // The marker makes every stored tool result explicit: this call stood in for the model and
+        // the OpenCode plugin and went straight to /v1/tool; it was not an LLM-driven invocation.
+        return JSONObject(reply.data?.toString() ?: "{}")
+            .put("transport", reply.transport)
     }
 
     private fun executeDevice(command: LocalProviderRegressionProtocol.Command): JSONObject {
@@ -636,7 +650,7 @@ internal class LocalProviderRegressionSession(
             text == "input-value" -> inputValue()
             text == "ui-state" -> uiState()
             text == "presentation-observe" -> presentationObserve()
-            text == "chat-browser-state" -> chatBrowserState()
+            text == "native-entry-state" -> nativeEntryState()
             text == "site-state-read" -> siteStateRead()
             text == "site-state-clear" -> siteStateClear()
             text.startsWith("site-state-write:") -> siteStateWrite(text.removePrefix("site-state-write:"))
@@ -645,7 +659,6 @@ internal class LocalProviderRegressionSession(
             text == "a11y-off:end" -> Accessibility.end(instrumentation, context)
             text == "native-blocked-input" -> nativeBlockedInput()
             text.startsWith("ui-target-chat:") -> uiTargetChat(text.removePrefix("ui-target-chat:"))
-            text.startsWith("chat-dom-target:") -> chatDomTarget(text.removePrefix("chat-dom-target:"))
             text == "cookie-read" -> cookieRead()
             text.startsWith("cookie-write:") -> cookieWrite(text.removePrefix("cookie-write:"))
             text.startsWith("fixture-target:") -> fixtureTarget(text.removePrefix("fixture-target:"))
@@ -707,7 +720,11 @@ internal class LocalProviderRegressionSession(
      */
     private fun accessibility(): UiAutomation {
         Accessibility.requireTree()
-        return instrumentation.uiAutomation
+        val automation = instrumentation.uiAutomation
+        // Compose updates a Text node in place (Enlarge -> Restore); the a11y cache may keep serving
+        // the old text for the same node id. Every read is a fresh observation (API 34+).
+        if (Build.VERSION.SDK_INT >= 34) runCatching { automation.clearCache() }
+        return automation
     }
 
     private fun stateViewHandle(): Int? = presenter?.state?.value?.viewHandle
@@ -734,10 +751,6 @@ internal class LocalProviderRegressionSession(
             .put("selectedOwner", selected?.owner ?: JSONObject.NULL)
             .put("documentEpoch", state.documentEpoch)
             .put("viewHandle", state.viewHandle)
-            .put("dispatchCount", GeometryGateCounters.dispatched.get())
-            .put("captureQueued", GeometryGateCounters.queued.get())
-            .put("captureCompleted", GeometryGateCounters.completed.get())
-            .put("captureForwarded", GeometryGateCounters.forwarded.get())
             .put("holdProbe", LocalProviderRegressionEvidence.HOLD_PROBE)
     }
 
@@ -1288,52 +1301,76 @@ internal class LocalProviderRegressionSession(
             .put("labels", labels)
     }
 
-    private fun chatBrowserState(): JSONObject {
-        val session = selectedSessionId ?: throw CommandFailure("no-session", "no session")
-        val activity = activity ?: throw CommandFailure("no-activity", "no activity")
-        val target = currentView()
-        val console = run.onMain {
-            findMainConsoleWebView(activity.window.decorView, target, base, session)
-        } ?: throw CommandFailure("no-console-view", "no console")
-        val consoleUrl = run.onMain { console.url.orEmpty() }
-        val querySession = LocalProviderConsoleSetup.consoleSession(consoleUrl, base, session)
-            ?: throw CommandFailure("console-session-mismatch", "console")
-        val raw = run.eval(console, CHAT_BROWSER_STATE_SCRIPT)
-            ?: throw CommandFailure("chat-browser-state-null", "null")
-        val body = runCatching { JSONObject(raw) }.getOrNull()
-            ?: throw CommandFailure("chat-browser-state-not-json", "not json")
-        val address = body.optJSONObject("address") ?: JSONObject()
-        val rawValue = address.opt("value") as? String
-        val present = address.optBoolean("present")
-        val value = when {
-            !present || rawValue == null -> JSONObject.NULL
-            rawValue.isEmpty() || rawValue == LocalProviderConsoleSetup.FOCUSED_URL -> rawValue
-            else -> JSONObject.NULL
-        }
-        val main = run.onMain {
+    /**
+     * Read-only state of the native OpenBrowserUrlDialog. It reads the only editable field and the
+     * Open button from the accessibility tree; the typed value itself is never exported, only
+     * whether it is exactly the fixed fixture URL and its length.
+     */
+    private fun nativeEntryState(): JSONObject {
+        Accessibility.requireTree()
+        val root = try {
+            accessibility().rootInActiveWindow
+        } catch (error: Throwable) {
+            throw CommandFailure("accessibility-unavailable", error.javaClass.simpleName)
+        } ?: throw CommandFailure("no-active-window", "no window")
+        val tracked = Collections.newSetFromMap(IdentityHashMap<AccessibilityNodeInfo, Boolean>())
+        fun track(node: AccessibilityNodeInfo) { tracked.add(node) }
+        return try {
+            track(root)
+            if (root.packageName?.toString() != context.packageName) {
+                throw CommandFailure("active-window-not-own-package", root.packageName?.toString().orEmpty())
+            }
+            var address: AccessibilityNodeInfo? = null
+            var open: AccessibilityNodeInfo? = null
+            var titlePresent = false
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty()) {
+                val node = queue.removeFirst()
+                if (node.isVisibleToUser) {
+                    val text = node.text?.toString().orEmpty()
+                    if (text == "Open web page") titlePresent = true
+                    if (address == null && node.isEditable && node.isEnabled) address = node
+                    // Material buttons expose the label on a child; the clickable node is its parent.
+                    if (open == null && text == "Open") {
+                        open = if (node.isClickable) node else node.parent?.also { track(it) }?.takeIf { it.isClickable }
+                    }
+                }
+                for (index in 0 until node.childCount) {
+                    node.getChild(index)?.let { child ->
+                        track(child)
+                        queue.add(child)
+                    }
+                }
+            }
+            val value = address?.text?.toString().orEmpty()
             JSONObject()
-                .put("viewHandle", presenter!!.state.value.viewHandle)
-                .put("hasFocus", console.hasFocus())
-                .put("hasWindowFocus", console.hasWindowFocus())
+                .put("phase", "native-entry-state")
+                .put("dialog", address != null)
+                .put("titlePresent", titlePresent)
+                .put(
+                    "address",
+                    JSONObject()
+                        .put("present", address != null)
+                        .put("focused", address?.isFocused ?: false)
+                        .put("editable", address?.isEditable ?: false)
+                        .put("enabled", address?.isEnabled ?: false)
+                        .put("valueLength", value.length)
+                        .put("valueExact", value == LocalProviderConsoleSetup.FOCUSED_URL),
+                )
+                .put(
+                    "open",
+                    JSONObject()
+                        .put("present", open != null)
+                        .put("enabled", open?.isEnabled ?: false),
+                )
+                .put("selectedTabId", presenter?.state?.value?.selectedTabId ?: JSONObject.NULL)
+        } finally {
+            tracked.forEach {
+                @Suppress("DEPRECATION")
+                it.recycle()
+            }
         }
-        return JSONObject()
-            .put("phase", "chat-browser-state")
-            .put("sessionId", session)
-            .put("querySession", querySession)
-            .put("documentReady", body.opt("ready") ?: JSONObject.NULL)
-            .put("documentHasFocus", body.opt("docFocus") ?: JSONObject.NULL)
-            .put("main", main)
-            .put("address", JSONObject()
-                .put("present", present)
-                .put("value", value)
-                .put("focused", address.opt("focused") ?: JSONObject.NULL)
-                .put("tag", address.opt("tag") ?: JSONObject.NULL)
-                .put("type", address.opt("type") ?: JSONObject.NULL)
-                .put("enabled", address.opt("enabled") ?: JSONObject.NULL)
-                .put("readOnly", address.opt("readOnly") ?: JSONObject.NULL)
-                .put("activeTag", body.opt("activeTag") ?: JSONObject.NULL)
-                .put("matchesFocusedURL", if (present && rawValue != null) rawValue == LocalProviderConsoleSetup.FOCUSED_URL else JSONObject.NULL)
-                .put("valueLength", if (present && rawValue != null) rawValue.length else JSONObject.NULL))
     }
 
     private fun presentationObserve(): JSONObject {
@@ -1706,7 +1743,14 @@ internal class LocalProviderRegressionSession(
                 // Chromium exposes an empty <input aria-label> name as hintText (text stays empty or
                 // the placeholder). Only an editable node may match by hint, never a plain label.
                 val hintMatch = node.isEditable && node.hintText?.toString() == label
-                if ((node.text?.toString() == label || node.contentDescription?.toString() == label || hintMatch) &&
+                // Compose exposes Modifier.clickable(onClickLabel=...) as an accessibility action,
+                // not as text or a content description; the edge handle is found this way.
+                val actionMatch = node.actionList.any { action -> action.label?.toString() == label }
+                // The OpenBrowserUrlDialog has exactly one editable field; the fixed host label
+                // "Address" selects it without reading or exporting what has been typed.
+                val addressField = label == "Address" && node.isEditable
+                if ((node.text?.toString() == label || node.contentDescription?.toString() == label ||
+                        hintMatch || actionMatch || addressField) &&
                     node.isVisibleToUser && node.packageName?.toString() == context.packageName
                 ) {
                     fun targetJson(current: AccessibilityNodeInfo, bounds: Rect, editable: Boolean): JSONObject {
@@ -1724,14 +1768,21 @@ internal class LocalProviderRegressionSession(
                             .put("ageMs", 0)
                             .put("fresh", true)
                             .put("runId", runId)
-                            .put("source", "main-chat")
+                            .put("source", "native-ui")
                     }
                     fun eligible(current: AccessibilityNodeInfo): JSONObject? {
                         if (!current.isEnabled || !current.isVisibleToUser) return null
                         val bounds = Rect()
                         current.getBoundsInScreen(bounds)
                         if (bounds.width() <= 0 || bounds.height() <= 0) return null
-                        if (targetBounds != null && Rect.intersects(bounds, targetBounds)) return null
+                        // The edge tab and its dialog are App-owned overlays above the page window:
+                        // the handle sits on the screen edge the floating page leaves free, and the
+                        // dialog is modal. Only stock chat labels keep the page-overlap exclusion.
+                        if (!NATIVE_OVERLAY_LABELS.contains(label) && targetBounds != null &&
+                            Rect.intersects(bounds, targetBounds)
+                        ) {
+                            return null
+                        }
                         return targetJson(current, bounds, current.isEditable)
                     }
                     // An editable input is its own valid touch target; never fall through to the
@@ -1766,214 +1817,6 @@ internal class LocalProviderRegressionSession(
             }
         }
     }
-
-    /**
-     * Read-only DOM-rect target for the two workspace-drawer controls Chromium renders inside a portal
-     * `<section role="dialog" aria-modal="true">`, where its accessibility tree exposes no node. The
-     * label maps to one fixed selector; the script reads geometry and hit-testing only (never focus,
-     * click, scroll or an input value). The CSS rect is projected with the same width ratio as
-     * ComposerBounds, then fenced against the console WebView and the floating page.
-     */
-    private fun chatDomTarget(label: String): JSONObject {
-        val fixed = LocalProviderRegressionProtocol.CHAT_DOM_TARGETS[label]
-            ?: throw CommandFailure("unknown-chat-label", label.take(60))
-        val session = selectedSessionId ?: throw CommandFailure("no-session", "no session")
-        val activity = activity ?: throw CommandFailure("no-activity", "no activity")
-        val target = currentView()
-        val console = run.onMain {
-            findMainConsoleWebView(activity.window.decorView, target, base, session)
-        } ?: throw CommandFailure("no-console-view", "no console")
-        val consoleUrl = run.onMain { console.url.orEmpty() }
-        LocalProviderConsoleSetup.consoleSession(consoleUrl, base, session)
-            ?: throw CommandFailure("console-session-mismatch", "console")
-        val script = CHAT_DOM_TARGET_SCRIPT.replace("__SELECTOR__", JSONObject.quote(fixed.selector))
-        val raw = run.eval(console, script) ?: throw CommandFailure("chat-dom-target-null", "null")
-        val body = runCatching { JSONObject(raw) }.getOrNull()
-            ?: throw CommandFailure("chat-dom-target-not-json", "not json")
-        if (!body.optBoolean("present")) throw CommandFailure("missing-chat-target", label)
-        if (!body.optBoolean("connected")) throw CommandFailure("chat-dom-target-detached", label)
-        if (body.optInt("rects", 0) <= 0) throw CommandFailure("chat-dom-target-no-rects", label)
-        if (!body.optBoolean("visible")) throw CommandFailure("chat-dom-target-hidden", label)
-        if (body.optBoolean("disabled")) throw CommandFailure("chat-dom-target-disabled", label)
-        if (!body.optBoolean("centerInWindow")) throw CommandFailure("chat-dom-target-center-outside-viewport", label)
-        if (!body.optBoolean("pointInside")) throw CommandFailure("chat-dom-target-obscured", label)
-        val rect = body.optJSONObject("rect") ?: throw CommandFailure("chat-dom-target-no-rect", label)
-        val innerWidth = body.optDouble("innerWidth", 0.0)
-        if (!innerWidth.isFinite() || innerWidth <= 0.0) throw CommandFailure("chat-dom-target-viewport", label)
-        val cssLeft = rect.optDouble("left", Double.NaN)
-        val cssTop = rect.optDouble("top", Double.NaN)
-        val cssRight = rect.optDouble("right", Double.NaN)
-        val cssBottom = rect.optDouble("bottom", Double.NaN)
-        if (!cssLeft.isFinite() || !cssTop.isFinite() || !cssRight.isFinite() || !cssBottom.isFinite() ||
-            cssRight <= cssLeft || cssBottom <= cssTop
-        ) {
-            throw CommandFailure("chat-dom-target-empty", label)
-        }
-        val consoleRect = Rect()
-        if (!run.onMain { console.getGlobalVisibleRect(consoleRect) } || consoleRect.isEmpty) {
-            throw CommandFailure("no-console-rect", "console not visible")
-        }
-        // Same projection rule as ComposerBounds / acceptedComposerRect: width ratio, not DPR.
-        val scale = console.width / innerWidth
-        if (!scale.isFinite() || scale <= 0.0) throw CommandFailure("chat-dom-target-scale", "scale")
-        val loc = IntArray(2)
-        run.onMain { console.getLocationOnScreen(loc) }
-        fun project(css: Double, origin: Int): Int = (origin + css * scale).roundToInt()
-        val projected = Rect(
-            project(cssLeft, loc[0]),
-            project(cssTop, loc[1]),
-            project(cssRight, loc[0]),
-            project(cssBottom, loc[1]),
-        )
-        if (projected.width() <= 0 || projected.height() <= 0) {
-            throw CommandFailure("chat-dom-target-empty", label)
-        }
-        if (projected.left < consoleRect.left || projected.top < consoleRect.top ||
-            projected.right > consoleRect.right || projected.bottom > consoleRect.bottom
-        ) {
-            throw CommandFailure("chat-dom-target-outside-console", label)
-        }
-        if (target != null && target !== console) {
-            val floatingRect = run.onMain {
-                val bounds = Rect()
-                target.getGlobalVisibleRect(bounds)
-                bounds
-            }
-            if (!floatingRect.isEmpty && Rect.intersects(projected, floatingRect)) {
-                throw CommandFailure("chat-dom-target-overlaps-page", label)
-            }
-        }
-        val now = System.currentTimeMillis()
-        return JSONObject()
-            .put("phase", "ui-target-chat")
-            .put("label", label)
-            .put("left", projected.left).put("top", projected.top)
-            .put("right", projected.right).put("bottom", projected.bottom)
-            .put("windowId", consoleWindowId(console, consoleRect))
-            .put("ownerPackage", context.packageName)
-            .put("enabled", true)
-            .put("editable", fixed.editable)
-            .put("observedAtMs", now)
-            .put("ageMs", 0)
-            .put("fresh", true)
-            .put("runId", runId)
-            .put("source", "main-chat-dom")
-            .put("scale", scale)
-            .put("documentReady", body.opt("ready") ?: JSONObject.NULL)
-            .put("visualViewport", body.opt("visualViewport") ?: JSONObject.NULL)
-    }
-
-    /**
-     * Honest accessibility window id for the window that owns the console WebView. The portal DOM has
-     * no accessibility node, so the id comes from the window list: an application window of this
-     * package whose bounds overlap the console the most (an IME window is another package/type).
-     */
-    private fun consoleWindowId(console: WebView, consoleRect: Rect): Int {
-        // Same source as uiTargetChat: the active window's root node. uiAutomation.windows is empty
-        // unless the automation service requests interactive windows, so it is only a fallback.
-        val automation = accessibility()
-        val root = try {
-            automation.rootInActiveWindow
-        } catch (error: Throwable) {
-            throw CommandFailure("accessibility-unavailable", error.javaClass.simpleName)
-        }
-        if (root != null) {
-            try {
-                val bounds = Rect().also { root.getBoundsInScreen(it) }
-                if (root.packageName?.toString() == context.packageName &&
-                    bounds.contains(consoleRect.centerX(), consoleRect.centerY())
-                ) {
-                    return root.windowId
-                }
-            } finally {
-                @Suppress("DEPRECATION")
-                root.recycle()
-            }
-        }
-        val windows = try {
-            automation.windows
-        } catch (error: Throwable) {
-            throw CommandFailure("accessibility-unavailable", error.javaClass.simpleName)
-        }
-        var bestId = -1
-        var bestArea = 0
-        for (window in windows) {
-            if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
-            val bounds = Rect()
-            window.getBoundsInScreen(bounds)
-            val overlap = Rect(consoleRect)
-            if (!overlap.intersect(bounds)) continue
-            val root = window.root ?: continue
-            val owner = try {
-                root.packageName?.toString()
-            } finally {
-                @Suppress("DEPRECATION")
-                root.recycle()
-            }
-            if (owner != context.packageName) continue
-            val area = overlap.width() * overlap.height()
-            if (area > bestArea) {
-                bestArea = area
-                bestId = window.id
-            }
-        }
-        if (bestId < 0) throw CommandFailure("no-console-window", "no window")
-        return bestId
-    }
-
-    private val CHAT_DOM_TARGET_SCRIPT = """
-        (function(){
-          var selector = __SELECTOR__;
-          var el = document.querySelector(selector);
-          if (!el) return JSON.stringify({present: false});
-          var rect = el.getBoundingClientRect();
-          var style = window.getComputedStyle(el);
-          var visible = !!style && style.visibility !== 'hidden' && style.visibility !== 'collapse' && style.display !== 'none';
-          var ready = String(document.readyState);
-          var cx = rect.left + rect.width / 2;
-          var cy = rect.top + rect.height / 2;
-          var hit = null;
-          try { hit = document.elementFromPoint(cx, cy); } catch (e) { hit = null; }
-          var vv = window.visualViewport;
-          return JSON.stringify({
-            present: true,
-            ready: ready,
-            connected: el.isConnected === true,
-            rects: el.getClientRects ? el.getClientRects().length : 0,
-            visible: visible,
-            disabled: el.disabled === true,
-            rect: {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height},
-            center: {x: cx, y: cy},
-            centerInWindow: cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight,
-            pointInside: !!(hit && (hit === el || (el.contains && el.contains(hit)))),
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight,
-            visualViewport: vv ? {width: vv.width, offsetLeft: vv.offsetLeft, offsetTop: vv.offsetTop, scale: vv.scale} : null
-          });
-        })()
-    """
-
-    private val CHAT_BROWSER_STATE_SCRIPT = """
-        (function(){
-          var input = document.querySelector('[aria-label="Browser address"]');
-          var active = document.activeElement;
-          var present = !!(input && input.isConnected && input.getClientRects().length > 0);
-          return JSON.stringify({
-            ready: String(document.readyState),
-            docFocus: typeof document.hasFocus === 'function' ? document.hasFocus() : null,
-            address: {
-              present: present,
-              value: present && typeof input.value === 'string' ? input.value : null,
-              focused: !!(present && active === input),
-              tag: present ? input.tagName : null,
-              type: present && input.type ? String(input.type) : null,
-              enabled: present ? input.disabled !== true : null,
-              readOnly: present ? input.readOnly === true : null
-            },
-            activeTag: active && active.tagName ? String(active.tagName) : null
-          });
-        })()
-    """
 
     private val SITE_STATE_WRITE_SCRIPT = """
         (function(){
@@ -2565,6 +2408,9 @@ internal class LocalProviderRegressionSession(
  * Pure guards for the production notification/deep-link session setup. The actual producer uses
  * these same functions before starting the intent and before accepting Main-chat readiness.
  */
+/** App-owned Compose menu/dialog labels that sit above the floating browser page. */
+private val NATIVE_OVERLAY_LABELS = setOf("AndChamber menu", "Open web page", "Address", "Open", "Cancel")
+
 internal object LocalProviderConsoleSetup {
     const val SESSION_DIRECTORY = "/root"
     const val FOCUSED_URL = OpenChamberProviderFixtures.FOCUSED_URL

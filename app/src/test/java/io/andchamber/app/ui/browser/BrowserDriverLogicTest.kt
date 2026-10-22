@@ -521,13 +521,6 @@ class BrowserDriverLogicTest {
         assertEquals(160, floatWidthDp(192, tablet = false))
         assertTrue(floatHeightDp(400) <= 168)
     }
-
-    @Test
-    fun `address field adds https and leaves an explicit scheme alone`() {
-        assertEquals("https://example.com", normalizeAddress("example.com"))
-        assertEquals("https://example.com", normalizeAddress("https://example.com"))
-        assertEquals("http://example.com", normalizeAddress("http://example.com"))
-    }
 }
 
 /**

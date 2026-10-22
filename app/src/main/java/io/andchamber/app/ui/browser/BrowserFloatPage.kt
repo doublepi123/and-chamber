@@ -54,6 +54,7 @@ internal fun BrowserFloatPage(
     val scope = rememberCoroutineScope()
     // Main-only observation counter survives target-view keys; no geometry/ref epoch guessing.
     val contentHandoff = remember(presenter) { WindowContentHandoff() }
+    var clearingSiteData by remember(presenter) { mutableStateOf(false) }
     if (!state.shown) return
     val context = LocalContext.current
     // Toasts do not resize the page or feed back into geometry/scroll restoration.
@@ -105,6 +106,20 @@ internal fun BrowserFloatPage(
         mouseOn = state.mouseMode,
         onDesktopMode = { presenter.setDesktopMode(it) },
         onMouseMode = { presenter.setMouseMode(it) },
+        onClearSiteData = {
+            if (!clearingSiteData && !presenter.state.value.mousePressActive) {
+                clearingSiteData = true
+                scope.launch {
+                    try {
+                        val result = BrowserSiteDataClearer(PresenterSiteDataOps(presenter)).clear()
+                        Toast.makeText(context, browserSiteDataResultResource(result), Toast.LENGTH_SHORT).show()
+                    } finally {
+                        clearingSiteData = false
+                    }
+                }
+            }
+        },
+        clearingSiteData = clearingSiteData,
         bottomClearance = bottomClearance,
     ) { renderedChange, acknowledge, presentationBlocked ->
         // Immutable render request, captured now rather than looked up in a later callback.

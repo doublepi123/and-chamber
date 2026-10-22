@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.view.MotionEvent
 import android.view.View
+import io.andchamber.app.BuildConfig
 import io.andchamber.app.browser.BrowserDriver
 import io.andchamber.app.browser.BrowserUrlPolicy
 import io.andchamber.app.browser.UrlDecision
@@ -157,8 +158,12 @@ class NativeBrowserPresenter(
         synchronized(lock) { publishLocked() }
     }
 
-    /** Unit tests attach a host without constructing an Activity. Production callers use the Activity overload. */
+    /**
+     * Unit tests attach a host without constructing an Activity. Production callers use the Activity
+     * overload. Debug builds only: a release build refuses this entry point.
+     */
     internal fun attachHostForTest(instanceKey: String, consoleGeneration: Long) {
+        check(BuildConfig.DEBUG) { "attachHostForTest is debug-only" }
         consoleInvalidated = false
         testHost = true
         synchronized(lock) {
@@ -171,9 +176,10 @@ class NativeBrowserPresenter(
      * Test-only. Installs an observer that sees each production page exactly once, synchronously at
      * creation and before the first mode change, load, bind or registry open. It only observes or
      * attaches a test WebViewClient; it receives the original page and cannot replace it. Accepted
-     * once, before any page exists. Production never calls this.
+     * once, before any page exists. Production never calls this, and a release build refuses it.
      */
     internal fun installPageDecorator(decorator: (ControlledBrowserPage) -> Unit) {
+        check(BuildConfig.DEBUG) { "installPageDecorator is debug-only" }
         synchronized(lock) {
             check(!pageCreated && pages.isEmpty() && page == null && !activePageAccess && loadJob == null) {
                 "page decorator must be installed before the first page"
@@ -1000,11 +1006,14 @@ class NativeBrowserPresenter(
         }
     }
 
-    internal fun beginForTest(requestId: String): Boolean = synchronized(lock) {
-        if (activeJob != null) return false
-        activeJob = Job()
-        activeRequestId = requestId
-        true
+    internal fun beginForTest(requestId: String): Boolean {
+        check(BuildConfig.DEBUG) { "beginForTest is debug-only" }
+        return synchronized(lock) {
+            if (activeJob != null) return false
+            activeJob = Job()
+            activeRequestId = requestId
+            true
+        }
     }
 
     fun cancel(requestId: String) {
@@ -1500,8 +1509,10 @@ class NativeBrowserPresenter(
         }
     }
 
-    internal suspend fun acceptProbeForTest(source: ControlledBrowserPage, identity: ReadyProbeIdentity) =
+    internal suspend fun acceptProbeForTest(source: ControlledBrowserPage, identity: ReadyProbeIdentity) {
+        check(BuildConfig.DEBUG) { "acceptProbeForTest is debug-only" }
         withContext(main) { acceptProbe(source, identity) }
+    }
 
     private suspend fun acceptProbe(source: ControlledBrowserPage, identity: ReadyProbeIdentity) {
         var current = identity

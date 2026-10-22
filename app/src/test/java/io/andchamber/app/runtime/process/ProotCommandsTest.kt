@@ -1,9 +1,5 @@
 package io.andchamber.app.runtime.process
 
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -105,65 +101,35 @@ class ProotCommandsTest {
         assertEquals("true", env["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("/usr/local/bin/opencode", env["OPENCHAMBER_OPENCODE_BIN"])
         assertEquals("--require /opt/andchamber/android-shim.cjs", env["NODE_OPTIONS"])
-        assertEquals(BrowserToolAssets.GUEST_ENDPOINT_FILE, env[BrowserToolAssets.ENDPOINT_ENV])
-        assertFalse(env.getValue(BrowserToolAssets.CONFIG_ENV).contains("secret-password"))
-        assertFalse(env.values.any { it.contains("token=") || it.contains("\"token\"") })
+        assertFalse(env.containsKey(BrowserPluginAssets.TOOL_ENV))
+        assertFalse(env.containsKey(BrowserPluginAssets.CONFIG_ENV))
     }
 
     @Test
-    fun `server environment without browser control keeps the user config and adds no overlay`() {
+    fun `server environment adds only the plugin endpoint and merged config`() {
         val existing = """{"model":"keep-me"}"""
+        val merged = BrowserPluginAssets.mergeConfig(existing)
         val env =
             ProotCommands.serverEnvironment(
-                suiteEnvironment = mapOf(BrowserToolAssets.CONFIG_ENV to existing),
+                suiteEnvironment = mapOf(BrowserPluginAssets.CONFIG_ENV to existing),
                 prootTmp = prootTmp,
                 uiPassword = "secret-password",
-                browserControl = false,
+                browserTool = mapOf(
+                    BrowserPluginAssets.TOOL_ENV to BrowserPluginAssets.GUEST_ENDPOINT_FILE,
+                    BrowserPluginAssets.CONFIG_ENV to merged,
+                ),
             )
 
-        assertEquals(existing, env[BrowserToolAssets.CONFIG_ENV])
-        assertFalse(env.containsKey(BrowserToolAssets.ENDPOINT_ENV))
+        assertEquals(BrowserPluginAssets.GUEST_ENDPOINT_FILE, env[BrowserPluginAssets.TOOL_ENV])
+        assertEquals(merged, env[BrowserPluginAssets.CONFIG_ENV])
+        assertTrue(env.getValue(BrowserPluginAssets.CONFIG_ENV).contains("keep-me"))
+        assertTrue(env.getValue(BrowserPluginAssets.CONFIG_ENV).contains(BrowserPluginAssets.GUEST_DIR))
         assertEquals("secret-password", env["OPENCHAMBER_UI_PASSWORD"])
-    }
-
-    @Test
-    fun `server environment fails closed when an existing inline config is not a JSON object`() {
-        val error =
-            runCatching {
-                ProotCommands.serverEnvironment(
-                    suiteEnvironment = mapOf(BrowserToolAssets.CONFIG_ENV to "{not json"),
-                    prootTmp = prootTmp,
-                    uiPassword = "secret-password",
-                )
-            }.exceptionOrNull()
-
-        assertTrue(error is IllegalArgumentException)
-    }
-
-    @Test
-    fun `server environment merges an existing inline config and keeps its strict server environment`() {
-        val existing =
-            """{"model":"keep-me","mcp":{"servers":{"other":{"type":"local","command":["echo"]},"andchamber_browser":{"environment":{"STRICT":"1"}}}}}"""
-        val env =
-            ProotCommands.serverEnvironment(
-                suiteEnvironment = mapOf(BrowserToolAssets.CONFIG_ENV to existing),
-                prootTmp = prootTmp,
-                uiPassword = "secret-password",
-            )
-        val config = Json.parseToJsonElement(env.getValue(BrowserToolAssets.CONFIG_ENV)).jsonObject
-        val browser = config.getValue("mcp").jsonObject.getValue("servers").jsonObject
-            .getValue("andchamber_browser").jsonObject
-
-        assertEquals("keep-me", config.getValue("model").jsonPrimitive.content)
-        assertTrue(config.getValue("mcp").jsonObject.getValue("servers").jsonObject.containsKey("other"))
-        assertEquals("1", browser.getValue("environment").jsonObject.getValue("STRICT").jsonPrimitive.content)
-        assertFalse(browser.getValue("environment").jsonObject.containsKey(BrowserToolAssets.ENDPOINT_ENV))
-        assertEquals(
-            listOf("node", BrowserToolAssets.GUEST_SCRIPT),
-            browser.getValue("command").jsonArray.map { it.jsonPrimitive.content },
-        )
-        assertEquals(BrowserToolAssets.GUEST_ENDPOINT_FILE, env[BrowserToolAssets.ENDPOINT_ENV])
-        assertFalse(env.getValue(BrowserToolAssets.CONFIG_ENV).contains("secret-password"))
+        assertFalse(env.containsKey("OPENCODE_CONFIG"))
+        assertFalse(env.containsKey("OPENCHAMBER_BROWSER_PROVIDER"))
+        assertFalse(env.containsKey("ANDCHAMBER_BROWSER_PROVIDER_TOKEN"))
+        assertFalse(env.containsKey("ANDCHAMBER_BROWSER_ENDPOINT_FILE"))
+        assertFalse(env.values.any { it.contains("\"token\"") })
     }
 
     @Test
@@ -178,8 +144,8 @@ class ProotCommandsTest {
 
         assertFalse(env.containsKey("OPENCHAMBER_UI_PASSWORD"))
         assertFalse(env.containsKey("NODE_OPTIONS"))
-        assertFalse(env.containsKey(BrowserToolAssets.ENDPOINT_ENV))
-        assertFalse(env.containsKey(BrowserToolAssets.CONFIG_ENV))
+        assertFalse(env.containsKey(BrowserPluginAssets.TOOL_ENV))
+        assertFalse(env.containsKey(BrowserPluginAssets.CONFIG_ENV))
         assertEquals("/root", env["HOME"])
     }
 

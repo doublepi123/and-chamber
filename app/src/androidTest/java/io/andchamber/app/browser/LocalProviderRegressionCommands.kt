@@ -42,29 +42,16 @@ internal object LocalProviderRegressionProtocol {
         "More", "Computer layout", "Phone layout", "Confirm", "Mouse", "Touch",
         "Enlarge", "Restore", "Allow agent", "Take over", "Reopen", "Open", "Close", "Turn off",
         "Browser", "New chat", "New session", "Open sessions and projects",
-        "Open workspace panel", "Open workspace panel, uncommitted changes", "Browser address",
-    )
-
-    /** Main-chat accessibility labels for ui-target-chat; host performs the tap. */
-    val CHAT_UI_LABELS: Set<String> = setOf(
-        "Browser", "New chat", "New session",
-        "Open sessions and projects", "Open workspace panel",
-        "Open workspace panel, uncommitted changes", "Browser address", "Open",
+        "AndChamber menu", "Open web page", "Address", "Cancel",
     )
 
     /**
-     * The drawer controls Chromium renders inside a portal `<section role="dialog">` and therefore
-     * never exposes as accessibility nodes. Only these two fixed label/selector pairs may be read as a
-     * DOM rect; the selector is never host-supplied.
+     * Main-chat and app-owned native labels for ui-target-chat; the host reads and taps them. The
+     * edge handle, its menu and the OpenBrowserUrlDialog are Compose UI, not patched chat markup.
      */
-    data class ChatDomTarget(val selector: String, val editable: Boolean)
-
-    val CHAT_DOM_TARGETS: Map<String, ChatDomTarget> = mapOf(
-        "Browser address" to ChatDomTarget("[data-testid=\"android-browser-address\"]", editable = true),
-        "Open" to ChatDomTarget("[data-testid=\"android-browser-open\"]", editable = false),
-        // The drawer slides in; Chromium's a11y tree can keep reporting the pre-slide off-screen
-        // bounds for this tab, so it is located from the live DOM like the other drawer controls.
-        "Browser" to ChatDomTarget("[data-testid=\"mobile-workspace-tab-browser\"]", editable = false),
+    val CHAT_UI_LABELS: Set<String> = setOf(
+        "Open sessions and projects", "New chat",
+        "AndChamber menu", "Open web page", "Address", "Open", "Cancel",
     )
 
     /** Non-clickable window semantics that ui-state reports with the same fixed labels. */
@@ -122,7 +109,7 @@ internal object LocalProviderRegressionProtocol {
         "site-state-clear",
         "profile-isolation",
         "native-blocked-input",
-        "chat-browser-state",
+        "native-entry-state",
         "a11y-off:begin",
         "a11y-off:end",
     )
@@ -184,7 +171,6 @@ internal object LocalProviderRegressionProtocol {
         text.startsWith("cookie-write:") -> isTestCookieValue(text.removePrefix("cookie-write:"))
         text.startsWith("site-state-write:") -> isSiteStateMarker(text.removePrefix("site-state-write:"))
         text.startsWith("ui-target-chat:") -> text.removePrefix("ui-target-chat:") in CHAT_UI_LABELS
-        text.startsWith("chat-dom-target:") -> text.removePrefix("chat-dom-target:") in CHAT_DOM_TARGETS
         text.startsWith("gate-native:") -> gateNativeAllowed(text.removePrefix("gate-native:"))
         text.startsWith("gate-finger:") -> gateFingerAllowed(text.removePrefix("gate-finger:"))
         text.startsWith("finger:") -> fingerAllowed(text.removePrefix("finger:"))

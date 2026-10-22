@@ -14,7 +14,7 @@ class LocalProviderProductProtocolTest {
             "site-state-clear",
             "profile-isolation",
             "native-blocked-input",
-            "chat-browser-state",
+            "native-entry-state",
             "a11y-off:begin",
             "a11y-off:end",
         )) {
@@ -58,26 +58,30 @@ class LocalProviderProductProtocolTest {
     }
 
     @Test
-    fun drawerDomTargetsAreTheFixedSelectorsOnly() {
-        val expected = mapOf(
-            "Browser address" to "[data-testid=\"android-browser-address\"]",
-            "Open" to "[data-testid=\"android-browser-open\"]",
-            "Browser" to "[data-testid=\"mobile-workspace-tab-browser\"]",
+    fun nativeEntryLabelsAreTheFixedAppOwnedSet() {
+        val expected = setOf(
+            "Open sessions and projects",
+            "New chat",
+            "AndChamber menu",
+            "Open web page",
+            "Address",
+            "Open",
+            "Cancel",
         )
-        assertEquals(expected.keys, LocalProviderRegressionProtocol.CHAT_DOM_TARGETS.keys)
-        for ((label, target) in LocalProviderRegressionProtocol.CHAT_DOM_TARGETS) {
-            assertTrue(label, LocalProviderRegressionProtocol.deviceAllowed("chat-dom-target:$label"))
+        assertEquals(expected, LocalProviderRegressionProtocol.CHAT_UI_LABELS)
+        for (label in expected) {
             assertTrue(label, LocalProviderRegressionProtocol.deviceAllowed("ui-target-chat:$label"))
-            assertEquals(expected[label], target.selector)
-            assertEquals(label == "Browser address", target.editable)
+            assertTrue(label, LocalProviderRegressionProtocol.deviceAllowed("ui-target:$label"))
         }
         for (text in listOf(
-            "chat-dom-target:New chat",
-            "chat-dom-target:Delete",
+            "chat-dom-target:Open",
+            "chat-dom-target:Address",
             "chat-dom-target:",
+            "ui-target-chat:Delete",
         )) {
             assertTrue(text, !LocalProviderRegressionProtocol.deviceAllowed(text))
         }
+        assertTrue(!LocalProviderRegressionProtocol.deviceAllowed("ui-target-chat:Browser address"))
     }
 
     @Test

@@ -1,18 +1,9 @@
 package io.andchamber.app.browser.provider
 
 /**
- * Native OpenChamber browser provider. Transport is SSE plus claim/result.
- * A connection is not authority. Grants bind one runtime launch, connection, session and visible tab.
- * Tokens are constructor input only and must never be copied into state, errors or logs.
+ * Native OpenChamber browser provider contract. A connection is not authority. Grants bind one runtime
+ * launch, connection, session and visible tab.
  */
-interface BrowserProvider {
-    suspend fun start()
-    suspend fun stop()
-    fun grant(sessionId: String, tabId: String)
-    fun revoke()
-    fun setManual(manual: Boolean)
-}
-
 data class ProviderTab(
     val tabId: String,
     val instanceKey: String,
@@ -63,6 +54,18 @@ data class ProviderResult(
     val errorCode: String? = null,
     val message: String? = null,
 )
+
+/** The page executor the tool server drives. Implemented by the presenter's page router. */
+fun interface ProviderExecutor {
+    suspend fun execute(
+        request: ProviderRequest,
+        registry: ProviderRegistry,
+        mode: ProviderMode,
+        visibleTabId: String?,
+        deadlineElapsed: Long,
+        clock: () -> Long,
+    ): ProviderResult
+}
 
 object ProviderCodes {
     const val AUTHORIZATION_REQUIRED = "AUTHORIZATION_REQUIRED"

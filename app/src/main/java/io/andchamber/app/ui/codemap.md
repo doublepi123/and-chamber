@@ -16,7 +16,7 @@ Files:
 
 ## Design
 
-- Navigation: `NavHost` with `Routes.HOME = "home"`, `Routes.WEB = "web/{targetId}"` and `Routes.BROWSER = "browser"`. `Routes.web(id)` URL-encodes the id. `ServerTarget.LOCAL_ID` denotes the on-device server. The browser route is a separate public-https page. It is not an OpenChamber session, and visiting it does not clear or replace the remembered last server.
+- Navigation: `NavHost` with `Routes.HOME = "home"` and `Routes.WEB = "web/{targetId}"`. `Routes.web(id)` URL-encodes the id. `ServerTarget.LOCAL_ID` denotes the on-device server. The in-app browser is not a route: it is the floating window over the local chat.
 - Launch decision is a pure function: `launchTarget(RuntimeState)` gives `Wait`, `Home`, `OpenLocal` or `StartAndOpenLocal`. Setup, failures, unsupported ABI, Installing and Stopping go to `Home`. Stopped starts and then opens. Running and Starting open.
 - `LaunchStage` (`Waiting`, `Opening`, `Done`) drives the cover. `initialLaunchStage` runs on frame one, so Home never flashes when an auto-open is possible.
 - `LocalActions` wraps `LocalRuntimeController` for UI intents. `pendingStartFrom` makes a start read as Starting until the runtime reports back, with an 8 s safety timeout (`PENDING_START_TIMEOUT_MS`). `retry()` reinstalls on `FailurePhase.Install` and restarts otherwise. `restart()` is one queued runtime call.
@@ -69,7 +69,7 @@ Shared-storage permission:
 
 ## Integration
 
-- Entry point: `AndChamberApp(runtime, remotes, auth, storage)`, called by `MainActivity` (outside these folders). The browser route reads the single `BrowserController` and `OpenChamberServer.readyLaunchId` from Koin (`rememberBrowserDependencies`). The launcher-tap listener needs `launchMode="singleTop"`.
+- Entry point: `AndChamberApp(runtime, remotes, auth, storage)`, called by `MainActivity` (outside these folders). A local web route resolves the single `NativeBrowserPresenter` from Koin for the floating browser window; there is no separate browser route. The launcher-tap listener needs `launchMode="singleTop"`.
 - `runtime.LocalRuntimeController`: `state`, `info` and `logTail` flows, plus `install`, `start`, `stop`, `restart`, `repair`, `uninstall`. Consumes `RuntimeState` (`Running` carries `url`, `port`, `sinceEpochMs`), `FailurePhase`, `RuntimeInfo`, `InstallStep`, and `ServerTarget.Local(url)`.
 - `runtime.RemoteServerStore`: `servers` flow, `upsert`, `remove`. The web session key uses the remote id, baseUrl and a hash of the UI password.
 - `runtime.WebSessionAuthenticator.prepare(target, cookies)` → `WebSessionResult` (`Ready`, `NeedsLogin`, `Unreachable`). Used by `WebScreen` only after the target's profile is bound (`WebSessionProfiles` via `ui/web/WebDependencies.kt`). The root passes `WebViewPool(downloads)` the app's `HttpDownloadStarter`.

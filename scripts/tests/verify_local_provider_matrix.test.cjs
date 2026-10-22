@@ -13,7 +13,7 @@ const test = require('node:test');
 
 const matrix = require('../lib/local_provider_matrix_io.cjs');
 const runner = require('../verify_local_provider_matrix.cjs');
-const harness = require('../verify_openchamber_provider_emulator.cjs');
+const harness = require('../lib/provider_gate_adapters.cjs');
 const lifecycleProbe = require('../lib/provider_lifecycle_gate_probe.cjs');
 const retirementProbe = require('../lib/provider_retirement_gate_probe.cjs');
 

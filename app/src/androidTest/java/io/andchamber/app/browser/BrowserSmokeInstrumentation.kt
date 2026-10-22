@@ -47,21 +47,15 @@ import kotlin.coroutines.resume
  */
 class BrowserSmokeInstrumentation : Instrumentation() {
     private val results = linkedMapOf<String, String>()
-    private var mcpBridge = false
 
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
-        mcpBridge = arguments?.getString("mcpBridge") == "true"
         start()
     }
 
     override fun onStart() {
         super.onStart()
         check(Looper.myLooper() != Looper.getMainLooper()) { "onStart must stay off the main looper" }
-        if (mcpBridge) {
-            BrowserMcpBridgeHarness(this).run()
-            return
-        }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             fail("multiProfile", "MULTI_PROFILE is not supported")
         } else {
