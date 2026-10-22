@@ -84,6 +84,9 @@
     <string name="uptime">Up %1$s</string>
     <string name="port">Port %1$d</string>
     <string name="just_started">Just started</string>
+    <string name="duration_minutes">%1$dm</string>
+    <string name="duration_hours_minutes">%1$dh %2$dm</string>
+    <string name="duration_days_hours">%1$dd %2$dh</string>
     <string name="copy_address">Copy address</string>
     <string name="copied">Copied</string>
     <string name="failed_title">OpenChamber ran into a problem</string>

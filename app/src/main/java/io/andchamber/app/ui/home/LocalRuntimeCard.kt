@@ -119,6 +119,7 @@ import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import io.andchamber.app.ui.theme.ChamberTheme
 import io.andchamber.app.ui.theme.MonoFamily
+import io.andchamber.app.ui.DurationUnits
 import io.andchamber.app.ui.uptimeLabel
 import kotlinx.coroutines.delay
 import kotlin.math.max
@@ -855,6 +856,15 @@ private fun RunningBody(
                 val justStarted = stringResource(R.string.just_started)
                 val upTemplate = stringResource(R.string.uptime, "%1\$s")
                 val portText = stringResource(R.string.port, running.port)
+                val resources = LocalContext.current.resources
+                val units =
+                    remember(resources) {
+                        DurationUnits(
+                            minutes = { m -> resources.getString(R.string.duration_minutes, m) },
+                            hoursMinutes = { h, m -> resources.getString(R.string.duration_hours_minutes, h, m) },
+                            daysHours = { d, h -> resources.getString(R.string.duration_days_hours, d, h) },
+                        )
+                    }
                 Text(
                     text =
                         uptimeLabel(
@@ -862,6 +872,7 @@ private fun RunningBody(
                             nowEpochMs = now,
                             justStarted = justStarted,
                             upTemplate = { value -> upTemplate.replace("%1\$s", value) },
+                            units = units,
                         ) + "  ·  " + portText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -1,0 +1,5 @@
+0.0.13
+
+Fixes:
+- The open OpenChamber page now follows the system dark mode right away, without reloading.
+- The uptime on the Home card is shown in your language.

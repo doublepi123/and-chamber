@@ -172,6 +172,9 @@ internal fun WebScreen(
             }
         }
     val web: ChamberWebView? = bound.web
+    // The page outlives theme flips (uiMode is handled in place), so restyle it when the theme changes.
+    val themeBackgroundArgb = themeBackground.toArgb()
+    LaunchedEffect(web, darkTheme, themeBackgroundArgb) { web?.applyTheme(darkTheme, themeBackgroundArgb) }
     // Read as state, so a renderer that can't be bound again after a crash shows up here as well.
     val isolation: WebIsolationFailure? = if (web != null) web.isolationFailure else bound.failure
 
