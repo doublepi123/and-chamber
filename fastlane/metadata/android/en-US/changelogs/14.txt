@@ -1,0 +1,6 @@
+0.0.14
+
+New:
+- The agent drives a floating browser window in the chat through an AndChamber tool; you allow it per page.
+- "Open web page" in the edge menu, and "Clear site data" in the browser window.
+- OpenChamber runs as the official package again, so in-app updates work.
