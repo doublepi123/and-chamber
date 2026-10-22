@@ -13,7 +13,38 @@ class BrowserFloatStatusTest {
         pageRetired: Boolean = false,
         mouseMode: Boolean = false,
         accessibilityEnabled: Boolean = false,
-    ): Int? = browserFloatStatusResource(pageError, agentOn, pageReady, pageRetired, mouseMode, accessibilityEnabled)
+        awaitingAllow: Boolean = false,
+    ): Int? = browserFloatStatusResource(
+        pageError, agentOn, pageReady, pageRetired, mouseMode, accessibilityEnabled, awaitingAllow,
+    )
+
+    @Test fun `a page the agent opened but nobody allowed yet says so`() {
+        assertEquals(R.string.browser_float_status_agent_waiting, status(awaitingAllow = true))
+        assertEquals(
+            "agent control on wins over the notice",
+            R.string.browser_status_on,
+            status(agentOn = true, awaitingAllow = true),
+        )
+        assertEquals(
+            "loading wins over the notice",
+            R.string.browser_page_loading,
+            status(pageReady = false, awaitingAllow = true),
+        )
+        assertEquals(
+            "the mouse notice wins over the notice",
+            R.string.browser_mouse_hover_accessibility,
+            status(mouseMode = true, accessibilityEnabled = true, awaitingAllow = true),
+        )
+        assertNull(
+            "a page error still wins and stays unchanged",
+            status(pageError = "The certificate isn't trusted", awaitingAllow = true),
+        )
+    }
+
+    @Test fun `an allowed or person-opened page keeps the browsing line`() {
+        assertEquals(R.string.browser_float_status_manual, status())
+        assertEquals(R.string.browser_float_status_manual, status(awaitingAllow = false))
+    }
 
     @Test fun `mouse mode with accessibility on shows the hover notice`() {
         assertEquals(R.string.browser_mouse_hover_accessibility, status(mouseMode = true, accessibilityEnabled = true))

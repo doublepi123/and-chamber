@@ -138,6 +138,85 @@ class BrowserToolServerTest {
     }
 
     @Test
+    fun `an open allow wait is added to the page load timeout`() {
+        val executor = RecordingExecutor()
+        val server = server(executor)
+        val port = server.start()
+        server.setConnection("conn-1")
+        try {
+            val reply = post(
+                port,
+                BrowserToolEndpoint.TOOL_PATH,
+                toolBody("wait-call", action = "open", allowWaitMs = "60000"),
+            )
+            assertEquals(200, reply.status)
+            val request = executor.requests.single()
+            assertEquals(60_000, request.allowWaitMs)
+            assertEquals(105_000L, request.timeoutMs)
+            assertEquals("browser.open", request.action)
+            assertFalse("the wait is not a page parameter", request.parameters.containsKey("allowWaitMs"))
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `absent or zero allow wait keeps the plain open timeout`() {
+        val executor = RecordingExecutor()
+        val server = server(executor)
+        val port = server.start()
+        server.setConnection("conn-1")
+        try {
+            post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("no-wait", action = "open"))
+            post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("zero-wait", action = "open", allowWaitMs = "0"))
+            assertEquals(listOf(0, 0), executor.requests.map { it.allowWaitMs })
+            assertEquals(listOf(45_000L, 45_000L), executor.requests.map { it.timeoutMs })
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `an allow wait outside the accepted range is refused before the executor`() {
+        val executor = RecordingExecutor()
+        val server = server(executor)
+        val port = server.start()
+        server.setConnection("conn-1")
+        try {
+            val cases = listOf("-1", "120001", "1.5", "\"60000\"", "true", "null")
+            cases.forEachIndexed { index, raw ->
+                val reply =
+                    post(
+                        port,
+                        BrowserToolEndpoint.TOOL_PATH,
+                        toolBody("bad-wait-$index", action = "open", allowWaitMs = raw),
+                    )
+                assertEquals("allowWaitMs=$raw", 400, reply.status)
+                assertEquals("allowWaitMs=$raw", ProviderCodes.INVALID_REQUEST, code(reply))
+            }
+            assertEquals("no invalid wait ever reaches the page", 0, executor.calls.get())
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
+    fun `an allow wait at the range bounds is accepted`() {
+        val executor = RecordingExecutor()
+        val server = server(executor)
+        val port = server.start()
+        server.setConnection("conn-1")
+        try {
+            post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("min-wait", action = "open", allowWaitMs = "0"))
+            post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("max-wait", action = "open", allowWaitMs = "120000"))
+            assertEquals(120_000, executor.requests.last().allowWaitMs)
+            assertEquals(45_000L + 120_000L, executor.requests.last().timeoutMs)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `a repeated callID is refused and never executes twice`() {
         val executor = RecordingExecutor()
         val server = server(executor)
@@ -476,11 +555,14 @@ class BrowserToolServerTest {
     private fun toolBody(
         callId: String,
         action: String = "snapshot",
+        allowWaitMs: String? = null,
     ): String =
         buildJsonObject {
             put("version", 1)
             put("sessionID", "session-1")
             put("callID", callId)
+            // Raw JSON so a test can send a type the contract does not accept.
+            if (allowWaitMs != null) put("allowWaitMs", kotlinx.serialization.json.Json.parseToJsonElement(allowWaitMs))
             put(
                 "input",
                 buildJsonObject {

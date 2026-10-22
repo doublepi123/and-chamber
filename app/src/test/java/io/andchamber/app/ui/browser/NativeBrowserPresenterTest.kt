@@ -16,6 +16,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -308,6 +310,165 @@ class NativeBrowserPresenterTest {
         presenter.allow()
         presenter.takeover()
         assertNull(presenter.registry.currentGrant())
+    }
+
+    @Test
+    fun `an agent open awaits allow and allow takeover or a person's open clears it`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter(uniqueTabs = true) { page }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue("an agent open awaits Allow", presenter.state.value.awaitingAllow)
+
+        assertTrue(presenter.allow())
+        assertFalse("allow clears the notice", presenter.state.value.awaitingAllow)
+
+        assertTrue(presenter.openClaimed(openRequest(id = "open-2"), 1_000L).ok)
+        assertTrue(presenter.state.value.awaitingAllow)
+        presenter.takeover()
+        assertFalse("takeover clears the notice", presenter.state.value.awaitingAllow)
+
+        assertTrue(presenter.openClaimed(openRequest(id = "open-3"), 1_000L).ok)
+        assertTrue(presenter.state.value.awaitingAllow)
+        assertTrue(presenter.openUser("https://example.com/user", "session-a").ok)
+        assertFalse("a person's own open never awaits Allow", presenter.state.value.awaitingAllow)
+
+        assertTrue(presenter.openClaimed(openRequest(id = "open-4"), 1_000L).ok)
+        assertTrue(presenter.state.value.awaitingAllow)
+        presenter.close(presenter.state.value.selectedTabId!!)
+        assertFalse("closing the tab clears the notice", presenter.state.value.awaitingAllow)
+    }
+
+    @Test
+    fun `switching to a tab that is not awaiting allow hides the notice`() = runBlocking {
+        val presenter = presenter(uniqueTabs = true) { FakePage() }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        val first = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.allow())
+        assertFalse(presenter.state.value.awaitingAllow)
+        assertTrue(presenter.openClaimed(openRequest(id = "open-2"), 1_000L).ok)
+        assertTrue(presenter.state.value.awaitingAllow)
+        assertTrue(presenter.select(first))
+        assertFalse("the allowed tab is not awaiting Allow", presenter.state.value.awaitingAllow)
+    }
+
+    @Test
+    fun `an open with an allow wait reports drivable true when the person allows it`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse("the open waits for the tap", pending.isCompleted)
+        assertTrue(presenter.state.value.awaitingAllow)
+        assertFalse(presenter.state.value.agentOn)
+
+        assertTrue(presenter.allow())
+        val opened = pending.await()
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertEquals("true", opened.data.getValue("drivable").toString())
+        assertFalse("a granted open has no reason", opened.data.containsKey("reason"))
+        assertEquals("tab-real", opened.data.getValue("tabId").toString().trim('"'))
+        assertTrue(presenter.state.value.agentOn)
+        assertFalse(presenter.state.value.awaitingAllow)
+    }
+
+    @Test
+    fun `an open with an allow wait reports drivable false when the wait expires`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 5_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        advanceTimeBy(5_001)
+        val opened = pending.await()
+        assertTrue(opened.ok)
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+        assertFalse(presenter.state.value.agentOn)
+        assertTrue("nobody allowed, so the notice stays", presenter.state.value.awaitingAllow)
+        assertEquals(1, page.loads)
+    }
+
+    @Test
+    fun `cancelling an open ends the allow wait and leaves no grant`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        pending.cancel()
+        pending.join()
+        advanceUntilIdle()
+        assertTrue("the cancelled open left the slot free", pending.isCancelled)
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals(1, page.loads)
+        val refused = presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertEquals("nothing kept running after the cancel", ProviderCodes.AUTHORIZATION_REQUIRED, refused.errorCode)
+    }
+
+    @Test
+    fun `a grant for another tab never satisfies the allow wait`() = runTest {
+        val page = FakePage()
+        val presenter = presenter(uniqueTabs = true) { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 3_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        val other = presenter.registry.open("session-b", "/proj", "local", "https://example.com/other", null)
+        presenter.registry.grant(1L, "c1", "session-b", other.tabId)
+        advanceTimeBy(2_000)
+        assertFalse("another session's grant is not this page's Allow", pending.isCompleted)
+        advanceTimeBy(1_500)
+        val opened = pending.await()
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+    }
+
+    @Test
+    fun `a takeover during the allow wait answers with the unauthorized payload`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        presenter.takeover()
+        val opened = pending.await()
+        assertTrue("the open answers instead of dying with its job", opened.ok)
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+        assertFalse(presenter.state.value.awaitingAllow)
+        assertFalse(presenter.state.value.agentOn)
+    }
+
+    @Test
+    fun `closing the tab during the allow wait answers with the unauthorized payload`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        presenter.close(presenter.state.value.selectedTabId!!)
+        val opened = pending.await()
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+        assertTrue("the closed tab is gone", presenter.registry.tabs().isEmpty())
     }
 
     @Test
@@ -2177,7 +2338,12 @@ class NativeBrowserPresenterTest {
         ).also { it.attachHostForTest("local", 1L) }
     }
 
-    private fun openRequest(session: String = "session-a", tabId: String? = null, id: String = "open-1") = ProviderRequest(
+    private fun openRequest(
+        session: String = "session-a",
+        tabId: String? = null,
+        id: String = "open-1",
+        allowWaitMs: Int = 0,
+    ) = ProviderRequest(
         serverEpoch = "e1",
         connectionId = "c1",
         requestId = id,
@@ -2189,6 +2355,7 @@ class NativeBrowserPresenterTest {
         directory = "/proj",
         sessionId = session,
         timeoutMs = 1_000L,
+        allowWaitMs = allowWaitMs,
     )
 
     private fun request(

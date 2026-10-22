@@ -181,12 +181,44 @@ test('package.json and tool registration shape', () => {
 
   assert.match(tool.description, /Allow/);
   assert.match(tool.description, /drivable:false/);
+  assert.match(tool.description, /drivable:true/);
+  assert.match(tool.description, /about a minute/);
   assert.match(tool.description, /latest snapshot/);
   assert.match(tool.description, /one action per call/i);
   assert.match(tool.description, /AUTHORIZATION_REQUIRED/);
   assert.match(tool.description, /REF_EXPIRED/);
   assert.match(tool.description, /BROWSER_PAGE_UNAVAILABLE/);
   assert.match(tool.description, /do not retry in a loop/i);
+});
+
+test('only open asks the server to wait for Allow', async (t) => {
+  const payload = {
+    version: 1,
+    ok: true,
+    action: 'browser.open',
+    data: { opened: true, tabId: 'tab-1', drivable: false, reason: 'authorization_required' },
+  };
+  const server = await useServer(t, json(payload));
+  endpointDir(t).write(server);
+
+  await tool.execute({ action: 'open', url: 'https://example.com' }, context());
+  await tool.execute({ action: 'snapshot' }, context({ id: 'call_def' }));
+
+  const [opened, snapshot] = server.requests.map((request) => JSON.parse(request.body));
+  assert.equal(opened.allowWaitMs, 60000);
+  assert.deepEqual(opened.input, { action: 'open', url: 'https://example.com' });
+  assert.equal('allowWaitMs' in opened, true);
+  assert.equal('allowWaitMs' in snapshot, false);
+  assert.deepEqual(snapshot.input, { action: 'snapshot' });
+  assert.deepEqual(Object.keys(opened).sort(), [
+    'agent',
+    'allowWaitMs',
+    'callID',
+    'input',
+    'messageID',
+    'sessionID',
+    'version',
+  ]);
 });
 
 test('posts the call and returns the success envelope as text', async (t) => {

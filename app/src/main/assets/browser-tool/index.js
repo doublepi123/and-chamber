@@ -11,13 +11,16 @@ const ENDPOINT_ENV = "ANDCHAMBER_BROWSER_TOOL_FILE";
 const MAX_ENDPOINT_BYTES = 8192;
 const MAX_TOKEN_LENGTH = 512;
 const CANCEL_TIMEOUT_MS = 2000;
+// "open" may wait this long for the person's Allow tap after the page has loaded. It is a
+// transport field, not part of the tool's input schema.
+const OPEN_ALLOW_WAIT_MS = 60000;
 
 const UNAVAILABLE =
   "AndChamber browser is not available. Open the AndChamber chat screen on the phone and try again.";
 
 const DESCRIPTION = [
   "Drive the in-app browser window on the user's Android phone.",
-  'A page opened with "open" is not under agent control yet: the person must tap Allow in that window, so "open" reports drivable:false until they do.',
+  'A page opened with "open" is not under agent control yet: the person must tap Allow in that window. "open" waits about a minute for that tap and then reports drivable:true; if it still reports drivable:false, ask the person to tap Allow and continue.',
   "Take one action per call.",
   'Take "snapshot" first and use refs from the latest snapshot; navigation or DOM changes invalidate old refs, so snapshot again instead of guessing.',
   '"click", "type", "scroll", "capture" and "resize" may be refused with AUTHORIZATION_REQUIRED (the person has not allowed this page or the grant expired), REF_EXPIRED (take a new snapshot) or BROWSER_PAGE_UNAVAILABLE (the AndChamber chat screen is not open).',
@@ -222,6 +225,8 @@ export default {
                 callID,
                 messageID: context?.messageID,
                 agent: context?.agent,
+                // Only "open" waits for Allow; every other action keeps its immediate answer.
+                ...(args.action === "open" ? { allowWaitMs: OPEN_ALLOW_WAIT_MS } : {}),
                 input: args,
               }),
               signal: context?.signal,

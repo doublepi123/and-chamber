@@ -354,4 +354,5 @@
     <string name="browser_site_data_cleared_no_reload">Site data cleared. The page was not reloaded.</string>
     <string name="browser_site_data_partial">Cookies and storage cleared. Page cache not cleared.</string>
     <string name="browser_site_data_failed">Could not clear site data.</string>
+    <string name="browser_float_status_agent_waiting">The agent opened this page. Tap Allow agent to let it use the page.</string>
 </resources>
