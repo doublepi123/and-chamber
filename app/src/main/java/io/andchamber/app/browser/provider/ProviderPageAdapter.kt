@@ -5,6 +5,7 @@ import io.andchamber.app.browser.BrowserErrorCode
 import io.andchamber.app.browser.BrowserMethod
 import io.andchamber.app.browser.BrowserReply
 import io.andchamber.app.browser.BrowserRequest
+import io.andchamber.app.ui.browser.BrowserDesktopViewport
 import io.andchamber.app.ui.browser.BrowserDriverLogic
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -80,10 +81,10 @@ class OpenChamberPageAdapter(
         return when (request.action) {
             "browser.snapshot" -> snapshot(registry, session, request.parameters["tabId"])
             "browser.click" -> click(request)
-            "browser.type" -> type(request)
+            "browser.type" -> type(request, deadlineElapsed)
             "browser.scroll" -> scroll(request)
             "browser.capture" -> capture()
-            "browser.resize" -> ProviderResult(ok = true, data = buildJsonObject { put("accepted", true) })
+            "browser.resize" -> resize(request)
             else -> ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_ACTION)
         }
     }
@@ -136,6 +137,18 @@ class OpenChamberPageAdapter(
         val viewport = request.parameters["viewport"]
         if (viewport != null && viewport != "fill" && viewport != "desktop" && viewport != "mobile") {
             return OpenedPage(ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER))
+        }
+        val width = request.parameters[BrowserDriverLogic.PARAM_WIDTH]?.takeIf { it.isNotBlank() }
+        val height = request.parameters[BrowserDriverLogic.PARAM_HEIGHT]?.takeIf { it.isNotBlank() }
+        if (width != null || height != null) {
+            if (viewport != "desktop") {
+                return OpenedPage(ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "width and height require desktop"))
+            }
+            when (BrowserDesktopViewport.parse(width, height)) {
+                is BrowserDesktopViewport.Parse.Invalid ->
+                    return OpenedPage(ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "invalid desktop size"))
+                else -> Unit
+            }
         }
         val named = request.parameters["tabId"]?.takeIf { it.isNotBlank() }
         if (named != null) {
@@ -210,6 +223,8 @@ class OpenChamberPageAdapter(
                 put("text", parsed["text"]?.jsonPrimitive?.contentOrNull.orEmpty())
                 put("elements", mapped)
                 put("tabs", tabsPayload(registry, session))
+                parsed["layoutViewport"]?.let { put("layoutViewport", it) }
+                parsed["visualViewport"]?.let { put("visualViewport", it) }
                 put("drivable", true)
             },
         )
@@ -244,12 +259,13 @@ class OpenChamberPageAdapter(
         return ProviderResult(ok = true, data = buildJsonObject { put("clicked", refSelector(ref)) })
     }
 
-    private suspend fun type(request: ProviderRequest): ProviderResult {
+    private suspend fun type(request: ProviderRequest, deadlineElapsed: Long): ProviderResult {
         val selector = request.parameters["selector"]
         val ref = ProviderProtocol.selectorRef(selector)
         if (ref == null || ref !in snapshotRefs) return refRefusal(selector)
         val value = request.parameters["value"] ?: request.parameters["text"]
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
+        val submit = request.parameters["submit"] == "true"
         val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
         val field = currentField(ref)
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
@@ -259,15 +275,20 @@ class OpenChamberPageAdapter(
         if (isSensitive(field) || !isEditable(field) || isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "refused field")
         }
+        // A submit receipt must live inside the caller's own budget, not a fixed short window.
+        val remaining = (deadlineElapsed - clock()).coerceAtLeast(1L)
         val reply = dispatched {
             driver.execute(
             BrowserRequest(
                 id = request.requestId,
                 method = BrowserMethod.TYPE,
-                params = mapOf(
-                    BrowserDriverLogic.PARAM_REF to ref,
-                    BrowserDriverLogic.PARAM_TEXT to value,
-                ),
+                params = buildMap {
+                    put(BrowserDriverLogic.PARAM_REF, ref)
+                    put(BrowserDriverLogic.PARAM_TEXT, value)
+                    // Only an exact true is a submit; missing/false stays the original TYPE action.
+                    if (submit) put(BrowserDriverLogic.PARAM_SUBMIT, "true")
+                },
+                timeoutMs = remaining,
             ),
         )
         }
@@ -276,7 +297,57 @@ class OpenChamberPageAdapter(
         // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
+        if (submit) {
+            // Success here is only "value set and Enter dispatched once". Navigation is the
+            // presenter's separate, real-GET receipt and must not be claimed by the adapter.
+            if (reply.result[BrowserDriverLogic.RESULT_ENTER_DISPATCHED] != "true") {
+                return ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN, message = "enter not dispatched")
+            }
+            return ProviderResult(ok = true, data = buildJsonObject {
+                put("typed", refSelector(ref))
+                put("enterDispatched", true)
+            })
+        }
         return ProviderResult(ok = true, data = buildJsonObject { put("typed", refSelector(ref)) })
+    }
+
+    private suspend fun resize(request: ProviderRequest): ProviderResult {
+        val viewport = request.parameters[BrowserDriverLogic.PARAM_VIEWPORT]
+            ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "missing viewport")
+        val width = request.parameters[BrowserDriverLogic.PARAM_WIDTH]?.takeIf { it.isNotBlank() }
+        val height = request.parameters[BrowserDriverLogic.PARAM_HEIGHT]?.takeIf { it.isNotBlank() }
+        val reply = try {
+            driver.execute(
+                BrowserRequest(
+                    id = request.requestId,
+                    method = BrowserMethod.RESIZE,
+                    params = buildMap {
+                        put(BrowserDriverLogic.PARAM_VIEWPORT, viewport)
+                        if (width != null) put(BrowserDriverLogic.PARAM_WIDTH, width)
+                        if (height != null) put(BrowserDriverLogic.PARAM_HEIGHT, height)
+                    },
+                    timeoutMs = request.timeoutMs,
+                ),
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return ProviderResult(false, errorCode = ProviderCodes.BROWSER_PAGE_UNAVAILABLE)
+        }
+        if (!reply.ok) return fromDriver(reply)
+        // The pair is the configured request, not a measured DOM claim. Snapshot probe fields are
+        // the measured truth.
+        return ProviderResult(
+            ok = true,
+            data = buildJsonObject {
+                put("accepted", true)
+                put("viewport", reply.result[BrowserDriverLogic.PARAM_VIEWPORT] ?: viewport)
+                put("mode", if (reply.result["desktop"] == "true") "desktop" else "mobile")
+                reply.result[BrowserDriverLogic.PARAM_WIDTH]?.toIntOrNull()?.let { put("desktopWidth", it) }
+                reply.result[BrowserDriverLogic.PARAM_HEIGHT]?.toIntOrNull()?.let { put("desktopHeight", it) }
+                put("geometry", "pending")
+            },
+        )
     }
 
     private suspend fun scroll(request: ProviderRequest): ProviderResult {
@@ -376,14 +447,30 @@ class OpenChamberPageAdapter(
             if (viewport != "desktop" && viewport != "mobile" && viewport != "fill") {
                 return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
             }
+            val width = request.parameters[BrowserDriverLogic.PARAM_WIDTH]?.takeIf { it.isNotBlank() }
+            val height = request.parameters[BrowserDriverLogic.PARAM_HEIGHT]?.takeIf { it.isNotBlank() }
+            if (width != null || height != null) {
+                if (viewport != "desktop") {
+                    return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "width and height require desktop")
+                }
+                when (BrowserDesktopViewport.parse(width, height)) {
+                    is BrowserDesktopViewport.Parse.Invalid ->
+                        return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "invalid desktop size")
+                    else -> Unit
+                }
+            }
             return null
         }
         if (request.action == "browser.snapshot" && request.parameters.containsKey("selector")) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
         }
         val submit = request.parameters["submit"]
-        if (submit != null && submit != "false") {
-            return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "submit refused")
+        if (request.action == "browser.type") {
+            if (submit != null && submit != "true" && submit != "false") {
+                return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "submit must be true or false")
+            }
+        } else if (submit != null) {
+            return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "submit is only for type")
         }
         if (request.parameters["sensitive"] == "true") {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "credential refused")
@@ -394,6 +481,7 @@ class OpenChamberPageAdapter(
     private fun fromDriver(reply: BrowserReply): ProviderResult {
         val code = when (reply.error?.code) {
             BrowserErrorCode.INVALID_REQUEST -> ProviderCodes.INVALID_REQUEST
+            BrowserErrorCode.UNSUPPORTED_PARAMETER -> ProviderCodes.UNSUPPORTED_PARAMETER
             BrowserErrorCode.TIMEOUT -> ProviderCodes.DEADLINE
             BrowserErrorCode.OUTCOME_UNKNOWN -> ProviderCodes.OUTCOME_UNKNOWN
             BrowserErrorCode.REVOKED, BrowserErrorCode.TAKEN_OVER, BrowserErrorCode.DISABLED -> ProviderCodes.AUTHORIZATION_REQUIRED

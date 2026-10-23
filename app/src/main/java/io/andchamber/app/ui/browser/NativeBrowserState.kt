@@ -61,6 +61,9 @@ data class NativeBrowserState(
     val pageRetired: Boolean = false,
     val mousePressActive: Boolean = false,
     val desktopMode: Boolean = false,
+    /** The selected tab's configured desktop CSS viewport; mobile pages keep the stored pair. */
+    val desktopWidth: Int = BrowserDesktopViewport.DEFAULT_WIDTH,
+    val desktopHeight: Int = BrowserDesktopViewport.DEFAULT_HEIGHT,
     val mouseMode: Boolean = false,
     /** Pointer position in CSS px. This is not a WebView pixel or a screenshot pixel. */
     val pointerX: Float = 0f,

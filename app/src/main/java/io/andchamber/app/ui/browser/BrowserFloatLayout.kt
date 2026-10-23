@@ -77,6 +77,58 @@ internal data class WindowRect(val left: Float, val top: Float, val width: Float
 internal fun browserViewportDp(safeWidth: Float, safeHeight: Float): Pair<Float, Float> =
     safeWidth.coerceAtLeast(1f) to (safeHeight - 2 * BROWSER_BAR_HEIGHT).coerceAtLeast(1f)
 
+/**
+ * The page's fixed size in physical pixels. Phone layout: the full-screen page area from
+ * [browserViewportDp] at the screen's density. Computer layout: the agent's requested CSS size
+ * (default 1920 x 1080), independent of the phone's screen, rotation, keyboard and window; mapped
+ * by [desktopViewportPx]. A missing or invalid desktop size falls back to the phone size.
+ */
+internal fun browserPageViewportPx(
+    desktop: Boolean,
+    desktopCssWidth: Int,
+    desktopCssHeight: Int,
+    phoneWidthPx: Int,
+    phoneHeightPx: Int,
+): Pair<Int, Int> =
+    if (desktop && desktopCssWidth > 0 && desktopCssHeight > 0) {
+        desktopViewportPx(desktopCssWidth) to desktopViewportPx(desktopCssHeight)
+    } else {
+        phoneWidthPx to phoneHeightPx
+    }
+
+/** Computer-layout CSS px to the page's physical px. 1:1 for now (the engine's own mapping). */
+internal fun desktopViewportPx(css: Int): Int = css
+
+/**
+ * The page proportions the window lays out with, in dp. Phone layout keeps the phone viewport.
+ * Computer layout keeps the phone's width and the desktop page's aspect ratio, so a small window
+ * or full screen shows the whole wide page without empty bands inside the window.
+ */
+internal fun browserLayoutViewportDp(
+    phoneViewport: Pair<Float, Float>,
+    desktop: Boolean,
+    desktopCssWidth: Int,
+    desktopCssHeight: Int,
+): Pair<Float, Float> =
+    if (desktop && desktopCssWidth > 0 && desktopCssHeight > 0) {
+        phoneViewport.first to (phoneViewport.first * desktopCssHeight / desktopCssWidth).coerceAtLeast(1f)
+    } else {
+        phoneViewport
+    }
+
+/**
+ * Whether a change of the page's fixed size is a phone-screen change the UI must report as a
+ * geometry change. Only phone layout before and after: a computer-layout size or a layout switch
+ * is the agent's own resize, which already invalidates and reloads the page; reporting it again
+ * would cancel that resize, or the agent action running after it.
+ */
+internal fun browserViewportChangeInvalidates(
+    previousDesktop: Boolean,
+    previousPx: Pair<Int, Int>,
+    desktop: Boolean,
+    px: Pair<Int, Int>,
+): Boolean = !previousDesktop && !desktop && previousPx != px
+
 /** What the person chose for the small window. Null means "use the default". */
 internal data class FloatPlacement(val scale: Float? = null, val left: Float? = null, val top: Float? = null)
 

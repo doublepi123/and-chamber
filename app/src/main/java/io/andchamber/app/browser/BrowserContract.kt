@@ -16,6 +16,7 @@ enum class BrowserMethod {
     TYPE,
     SCROLL,
     CAPTURE,
+    RESIZE,
 }
 
 /**
@@ -45,6 +46,7 @@ enum class BrowserErrorCode {
     TIMEOUT,
     OUTCOME_UNKNOWN,
     INVALID_REQUEST,
+    UNSUPPORTED_PARAMETER,
     POLICY_DENIED,
     DRIVER,
     INTERNAL,

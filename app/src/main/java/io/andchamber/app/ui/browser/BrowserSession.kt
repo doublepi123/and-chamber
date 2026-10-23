@@ -27,6 +27,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import io.andchamber.app.ui.findActivity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -87,9 +89,26 @@ internal class BrowserSession private constructor(
     private var destroyed = false
     var onFatal: (() -> Unit)? = null
     var onMainGet: ((String) -> Unit)? = null
+    /** One-shot `browser.type` submit receipt; completed by a real main-frame navigation. */
+    var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)? = null
     var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
+
+    /**
+     * The single Enter this session dispatched for a submit. It is one-shot, identity-bound and
+     * expires quickly; an ordinary link navigation never creates it.
+     */
+    private data class SubmitIntent(
+        val viewId: String,
+        val ticket: Long,
+        val epoch: Long,
+        val documentId: String,
+        val expiresAt: Long,
+    )
+
+    private var submitIntent: SubmitIntent? = null
+    private val submitIntentTimeout = Runnable { submitIntent = null }
 
     /**
      * Human interaction mode. When true, a person may start a normal top-level navigation, submit
@@ -106,6 +125,7 @@ internal class BrowserSession private constructor(
      * start a navigation, so the committed page stays committed.
      */
     fun invalidateRefs() {
+        clearSubmitIntent()
         epoch += 1
         documentNonce = BrowserDriverLogic.newNonce()
         installedNonce = null
@@ -160,6 +180,7 @@ internal class BrowserSession private constructor(
             "unknown source=$source ticket=$ticket epoch=$epoch starts=$mainStarts thread=${if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) "Main" else "IO"}",
         )
         clearControlledGet()
+        clearSubmitIntent()
         unknownNavigation = true
         committed = false
         installedNonce = null
@@ -319,6 +340,7 @@ internal class BrowserSession private constructor(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        clearSubmitIntent()
         unwrappedCommitGate?.cancel()
         unwrappedCommitGate = null
         unwrappedCommitted = null
@@ -337,27 +359,52 @@ internal class BrowserSession private constructor(
 
     /**
      * Desktop layout is a real CSS viewport, not only a UA string. The document-start script sets
-     * a 1024 CSS px viewport and the WebView scale is reset, so `innerWidth` can match that width.
-     * A POST page is not reloaded by this call.
+     * a viewport of [width] CSS px and the WebView scale is derived from the page's real DPR, so
+     * `innerWidth` can match that width. Mobile keeps the normal overview rules. A POST page is not
+     * reloaded by this call.
      */
-    fun configureDesktop(enabled: Boolean) {
+    var desktopWidth = BrowserDesktopViewport.DEFAULT_WIDTH
+        private set
+    var desktopHeight = BrowserDesktopViewport.DEFAULT_HEIGHT
+        private set
+
+    /** Bool-only switches preserve the currently configured custom desktop size. */
+    fun configureDesktop(enabled: Boolean) = configureDesktop(enabled, desktopWidth, desktopHeight)
+
+    fun configureDesktop(enabled: Boolean, width: Int, height: Int) {
+        if (!BrowserDesktopViewport.isValid(width, height)) return
+        val sizeChanged = width != desktopWidth || height != desktopHeight
+        desktopWidth = width
+        desktopHeight = height
         desktopConfigured = enabled
         view.settings.userAgentString = if (enabled) BrowserDriverLogic.DESKTOP_UA else null
+        // Desktop must not let overview mode shrink a wide page; mobile keeps the normal rules.
         view.settings.useWideViewPort = true
-        view.settings.loadWithOverviewMode = true
+        view.settings.loadWithOverviewMode = !enabled
         view.setInitialScale(0)
-        if (enabled) installDesktopViewport() else removeDesktopViewport()
+        if (enabled) {
+            if (desktopScript == null || sizeChanged) installDesktopViewport(width)
+            if (sizeChanged && desktopScript != null) {
+                view.evaluateJavascript(BrowserDriverLogic.desktopViewportUpdateScript(width), null)
+            }
+        } else {
+            removeDesktopViewport()
+        }
     }
 
     fun setDesktopMode(enabled: Boolean) = configureDesktop(enabled)
 
     private var desktopScript: androidx.webkit.ScriptHandler? = null
 
-    private fun installDesktopViewport() {
+    private fun installDesktopViewport(width: Int) {
         removeDesktopViewport()
         if (!androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) return
         desktopScript = runCatching {
-            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view, BrowserDriverLogic.desktopViewportScript(), setOf("*"))
+            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+                view,
+                BrowserDriverLogic.desktopViewportScript(width),
+                setOf("*"),
+            )
         }.getOrNull()
     }
 
@@ -569,6 +616,109 @@ internal class BrowserSession private constructor(
         }
         if (requestEpoch != epoch) return null
         return raw
+    }
+
+    /**
+     * Confirms the same DOM ref is still the active, safe single-line input, then dispatches exactly
+     * one native Enter DOWN/UP. No JS submit, no JS KeyboardEvent, no IME call and no second press.
+     * A platform return value is not treated as completion; the presenter waits for a real GET.
+     */
+    suspend fun pressEnter(ref: String, requestEpoch: Long, armedForMs: Long? = null): EnterPress {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return EnterPress.Failed
+        // A new submit replaces any previous one-shot receipt; a failed press must not leave it.
+        clearSubmitIntent()
+        if (destroyed || fatal || unknownNavigation) return EnterPress.Stale
+        if (requestEpoch != epoch) return EnterPress.Stale
+        if (!view.isAttachedToWindow || !view.isShown) return EnterPress.NotVisible
+        if (!view.hasWindowFocus()) return EnterPress.NotVisible
+        if (!keyInputAdmitted()) return EnterPress.Stale
+        if (!view.isFocused && !view.requestFocus()) return EnterPress.Refused("not focused")
+        if (!view.isFocused) return EnterPress.Refused("not focused")
+        val documentId = acceptedDocumentId ?: return EnterPress.Stale
+        val nonce = documentNonce
+        val viewId = viewId
+        val ticket = ticket
+        val raw = eval(BrowserDriverLogic.enterReadyScript(nonce, documentId, ref), requestEpoch)
+            ?: return EnterPress.Stale
+        if (destroyed || epoch != requestEpoch || acceptedDocumentId != documentId || !owns(viewId, ticket)) {
+            return EnterPress.Stale
+        }
+        if (!view.isAttachedToWindow || !view.isShown || !view.hasWindowFocus()) return EnterPress.NotVisible
+        if (!keyInputAdmitted()) return EnterPress.Stale
+        when (val parsed = BrowserDriverLogic.parseScriptResult(raw)) {
+            is ScriptResult.Failed -> return EnterPress.Refused(parsed.message)
+            is ScriptResult.Ok -> {
+                if (parsed.json["documentId"]?.jsonPrimitive?.contentOrNull != documentId) return EnterPress.Stale
+            }
+        }
+        // Only this one native navigation may complete the submit receipt.
+        currentCoroutineContext().ensureActive()
+        armSubmitIntent(documentId, armedForMs ?: SUBMIT_INTENT_MS)
+        val now = android.os.SystemClock.uptimeMillis()
+        return try {
+            view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_DOWN))
+            view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_UP))
+            EnterPress.Dispatched
+        } catch (_: RuntimeException) {
+            clearSubmitIntent()
+            EnterPress.Failed
+        }
+    }
+
+    private fun enterKey(now: Long, action: Int): android.view.KeyEvent = android.view.KeyEvent(
+        now,
+        now,
+        action,
+        android.view.KeyEvent.KEYCODE_ENTER,
+        0,
+        0,
+        android.view.KeyCharacterMap.VIRTUAL_KEYBOARD,
+        0,
+        0,
+        android.view.InputDevice.SOURCE_KEYBOARD,
+    )
+
+    private fun keyInputAdmitted(): Boolean =
+        !destroyed && !inputGateClosed && (view as? FencedWebView)?.gate?.admit() != false
+
+    private fun clearSubmitIntent() {
+        submitIntent = null
+        // Unit tests construct a session without a WebView; a real one is always present here.
+        val target: WebView? = view
+        target?.removeCallbacks(submitIntentTimeout)
+    }
+
+    private fun armSubmitIntent(documentId: String, armedForMs: Long) {
+        clearSubmitIntent()
+        val now = android.os.SystemClock.uptimeMillis()
+        val budget = armedForMs.coerceIn(1L, MAX_SUBMIT_ARM_MS)
+        submitIntent = SubmitIntent(
+            viewId = viewId,
+            ticket = ticket,
+            epoch = epoch,
+            documentId = documentId,
+            expiresAt = now + budget,
+        )
+        view.postDelayed(submitIntentTimeout, budget)
+    }
+
+    /** The one-shot Enter intent for the current page/load/document, or null and cleared. */
+    private fun activeSubmitIntent(): SubmitIntent? {
+        val intent = submitIntent ?: return null
+        val current = !destroyed && !unknownNavigation && !manualNavigation &&
+            intent.viewId == viewId && intent.ticket == ticket && intent.epoch == epoch &&
+            intent.documentId == acceptedDocumentId &&
+            android.os.SystemClock.uptimeMillis() <= intent.expiresAt
+        if (!current) {
+            clearSubmitIntent()
+            return null
+        }
+        return intent
+    }
+
+    private fun emitSubmitNavigation(event: BrowserSubmitNavigation) {
+        clearSubmitIntent()
+        onSubmitNavigation?.invoke(event)
     }
 
     /**
@@ -787,6 +937,13 @@ internal class BrowserSession private constructor(
         }
     }
 
+    /** Fixed engine reason; page text is never placed in a submit receipt. */
+    private fun submitRejectionReason(request: WebResourceRequest): String = when {
+        request.isRedirect -> SUBMIT_REASON_REDIRECT
+        request.method.equals("POST", true) -> SUBMIT_REASON_POST
+        else -> SUBMIT_REASON_METHOD
+    }
+
     private fun logNav(source: String, method: String?, redirect: Boolean, manual: Boolean, captured: Long = ticket) {
         val normalized = when {
             method.equals("GET", true) -> "GET"
@@ -803,8 +960,24 @@ internal class BrowserSession private constructor(
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             if (!request.isForMainFrame) return false
             val raw = request.url?.toString().orEmpty()
+            // Only an Enter this session just dispatched may produce a submit receipt. Ordinary
+            // link GETs keep the old intercept-and-wait behavior.
+            val submit = if (manualNavigation) {
+                clearSubmitIntent()
+                null
+            } else {
+                activeSubmitIntent()
+            }
             val decision = policyProvider().checkSyntax(raw)
             if (decision !is io.andchamber.app.browser.UrlDecision.Allow) {
+                if (submit != null) {
+                    // The armed submit's deterministic refusal: block this one load and report it.
+                    // Do not change the session document/witness/epoch here; the coordinator's
+                    // awaited receipt marks the exact page unknown and revokes after it resumes.
+                    emitSubmitNavigation(BrowserSubmitNavigation.Rejected(SUBMIT_REASON_POLICY))
+                    logNav("override-submit-rejected", request.method, request.isRedirect, manualNavigation)
+                    return true
+                }
                 denyNavigation(
                     BrowserDriverLogic.denyMessage(
                         (decision as? io.andchamber.app.browser.UrlDecision.Deny)?.reason
@@ -815,6 +988,14 @@ internal class BrowserSession private constructor(
             }
             val manualAtDecision = manualNavigation
             if (!MainFrameGate.allows(request.method, request.isRedirect, manualAtDecision)) {
+                if (submit != null) {
+                    // A known submit POST/redirect is a definite rejection. Report it and leave the
+                    // page/action alone so the original request can return OUTCOME_UNKNOWN; do not
+                    // trigger onUnknown here, which would revoke and cancel the waiting job.
+                    emitSubmitNavigation(BrowserSubmitNavigation.Rejected(submitRejectionReason(request)))
+                    logNav("override-submit-rejected", request.method, request.isRedirect, manualAtDecision)
+                    return true
+                }
                 logNav("override-unsupported", request.method, request.isRedirect, manualAtDecision)
                 onUnknown?.invoke()
                 markUnknownNavigation("override-unsupported")
@@ -822,6 +1003,12 @@ internal class BrowserSession private constructor(
             }
             // Manual mode is a person navigating. Do not rewrite the request or start a controlled GET.
             if (manualNavigation) return false
+            if (submit != null) {
+                // The real GET is the only submit receipt. The page's own load is blocked; the
+                // presenter policy-checks and opens it once in the same tab.
+                emitSubmitNavigation(BrowserSubmitNavigation.Get(raw))
+                return true
+            }
             onMainGet?.invoke(raw)
             return true
         }
@@ -830,11 +1017,26 @@ internal class BrowserSession private constructor(
             val manualAtDecision = manualNavigation
             if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect, manualAtDecision)) {
                 val captured = ticket
+                val reason = submitRejectionReason(request)
                 logNav("intercept-unsupported", request.method, request.isRedirect, manualAtDecision)
                 view.post {
                     logNav("intercept-posted", request.method, request.isRedirect, manualNavigation, captured)
-                    markUnknownNavigation("intercept-unsupported")
-                    onUnknown?.invoke()
+                    val submit = if (manualNavigation) {
+                        clearSubmitIntent()
+                        null
+                    } else {
+                        activeSubmitIntent()
+                    }
+                    if (submit != null) {
+                        // A blocked POST/redirect is still no GET. Report the one fixed rejection
+                        // for this armed Enter, but keep the original request alive so the
+                        // coordinator can return real OUTCOME_UNKNOWN rather than a cancellation.
+                        emitSubmitNavigation(BrowserSubmitNavigation.Rejected(reason))
+                    } else {
+                        // Ordinary unsupported navigation keeps the existing fail-closed path.
+                        markUnknownNavigation("intercept-unsupported")
+                        onUnknown?.invoke()
+                    }
                 }
                 return emptyBlocked()
             }
@@ -1099,6 +1301,15 @@ internal sealed interface MouseDelivery {
     data class RetireRequired(val identity: MouseDocumentIdentity, val reason: String) : MouseDelivery
 }
 
+/** Outcome of the one native Enter a submit may dispatch. Success means pressed once, not navigated. */
+internal sealed interface EnterPress {
+    data object Dispatched : EnterPress
+    data object Stale : EnterPress
+    data object NotVisible : EnterPress
+    data class Refused(val reason: String) : EnterPress
+    data object Failed : EnterPress
+}
+
 internal data class CaptureImage(
     val base64: String,
     val width: Int = 0,
@@ -1128,3 +1339,12 @@ data class GeometrySample(
     val frame: NativeFrame,
     val probe: GeometryProbe,
 )
+
+/** The Enter receipt falls back to this when a caller supplies no budget. */
+private const val SUBMIT_INTENT_MS = 2_000L
+/** A caller budget is bounded; the marker is never permanent. */
+private const val MAX_SUBMIT_ARM_MS = 60_000L
+private const val SUBMIT_REASON_POST = "post"
+private const val SUBMIT_REASON_REDIRECT = "redirect"
+private const val SUBMIT_REASON_METHOD = "method"
+private const val SUBMIT_REASON_POLICY = "policy"

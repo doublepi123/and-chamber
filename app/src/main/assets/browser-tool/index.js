@@ -25,7 +25,9 @@ const DESCRIPTION = [
   '"open" waits about a minute for that automatic grant; if it reports drivable:false, ask the person to hand control back with Resume agent in the window. Opening again does not override an explicit takeover.',
   "Control ends only when the person takes over explicitly, hides or closes the window, the app leaves the foreground, or the chat owner changes; scrolling the page, dragging the window, resizing it or using full screen does not end control. A foreground agent action may wake a hidden window and ask for control again, but an explicit takeover is not taken back by ordinary agent actions. Restoring the window or opening it manually never grants by itself; the person can hand control back explicitly.",
   "Take one action per call.",
+  'Choose "viewport":"mobile" or "desktop" yourself to suit the site and task; do not ask the person merely to choose the layout. Desktop uses a fixed 1920x1080 CSS viewport by default. Supply both "width" and "height" to choose another desktop resolution for "open" or "resize". Page layout is independent of the small-window/full-screen display; take a fresh snapshot after changing the page viewport.',
   'Take "snapshot" first and use refs from the latest snapshot; navigation or DOM changes invalidate old refs, so snapshot again instead of guessing.',
+  'For a search, "type" with "submit":true enters the value and dispatches Enter once. Success requires confirmed same-tab GET navigation; POST forms, redirects and sensitive fields are not supported. An unknown outcome must not be retried automatically.',
   '"click", "type", "scroll", "capture" and "resize" may be refused with AUTHORIZATION_REQUIRED (agent control is absent, was taken over or revoked, or the window is not in front), REF_EXPIRED (take a new snapshot) or BROWSER_PAGE_UNAVAILABLE (the AndChamber chat screen is not open).',
   "When that happens, ask the person to hand control back with Resume agent in the window; do not expect a tap before every action, and do not retry in a loop.",
 ].join(" ");
@@ -173,7 +175,7 @@ export default {
             },
             url: {
               type: "string",
-              description: 'Absolute http or https URL to open in the window ("open" only).',
+              description: 'Public HTTPS URL to open in the window ("open" only).',
             },
             tabId: {
               type: "string",
@@ -182,11 +184,23 @@ export default {
             viewport: {
               type: "string",
               enum: ["mobile", "desktop", "fill"],
-              description: 'Window size preset for "open" or "resize".',
+              description: 'Page layout for "open" or "resize": choose mobile or desktop for the task. Desktop defaults to 1920x1080; fill keeps the current layout. This is not the floating window size.',
+            },
+            width: {
+              type: "integer",
+              minimum: 640,
+              maximum: 3840,
+              description: 'Desktop CSS viewport width. Supply together with height, and only with viewport="desktop" for "open" or "resize".',
+            },
+            height: {
+              type: "integer",
+              minimum: 360,
+              maximum: 2160,
+              description: 'Desktop CSS viewport height. Supply together with width, and only with viewport="desktop" for "open" or "resize".',
             },
             selector: {
               type: "string",
-              description: 'CSS selector from the latest snapshot ("click", "type", "capture").',
+              description: 'Ref selector from the latest snapshot ("click" or "type"), not an arbitrary CSS selector.',
             },
             text: {
               type: "string",
@@ -198,7 +212,7 @@ export default {
             },
             submit: {
               type: "boolean",
-              description: 'Press Enter after typing ("type").',
+              description: 'After typing into a non-sensitive single-line input, press Enter once and wait for confirmed same-tab GET navigation. POST forms and redirects are unsupported ("type" only).',
             },
             direction: {
               type: "string",

@@ -149,6 +149,12 @@ internal fun BrowserFloatWindow(
     clearingSiteData: Boolean = false,
     /** Height of the chat composer above the keyboard; a small window stays above it. */
     bottomClearance: Dp = 72.dp,
+    /**
+     * Computer layout's page size in CSS px (the agent's choice, default 1920 x 1080), or null in
+     * phone layout. It changes only the page's fixed size and the window's proportions; full
+     * screen, small window and the window's place stay as they are.
+     */
+    desktopViewport: IntSize? = null,
     /** The page area. [blocked]: not presented (folded). [viewportPx]: the fixed page size. */
     content: @Composable (blocked: Boolean, viewportPx: IntSize) -> Unit,
 ) {
@@ -174,8 +180,17 @@ internal fun BrowserFloatWindow(
         // a keyboard (or a frame where the inset and the constraints disagree) never resizes the
         // page. A new width (rotation, split screen) or a keyboard-closed height change updates it.
         val stable = remember { StableViewport() }
-        val (vpW, vpH) = stable.update(safeWidth, safeHeight, imeOpen = imeOverlapDp > 0f)
-        val viewportPx = with(density) { IntSize(vpW.dp.roundToPx(), vpH.dp.roundToPx()) }
+        val phoneViewport = stable.update(safeWidth, safeHeight, imeOpen = imeOverlapDp > 0f)
+        val desktop = desktopViewport != null
+        val (pageW, pageH) = browserPageViewportPx(
+            desktop, desktopViewport?.width ?: 0, desktopViewport?.height ?: 0,
+            with(density) { phoneViewport.first.dp.roundToPx() }, with(density) { phoneViewport.second.dp.roundToPx() },
+        )
+        val viewportPx = IntSize(pageW, pageH)
+        // The window lays out with the page's proportions; the page itself keeps its fixed size.
+        val (vpW, vpH) = browserLayoutViewportDp(
+            phoneViewport, desktop, desktopViewport?.width ?: 0, desktopViewport?.height ?: 0,
+        )
         val layout = browserWindowLayout(
             safeWidth, safeHeight, imeOverlapDp, bottomClearance.value, vpW, vpH,
             fullRequested = ui.fullRequested, placement = ui.placement,

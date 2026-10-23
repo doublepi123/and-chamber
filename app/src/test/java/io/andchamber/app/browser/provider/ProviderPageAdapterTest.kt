@@ -186,6 +186,186 @@ class ProviderPageAdapterTest {
     }
 
     @Test
+    fun `type submit true forwards one flag and returns enterDispatched`() = runBlocking {
+        val driver = FakeDriver()
+        driver.typeReply = BrowserReply(
+            ok = true,
+            result = mapOf(BrowserDriverLogic.RESULT_ENTER_DISPATCHED to "true"),
+        )
+        val pages = granted(driver, snapshotJson(ref, "Query", role = "input", type = "text"))
+        val result = pages.second.execute(
+            request(
+                "browser.type",
+                mapOf(
+                    "selector" to """[data-andchamber-ref="$ref"]""",
+                    "value" to "hello-search",
+                    "submit" to "true",
+                ),
+            ),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertTrue(result.ok)
+        assertEquals("true", driver.lastParams[BrowserDriverLogic.PARAM_SUBMIT])
+        assertEquals("hello-search", driver.lastParams[BrowserDriverLogic.PARAM_TEXT])
+        assertEquals(1_000L, driver.lastRequest?.timeoutMs)
+        assertEquals(true, result.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull)
+    }
+
+    @Test
+    fun `type missing or false submit keeps the original action`() = runBlocking {
+        val driver = FakeDriver()
+        val pages = granted(driver, snapshotJson(ref, "Query", role = "input", type = "text"))
+        val missing = pages.second.execute(
+            request("browser.type", mapOf("selector" to """[data-andchamber-ref="$ref"]""", "value" to "a")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertTrue(missing.ok)
+        assertFalse(driver.lastParams.containsKey(BrowserDriverLogic.PARAM_SUBMIT))
+        val falseSubmit = pages.second.execute(
+            request(
+                "browser.type",
+                mapOf("selector" to """[data-andchamber-ref="$ref"]""", "value" to "b", "submit" to "false"),
+            ),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertTrue(falseSubmit.ok)
+        assertFalse(driver.lastParams.containsKey(BrowserDriverLogic.PARAM_SUBMIT))
+        assertNull(falseSubmit.data["enterDispatched"])
+    }
+
+    @Test
+    fun `type submit refuses a credential autocomplete field without calling the driver`() = runBlocking {
+        val driver = FakeDriver()
+        val pages = granted(driver, snapshotJson(ref, "Password", role = "input", type = "current-password"))
+        val refused = pages.second.execute(
+            request(
+                "browser.type",
+                mapOf("selector" to """[data-andchamber-ref="$ref"]""", "value" to "do-not-submit", "submit" to "true"),
+            ),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, refused.errorCode)
+        assertEquals(0, driver.calls)
+    }
+
+    @Test
+    fun `submit is rejected outside type and for a non-boolean value`() = runBlocking {
+        val driver = FakeDriver()
+        val pages = granted(driver, snapshotJson(ref, "Query", role = "input", type = "text"))
+        val click = pages.second.execute(
+            request("browser.click", mapOf("selector" to """[data-andchamber-ref="$ref"]""", "submit" to "true")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, click.errorCode)
+        val bad = pages.second.execute(
+            request(
+                "browser.type",
+                mapOf("selector" to """[data-andchamber-ref="$ref"]""", "value" to "x", "submit" to "1"),
+            ),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, bad.errorCode)
+        assertEquals(0, driver.calls)
+    }
+
+    @Test
+    fun `open and resize reject an invalid or unpaired desktop size before load`() = runBlocking {
+        val driver = FakeDriver()
+        var presented = 0
+        val pages = OpenChamberPageAdapter(
+            driver,
+            present = { presented += 1; true },
+            viewportSize = { 12 to 34 },
+        )
+        val registry = ProviderRegistry { "tab-1" }
+        suspend fun open(vararg params: Pair<String, String>) = pages.execute(
+            request("browser.open", mapOf("url" to "https://public.example") + params.toMap()),
+            registry,
+            null,
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, open("viewport" to "desktop", "width" to "100", "height" to "1080").errorCode)
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, open("viewport" to "desktop", "width" to "1920").errorCode)
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, open("viewport" to "mobile", "width" to "1920", "height" to "1080").errorCode)
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, open("width" to "1920", "height" to "1080").errorCode)
+        assertEquals(0, presented)
+        assertTrue(registry.tabs().isEmpty())
+        val valid = open("viewport" to "desktop", "width" to "2560", "height" to "1440")
+        assertTrue(valid.ok)
+        assertEquals(1, presented)
+    }
+
+    @Test
+    fun `resize validates dimensions and forwards the real configure request`() = runBlocking {
+        val driver = FakeDriver()
+        val pages = granted(driver, snapshotJson(ref, "Query", role = "input", type = "text"))
+        val before = driver.calls
+        val invalid = pages.second.execute(
+            request("browser.resize", mapOf("viewport" to "desktop", "width" to "100", "height" to "1080")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, invalid.errorCode)
+        assertEquals(before, driver.calls)
+        val mobileDims = pages.second.execute(
+            request("browser.resize", mapOf("viewport" to "mobile", "width" to "1920", "height" to "1080")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, mobileDims.errorCode)
+        assertEquals(before, driver.calls)
+        val valid = pages.second.execute(
+            request("browser.resize", mapOf("viewport" to "desktop", "width" to "2560", "height" to "1440")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertTrue(valid.ok)
+        assertEquals(BrowserMethod.RESIZE, driver.lastRequest?.method)
+        assertEquals("2560", driver.lastRequest?.params?.get(BrowserDriverLogic.PARAM_WIDTH))
+        assertEquals("1440", driver.lastRequest?.params?.get(BrowserDriverLogic.PARAM_HEIGHT))
+        assertEquals(2560, valid.data["desktopWidth"]!!.jsonPrimitive.content.toInt())
+        assertEquals(1440, valid.data["desktopHeight"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `snapshot forwards measured layout and visual viewport objects`() = runBlocking {
+        val driver = FakeDriver()
+        val json = """{"url":"https://public.example","title":"Hi","text":"hello","elements":[],"layoutViewport":{"width":1920,"height":1080},"visualViewport":{"width":1918.5,"height":1078.5}}"""
+        val pages = granted(driver, json)
+        val snap = pages.second.execute(request("browser.snapshot"), pages.first, "tab-1", ProviderMode.AGENT, 1_000L)
+        assertTrue(snap.ok)
+        assertEquals("1920", snap.data["layoutViewport"]!!.jsonObject["width"]!!.jsonPrimitive.content)
+        assertEquals("1080", snap.data["layoutViewport"]!!.jsonObject["height"]!!.jsonPrimitive.content)
+        assertEquals("1918.5", snap.data["visualViewport"]!!.jsonObject["width"]!!.jsonPrimitive.content)
+        assertEquals("1078.5", snap.data["visualViewport"]!!.jsonObject["height"]!!.jsonPrimitive.content)
+    }
+
+    @Test
     fun `tabs include id title url owner and active`() = runBlocking {
         val driver = FakeDriver()
         val pages = adapter(driver)
@@ -350,15 +530,30 @@ class ProviderPageAdapterTest {
         var calls = 0
         val methods = mutableListOf<BrowserMethod>()
         var lastRef: String? = null
+        var lastParams: Map<String, String> = emptyMap()
+        var lastRequest: BrowserRequest? = null
+        var typeReply: BrowserReply? = null
         var snapshotJson: String = """{"url":"https://public.example","title":"Hi","text":"hello","elements":[{"ref":"abcdef01-1234abcd-1","role":"button","name":"Sign in"}]}"""
 
         override suspend fun execute(request: BrowserRequest): BrowserReply {
             calls += 1
             methods += request.method
             lastRef = request.params[BrowserDriverLogic.PARAM_REF]
+            lastParams = request.params
+            lastRequest = request
             return when (request.method) {
                 BrowserMethod.NAVIGATE -> BrowserReply(ok = true, result = mapOf("phase" to "started"))
                 BrowserMethod.SNAPSHOT -> BrowserReply(ok = true, result = mapOf(BrowserDriverLogic.RESULT_SNAPSHOT to snapshotJson))
+                BrowserMethod.TYPE -> typeReply ?: BrowserReply(ok = true)
+                BrowserMethod.RESIZE -> BrowserReply(
+                    ok = true,
+                    result = mapOf(
+                        BrowserDriverLogic.PARAM_VIEWPORT to (request.params[BrowserDriverLogic.PARAM_VIEWPORT] ?: ""),
+                        "desktop" to "true",
+                        BrowserDriverLogic.PARAM_WIDTH to (request.params[BrowserDriverLogic.PARAM_WIDTH] ?: "1920"),
+                        BrowserDriverLogic.PARAM_HEIGHT to (request.params[BrowserDriverLogic.PARAM_HEIGHT] ?: "1080"),
+                    ),
+                )
                 BrowserMethod.CAPTURE -> BrowserReply(
                     ok = true,
                     result = mapOf(

@@ -28,8 +28,9 @@ internal data class ViewportTransform(val scale: Float, val offsetX: Float, val 
 /**
  * Fits a [viewportWidth] x [viewportHeight] page into a [containerWidth] x [containerHeight] box:
  * the whole page always stays visible (never cropped), it is never enlarged past 1:1, and spare
- * width is split evenly on both sides (the page stays at the top). A container exactly the
- * viewport's size gets scale 1 and no offset. Unknown viewport sizes draw 1:1.
+ * room is split evenly on both sides, across and down (a wide computer-layout page sits in the
+ * middle of a tall phone screen). A container exactly the viewport's size gets scale 1 and no
+ * offset. Unknown viewport sizes draw 1:1.
  */
 internal fun fixedViewportTransform(
     containerWidth: Int,
@@ -42,7 +43,8 @@ internal fun fixedViewportTransform(
     val scale = min(containerWidth.toFloat() / viewportWidth, containerHeight.toFloat() / viewportHeight)
         .coerceIn(MIN_VIEWPORT_SCALE, 1f)
     val offsetX = ((containerWidth - viewportWidth * scale) / 2f).coerceAtLeast(0f)
-    return ViewportTransform(scale, offsetX, 0f)
+    val offsetY = ((containerHeight - viewportHeight * scale) / 2f).coerceAtLeast(0f)
+    return ViewportTransform(scale, offsetX, offsetY)
 }
 
 /**

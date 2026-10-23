@@ -5,6 +5,7 @@ import io.andchamber.app.browser.BrowserDriver
 import io.andchamber.app.browser.BrowserMethod
 import io.andchamber.app.browser.BrowserReply
 import io.andchamber.app.browser.BrowserUrlPolicy
+import io.andchamber.app.browser.DnsResolver
 import io.andchamber.app.browser.provider.PageField
 import io.andchamber.app.browser.provider.ProviderCodes
 import io.andchamber.app.browser.provider.ProviderMode
@@ -37,10 +38,15 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.InetAddress
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class NativeBrowserPresenterTest {
     private var testNow = 0L
+    /** A preflight policy whose DNS answer is a public literal, so submit tests do not hit the network. */
+    private val submitPolicy = BrowserUrlPolicy(
+        resolver = DnsResolver { listOf(InetAddress.getByName("93.184.216.34")) },
+    )
     private companion object {
         const val REF = "abcdef01-1234abcd-1"
     }
@@ -412,6 +418,347 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `a first visibility failure retries inside the open budget and grants without new events`() = runTest {
+        val page = FakePage()
+        page.readyForAllow = false
+        page.presentationVisible = false
+        var visibilityChecks = 0
+        val presenter = presenter(awaitPageVisible = {
+            visibilityChecks += 1
+            page.presentationVisible = visibilityChecks >= 2
+            page.presentationVisible
+        }) { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        val selected = presenter.state.value.selectedTabId!!
+        // The ready probe is accepted while the fake is still not ready to grant. The intent and
+        // its readyAccepted marker remain; no person's tap will follow.
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        assertNull("a not-ready page does not grant", presenter.registry.currentGrant())
+        page.readyForAllow = true
+        // A presentation event (not geometry/ready) starts the first retry. Its visibility wait
+        // fails once; the open's own budget drives the second retry without any new page event.
+        presenter.onPresentationChanged()
+        runCurrent()
+        advanceTimeBy(251)
+        runCurrent()
+        advanceTimeBy(251)
+        runCurrent()
+        val opened = pending.await()
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertEquals("true", opened.data.getValue("drivable").toString())
+        assertTrue("the retry saw visibility on its second attempt", visibilityChecks >= 2)
+        assertNotNull(presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertEquals(selected, presenter.state.value.selectedTabId)
+    }
+
+    @Test
+    fun `a temporary presentation block keeps the open waiting and unblock grants`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 5_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        presenter.setPresentationBlocked(true)
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertFalse("a temporary layout/IME block is not a stop", pending.isCompleted)
+        presenter.setPresentationBlocked(false)
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        runCurrent()
+        val opened = pending.await()
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertEquals("true", opened.data.getValue("drivable").toString())
+        assertNotNull(presenter.registry.currentGrant())
+        assertEquals("the blocked open never created a second page", 1, page.loads)
+    }
+
+    @Test
+    fun `a ready callback before mount is replayed after visibility`() = runTest {
+        val page = FakePage()
+        page.documentId = null
+        page.presentationVisible = false
+        var visibilityWaits = 0
+        val presenter = presenter(awaitPageVisible = {
+            visibilityWaits += 1
+            page.presentationVisible = true
+            true
+        }) { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 5_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        page.onReadyProbe?.invoke(ReadyProbeIdentity(page.viewId(), page.ticket(), 4L))
+        runCurrent()
+        assertNull("an unmounted page does not accept the ready witness", page.acceptedDocument())
+        assertNull(presenter.registry.currentGrant())
+
+        advanceTimeBy(251)
+        runCurrent()
+        val opened = pending.await()
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertEquals("true", opened.data.getValue("drivable").toString())
+        assertEquals("witness-1", page.acceptedDocument())
+        assertNotNull("the stored ready identity was replayed after mount", presenter.registry.currentGrant())
+        assertEquals(1, page.loads)
+        assertTrue(visibilityWaits >= 1)
+    }
+
+    @Test
+    fun `a takeover during the visibility retry keeps the open unauthorized`() = runTest {
+        val page = FakePage()
+        page.readyForAllow = false
+        page.presentationVisible = false
+        val presenter = presenter(awaitPageVisible = { false }) { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 5_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        page.readyForAllow = true
+        presenter.onPresentationChanged()
+        runCurrent()
+        advanceTimeBy(251)
+        runCurrent()
+        presenter.takeover()
+        val opened = pending.await()
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+    }
+
+    @Test
+    fun `a connection change during the visibility retry keeps the open unauthorized`() = runTest {
+        val page = FakePage()
+        page.readyForAllow = false
+        page.presentationVisible = false
+        val presenter = presenter(awaitPageVisible = { false }) { page }
+        presenter.setConnection("c1", 1L)
+        val pending = async {
+            presenter.execute(openRequest(allowWaitMs = 5_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
+        }
+        runCurrent()
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        page.readyForAllow = true
+        presenter.onPresentationChanged()
+        runCurrent()
+        advanceTimeBy(251)
+        runCurrent()
+        presenter.setConnection("c2", 2L)
+        val opened = pending.await()
+        assertEquals("false", opened.data.getValue("drivable").toString())
+        assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+    }
+
+    @Test
+    fun `a submit with no navigation returns unknown and leaves no drivable old page`() = runTest {
+        val page = FakePage()
+        val presenter = presenter(policy = { submitPolicy }) { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val pending = async {
+            presenter.execute(
+                request(
+                    "browser.type",
+                    id = "submit-1",
+                    parameters = mapOf(
+                        "selector" to """[data-andchamber-ref="$REF"]""",
+                        "value" to "x",
+                        "submit" to "true",
+                    ),
+                ),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                1_000L,
+            ) { 0L }
+        }
+        runCurrent()
+        advanceTimeBy(1_001)
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
+        assertNull("the submitted page's grant is not kept", presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        val after = presenter.execute(request("browser.snapshot", id = "after-submit"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals("the old page is not drivable", ProviderCodes.AUTHORIZATION_REQUIRED, after.errorCode)
+    }
+
+    @Test
+    fun `a timed-out submit cannot late-grant through a suspended allow probe`() = runTest {
+        val page = FakePage()
+        val presenter = presenter(policy = { submitPolicy }) { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+
+        val probeGate = CompletableDeferred<Unit>()
+        page.plainProbeGates.add(probeGate)
+        val submit = async {
+            presenter.execute(
+                request(
+                    "browser.type",
+                    id = "submit-timeout",
+                    parameters = mapOf(
+                        "selector" to """[data-andchamber-ref="$REF"]""",
+                        "value" to "x",
+                        "submit" to "true",
+                    ),
+                ),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                1_000L,
+            ) { 0L }
+        }
+        runCurrent()
+        // A second allow is already probing this same page/document while the submit waits.
+        val suspendedAllow = async { presenter.allow() }
+        runCurrent()
+        assertFalse("the allow probe is suspended", suspendedAllow.isCompleted)
+
+        // No GET arrives: the submit times out, marks the exact page unknown and revokes its grant.
+        advanceTimeBy(1_001)
+        runCurrent()
+        val submitResult = submit.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, submitResult.errorCode)
+        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+
+        // The suspended probe may return an Accept witness now, but the final fence must see the
+        // unknown page and refuse to mint a late grant.
+        probeGate.complete(Unit)
+        runCurrent()
+        assertFalse("a late allow probe cannot revive a submitted page", suspendedAllow.await())
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
+        assertEquals(
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            presenter.execute(request("browser.snapshot", id = "after-unknown"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        )
+
+        // A later person's open replaces the page and gets a clean, independent authority.
+        assertTrue(presenter.navigateManual("https://example.com/later").ok)
+        assertTrue(presenter.allow())
+        assertNotNull(presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertNull("the old unknown page does not pollute the new user page", presenter.state.value.pageError)
+        assertTrue(presenter.execute(request("browser.snapshot", id = "later"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+    }
+
+    @Test
+    fun `a submit replacement that is not ready cannot late grant`() = runTest {
+        val pages = mutableListOf<FakePage>()
+        var created = 0
+        val presenter = presenter(policy = { submitPolicy }) {
+            FakePage().also { page ->
+                created += 1
+                if (created > 1) page.readyForAllow = false
+                pages += page
+            }
+        }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val pending = async {
+            presenter.execute(
+                request(
+                    "browser.type",
+                    id = "submit-2",
+                    parameters = mapOf(
+                        "selector" to """[data-andchamber-ref="$REF"]""",
+                        "value" to "x",
+                        "submit" to "true",
+                    ),
+                ),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                2_000L,
+            ) { 0L }
+        }
+        runCurrent()
+        pages[0].onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
+        repeat(200) {
+            if (pages.size < 2) {
+                runCurrent()
+                yield()
+            }
+        }
+        assertEquals("the controlled replacement was created", 2, pages.size)
+        advanceTimeBy(2_001)
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        val fresh = pages[1]
+        fresh.readyForAllow = true
+        presenter.acceptProbeForTest(fresh, readyIdentity(fresh))
+        assertNull("a late ready on the failed replacement never grants", presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
+    }
+
+    @Test
+    fun `a late old submit event cannot affect a later page after takeover`() = runTest {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(policy = { submitPolicy }) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val submit = async {
+            presenter.execute(
+                request(
+                    "browser.type",
+                    id = "submit-3",
+                    parameters = mapOf(
+                        "selector" to """[data-andchamber-ref="$REF"]""",
+                        "value" to "x",
+                        "submit" to "true",
+                    ),
+                ),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                60_000L,
+            ) { 0L }
+        }
+        runCurrent()
+        val oldPage = pages[0]
+        presenter.takeover()
+        runCatching { submit.await() }
+        assertTrue(presenter.navigateManual("https://example.com/later").ok)
+        val fresh = pages.last()
+        assertTrue(presenter.allow())
+        val grant = presenter.registry.currentGrant()
+        val loads = pages.map { it.loads }
+        oldPage.onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/late"))
+
+        assertSame("a late old event never replaces the later grant", grant, presenter.registry.currentGrant())
+        assertEquals("a late old event never navigates the later page", loads, pages.map { it.loads })
+        assertEquals(fresh.tabId, presenter.state.value.selectedTabId)
+        assertTrue(presenter.state.value.agentOn)
+    }
+
+    @Test
     fun `cancelling an open ends the allow wait and leaves no grant`() = runTest {
         val page = FakePage()
         val presenter = presenter { page }
@@ -442,12 +789,89 @@ class NativeBrowserPresenterTest {
         runCurrent()
         val other = presenter.registry.open("session-b", "/proj", "local", "https://example.com/other", null)
         presenter.registry.grant(1L, "c1", "session-b", other.tabId)
-        advanceTimeBy(2_000)
-        assertFalse("another session's grant is not this page's Allow", pending.isCompleted)
-        advanceTimeBy(1_500)
+        // The bounded wait re-checks at its retry tick. Another session's grant is a STOPPED state,
+        // so the open answers unauthorized rather than treating it as this page's control.
+        advanceTimeBy(300)
         val opened = pending.await()
         assertEquals("false", opened.data.getValue("drivable").toString())
         assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
+    }
+
+    @Test
+    fun `overlapping allow probes mint one grant epoch and keep snapshot authority`() = runTest {
+        val page = FakePage()
+        val firstGate = CompletableDeferred<Unit>()
+        val secondGate = CompletableDeferred<Unit>()
+        page.plainProbeGates.add(firstGate)
+        page.plainProbeGates.add(secondGate)
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+
+        val first = async { presenter.allow() }
+        val second = async { presenter.allow() }
+        runCurrent()
+        assertFalse("the first probe is held", first.isCompleted)
+        assertFalse("the second probe overlaps it", second.isCompleted)
+
+        firstGate.complete(Unit)
+        runCurrent()
+        assertTrue("the first verified probe grants", first.await())
+        val epoch = presenter.registry.currentGrant()?.grantEpoch
+        assertNotNull(epoch)
+        assertTrue(
+            "a snapshot taken after the first grant is authorized",
+            presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok,
+        )
+
+        secondGate.complete(Unit)
+        runCurrent()
+        assertTrue("the overlapping second probe still succeeds", second.await())
+        assertEquals("the second probe reuses the same grant epoch", epoch, presenter.registry.currentGrant()?.grantEpoch)
+        assertTrue(
+            "a later snapshot keeps authority",
+            presenter.execute(request("browser.snapshot", id = "after-overlap"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok,
+        )
+    }
+
+    @Test
+    fun `a takeover during an allow probe cannot grant late`() = runTest {
+        val page = FakePage()
+        val gate = CompletableDeferred<Unit>()
+        page.plainProbeGates.add(gate)
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        val allowing = async { presenter.allow() }
+        runCurrent()
+        assertFalse(allowing.isCompleted)
+        presenter.takeover()
+        gate.complete(Unit)
+        runCurrent()
+        assertFalse("takeover during the probe wins", allowing.await())
+        assertNull(presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.explicitTakeover)
+        assertFalse(presenter.state.value.agentOn)
+    }
+
+    @Test
+    fun `a genuinely new verified document gets a fresh grant epoch`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        val firstEpoch = presenter.registry.currentGrant()?.grantEpoch
+        assertNotNull(firstEpoch)
+
+        page.documentId = "doc-2"
+        page.probeResultOverride = ProbeAcceptance.Accept("witness-2")
+        assertTrue("a new verified document is allowed", presenter.allow())
+        assertNotEquals(
+            "a different document needs a fresh grant epoch",
+            firstEpoch,
+            presenter.registry.currentGrant()?.grantEpoch,
+        )
     }
 
     @Test
@@ -656,6 +1080,166 @@ class NativeBrowserPresenterTest {
         val refused = presenter.openClaimed(openRequest(id = "open-2").copy(parameters = openRequest().parameters + ("viewport" to "tablet")), 1_000L)
         assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, refused.errorCode)
         assertEquals(1, presenter.registry.tabs().size)
+    }
+
+    @Test
+    fun `a new desktop open defaults to 1080p and applies it before load`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        val request = openRequest().let {
+            it.copy(parameters = it.parameters + mapOf("viewport" to "desktop"))
+        }
+        assertTrue(presenter.openClaimed(request, 1_000L).ok)
+        assertTrue(page.desktop)
+        assertEquals(BrowserDesktopViewport.DEFAULT_WIDTH, page.desktopWidth)
+        assertEquals(BrowserDesktopViewport.DEFAULT_HEIGHT, page.desktopHeight)
+        assertEquals("configured once before the single load", 1, page.desktopViewportSets)
+        assertTrue("desktop was set before loadOnce", page.loadAfterMode)
+        assertEquals(BrowserDesktopViewport.DEFAULT_WIDTH, presenter.state.value.desktopWidth)
+        assertEquals(BrowserDesktopViewport.DEFAULT_HEIGHT, presenter.state.value.desktopHeight)
+    }
+
+    @Test
+    fun `a desktop open accepts one paired custom size`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        val request = openRequest().let {
+            it.copy(
+                parameters = it.parameters + mapOf(
+                    "viewport" to "desktop",
+                    "width" to "1600",
+                    "height" to "900",
+                ),
+            )
+        }
+        assertTrue(presenter.openClaimed(request, 1_000L).ok)
+        val page = pages.single()
+        assertEquals(1600, page.desktopWidth)
+        assertEquals(900, page.desktopHeight)
+        assertEquals(1600, presenter.state.value.desktopWidth)
+        assertEquals(900, presenter.state.value.desktopHeight)
+        assertEquals(1, page.loads)
+    }
+
+    @Test
+    fun `an invalid or mobile custom size is unsupported before any page`() = runBlocking {
+        var created = 0
+        val presenter = presenter { created += 1; FakePage() }
+        presenter.setConnection("c1", 4L)
+        suspend fun attempt(viewport: String?, width: String?, height: String?) {
+            val parameters = buildMap {
+                putAll(openRequest().parameters)
+                viewport?.let { put("viewport", it) }
+                width?.let { put("width", it) }
+                height?.let { put("height", it) }
+            }
+            val result = presenter.openClaimed(openRequest().copy(parameters = parameters), 1_000L)
+            assertEquals(ProviderCodes.UNSUPPORTED_PARAMETER, result.errorCode)
+        }
+        attempt("mobile", "1600", "900")
+        attempt(null, "1600", "900")
+        attempt("desktop", "1600", null)
+        attempt("desktop", "639", "900")
+        attempt("desktop", "1600", "2161")
+        attempt("fill", "1600", "900")
+        assertEquals("invalid sizes never create a page", 0, created)
+    }
+
+    @Test
+    fun `the same tab keeps its custom desktop size across controlled navigation`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        val request = openRequest().let {
+            it.copy(parameters = it.parameters + mapOf("viewport" to "desktop", "width" to "1600", "height" to "900"))
+        }
+        assertTrue(presenter.openClaimed(request, 1_000L).ok)
+        val opened = presenter.navigateManual("https://example.com/next")
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        val fresh = pages.last()
+        assertEquals(1600, fresh.desktopWidth)
+        assertEquals(900, fresh.desktopHeight)
+        assertTrue(fresh.desktop)
+        assertEquals(1600, presenter.state.value.desktopWidth)
+        assertEquals(900, presenter.state.value.desktopHeight)
+        assertEquals(1, fresh.loads)
+    }
+
+    @Test
+    fun `resize keeps a custom size, applies a new pair, and restores it after mobile`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        val request = openRequest().let { it.copy(parameters = it.parameters + mapOf("viewport" to "desktop")) }
+        assertTrue(presenter.openClaimed(request, 1_000L).ok)
+        assertEquals(0, page.reloads)
+
+        assertEquals(ModeSwitch.Unchanged, presenter.resizeViewport("desktop", null))
+        assertEquals(BrowserDesktopViewport.DEFAULT_WIDTH, page.desktopWidth)
+        assertEquals(0, page.reloads)
+
+        assertEquals(ModeSwitch.Applied, presenter.resizeViewport("desktop", null, 1280, 720))
+        assertEquals(1280, page.desktopWidth)
+        assertEquals(720, page.desktopHeight)
+        assertEquals(1, page.reloads)
+        assertEquals(1280, presenter.state.value.desktopWidth)
+
+        assertEquals(ModeSwitch.Unchanged, presenter.resizeViewport("desktop", null))
+        assertEquals(1280, page.desktopWidth)
+        assertEquals(1, page.reloads)
+
+        assertEquals(ModeSwitch.Applied, presenter.resizeViewport("mobile", null))
+        assertFalse(page.desktop)
+        assertEquals("the tab keeps its desktop pair while mobile", 1280, presenter.state.value.desktopWidth)
+        assertEquals(2, page.reloads)
+
+        assertEquals(ModeSwitch.Unchanged, presenter.resizeViewport("mobile", null, 1600, 900))
+        assertFalse(page.desktop)
+        assertEquals(1280, presenter.state.value.desktopWidth)
+
+        assertEquals(ModeSwitch.Applied, presenter.resizeViewport("desktop", null))
+        assertTrue(page.desktop)
+        assertEquals("mobile -> desktop restores this tab's custom pair", 1280, page.desktopWidth)
+        assertEquals(720, page.desktopHeight)
+        assertEquals(3, page.reloads)
+    }
+
+    @Test
+    fun `resize RPC rejects custom dimensions for mobile and malformed desktop pairs`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        suspend fun resize(parameters: Map<String, String>) = presenter.execute(
+            request("browser.resize", parameters = parameters),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            5_000L,
+        ) { 0L }
+
+        assertEquals(
+            ProviderCodes.UNSUPPORTED_PARAMETER,
+            resize(mapOf("viewport" to "mobile", "width" to "1600", "height" to "900")).errorCode,
+        )
+        assertEquals(
+            ProviderCodes.UNSUPPORTED_PARAMETER,
+            resize(mapOf("viewport" to "desktop", "width" to "1600")).errorCode,
+        )
+        assertEquals(
+            ProviderCodes.UNSUPPORTED_PARAMETER,
+            resize(mapOf("viewport" to "desktop", "width" to "5000", "height" to "900")).errorCode,
+        )
+        val applied = resize(mapOf("viewport" to "desktop", "width" to "1280", "height" to "720"))
+        assertTrue(applied.errorCode ?: "ok", applied.ok)
+        assertEquals("1280", applied.data.getValue("desktopWidth").toString())
+        assertEquals("720", applied.data.getValue("desktopHeight").toString())
+        assertEquals("pending", applied.data.getValue("geometry").toString().trim('"'))
+        assertEquals(1280, page.desktopWidth)
+        assertEquals(720, page.desktopHeight)
     }
 
     @Test
@@ -1054,7 +1638,7 @@ class NativeBrowserPresenterTest {
         assertFalse(presenter.state.value.agentOn)
         assertNull(presenter.registry.currentGrant())
         assertFalse(presenter.state.value.pageRetired)
-        assertNotEquals(oldTab, presenter.state.value.selectedTabId)
+        assertEquals("reopen keeps the tab and its viewport configuration", oldTab, presenter.state.value.selectedTabId)
         // The fresh view must see a fresh DOWN before it admits any input.
         assertFalse(presenter.admitPageInput(MouseInput.ACTION_UP))
         assertTrue(presenter.admitPageInput(MouseInput.ACTION_DOWN))
@@ -2039,6 +2623,7 @@ class NativeBrowserPresenterTest {
         // Already ready: an epoch move is not a reason to probe again.
         page.currentTicket = 1L
         page.readyForAllow = true
+        page.documentId = "witness-1"
         page.probeCalls = 0
         page.onProbeCall = { page.strictEpoch = 6L }
         presenter.acceptProbeForTest(page, ReadyProbeIdentity(page.viewId(), 1L, 4L))
@@ -2092,15 +2677,18 @@ class NativeBrowserPresenterTest {
         presenter.setConnection("c1", 4L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
         presenter.acceptProbeForTest(page, readyIdentity(page))
-        assertEquals("witness-1", page.acceptedDocument())
+        assertNull("an unmounted page does not accept ready yet", page.acceptedDocument())
         assertEquals("an unmounted page gets no geometry request", 0, page.probeReleases)
         assertFalse(presenter.state.value.pointerUi.geometryReady)
-        // A later real layout supplies the frame; only then may geometry become ready.
+        assertNull(presenter.registry.currentGrant())
+        // A later real layout supplies the frame and makes the page visible. The stored ready
+        // identity is replayed then; only then may the witness/geometry/grant be accepted.
         page.presentationVisible = true
         page.frame = NativeFrame(100, 80, 1, 2, 1, 2, 101, 82)
         presenter.onGeometrySettled()
         assertTrue(presenter.state.value.pointerUi.geometryReady)
-        assertEquals(1, page.probeReleases)
+        assertEquals("witness-1", page.acceptedDocument())
+        assertTrue("the replay or settle requested geometry", page.probeReleases >= 1)
         assertNotNull(presenter.registry.currentGrant())
     }
 
@@ -2435,6 +3023,12 @@ class NativeBrowserPresenterTest {
 
     private fun presenter(
         uniqueTabs: Boolean = false,
+        awaitPageVisible: suspend (ControlledBrowserPage) -> Boolean = { it.nativePresentationVisible() },
+        policy: () -> BrowserUrlPolicy = {
+            BrowserUrlPolicy(resolver = io.andchamber.app.browser.DnsResolver {
+                listOf(java.net.InetAddress.getByName("93.184.216.34"))
+            })
+        },
         pageFactory: (android.content.Context?) -> ControlledBrowserPage,
     ): NativeBrowserPresenter {
         var ids = 0
@@ -2444,6 +3038,8 @@ class NativeBrowserPresenterTest {
             sessionFactory = pageFactory,
             main = kotlinx.coroutines.Dispatchers.Main,
             clock = { 0L },
+            policy = policy,
+            awaitPageVisible = awaitPageVisible,
         ).also { it.attachHostForTest("local", 1L) }
     }
 
@@ -2501,7 +3097,7 @@ class NativeBrowserPresenterTest {
         override val height: Int = 240
         override val pageError: String? = null
         var readyForAllow: Boolean = true
-        override val ready: Boolean get() = readyForAllow
+        override val ready: Boolean get() = readyForAllow && documentId != null
         override var manualNavigation: Boolean = false
         override var tabId: String? = null
         override var onProbe: ((String, Long) -> Unit)? = null
@@ -2509,6 +3105,7 @@ class NativeBrowserPresenterTest {
         override var onFatal: (() -> Unit)? = null
         override var onUnknown: (() -> Unit)? = null
         override var onManualDocument: (() -> Unit)? = null
+        override var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)? = null
         override var onGeometry: ((GeometrySample) -> Unit)? = null
         override var onGeometryRequested: (() -> Unit)? = null
         override var onMouseRetirement: ((String) -> Unit)? = null
@@ -2522,11 +3119,14 @@ class NativeBrowserPresenterTest {
             }
             BrowserReply(
                 ok = true,
-                result = mapOf(
-                    BrowserDriverLogic.RESULT_SNAPSHOT to """{"url":"https://example.com","title":"$text","text":"$text","elements":[{"ref":"$REF","role":"input","type":"text","name":"$text"}]}""",
-                    "width" to "320",
-                    "height" to "240",
-                ),
+                result = buildMap {
+                    put(BrowserDriverLogic.RESULT_SNAPSHOT, """{"url":"https://example.com","title":"$text","text":"$text","elements":[{"ref":"$REF","role":"input","type":"text","name":"$text"}]}""")
+                    put("width", "320")
+                    put("height", "240")
+                    if (request.method == BrowserMethod.TYPE && request.params[BrowserDriverLogic.PARAM_SUBMIT] == "true") {
+                        put(BrowserDriverLogic.RESULT_ENTER_DISPATCHED, "true")
+                    }
+                },
             )
         }
         override suspend fun loadOnce(url: String): Boolean {
@@ -2534,7 +3134,12 @@ class NativeBrowserPresenterTest {
             loadAfterMode = desktopApplies > 0
             return true
         }
-        override suspend fun probe(): ProbeAcceptance = probeResultOverride ?: probe
+        /** Gates for overlapping allow probes; an unqueued gate means immediate return. */
+        val plainProbeGates = ArrayDeque<CompletableDeferred<Unit>>()
+        override suspend fun probe(): ProbeAcceptance {
+            plainProbeGates.removeFirstOrNull()?.await()
+            return probeResultOverride ?: probe
+        }
         override fun acceptReady(ticket: Long, documentId: String): Boolean {
             if (!readyAccepted) return false
             this.documentId = documentId
@@ -2567,6 +3172,9 @@ class NativeBrowserPresenterTest {
         var reloads = 0
         var desktop = false
         var desktopApplies = 0
+        var desktopWidth = BrowserDesktopViewport.DEFAULT_WIDTH
+        var desktopHeight = BrowserDesktopViewport.DEFAULT_HEIGHT
+        var desktopViewportSets = 0
         var loadAfterMode = false
         var lastIdentity: ProbeIdentity? = null
         var takenOver = false
@@ -2576,6 +3184,11 @@ class NativeBrowserPresenterTest {
         var scrollReads = 0
         val mousePlans = mutableListOf<MouseEventPlan>()
         override fun destroy() { destroyed = true }
+        override fun setDesktopViewport(width: Int, height: Int) {
+            desktopWidth = width
+            desktopHeight = height
+            desktopViewportSets += 1
+        }
         override fun setDesktopMode(enabled: Boolean) {
             desktop = enabled
             desktopApplies += 1

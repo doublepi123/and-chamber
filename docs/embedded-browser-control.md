@@ -17,10 +17,10 @@ One tool, one action per call:
 | `open` | Open one public `https` URL in the in-app window; a ready foreground page defaults to agent control |
 | `snapshot` | Read a text snapshot and element refs |
 | `click` | Activate a ref from the latest snapshot |
-| `type` | Type into a ref from the latest snapshot |
+| `type` | Type into a snapshot ref; optional `submit:true` sends one native Enter and confirms a supported GET navigation |
 | `scroll` | Scroll `up` or `down` |
 | `capture` | Capture the browser view as PNG |
-| `resize` | Resize the window |
+| `resize` | Choose mobile/desktop page layout and an optional fixed desktop resolution |
 
 The plugin reads `ANDCHAMBER_BROWSER_TOOL_FILE` on every call. If the file is absent or unreadable it
 returns a plain "not available" text error. It never prints the token, and it does not retry on abort.
@@ -55,7 +55,8 @@ from, or into, the OpenChamber page profile.
 
 - The window has a visible address bar, address editing and reload, full-screen/small-window switching,
   a hide action, and an explicit takeover action. Closing a page is separate from hiding its window.
-- The page keeps a phone-sized layout viewport. Resizing the small window scales its presentation,
+- Mobile pages keep a phone-sized viewport. Desktop pages keep a separate fixed viewport, defaulting
+  to **1920 × 1080 CSS pixels**. Resizing the small window scales its presentation,
   rather than repeatedly changing the website's responsive layout. Full screen uses the same page,
   document, refs and scroll position; switching presentation does not pause agent work.
 - Ordinary scrolling, window dragging and resizing do not hand control away from the agent. Use the
@@ -64,6 +65,43 @@ from, or into, the OpenChamber page profile.
 - Native touch and agent coordinates are measured in the unscaled page; the window transform maps
   them to its displayed page rectangle. Capture must validate that transformed rectangle rather than
   copying an unscaled WebView-sized area of the chat window.
+
+### Agent-selected page layout
+
+The agent can choose `viewport:"mobile"` or `viewport:"desktop"` for the site and task without asking
+the person to select a layout. Desktop `open`/`resize` calls may include both integer `width` and
+`height`: width 640–3840, height 360–2160. Invalid or one-sided sizes are refused, never clamped. Mobile
+uses the device's available browser area and refuses custom desktop dimensions.
+
+```json
+{"action":"open","url":"https://example.com/","viewport":"desktop"}
+{"action":"resize","viewport":"desktop","width":1366,"height":768}
+```
+
+The chosen desktop resolution belongs to the tab and survives a controlled submit, reload, or a
+mobile/desktop round trip. Changing the actual page viewport can reload an eligible controlled GET
+and invalidates old refs; take a new snapshot. Configuration responses marked `geometry:"pending"`
+are not DOM measurements. Snapshots expose the measured layout and visual viewports; the app does not
+spoof device pixel ratio or `screen`. Desktop's minimum page scale is the configured baseline so wide
+overflow content cannot expand its fixed viewport; pinch can zoom in but not out below that baseline.
+WebView's density conversion can introduce about two CSS pixels of rounding; snapshots report the
+actual measurements rather than replacing them with the requested values. A captured PNG is still
+the displayed page rectangle, not a claim to an unscaled 1920 × 1080 screenshot.
+
+### Type and Enter submission
+
+`submit` absent or `false` keeps ordinary typing. For `submit:true`, the target must be an editable,
+non-sensitive single-line input. Known POST forms, credential/file-bearing forms, unsupported default
+submitter overrides and non-current-tab targets are refused before typing. The app fills the value,
+rechecks the same input and focus, then sends exactly one native Enter DOWN/UP pair without forcing
+the software keyboard open.
+
+The input/Enter acknowledgement alone is not success. The original request waits for a supported
+same-tab main-frame GET, preflights its URL and DNS off the main thread, replaces the view in the same
+tab, and confirms the new document witness and grant. Old refs expire. POST and redirect loads are
+not replayed as GET. No navigation, timeout, cancellation or an uncertain outcome is not reported as
+a successful search and never causes an automatic second Enter. Arbitrary in-page handler completion
+without a main-frame GET is not inferred from a DOM change.
 
 ## Limits
 
@@ -76,8 +114,8 @@ from, or into, the OpenChamber page profile.
 - POST, unrecognized redirects and complex login flows are not supported in this controlled browser.
   They are not replayed as GET. Use an external browser for unsupported flows; its cookies are not
   imported here.
-- Use `open` for top-level document navigation under agent control. Choose **Take over** before
-  following site-driven links or forms by hand; ordinary touching and scrolling no longer switch the
+- Use `open` or a supported `type(submit:true)` for top-level document navigation under agent control.
+  Choose **Take over** before following other site-driven links or forms by hand; ordinary touching and scrolling no longer switch the
   page into manual-navigation mode. Unsupported POST/redirect documents are not made controllable
   merely by restoring the window.
 - There is no production path that uses root or ADB. WebView remote debugging and CDP are not enabled.
@@ -162,6 +200,13 @@ adb -s "$SERIAL" shell am instrument -w \
   -e class io.andchamber.app.browser.NativeBrowserDefaultGrantInstrumentationTest,io.andchamber.app.browser.BrowserSiteDataIsolationInstrumentationTest \
   io.andchamber.app.test/androidx.test.runner.AndroidJUnitRunner
 ```
+
+`BrowserSubmitInstrumentationTest` adds native Enter/GET arrival, special-character query encoding,
+same-tab replacement/ref expiry, sensitive/POST refusal and hide-during-submit checks.
+`BrowserDesktopViewportInstrumentationTest` reads the actual 1920 × 1080 and custom desktop layout,
+visual viewport, CSS rulers, wide overflow and dynamic meta behavior; it also checks agent resize and
+presentation-only window changes. Both use the same normal AndroidJUnitRunner and in-memory HTTPS
+fixtures, not a synthetic grant or a manually constructed search URL.
 
 The emulator regression set also covers the ten product scenarios and the six lifecycle/two
 retirement scenarios in `scripts/verify_local_provider_product.cjs` and

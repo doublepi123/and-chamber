@@ -171,21 +171,25 @@ test('blocked-tight refuses NoProvider-style/wrong snapshot code and native inpu
   assert.equal(result.reason, 'blocked-snapshot-code');
 });
 
-test('desktop-1024 requires every actual metric, not only UA', async () => {
+test('desktop-1024 keeps its historical id but asserts real 1920x1080 JS layout', async () => {
+  const page = { innerWidth: 1920, innerHeight: 1080, media1000: true, devicePixelRatio: 1 };
   const io = {
     async open() { return { ok: true, tabId: 'tab' }; },
     async tapUi() { return { ok: true }; },
     async readDiag() { return { ...readyNative('tab', 7), grantForSelected: true }; },
-    async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
-    async presentation() { return { fixture: { native: { ...readyNative('tab', 7), physicalFrame: { left: 0, top: 0, width: 900, height: 600 } } }, observe: { metrics: { ua: 'desktop', clientWidth: 1024, media1000: true, visualViewport: { width: 1024, height: 700 }, dpr: 1 } }, ui: readyUi(), composer: {} }; },
+    async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true }, page }; },
+    async presentation() { return { fixture: { native: { ...readyNative('tab', 7), physicalFrame: { left: 0, top: 0, width: 900, height: 600 } } }, observe: { metrics: { ua: 'desktop' } }, ui: readyUi(), composer: {} }; },
   };
   const result = await product.PRODUCT_CASE_FUNCTIONS['product-desktop-1024'](io, {});
   assert.equal(result.ok, true, JSON.stringify(result));
-  io.presentation = async () => ({ fixture: { native: { ...readyNative('tab', 7) } }, observe: { metrics: { ua: 'desktop', clientWidth: 390, media1000: false } }, ui: readyUi(), composer: {} });
+  assert.equal(result.page.innerWidth, 1920);
+  assert.equal(result.page.innerHeight, 1080);
+  io.pageRect = async () => ({ viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true }, page: { ...page, innerWidth: 1024, innerHeight: 768 } });
   const failed = await product.PRODUCT_CASE_FUNCTIONS['product-desktop-1024'](io, {});
   assert.equal(failed.ok, false);
-  assert.deepEqual(failed.failures.sort(), ['clientWidth', 'dpr', 'media1000', 'physical', 'visualViewport']);
-  io.presentation = async () => ({ fixture: { native: { ...readyNative('tab', 7), physicalFrame: { left: 0, top: 0, width: 900, height: 600 } } }, observe: { metrics: { ua: 'desktopish', clientWidth: 1024, media1000: true, visualViewport: { width: 1024, height: 700 }, dpr: 1 } }, ui: readyUi(), composer: {} });
+  assert.deepEqual(failed.failures.sort(), ['innerHeight', 'innerWidth']);
+  io.pageRect = async () => ({ viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true }, page });
+  io.presentation = async () => ({ fixture: { native: { ...readyNative('tab', 7), physicalFrame: { left: 0, top: 0, width: 900, height: 600 } } }, observe: { metrics: { ua: 'desktopish' } }, ui: readyUi(), composer: {} });
   const wrongUa = await product.PRODUCT_CASE_FUNCTIONS['product-desktop-1024'](io, {});
   assert.equal(wrongUa.ok, false);
   assert.deepEqual(wrongUa.failures, ['ua']);
@@ -236,7 +240,7 @@ function clocked() {
   return { now: () => clock, sleep: async (ms) => { clock += ms; } };
 }
 
-function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false } = {}) {
+function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false, imeOverlap = false, imeLayout = 'float', blocked = false } = {}) {
   const clock = clocked();
   const state = { mouse: false, grant: true, note: '', noteFocused: false, docFocus: false, nativeFocus: false, ime: false, sy: 0, enlarged: false };
   return {
@@ -256,24 +260,36 @@ function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false
       state.ime = false;
       return { ok: true, data: { phase: 'ime-hide', shownBefore: true, shownAfter: false } };
     },
-    async readDiag() { return { ...readyNative('tab-focus', 7), grantForSelected: state.grant, mouseMode: state.mouse }; },
+    async readDiag() { return { ...readyNative('tab-focus', 7), grantForSelected: state.grant, mouseMode: state.mouse, presentationBlocked: blocked }; },
     async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
     async presentation() {
-      const editorTop = overlap ? 400 : 550;
-      const editorBottom = overlap ? 500 : 600;
+      const editorTop = imeOverlap ? 350 : overlap ? 400 : 550;
+      const editorBottom = imeOverlap ? 450 : overlap ? 500 : 600;
+      const imePage = { left: 0, top: 0, width: imeLayout === 'float' ? 600 : 1000, height: unsafe ? 500 : 400 };
       const frame = state.ime
-        ? { left: 0, top: 0, width: 1000, height: unsafe ? 500 : 400 }
+        ? imePage
         : state.enlarged
           ? { left: 0, top: 0, width: 1000, height: 600 }
-          : { left: 0, top: 0, width: 600, height: 500 };
-      const ui = state.ime
-        ? { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} }
+          : { left: 0, top: 0, width: 600, height: imeOverlap ? 300 : 500 };
+      const surface = state.ime
+        ? imeLayout === 'full' || imeLayout === 'autoFull'
+          ? { left: 0, top: 0, right: 1000, bottom: 400 }
+          : { left: 0, top: 0, right: 700, bottom: 420 }
         : state.enlarged
-          ? readyUi({ 'Small window': {} })
-          : readyUi();
+          ? { left: 0, top: 0, right: 1000, bottom: 600 }
+          : { left: 0, top: 0, right: 700, bottom: imeOverlap ? 350 : 550 };
+      let ui;
+      if (state.ime) {
+        if (imeLayout === 'float') ui = readyUi();
+        else if (imeLayout === 'full') ui = readyUi({ 'Small window': {} });
+        else ui = { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} };
+      } else {
+        ui = state.enlarged ? readyUi({ 'Small window': {} }) : readyUi();
+      }
+      ui.surface = surface;
       return {
         fixture: {
-          native: { ...readyNative('tab-focus', 7), grantForSelected: state.grant, hasFocus: state.nativeFocus, physicalFrame: frame },
+          native: { ...readyNative('tab-focus', 7), grantForSelected: state.grant, presentationBlocked: blocked, hasFocus: state.nativeFocus, physicalFrame: frame },
           page: { noteValue: state.note, noteFocused: state.noteFocused, noteEnabled: true, noteReadOnly: false, noteTag: 'INPUT', noteSelectionStart: state.noteFocused ? state.note.length : null, noteSelectionEnd: state.noteFocused ? state.note.length : null, documentHasFocus: state.docFocus, timeOrigin: 100, loads: 1 },
           outerime: { shown: state.ime, windowLeftPx: 0, windowTopPx: 0, windowRightPx: 1000, safeBottomPx: 400 },
         },
@@ -283,7 +299,7 @@ function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false
           mainWebView: { x: 0, y: 0, width: 1000, height: 600 },
           measurement: { consoleGeneration: 1, nativeGeneration: 1, nativeWidth: 1000, nativeHeight: 600, top: editorTop, bottom: editorBottom, viewportWidth: 1000, viewportHeight: 600, visible: true },
           consoleGeneration: 1, nativeGeneration: 1, contentWidth: 1000, contentHeight: 600,
-          selectedClearancePx: overlap ? 100 : 50, fallback: false, validityReason: 'accepted',
+          selectedClearancePx: imeOverlap ? 150 : overlap ? 100 : 50, fallback: false, validityReason: 'accepted',
         },
       };
     },
@@ -300,20 +316,39 @@ function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false
   };
 }
 
-test('focused product flow: IME autoFull, real Back autoFloat, then full/small cycle', async () => {
+test('focused product flow: IME accepts real Full/Float, Back restores Float, then full/small cycle', async () => {
   const ok = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo(), {});
   assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(ok.imeLayout, 'float');
+  const full = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ imeLayout: 'full' }), {});
+  assert.equal(full.ok, true, JSON.stringify(full));
+  assert.equal(full.imeLayout, 'full');
+  const autoFull = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ imeLayout: 'autoFull' }), {});
+  assert.equal(autoFull.ok, true, JSON.stringify(autoFull));
+  assert.equal(autoFull.imeLayout, 'full-auto');
+  const fullOverlap = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ imeLayout: 'full', imeOverlap: true }), {});
+  assert.equal(fullOverlap.ok, true, JSON.stringify(fullOverlap));
+  assert.equal(fullOverlap.imeLayout, 'full');
   const noFocus = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ focusable: false }), {});
   assert.equal(noFocus.ok, false);
   assert.equal(noFocus.reason, 'note-focus-timeout');
   const noFocusDoc = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ ime: false }), {});
   assert.equal(noFocusDoc.ok, false);
+  const imeOverlap = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ imeOverlap: true }), {});
+  assert.equal(imeOverlap.ok, false);
+  assert.equal(imeOverlap.reason, 'ime-shown-float-overlaps-composer');
+  const unknown = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ imeLayout: 'unknown' }), {});
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.reason, 'ime-shown-window-mode');
+  const blocked = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ blocked: true }), {});
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.reason, 'ime-shown-blocked');
   const overlap = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ overlap: true }), {});
   assert.equal(overlap.ok, false);
   assert.equal(overlap.reason, 'ime-gone-autfloat-float-overlaps-composer');
   const unsafe = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ unsafe: true }), {});
   assert.equal(unsafe.ok, false);
-  assert.equal(unsafe.reason, 'ime-autofull-page-outside-ime-safe');
+  assert.equal(unsafe.reason, 'ime-shown-page-outside-ime-safe');
 });
 
 function mouseIo({ logClick = true, logMove = false, clickOffset = 0 } = {}) {
@@ -384,10 +419,16 @@ test('mouse move-click enables Mouse, uses measured pointer hit and counts the r
   assert.equal(offBy.moved, true);
 });
 
-function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuringGesture = false, beginCode = null, endOk = true } = {}) {
+function hoverA11yIo({
+  move = true, moveOffset = 0, extraClick = false, a11yDuringGesture = false,
+  beginCode = null, endOk = true,
+  pageWidth = 1024, physicalWidth = 1024,
+  box = { left: 400, top: 150, right: 520, bottom: 230 },
+  pointerCss = { x: 0, y: 0 },
+} = {}) {
   const clock = clocked();
-  const state = { mouse: false, grant: true, logs: [], pointer: { x: 0, y: 0 }, began: 0, ended: 0 };
-  const box = { left: 400, top: 150, right: 520, bottom: 230 };
+  const scale = physicalWidth / pageWidth;
+  const state = { mouse: false, grant: true, logs: [], pointer: { x: pointerCss.x, y: pointerCss.y }, began: 0, ended: 0 };
   return {
     now: clock.now,
     sleep: clock.sleep,
@@ -402,7 +443,7 @@ function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuri
     },
     async readDiag() { return { ...readyNative('tab-hover', 7), grantForSelected: state.grant, mouseMode: state.mouse }; },
     async pageRect() {
-      return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true, pointerViewX: state.pointer.x, pointerViewY: state.pointer.y }, physical: { left: 0, top: 0, width: 1024, height: 600 }, page: { visualViewport: { width: 1024, height: 600, offsetLeft: 0, offsetTop: 0 } } };
+      return { viewHandle: 7, viewWidth: pageWidth, viewHeight: 600, pointerUi: { viewHandle: 7, geometryReady: true, pointerViewX: state.pointer.x, pointerViewY: state.pointer.y }, physical: { left: 0, top: 0, width: physicalWidth, height: 600 }, page: { visualViewport: { width: pageWidth, height: 600, offsetLeft: 0, offsetTop: 0 } } };
     },
     async fixtureTarget(_id, x, y) {
       return { box, hit: x >= box.left && x <= box.right && y >= box.top && y <= box.bottom };
@@ -410,7 +451,7 @@ function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuri
     async presentation() {
       return {
         fixture: {
-          native: { ...readyNative('tab-hover', 7), physicalFrame: { left: 0, top: 0, width: 1024, height: 600 } },
+          native: { ...readyNative('tab-hover', 7), physicalFrame: { left: 0, top: 0, width: physicalWidth, height: 600 } },
           page: { timeOrigin: 100, loads: 1 },
         },
         observe: { log: state.logs.map((entry) => ({ ...entry })) },
@@ -428,11 +469,18 @@ function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuri
       if (!endOk) return { ok: false, data: null, code: 'a11y-restore-failed', detail: 'a11y-restore-failed', commandId: 'cmd-end' };
       return { ok: true, data: { phase: 'a11y-off', state: 'on', a11yEnabled: true, elapsedMs: 130 }, code: '', detail: '', commandId: 'cmd-end' };
     },
+    async finger(text) {
+      const values = text.replace('finger:', '').split(',').map(Number);
+      const [, , dx, dy, hold, steps] = values;
+      if (hold !== 0 || steps < 1) return false;
+      state.pointer = { x: state.pointer.x + dx / scale, y: state.pointer.y + dy / scale };
+      return true;
+    },
     async hoverFinger(text) {
       const values = text.replace('finger:', '').split(',').map(Number);
       const [sx, sy, dx, dy, hold, steps] = values;
       if (hold !== 0 || steps < 1) return { ok: false, data: null, code: 'bad-finger', detail: 'bad-finger', commandId: 'cmd-finger' };
-      state.pointer = { x: state.pointer.x + dx, y: state.pointer.y + dy };
+      state.pointer = { x: state.pointer.x + dx / scale, y: state.pointer.y + dy / scale };
       if (move) {
         state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0, x: Math.round(state.pointer.x + moveOffset), y: Math.round(state.pointer.y + moveOffset) });
       }
@@ -455,6 +503,28 @@ test('mouse hover a11y-off passes with one button-free pointermove at the measur
   assert.ok(Math.hypot(result.dx, result.dy) > 32);
   assert.equal(io.began(), 1);
   assert.equal(io.ended(), 1, 'the accessibility-off window is closed exactly once');
+});
+
+test('mouse hover at the desktop display scale moves away before a large real move back to the box', async () => {
+  // Prior move-click leaves the pointer at the box centre. On the 1920 CSS desktop viewport the real
+  // box is only ~40 display px wide, so a centre-to-inset-corner move is naturally below 32 px.
+  const io = hoverA11yIo({
+    pageWidth: 1920,
+    physicalWidth: 512,
+    box: { left: 400, top: 150, right: 550, bottom: 230 },
+    pointerCss: { x: 475, y: 190 },
+  });
+  const result = await product.PRODUCT_CASE_FUNCTIONS['product-mouse-hover-a11y-off'](io, {});
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.hover, 'observed');
+  assert.equal(result.pointermoveObserved, true);
+  assert.equal(result.moves, 1, 'only the move back to the target is new hover evidence');
+  assert.ok(result.away, 'the small natural move first performed a real away move');
+  assert.equal(result.away.hit, false);
+  assert.ok(Math.hypot(result.away.displayDx, result.away.displayDy) >= 64);
+  assert.ok(Math.hypot(result.dx, result.dy) > 32);
+  assert.equal(io.began(), 1);
+  assert.equal(io.ended(), 1);
 });
 
 test('mouse hover a11y-off fails typed on a missing move, an extra click, an off-point move or a11y still on', async () => {

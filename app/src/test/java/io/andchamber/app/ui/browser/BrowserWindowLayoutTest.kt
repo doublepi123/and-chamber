@@ -184,4 +184,49 @@ class BrowserWindowLayoutTest {
         assertEquals("example.com" to "/a?b", splitAddress("https://example.com/a?b"))
         assertEquals("example.com" to "", splitAddress("https://example.com/"))
     }
+
+    @Test fun `computer layout keeps its own fixed size, whatever the phone does`() {
+        val phonePx = 945 to 1690
+        assertEquals(1920 to 1080, browserPageViewportPx(true, 1920, 1080, phonePx.first, phonePx.second))
+        assertEquals(1366 to 768, browserPageViewportPx(true, 1366, 768, 1690, 945))
+        // Phone layout, or an unusable desktop size, uses the phone viewport.
+        assertEquals(phonePx, browserPageViewportPx(false, 1920, 1080, phonePx.first, phonePx.second))
+        assertEquals(phonePx, browserPageViewportPx(true, 0, 1080, phonePx.first, phonePx.second))
+    }
+
+    @Test fun `computer layout windows keep the page proportions and stay usable on phones`() {
+        for ((w, h) in listOf(320f to 640f, 360f to 740f, 412f to 892f)) {
+            val phone = browserViewportDp(w, h)
+            val (vpW, vpH) = browserLayoutViewportDp(phone, true, 1920, 1080)
+            assertEquals(1920f / 1080f, vpW / vpH, 0.01f)
+            for (full in listOf(false, true)) {
+                val l = browserWindowLayout(w, h, 0f, composer, vpW, vpH, full)
+                assertFalse("$w x $h full=$full", l.blocked)
+                assertInside(l, w, if (l.presentation == BrowserPresentation.Float) h - composer else h)
+                if (l.presentation == BrowserPresentation.Float) {
+                    assertTrue(vpH * l.scale >= MIN_FLOAT_PAGE_HEIGHT - 0.01f)
+                    assertEquals(vpH * l.scale + 2 * BROWSER_BAR_HEIGHT, l.window.height, 0.01f)
+                }
+            }
+        }
+        assertEquals(browserViewportDp(360f, 740f), browserLayoutViewportDp(browserViewportDp(360f, 740f), false, 1920, 1080))
+    }
+
+    @Test fun `a wide page is centred in a tall full screen, never cropped or stretched`() {
+        // 1920 x 1080 page in a 945 x 1690 px full-screen page area.
+        val t = fixedViewportTransform(945, 1690, 1920, 1080)
+        assertEquals(945f / 1920f, t.scale, 0.0001f)
+        assertEquals(0f, t.offsetX, 0.01f)
+        assertEquals((1690 - 1080 * t.scale) / 2f, t.offsetY, 0.01f)
+        assertTrue(t.offsetY + 1080 * t.scale <= 1690f)
+    }
+
+    @Test fun `only a phone screen change in phone layout invalidates the page geometry`() {
+        assertTrue(browserViewportChangeInvalidates(false, 945 to 1690, false, 1690 to 945))
+        assertFalse(browserViewportChangeInvalidates(false, 945 to 1690, false, 945 to 1690))
+        // Agent resize and layout switches handle their own invalidation and reload.
+        assertFalse(browserViewportChangeInvalidates(true, 1920 to 1080, true, 1366 to 768))
+        assertFalse(browserViewportChangeInvalidates(false, 945 to 1690, true, 1920 to 1080))
+        assertFalse(browserViewportChangeInvalidates(true, 1920 to 1080, false, 945 to 1690))
+    }
 }

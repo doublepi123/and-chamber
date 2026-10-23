@@ -13,6 +13,10 @@ Files:
 - `BrowserFloatWindow.kt`, `BrowserFloatPage.kt`, `BrowserFloatLayout.kt`, `BrowserHostSurface.kt`:
   the Compose window, its header/menu/status and the host surface that reports the console session.
 - `BrowserSession.kt`: one WebView, profile bind, clients, viewport capture.
+- `BrowserDesktopViewport.kt`: bounded, paired desktop CSS dimensions (1920 × 1080 by default),
+  retained per tab independently of phone window presentation.
+- `BrowserSubmitNavigation.kt`: one-shot native Enter navigation receipts; callbacks report an event,
+  while the original presenter action owns policy checks and controlled replacement.
 - `BrowserSiteData.kt`: the "Clear site data" action. Revokes the agent grant, then clears this
   profile's cookies and JavaScript storage, then the shown page's cache and history, then reloads it as
   a person's navigation. If the page cache/history step fails after cookies and storage are gone, the
@@ -22,7 +26,7 @@ Files:
   WebView.
 - Support: `BrowserGeometry.kt`, `BrowserTouchFocus.kt`, `MouseInput.kt`, `ScrollMemory.kt`,
   `WindowRestoreTargetGate.kt`, `PixelCopyBridge.kt`, `BrowserRetiredPage.kt`.
-- `FixedBrowserViewportLayout.kt`: a fixed phone-sized child viewport and native presentation transform;
+- `FixedBrowserViewportLayout.kt`: a fixed phone-sized or configured desktop child viewport and native presentation transform;
   dragging, resizing and full-screen switching change the display rectangle, not the page layout.
   `NativeFrameCommitGate` reports a presentation only after the platform commits its frame (API 29+).
 
@@ -41,7 +45,8 @@ Files:
   No `addJavascriptInterface`, no `setWebContentsDebuggingEnabled`, no global `CookieManager`, no proxy
   override, no `pauseTimers`.
 - Navigation allow-list is `BrowserUrlPolicy` (public https only) plus forbidden origins for the local
-  OpenChamber URL and saved remotes. The driver preflights DNS off the main thread before `loadUrl`.
+  OpenChamber URL and saved remotes. A submit's controlled continuation additionally preflights DNS
+  on `Dispatchers.IO` before loading its replacement.
   Subresource and frame loads are syntax-checked in `shouldInterceptRequest` and replaced with an empty
   403 when refused. This is not a complete outbound firewall.
 - A controlled top-level GET always replaces the WebView with a new one on `andchamber_browser_v1`.
@@ -51,8 +56,16 @@ Files:
   and ticket, plus a policy-allowed URL. Callback URLs do not prove the document. A POST or an unknown
   main-document start is NotReady and cannot be saved by a later finished event. Page-reported text is
   not treated as verified. Caller values are inserted once as one JSON argument. Type uses the native
-  input value setter. Password and file fields are refused. Forms and pages that navigate themselves
-  need the user to take over.
+  input value setter. `submit:true` adds one native Enter for a safe single-line input; the original
+  action waits for a native GET receipt and a new ready/granted view before reporting success. POST,
+  credential/file-bearing forms and unsupported submitter overrides are refused, with no automatic
+  second Enter. Other site-driven navigation needs the user to take over.
+- Desktop layout uses an exact fixed native child canvas for the configured CSS dimensions and a
+  document-start viewport width/initial scale derived from real DPR; desktop overview auto-shrink is
+  disabled. Agents may choose mobile/desktop and paired custom desktop dimensions on open/resize.
+  Native dimensions and CSS/visual viewport probes remain separate; presentation changes do not
+  resize the page. A true mode/resolution change uses the presenter's owned reload/invalidation path,
+  not a second UI invalidation.
 - Capture samples the native viewport wrapper's presentation (`BrowserViewportHost.presentationSnapshot()`),
   maps the drawn page to whole window pixels, and requires the complete page to be inside the window and
   unclipped; otherwise capture is refused, so the rest of the app is not copied. The live tuple must also
@@ -83,7 +96,7 @@ Files:
 
 - `ui/web/WebScreen.kt` and `ui/web/ChamberWebView.kt` pass the console session id and the
   "Open web page" action; they do not create a page.
-- `browser/BrowserContract.kt` is the frozen driver contract. This folder does not modify it.
-- `browser/BrowserUrlPolicy.kt` is called, not modified. DNS preflight runs on `Dispatchers.IO`.
+- `browser/BrowserContract.kt` is the shared driver contract, including TYPE submit and RESIZE.
+- `browser/BrowserUrlPolicy.kt` is called, not modified; submit DNS preflight runs on `Dispatchers.IO`.
 - `runtime/process/LocalBrowserProviderBinding.kt` owns the loopback tool server for one launch.
 - Strings live in `values/strings.xml` and `values-zh/strings.xml` under the `browser_` keys.

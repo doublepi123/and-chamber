@@ -178,14 +178,21 @@ internal fun BrowserFloatPage(
         },
         clearingSiteData = clearingSiteData,
         bottomClearance = bottomClearance,
+        desktopViewport = if (state.desktopMode) IntSize(state.desktopWidth, state.desktopHeight) else null,
     ) { layoutBlocked, viewportPx ->
         val presentationBlocked = layoutBlocked || presentationOccluded
-        // A real viewport change (rotation, split screen) resizes the page; that one is a layout
-        // change. Window presentation changes never reach here.
-        var lastViewport by remember(presenter) { mutableStateOf(viewportPx) }
-        LaunchedEffect(viewportPx) {
-            if (viewportPx != lastViewport) {
-                lastViewport = viewportPx
+        // A real phone-screen change (rotation, split screen) in phone layout resizes the page; that
+        // one is a layout change. Window presentation changes never reach here, and a computer-layout
+        // size or a layout switch is the agent's own resize, which invalidates and reloads by itself.
+        val desktopNow = state.desktopMode
+        var lastViewport by remember(presenter) { mutableStateOf(desktopNow to viewportPx) }
+        LaunchedEffect(desktopNow, viewportPx) {
+            val (wasDesktop, was) = lastViewport
+            lastViewport = desktopNow to viewportPx
+            if (browserViewportChangeInvalidates(
+                    wasDesktop, was.width to was.height, desktopNow, viewportPx.width to viewportPx.height,
+                )
+            ) {
                 presenter.onGeometryChanged()
             }
         }

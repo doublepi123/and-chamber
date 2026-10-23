@@ -20,6 +20,28 @@ internal object OpenChamberProviderFixtures {
     const val MOUSE_URL = "https://example.com/openchamber-provider-mouse"
     const val RETIRE_URL = "https://example.com/openchamber-provider-retire"
     const val FOCUSED_URL = "https://example.com/openchamber-provider-focused"
+    const val SEARCH_URL = "https://example.com/openchamber-provider-search"
+    const val SEARCH_RESULTS_URL = "https://example.com/openchamber-provider-search-results"
+    const val SEARCH_POST_URL = "https://example.com/openchamber-provider-search-post"
+    const val SEARCH_POST_RESULTS_URL = "https://example.com/openchamber-provider-search-post-results"
+    const val SEARCH_SENSITIVE_URL = "https://example.com/openchamber-provider-search-sensitive"
+    const val SEARCH_RACE_URL = "https://example.com/openchamber-provider-search-race"
+    const val SEARCH_RACE_RESULTS_URL = "https://example.com/openchamber-provider-search-race-results"
+    const val DESKTOP_VIEWPORT_URL = "https://example.com/openchamber-provider-desktop-viewport"
+
+    /** Real GET/POST arrivals of the search fixture, for one-submit / no-replay proof. */
+    @Volatile
+    var searchGetArrivals: Int = 0
+
+    @Volatile
+    var searchRaceGetArrivals: Int = 0
+
+    @Volatile
+    var searchPostArrivals: Int = 0
+
+    /** A GET that lands on the POST result URL is a silent replay, never a valid submit. */
+    @Volatile
+    var searchPostGetArrivals: Int = 0
 
     /**
      * Desktop/mouse fixture. Reports the CSS viewport and records which real pointer events the page
@@ -234,7 +256,172 @@ internal object OpenChamberProviderFixtures {
         </script></body></html>
     """.trimIndent()
 
+    private val searchHtml = """
+        <!doctype html><html><head><title>search-form</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <form method="get" action="$SEARCH_RESULTS_URL">
+            <input id="q" name="q" type="text" aria-label="Search query" value="">
+            <input id="enterCount" type="hidden" name="enterCount" value="0">
+            <input id="nativeTrusted" type="hidden" name="nativeTrusted" value="false">
+            <button id="go" type="submit" aria-label="Search">Search</button>
+          </form>
+          <span id="marker">search-form</span>
+          <script>
+            var searchInput = document.getElementById('q');
+            var enterCount = document.getElementById('enterCount');
+            var nativeTrusted = document.getElementById('nativeTrusted');
+            searchInput.addEventListener('keydown', function(event){
+              if (event.key !== 'Enter') return;
+              enterCount.value = String((Number(enterCount.value) || 0) + 1);
+              nativeTrusted.value = String(event.isTrusted === true);
+              // No preventDefault, requestSubmit or synthetic navigation: the form's native GET submits.
+            });
+            window.__loads = (Number(sessionStorage.getItem('search-loads') || 0)) + 1;
+            sessionStorage.setItem('search-loads', String(window.__loads));
+          </script>
+        </body></html>
+    """.trimIndent()
+
+    private val searchResultsHtml = """
+        <!doctype html><html><head><title>search-results</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <span id="marker">results</span>
+          <span id="query"></span>
+          <button id="next" type="button" aria-label="Next result">Next</button>
+          <span id="clicked">click:0</span>
+          <script>
+            var q = new URLSearchParams(location.search).get('q') || '';
+            document.getElementById('marker').textContent = 'results:' + q;
+            document.getElementById('query').textContent = 'q:' + q;
+            window.__loads = (Number(sessionStorage.getItem('results-loads') || 0)) + 1;
+            sessionStorage.setItem('results-loads', String(window.__loads));
+            document.getElementById('next').addEventListener('click', function(){
+              document.getElementById('clicked').textContent = 'click:1';
+            });
+          </script>
+        </body></html>
+    """.trimIndent()
+
+    private val searchPostHtml = """
+        <!doctype html><html><head><title>search-post</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <form method="post" action="$SEARCH_POST_RESULTS_URL">
+            <input id="q" name="q" type="text" aria-label="Post query" value="">
+            <button id="go" type="submit" aria-label="Post search">Search</button>
+          </form>
+          <span id="marker">post-form</span>
+        </body></html>
+    """.trimIndent()
+
+    private val searchPostResultsHtml = """
+        <!doctype html><html><head><title>search-post-results</title></head><body>
+          <span id="marker">post-results</span>
+        </body></html>
+    """.trimIndent()
+
+    private val desktopViewportHtml = """
+        <!doctype html><html><head><title>desktop-viewport</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          html,body{margin:0;padding:0;overflow:visible}
+          #ruler{width:100vw;height:100vh;background:#eef}
+          #wide{width:4000px;height:8px;background:#fee}
+        </style></head><body>
+          <div id="ruler"></div>
+          <div id="wide"></div>
+          <script>
+            window.__metaAttempted = false;
+            window.addEventListener('load', function(){
+              var meta = document.querySelector('meta[name="viewport"]');
+              if (meta) meta.setAttribute('content', 'width=640, initial-scale=1');
+              window.__metaAttempted = true;
+            });
+            window.__viewportReport = function(){
+              var ruler = document.getElementById('ruler').getBoundingClientRect();
+              var vv = window.visualViewport || {};
+              var meta = document.querySelector('meta[name="viewport"]');
+              return JSON.stringify({
+                innerWidth: innerWidth,
+                innerHeight: innerHeight,
+                rulerWidth: ruler.width,
+                rulerHeight: ruler.height,
+                scrollWidth: document.documentElement.scrollWidth,
+                clientWidth: document.documentElement.clientWidth,
+                clientHeight: document.documentElement.clientHeight,
+                dpr: devicePixelRatio,
+                visualWidth: vv.width || 0,
+                visualHeight: vv.height || 0,
+                visualScale: vv.scale || 0,
+                metaAttempted: window.__metaAttempted === true,
+                metaContent: meta ? meta.getAttribute('content') : null,
+                timeOrigin: performance.timeOrigin
+              });
+            };
+          </script>
+        </body></html>
+    """.trimIndent()
+
+    private val searchRaceHtml = """
+        <!doctype html><html><head><title>search-race</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <form method="get" action="$SEARCH_RACE_RESULTS_URL">
+            <input id="q" name="q" type="text" aria-label="Race query" value="">
+            <button id="go" type="submit" aria-label="Race search">Search</button>
+          </form>
+          <span id="marker">race-form</span>
+          <script>
+            var raceInput = document.getElementById('q');
+            raceInput.addEventListener('keydown', function(event){
+              if (event.key !== 'Enter') return;
+              // Synchronous independent handler: stop the native default and schedule a delayed
+              // GET built with URLSearchParams, not by production code.
+              event.preventDefault();
+              window.__handlerFired = true;
+              window.__enterCount = (window.__enterCount || 0) + 1;
+              var target = '$SEARCH_RACE_RESULTS_URL' + '?' +
+                new URLSearchParams({q: 'race-delayed'}).toString();
+              setTimeout(function(){
+                window.__delayedGetAttempted = true;
+                location.assign(target);
+              }, 1200);
+            });
+          </script>
+        </body></html>
+    """.trimIndent()
+
+    private val searchSensitiveHtml = """
+        <!doctype html><html><head><title>search-sensitive</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <form method="get" action="$SEARCH_RESULTS_URL">
+            <input id="login-field" name="note" type="text" aria-label="Login field" value="">
+            <button id="go" type="submit" aria-label="Sign in">Sign in</button>
+          </form>
+          <span id="marker">sensitive-form</span>
+        </body></html>
+    """.trimIndent()
+
     private fun page(url: String, method: String): String? = when {
+        method.equals("POST", true) && url == SEARCH_POST_RESULTS_URL -> {
+            searchPostArrivals += 1
+            searchPostResultsHtml
+        }
+        method.equals("GET", true) && (url == SEARCH_POST_RESULTS_URL || url.startsWith("$SEARCH_POST_RESULTS_URL?")) -> {
+            searchPostGetArrivals += 1
+            searchPostResultsHtml
+        }
+        method.equals("GET", true) && url == SEARCH_URL -> searchHtml
+        method.equals("GET", true) && url == DESKTOP_VIEWPORT_URL -> desktopViewportHtml
+        method.equals("GET", true) && url == SEARCH_RACE_URL -> searchRaceHtml
+        method.equals("GET", true) && url == SEARCH_SENSITIVE_URL -> searchSensitiveHtml
+        method.equals("GET", true) && (url == SEARCH_RACE_RESULTS_URL || url.startsWith("$SEARCH_RACE_RESULTS_URL?")) -> {
+            searchRaceGetArrivals += 1
+            searchResultsHtml
+        }
+        method.equals("GET", true) && (url == SEARCH_RESULTS_URL || url.startsWith("$SEARCH_RESULTS_URL?")) -> {
+            searchGetArrivals += 1
+            searchResultsHtml
+        }
+        method.equals("GET", true) && url == SEARCH_POST_URL -> searchPostHtml
         method.equals("GET", true) && url == ORIGIN -> html("provider")
         method.equals("GET", true) && url == ORIGIN2 -> html("second")
         method.equals("GET", true) && url == MOUSE_URL -> mouseHtml

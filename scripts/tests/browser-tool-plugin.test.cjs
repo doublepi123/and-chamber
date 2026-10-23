@@ -254,6 +254,46 @@ test('posts the call and returns the success envelope as text', async (t) => {
   assertNoEndpoint(result, server);
 });
 
+test('type preserves the submit boolean and the confirmed submission result without retry', async (t) => {
+  const selector = '[data-andchamber-ref="ref-1"]';
+  const payload = { version: 1, ok: true, action: 'browser.type',
+    data: { typed: selector, enterDispatched: true, url: 'https://example.com/search?q=opencode', drivable: true } };
+  const server = await useServer(t, json(payload));
+  endpointDir(t).write(server);
+  for (const submit of [true, false]) {
+    const input = { action: 'type', selector, text: 'opencode', submit };
+    const result = await tool.execute(input, context({ id: submit ? 'submit_true' : 'submit_false' }));
+    const request = JSON.parse(server.requests.at(-1).body);
+    assert.deepEqual(request.input, input);
+    assert.equal('allowWaitMs' in request, false);
+    assert.deepEqual(JSON.parse(result.content[0].text), payload);
+    assertNoEndpoint(result, server);
+  }
+  assert.equal(server.requests.length, 2);
+  assert.match(tool.input.properties.submit.description, /same-tab GET/);
+  assert.match(tool.input.properties.submit.description, /POST/);
+});
+
+test('agents can choose fixed desktop resolution for open and resize', async (t) => {
+  const dir = endpointDir(t);
+  for (const [action, width, height] of [['open', 1920, 1080], ['resize', 1366, 768]]) {
+    const payload = { version: 1, ok: true, action: `browser.${action}`, data: { drivable: true } };
+    const server = await useServer(t, json(payload));
+    dir.write(server);
+    const input = { action, viewport: 'desktop', width, height,
+      ...(action === 'open' ? { url: 'https://example.com/' } : {}) };
+    await tool.execute(input, context({ id: `desktop_${action}` }));
+    assert.equal(server.requests.length, 1);
+    assert.deepEqual(JSON.parse(server.requests[0].body).input, input);
+  }
+  assert.equal(tool.input.properties.width.type, 'integer');
+  assert.equal(tool.input.properties.height.type, 'integer');
+  assert.deepEqual([tool.input.properties.width.minimum, tool.input.properties.width.maximum], [640, 3840]);
+  assert.deepEqual([tool.input.properties.height.minimum, tool.input.properties.height.maximum], [360, 2160]);
+  assert.match(tool.description, /Choose.*mobile.*desktop.*yourself/);
+  assert.match(tool.description, /1920x1080/);
+});
+
 test('returns a refused action envelope as text', async (t) => {
   const payload = {
     version: 1,

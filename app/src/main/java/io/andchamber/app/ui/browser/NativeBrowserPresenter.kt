@@ -25,6 +25,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -108,6 +109,8 @@ class NativeBrowserPresenter(
     /** Presentation gate set by the floating window. It is not a grant and never creates a page. */
     private var presentationBlocked = false
     private val tabModes = linkedMapOf<String, Boolean>()
+    /** Per-tab desktop CSS viewport; a mobile page keeps its stored pair for a later desktop switch. */
+    private val desktopSizes = linkedMapOf<String, BrowserDesktopViewport.Size>()
     /**
      * Legacy presentation set from before default control. An explicit open no longer waits for an
      * Allow tap, so nothing is added here; the field and its state output stay for binding
@@ -130,6 +133,12 @@ class NativeBrowserPresenter(
      * later foreground action retries it. Connection/owner/takeover/hide/page changes clear it.
      */
     private var pendingWake: PendingWake? = null
+    /**
+     * One-shot receipt for a `browser.type` submit. The Session callback completes [events]; it
+     * never calls execute or takes the action mutex. The execute coroutine still holding the action
+     * lock waits for it and continues a GET as one controlled replacement.
+     */
+    private var submitReceipt: SubmitReceipt? = null
     private var mouseMode = false
     private var pointerViewX = 0f
     private var pointerViewY = 0f
@@ -311,24 +320,56 @@ class NativeBrowserPresenter(
      * admission so the binding drops SSE. Tabs and pages stay. A later attachHost restores admission
      * only; it does not restore the grant.
      */
-    fun setDesktopMode(enabled: Boolean): ModeSwitch = applyMode(enabled, keepRequestId = null)
+    fun setDesktopMode(enabled: Boolean): ModeSwitch =
+        applyMode(enabled, keepRequestId = null, requestedSize = null)
 
-    fun resizeViewport(viewport: String, keepRequestId: String?): ModeSwitch {
+    fun resizeViewport(
+        viewport: String,
+        keepRequestId: String?,
+        width: Int? = null,
+        height: Int? = null,
+    ): ModeSwitch {
         val enabled = when (viewport) {
             "desktop" -> true
             "mobile" -> false
             "fill" -> tabModes[selectedTabId] == true
             else -> return ModeSwitch.ReopenRequired
         }
-        return applyMode(enabled, keepRequestId)
+        // Custom desktop dimensions are valid only with an explicit desktop viewport, as a valid
+        // pair. An invalid request is a no-op here; the RPC validates and reports unsupported.
+        if (width != null || height != null) {
+            if (viewport != "desktop" || width == null || height == null ||
+                !BrowserDesktopViewport.isValid(width, height)
+            ) {
+                return ModeSwitch.Unchanged
+            }
+        }
+        val requestedSize = if (width != null && height != null) {
+            BrowserDesktopViewport.Size(width, height)
+        } else {
+            null
+        }
+        return applyMode(enabled, keepRequestId, requestedSize)
     }
 
-    private fun applyMode(enabled: Boolean, keepRequestId: String?): ModeSwitch {
+    private fun applyMode(
+        enabled: Boolean,
+        keepRequestId: String?,
+        requestedSize: BrowserDesktopViewport.Size?,
+    ): ModeSwitch {
         // A press in progress defers the layout change. Nothing is applied and the press is not retired.
         if (page?.mousePressActive() == true) return ModeSwitch.Unchanged
         val tabId = selectedTabId
         val pageNow = page
-        if (tabId != null && tabModes[tabId] == enabled && (pageNow == null || pageNow.desktopConfigured() == enabled)) return ModeSwitch.Unchanged
+        val previousSize = desktopSizeFor(tabId)
+        val desiredSize = if (enabled) requestedSize ?: previousSize else previousSize
+        val modeChanged = tabId != null && tabModes[tabId] != enabled
+        val sizeChanged = enabled && desiredSize != previousSize
+        if (!modeChanged && !sizeChanged &&
+            (pageNow == null || pageNow.desktopConfigured() == enabled)
+        ) {
+            return ModeSwitch.Unchanged
+        }
         if (pageNow != null && !pageNow.controlledGetProvenance()) {
             revokeAll("desktop mode refused", keepRequestId)
             synchronized(lock) {
@@ -337,19 +378,26 @@ class NativeBrowserPresenter(
             }
             return ModeSwitch.ReopenRequired
         }
-        if (tabId != null) tabModes[tabId] = enabled
+        if (tabId != null) {
+            tabModes[tabId] = enabled
+            desktopSizes[tabId] = desiredSize
+        }
         modeSeq += 1
         scrollMemory.observePage(scrollIdentity())
         if (!enabled) mouseMode = false
+        // Store the exact desktop pair before the mode so a later desktop switch keeps it.
+        pageNow?.setDesktopViewport(desiredSize.width, desiredSize.height)
         pageNow?.setDesktopMode(enabled)
-        // A viewport change is presentation, not a takeover: the grant stays. Refs and geometry are
-        // dropped because the layout under the old snapshot is gone, and the controlled GET reloads
-        // the same URL for the new mode.
+        // Only a real mode/size change drops refs and reloads the same controlled GET. A viewport
+        // change is not a takeover; the grant stays. Never replay a POST.
         invalidateGeometry("desktop mode", keepRequestId)
         if (pageNow?.controlledGetProvenance() == true) pageNow.reloadGet()
         synchronized(lock) { publishLocked() }
         return ModeSwitch.Applied
     }
+
+    private fun desktopSizeFor(tabId: String?): BrowserDesktopViewport.Size =
+        tabId?.let { desktopSizes[it] } ?: BrowserDesktopViewport.default
 
     fun setMouseMode(enabled: Boolean) {
         // Deferred while a press is active: no mode change, no takeover, no retirement.
@@ -480,6 +528,8 @@ class NativeBrowserPresenter(
         const val TARGET_REGISTRATION_DEADLINE_MS = 2_000L
         /** Bounded re-probes of one load after only its ref epoch moved; never a reload. */
         const val READY_REPROBE_LIMIT = 4
+        /** Tick for a bounded default-control retry while an open is still waiting for its grant. */
+        const val OPEN_GRANT_RETRY_TICK_MS = 250L
     }
 
     private var windowContext: WindowContentContext? = null
@@ -908,6 +958,7 @@ class NativeBrowserPresenter(
             grantEpoch = 0L
             witnessForGrant = null
             autoGrantIntent = null
+            submitReceipt = null
             if (clearPendingWake) pendingWake = null
             mode = ProviderMode.MANUAL
             documentEpoch += 1
@@ -977,10 +1028,19 @@ class NativeBrowserPresenter(
         } ?: return unavailable()
         // The selection stays on the retired placeholder until the fresh page is accepted.
         val before = registry.tabs().map { it.tabId }.toSet()
+        val storedSize = desktopSizeFor(target.tab.tabId)
         val opened = openClaimed(
             ProviderRequest(
                 "user", connectionId.orEmpty(), "reopen", "browser.open",
-                mapOf("url" to target.tab.url, "viewport" to if (target.desktop) "desktop" else "mobile"),
+                buildMap {
+                    put("url", target.tab.url)
+                    put("tabId", target.tab.tabId)
+                    put("viewport", if (target.desktop) "desktop" else "mobile")
+                    if (target.desktop) {
+                        put("width", storedSize.width.toString())
+                        put("height", storedSize.height.toString())
+                    }
+                },
                 target.tab.directory, target.tab.ownerSessionId, 1_000L,
             ),
             Long.MAX_VALUE,
@@ -991,7 +1051,8 @@ class NativeBrowserPresenter(
             synchronized(lock) { publishLocked(shown = true) }
             return opened
         }
-        close(target.tab.tabId)
+        // The explicit open reused and replaced the retired tab's page in place; its tab, mode and
+        // desktop pair are preserved. Closing it here would close the fresh page.
         return opened
     }
 
@@ -1020,6 +1081,7 @@ class NativeBrowserPresenter(
             if (bound.retired) return
             if (autoGrantIntent?.page === target) autoGrantIntent = null
             if (pendingWake?.page === target) pendingWake = null
+            if (submitReceipt?.page === target) submitReceipt = null
             bound.retired = true
             bound.retireReason = reason
             wasSelected = selectedTabId == entry.key
@@ -1239,6 +1301,10 @@ class NativeBrowserPresenter(
         synchronized(lock) {
             created.tabId = tab.tabId
             val storedDesktop = tabModes[tab.tabId] == true
+            val storedSize = desktopSizeFor(tab.tabId)
+            if (desktopSizes[tab.tabId] == null) desktopSizes[tab.tabId] = storedSize
+            // Store the pair before the mode, exactly like a fresh/reopened page.
+            created.setDesktopViewport(storedSize.width, storedSize.height)
             created.setDesktopMode(storedDesktop)
             pages[tab.tabId] = BoundPage(created, pageAdapter, viewGeneration, desktop = storedDesktop)
             page = created
@@ -1264,6 +1330,9 @@ class NativeBrowserPresenter(
             awaitingAllowTabs.remove(removed.tabId)
             if (autoGrantIntent?.tabId == removed.tabId) autoGrantIntent = null
             if (pendingWake?.tabId == removed.tabId) pendingWake = null
+            if (submitReceipt?.tabId == removed.tabId) submitReceipt = null
+            tabModes.remove(removed.tabId)
+            desktopSizes.remove(removed.tabId)
         }
         pages.remove(removed.tabId)?.page?.destroy()
         if (selectedTabId == removed.tabId) {
@@ -1416,41 +1485,45 @@ class NativeBrowserPresenter(
             android.util.Log.i("AndChamberProvider", "allow refused: probe ${(probed as? ProbeAcceptance.Reject)?.message ?: probed.javaClass.simpleName}")
             return@withContext false
         }
-        val granted = synchronized(lock) {
-            val current = host
-            val pageNow = page
-            val bound = pages[snapshot.tab.tabId]
-            current != null && pageNow != null && bound != null && !bound.outcomeUnknown && pageNow.ready &&
-                current.instanceKey == snapshot.host.instanceKey &&
-                current.consoleGeneration == snapshot.host.consoleGeneration &&
-                pageNow === snapshot.page &&
-                bound.page === snapshot.page &&
-                documentEpoch == snapshot.epoch &&
-                bound.generation == snapshot.generation &&
-                selectedTabId == snapshot.tab.tabId &&
-                connectionId == snapshot.connection &&
-                (expectedPage == null || pageNow === expectedPage) &&
-                (expectedTabId == null || selectedTabId == expectedTabId) &&
-                !presentationBlocked && !hidden && !explicitTakeover
-        }
-        if (!granted) {
-            android.util.Log.i("AndChamberProvider", "allow refused: changed during probe")
-            return@withContext false
-        }
         val applied = synchronized(lock) {
             val pageNow = page ?: return@synchronized false
+            val current = host ?: return@synchronized false
+            val bound = pages[snapshot.tab.tabId] ?: return@synchronized false
             // Final fence between the verified probe and the grant: a takeover, a document/epoch
-            // move, a replaced page or a different connection invalidates the late grant.
-            if (explicitTakeover || documentEpoch != snapshot.epoch ||
-                connectionId != snapshot.connection || pageNow !== snapshot.page
+            // move, a replaced page, a temporary hide/block or a different connection invalidates
+            // the late grant. Keep the complete check and grant write in one critical section:
+            // a submit timeout must not mark the page unknown between these two operations.
+            if (bound.outcomeUnknown || bound.retired || !pageNow.ready ||
+                current.instanceKey != snapshot.host.instanceKey ||
+                current.consoleGeneration != snapshot.host.consoleGeneration ||
+                bound.page !== snapshot.page || bound.generation != snapshot.generation ||
+                selectedTabId != snapshot.tab.tabId ||
+                (expectedPage != null && pageNow !== expectedPage) ||
+                (expectedTabId != null && selectedTabId != expectedTabId) ||
+                explicitTakeover || documentEpoch != snapshot.epoch ||
+                connectionId != snapshot.connection || pageNow !== snapshot.page ||
+                hidden || presentationBlocked || paused || consoleInvalidated
             ) {
                 false
             } else {
                 pageNow.manualNavigation = false
                 pageNow.syncWitness(probed.documentId)
-                witnessForGrant = probed.documentId
-                registry.grant(runtimeLaunchId, snapshot.connection, snapshot.tab.ownerSessionId, snapshot.tab.tabId)
+                // Two concurrent ready probes for the same verified document must share one grant
+                // epoch. Reuse an identical live grant instead of minting another epoch; a genuinely
+                // new document (witness differs) still gets a fresh grant.
+                val existing = registry.currentGrant()
+                val reuse = existing != null &&
+                    existing.runtimeLaunchId == runtimeLaunchId &&
+                    existing.connectionId == snapshot.connection &&
+                    existing.sessionId == snapshot.tab.ownerSessionId &&
+                    existing.tabId == snapshot.tab.tabId &&
+                    witnessForGrant == probed.documentId &&
+                    mode == ProviderMode.AGENT
+                if (!reuse) {
+                    registry.grant(runtimeLaunchId, snapshot.connection, snapshot.tab.ownerSessionId, snapshot.tab.tabId)
+                }
                 grantEpoch = registry.currentGrant()?.grantEpoch ?: 0L
+                witnessForGrant = probed.documentId
                 mode = ProviderMode.AGENT
                 // Success consumes only the intent/wake that names this granted page. The explicit
                 // takeover latch is never cleared here; only resumeAgent() or a person's open does.
@@ -1532,8 +1605,219 @@ class NativeBrowserPresenter(
                 activePageAccess = false
                 activeTab = null
                 allowWaitActive = false
+                if (submitReceipt?.requestId == requestId) submitReceipt = null
             }
         }
+    }
+
+    private fun registerSubmitLocked(
+        request: ProviderRequest,
+        session: String,
+        tabId: String,
+    ): SubmitReceipt? {
+        val pageNow = page ?: return null
+        val bound = pages[tabId] ?: return null
+        val grant = registry.currentGrant() ?: return null
+        val tab = registry.find(tabId) ?: return null
+        val hostNow = host ?: return null
+        if (bound.page !== pageNow || bound.retired || pageNow.tabId != tabId) return null
+        if (tab.ownerSessionId != session || grant.tabId != tabId || grant.sessionId != session ||
+            grant.connectionId != request.connectionId || !pageNow.ready
+        ) {
+            return null
+        }
+        val receipt = SubmitReceipt(
+            requestId = request.requestId,
+            connectionId = request.connectionId,
+            ownerSessionId = session,
+            directory = request.directory,
+            serverEpoch = request.serverEpoch,
+            tabId = tabId,
+            page = pageNow,
+            viewId = pageNow.viewId(),
+            ticket = pageNow.ticket(),
+            documentId = pageNow.acceptedDocument(),
+            grantEpoch = grant.grantEpoch,
+            hostInstanceKey = hostNow.instanceKey,
+            consoleGeneration = hostNow.consoleGeneration,
+            events = CompletableDeferred(),
+        )
+        submitReceipt = receipt
+        return receipt
+    }
+
+    private fun clearSubmitReceipt(receipt: SubmitReceipt) {
+        synchronized(lock) { if (submitReceipt === receipt) submitReceipt = null }
+    }
+
+    private fun submitUnknown(message: String) =
+        ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN, message = message)
+
+    /**
+     * Waits for the engine's one-shot submit event inside the original action budget, applies URL
+     * policy off main, re-verifies the exact transaction on main, then performs one controlled
+     * replacement open with the same request id/tab/owner/non-user epoch. The action mutex is still
+     * held, so no other action can interleave.
+     */
+    private suspend fun awaitSubmitNavigation(
+        request: ProviderRequest,
+        receipt: SubmitReceipt,
+        adapterResult: ProviderResult,
+        deadlineElapsed: Long,
+        now: () -> Long,
+    ): ProviderResult {
+        var replacementIntent: AutoGrantIntent? = null
+        var keepReplacement = false
+        try {
+            val remaining = deadlineElapsed - now()
+            if (remaining <= 0L) return submitUnknown("submit navigation timed out")
+            val event = withTimeoutOrNull(remaining) { receipt.events.await() }
+            // The receipt is one-shot: never let a late event reach a newer page/transaction.
+            clearSubmitReceipt(receipt)
+            when (event) {
+                null -> return submitUnknown("submit navigation timed out")
+                is BrowserSubmitNavigation.Rejected ->
+                    return submitUnknown("submit navigation rejected: ${event.reason}")
+                is BrowserSubmitNavigation.Get -> Unit
+            }
+            val rawUrl = (event as BrowserSubmitNavigation.Get).url
+            if (rawUrl.isBlank()) return submitUnknown("submit navigation rejected")
+            // The open path here is a new load chosen by the page, so its own DNS preflight is required.
+            val decision = withContext(Dispatchers.IO) { policy().preflight(rawUrl) }
+            if (decision !is UrlDecision.Allow) return submitUnknown("submit navigation refused")
+            val follow = withContext(main) { submitFollowUp(request, receipt, rawUrl, deadlineElapsed, now) }
+                ?: return submitUnknown("submit navigation changed")
+            val opened = openClaimed(
+                follow,
+                receipt.ownerSessionId,
+                deadlineElapsed,
+                now,
+                onAutoGrantIntent = { replacementIntent = it },
+            )
+            if (!opened.ok) return submitUnknown("submit page did not open")
+            if (opened.data["drivable"]?.jsonPrimitive?.booleanOrNull != true) {
+                return submitUnknown("submit page not ready")
+            }
+            keepReplacement = true
+            val finalUrl = replacementIntent?.page?.currentUrl()?.takeIf { it.isNotBlank() } ?: rawUrl
+            val typed = adapterResult.data["typed"] ?: opened.data["typed"]
+            val data = JsonObject(opened.data.toMutableMap().apply {
+                if (typed != null) put("typed", typed)
+                put("enterDispatched", JsonPrimitive(true))
+                put("finalURL", JsonPrimitive(finalUrl))
+                put("drivable", JsonPrimitive(true))
+                remove("reason")
+            })
+            return ProviderResult(ok = true, data = data)
+        } finally {
+            clearSubmitReceipt(receipt)
+            if (!keepReplacement) {
+                // Clear only the replacement intent this exact submit created, then mark only the
+                // exact transaction page (original or its own replacement) unknown. A later user
+                // open/replacement is never touched.
+                clearAutoGrantIntent(replacementIntent)
+                markSubmitUnknown(receipt, replacementIntent)
+            }
+        }
+    }
+
+    private fun clearAutoGrantIntent(intent: AutoGrantIntent?) {
+        if (intent == null) return
+        synchronized(lock) { if (autoGrantIntent === intent) autoGrantIntent = null }
+    }
+
+    /**
+     * A submit whose Enter was dispatched but whose GET was not continued leaves no drivable page
+     * and no auto-replay. It marks only the exact original page or the exact replacement this
+     * submit created; if a person's later open replaced it, nothing is touched. The grant on that
+     * exact page/connection/epoch is cleared; a different/new grant is left alone.
+     */
+    private fun markSubmitUnknown(receipt: SubmitReceipt, replacement: AutoGrantIntent?) {
+        synchronized(lock) {
+            val originalBound = pages[receipt.tabId]
+                ?.takeIf { it.page === receipt.page && !it.retired }
+            val replacementBound = replacement?.let { intent ->
+                pages[intent.tabId]?.takeIf { it.page === intent.page && !it.retired }
+            }
+            val targetBound = originalBound ?: replacementBound
+            if (targetBound == null) {
+                publishLocked()
+                return
+            }
+            val originalTarget = originalBound != null
+            val targetTab = if (originalTarget) receipt.tabId else replacement?.tabId ?: receipt.tabId
+            targetBound.outcomeUnknown = true
+            val grant = registry.currentGrant()
+            val exactEpoch = if (originalTarget) receipt.grantEpoch else null
+            if (grant != null && grant.tabId == targetTab &&
+                grant.connectionId == receipt.connectionId &&
+                grant.sessionId == receipt.ownerSessionId &&
+                (exactEpoch == null || grant.grantEpoch == exactEpoch)
+            ) {
+                registry.revoke()
+                grantEpoch = 0L
+                witnessForGrant = null
+                mode = ProviderMode.MANUAL
+            }
+            if (autoGrantIntent?.page === targetBound.page) autoGrantIntent = null
+            if (pendingWake?.page === targetBound.page) pendingWake = null
+            publishLocked()
+        }
+    }
+
+    /**
+     * Returns the exact controlled replacement request only while the original transaction is
+     * still current. It never continues across a new connection/owner/tab, takeover, hide, pause,
+     * block, page replacement or document move.
+     */
+    private fun submitFollowUp(
+        request: ProviderRequest,
+        receipt: SubmitReceipt,
+        url: String,
+        deadlineElapsed: Long,
+        now: () -> Long,
+    ): ProviderRequest? = synchronized(lock) {
+        if (request.serverEpoch == "user") return@synchronized null
+        if (activeRequestId != receipt.requestId || activeAction != "browser.type") return@synchronized null
+        val bound = pages[receipt.tabId] ?: return@synchronized null
+        val grant = registry.currentGrant() ?: return@synchronized null
+        val tab = registry.find(receipt.tabId) ?: return@synchronized null
+        if (page !== receipt.page || bound.page !== receipt.page || bound.retired) return@synchronized null
+        if (selectedTabId != receipt.tabId || connectionId != receipt.connectionId) return@synchronized null
+        if (tab.ownerSessionId != receipt.ownerSessionId) return@synchronized null
+        if (receipt.page.tabId != receipt.tabId ||
+            receipt.page.viewId() != receipt.viewId || receipt.page.ticket() != receipt.ticket ||
+            receipt.page.acceptedDocument() != receipt.documentId
+        ) {
+            return@synchronized null
+        }
+        if (grant.grantEpoch != receipt.grantEpoch || grant.tabId != receipt.tabId ||
+            grant.connectionId != receipt.connectionId || grant.sessionId != receipt.ownerSessionId
+        ) {
+            return@synchronized null
+        }
+        if (host?.instanceKey != receipt.hostInstanceKey ||
+            host?.consoleGeneration != receipt.consoleGeneration ||
+            hidden || paused || consoleInvalidated || presentationBlocked || explicitTakeover
+        ) {
+            return@synchronized null
+        }
+        val remaining = deadlineElapsed - now()
+        if (remaining <= 0L) return@synchronized null
+        ProviderRequest(
+            serverEpoch = receipt.serverEpoch,
+            connectionId = receipt.connectionId,
+            requestId = receipt.requestId,
+            action = "browser.open",
+            parameters = buildMap {
+                put("url", url)
+                put("tabId", receipt.tabId)
+            },
+            directory = receipt.directory,
+            sessionId = receipt.ownerSessionId,
+            timeoutMs = request.timeoutMs,
+            allowWaitMs = minOf(remaining, 60_000L).toInt(),
+        )
     }
 
     private suspend fun dispatch(
@@ -1559,18 +1843,38 @@ class NativeBrowserPresenter(
             if (viewport != "desktop" && viewport != "mobile" && viewport != "fill") {
                 return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
             }
+            val widthRaw = request.parameters["width"]
+            val heightRaw = request.parameters["height"]
+            val hasDims = !widthRaw.isNullOrBlank() || !heightRaw.isNullOrBlank()
+            if (hasDims && viewport != "desktop") {
+                return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+            }
+            val requestedSize = when (val parsed = BrowserDesktopViewport.parse(widthRaw, heightRaw)) {
+                is BrowserDesktopViewport.Parse.Invalid ->
+                    return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+                is BrowserDesktopViewport.Parse.Valid -> parsed.size
+                BrowserDesktopViewport.Parse.Unspecified -> null
+            }
             if (!registry.authorized(request, request.connectionId, selectedTabId)) {
                 return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
             }
             // A press defers the layout change: busy, nothing applied, press not retired.
             if (page?.mousePressActive() == true) return ProviderResult(false, errorCode = ProviderCodes.BUSY)
-            val switched = withContext(main) { resizeViewport(viewport, request.requestId) }
+            val switched = withContext(main) {
+                resizeViewport(viewport, request.requestId, requestedSize?.width, requestedSize?.height)
+            }
             val modeName = if (tabModes[selectedTabId] == true) "desktop" else "mobile"
+            val configured = synchronized(lock) {
+                desktopSizes[selectedTabId] ?: BrowserDesktopViewport.default
+            }
             return when (switched) {
                 ModeSwitch.ReopenRequired -> ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "reopen-required")
                 else -> ProviderResult(ok = true, data = kotlinx.serialization.json.buildJsonObject {
                     put("viewportApplied", JsonPrimitive(switched != ModeSwitch.ReopenRequired))
                     put("mode", JsonPrimitive(modeName))
+                    put("desktopWidth", JsonPrimitive(configured.width))
+                    put("desktopHeight", JsonPrimitive(configured.height))
+                    // Configuration only; no DOM measurement is claimed here.
                     put("geometry", JsonPrimitive("pending"))
                 })
             }
@@ -1583,7 +1887,7 @@ class NativeBrowserPresenter(
         // Authority is decided before the page is marked as accessed. A refused action (no grant,
         // retired page, other tab) never sets activePageAccess, so a later geometry change cannot
         // report it as outcome-unknown. The check is repeated under the lock to close the race.
-        val pageAdapter = synchronized(lock) {
+        val pageAtDispatch = synchronized(lock) {
             val bound = pages[shown]
             if (bound == null || bound.retired || presentationBlocked ||
                 !registry.authorized(request, request.connectionId, shown)
@@ -1592,7 +1896,16 @@ class NativeBrowserPresenter(
             }
             activePageAccess = true
             activeTab = shown
-            initialAdapter
+            bound.page
+        }
+        val pageAdapter = initialAdapter
+        val isSubmit = request.action == "browser.type" && request.parameters["submit"] == "true"
+        val submit = if (isSubmit) {
+            val submitTab = shown ?: return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
+            synchronized(lock) { registerSubmitLocked(request, session, submitTab) }
+                ?: return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED, message = "submit unavailable")
+        } else {
+            null
         }
         // WebView may only be touched on the main thread; the provider client calls from IO.
         // Outcome-unknown is decided by the adapter at dispatch time (no reply after the action was
@@ -1600,9 +1913,25 @@ class NativeBrowserPresenter(
         // Cancellation mid-dispatch is marked by the adapter's dispatch hook before it propagates.
         val result = withContext(main) { pageAdapter.execute(request, registry, shown, currentMode, deadlineElapsed) }
         if (result.errorCode == ProviderCodes.OUTCOME_UNKNOWN) {
-            synchronized(lock) { pages[shown]?.outcomeUnknown = true; publishLocked() }
+            submit?.let { clearSubmitReceipt(it) }
+            synchronized(lock) {
+                val bound = pages[shown]
+                // Only the exact page this dispatch touched; a replaced/user page is untouched.
+                if (bound != null && bound.page === pageAtDispatch) {
+                    bound.outcomeUnknown = true
+                    publishLocked()
+                }
+            }
+            return result
         }
-        return result
+        if (submit == null) return result
+        if (!result.ok || result.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull != true) {
+            clearSubmitReceipt(submit)
+            return result
+        }
+        // The adapter only confirmed the input/Enter dispatch. The original execute coroutine
+        // still owns the action lock while it waits for the engine's one-shot navigation receipt.
+        return awaitSubmitNavigation(request, submit, result, deadlineElapsed, now)
     }
 
     /**
@@ -1623,6 +1952,7 @@ class NativeBrowserPresenter(
         session: String,
         deadlineElapsed: Long,
         now: () -> Long,
+        onAutoGrantIntent: ((AutoGrantIntent) -> Unit)? = null,
     ): ProviderResult = withContext(main) {
         // An explicit open is one of the two ways to show a hidden window again. It still fails closed
         // if the host or console cannot present; only the person's hide choice is overridden.
@@ -1652,6 +1982,18 @@ class NativeBrowserPresenter(
         if (url.isBlank() || policy().checkSyntax(url) !is UrlDecision.Allow) {
             return@withContext ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "url refused")
         }
+        val widthRaw = request.parameters["width"]
+        val heightRaw = request.parameters["height"]
+        val hasDims = !widthRaw.isNullOrBlank() || !heightRaw.isNullOrBlank()
+        if (hasDims && viewport != "desktop") {
+            return@withContext ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+        }
+        val requestedDesktopSize = when (val parsed = BrowserDesktopViewport.parse(widthRaw, heightRaw)) {
+            is BrowserDesktopViewport.Parse.Invalid ->
+                return@withContext ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER)
+            is BrowserDesktopViewport.Parse.Valid -> parsed.size
+            BrowserDesktopViewport.Parse.Unspecified -> null
+        }
         val activeOwner = synchronized(lock) { registry.find(selectedTabId.orEmpty())?.ownerSessionId }
         // The person is looking at [session] in the chat console, so the page it asked for is the one
         // to show: it takes the selection from another owner's visible page. That page is kept, not
@@ -1666,6 +2008,7 @@ class NativeBrowserPresenter(
             synchronized(lock) {
                 parked.tab?.tabId?.let {
                     tabModes[it] = parkedDesktop
+                    desktopSizes[it] = requestedDesktopSize ?: BrowserDesktopViewport.default
                     if (parked.result.ok) noteOpenedByAgent(request, it)
                 }
                 publishLocked()
@@ -1693,7 +2036,13 @@ class NativeBrowserPresenter(
             "mobile" -> false
             else -> tabModes[named ?: selectedTabId] == true
         }
-        created.prepareMode(requestedDesktop)
+        val desktopSize = requestedDesktopSize
+            ?: named?.let { desktopSizes[it] }
+            ?: BrowserDesktopViewport.default
+        // Store the pair before the mode so a custom desktop size survives the load and a later
+        // switch back from mobile on this tab.
+        created.setDesktopViewport(desktopSize.width, desktopSize.height)
+        created.setDesktopMode(requestedDesktop)
         val pageAdapter = adapterFor(created)
         android.util.Log.i("AndChamberProvider", "open step=load-start")
         val opened = pageAdapter.openClaimed(request, registry, session)
@@ -1707,6 +2056,7 @@ class NativeBrowserPresenter(
                 replacedPage = pages[tabId]?.page?.takeIf { it !== created }
                 created.tabId = tabId
                 tabModes[tabId] = requestedDesktop
+                desktopSizes[tabId] = desktopSize
                 pages[tabId] = BoundPage(created, pageAdapter, viewGeneration + 1, desktop = requestedDesktop)
                 page = created
                 adapter = pageAdapter
@@ -1727,7 +2077,7 @@ class NativeBrowserPresenter(
                 // beginControlledGet() and fixes the ticket; viewId is fixed at page creation.
                 // The ready callback can only run after this main coroutine yields, so these
                 // identities are final here and the first probe cannot miss the intent.
-                autoGrantIntent = AutoGrantIntent(
+                val intent = AutoGrantIntent(
                     tabId = tabId,
                     viewId = created.viewId(),
                     ticket = created.ticket(),
@@ -1736,8 +2086,13 @@ class NativeBrowserPresenter(
                     // Bind to the connection this open was admitted on, never a connection that
                     // replaced it while the load was in flight.
                     connection = request.connectionId.takeIf { it.isNotBlank() } ?: connectionId,
+                    hostInstanceKey = prepared.host.instanceKey,
                     page = created,
                 )
+                autoGrantIntent = intent
+                // A submit continuation captures exactly the replacement intent it created, so a
+                // failure/timeout/cancel can clear only that intent and not a later person's open.
+                onAutoGrantIntent?.invoke(intent)
                 noteOpenedByAgent(request, tabId)
             } else {
                 created.destroy()
@@ -1786,10 +2141,20 @@ class NativeBrowserPresenter(
         waitMs: Long,
     ): Boolean {
         if (waitMs <= 0) return false
-        withTimeoutOrNull(waitMs) {
-            state.first { openWaitState(it, session, tabId, page, connection) != OpenWait.WAITING }
-        } ?: return false
-        return openWaitState(state.value, session, tabId, page, connection) == OpenWait.GRANTED
+        return withTimeoutOrNull(waitMs) {
+            // Drive the existing singleflight auto-control retry inside this open's own budget. If
+            // the page was not visible when its ready probe arrived, this is the bounded trigger
+            // that completes the default grant without a person's tap and without a background loop.
+            while (true) {
+                if (openWaitState(state.value, session, tabId, page, connection) != OpenWait.WAITING) break
+                scheduleAutoGrantRetry()
+                val changed = withTimeoutOrNull(OPEN_GRANT_RETRY_TICK_MS) {
+                    state.first { openWaitState(it, session, tabId, page, connection) != OpenWait.WAITING }
+                }
+                if (changed != null) break
+            }
+            openWaitState(state.value, session, tabId, page, connection) == OpenWait.GRANTED
+        } ?: false
     }
 
     private fun openWaitState(
@@ -1806,9 +2171,12 @@ class NativeBrowserPresenter(
         val watchable = current.shown && selectedTabId == tabId && bound != null && !bound.retired &&
             bound.page === page && !page.manualNavigation && page.tabId == tabId &&
             connectionId == connection && host != null && !paused && !consoleInvalidated &&
-            !presentationBlocked
+            !explicitTakeover
         when {
+            // A temporary layout/IME presentation gate is not a background or authority change:
+            // keep the open waiting, but never report a grant while blocked.
             !watchable -> OpenWait.STOPPED
+            presentationBlocked -> OpenWait.WAITING
             grant != null && grant.connectionId == connection && grant.sessionId == session &&
                 grant.tabId == tabId && mode == ProviderMode.AGENT -> OpenWait.GRANTED
             // Any other live grant belongs to somebody else and can never become this page's grant.
@@ -1834,6 +2202,7 @@ class NativeBrowserPresenter(
         created.onGeometry = { sample -> acceptSample(created, sample) }
         created.onGeometryRequested = { scope.launch(main) { onGeometrySettled() } }
         created.onMouseRetirement = { reason -> retireBound(created, reason) }
+        created.onSubmitNavigation = { event -> onSubmitNavigation(created, event) }
     }
 
     private fun acceptSample(source: ControlledBrowserPage, sample: GeometrySample) {
@@ -1914,7 +2283,18 @@ class NativeBrowserPresenter(
             if (!source.matchesReady(identity)) return staleReadyRetryLocked(source, identity)
             source
         }
+        // A real commit/finished callback can precede the first native mount. Keep its exact
+        // identity on the current open intent instead of dropping the only ready event. Pages
+        // without a default-control intent keep their previous probe behavior.
+        val waitForMount = synchronized(lock) { autoGrantIdentityLocked(raw) != null }
+        if (waitForMount && !raw.nativePresentationVisible()) {
+            synchronized(lock) { storePendingReadyLocked(raw, identity) }
+            return null
+        }
         val probed = raw.probe(identity)
+        if (probed == null) {
+            synchronized(lock) { storePendingReadyLocked(source, identity) }
+        }
         var geometryRequest: Pair<ControlledBrowserPage, ProbeIdentity>? = null
         var autoGrantConnection: String? = null
         synchronized(lock) {
@@ -1936,7 +2316,12 @@ class NativeBrowserPresenter(
                         onUnknown(source)
                     }
                 }
-                is ProbeAcceptance.Pending -> android.util.Log.i("AndChamberProvider", "probe pending ticket=${identity.ticket} epoch=${identity.sessionEpoch}")
+                is ProbeAcceptance.Pending -> {
+                    android.util.Log.i("AndChamberProvider", "probe pending ticket=${identity.ticket} epoch=${identity.sessionEpoch}")
+                    // A pending read-only probe is retried after the page is visible; it is never
+                    // turned into an allow without an accepted witness.
+                    storePendingReadyLocked(source, identity)
+                }
                 is ProbeAcceptance.Reject -> {
                     val reason = when (probed.message) {
                         "no witness", "document changed", "witness already used", "not ready", "url refused", "loading", "no probe" -> probed.message
@@ -1975,6 +2360,7 @@ class NativeBrowserPresenter(
             source.tabId == intent.tabId && selectedTabId == intent.tabId &&
             source.ticket() == intent.ticket && source.viewId() == intent.viewId &&
             identity.ticket == intent.ticket && identity.viewId == intent.viewId &&
+            host?.instanceKey == intent.hostInstanceKey &&
             host?.consoleGeneration == intent.consoleGeneration &&
             // A session known at open time must still be the console's session. An unknown one at
             // open time may become known; it must not silently become a different session later.
@@ -1984,6 +2370,10 @@ class NativeBrowserPresenter(
             autoGrantIntent = null
             return null
         }
+        // This call only happens after a ready probe was accepted for this exact load, so a later
+        // bounded retry may complete the grant even if the first attempt is blocked/not visible.
+        intent.readyAccepted = true
+        intent.pendingReady = null
         // Temporary states keep the pending intent; the unblock/mount path retries it.
         if (presentationBlocked || !source.ready) return null
         if (hidden || paused || consoleInvalidated || explicitTakeover) {
@@ -1998,15 +2388,52 @@ class NativeBrowserPresenter(
      * presentation gate cleared. It never clears the intent on a temporary failure and never grants
      * across a different connection/page/owner. A single retry runs at a time.
      */
+    private fun autoGrantIdentityLocked(source: ControlledBrowserPage): AutoGrantIntent? {
+        val current = autoGrantIntent ?: return null
+        if (current.page !== source) return null
+        val bound = pages[current.tabId] ?: return null
+        if (bound.page !== source || bound.retired) return null
+        if (page !== source || selectedTabId != current.tabId) return null
+        if (connectionId != current.connection) return null
+        if (host?.instanceKey != current.hostInstanceKey ||
+            host?.consoleGeneration != current.consoleGeneration
+        ) {
+            return null
+        }
+        if (current.consoleSession != null && consoleSessionId != current.consoleSession) return null
+        if (source.viewId() != current.viewId || source.ticket() != current.ticket) return null
+        return current
+    }
+
+    /**
+     * Keeps the exact native ready callback for this open's page/load when the page is not yet
+     * mounted/visible (or the read-only probe returned no value). It is replayed later only for the
+     * same view/ticket/host/connection/owner. A temporary presentation block is allowed to keep the
+     * identity; real background/hidden/console/takeover is not.
+     */
+    private fun storePendingReadyLocked(source: ControlledBrowserPage, identity: ReadyProbeIdentity): Boolean {
+        val current = autoGrantIdentityLocked(source) ?: return false
+        if (hidden || paused || consoleInvalidated || explicitTakeover) return false
+        if (identity.viewId != current.viewId || identity.ticket != current.ticket) return false
+        current.pendingReady = identity
+        return true
+    }
+
     private fun scheduleAutoGrantRetry() {
         val source = synchronized(lock) {
             if (autoGrantRetryActive) return
             val intent = autoGrantIntent ?: return
+            if (!intent.readyAccepted && intent.pendingReady == null) return
             if (hidden || explicitTakeover || paused || consoleInvalidated || presentationBlocked) return
             if (!presentableLocked()) return
             val bound = pages[intent.tabId] ?: return
             if (bound.retired || bound.page !== page || selectedTabId != intent.tabId) return
             if (intent.connection == null || connectionId != intent.connection) return
+            if (host?.instanceKey != intent.hostInstanceKey ||
+                host?.consoleGeneration != intent.consoleGeneration
+            ) {
+                return
+            }
             autoGrantRetryActive = true
             bound.page
         }
@@ -2021,30 +2448,33 @@ class NativeBrowserPresenter(
 
     private suspend fun completePendingAutoGrant(source: ControlledBrowserPage) {
         if (!withContext(main) { awaitPageVisible(source) }) return
+        val first = synchronized(lock) {
+            val current = autoGrantIdentityLocked(source) ?: return@synchronized null
+            if (!current.readyAccepted && current.pendingReady == null) return@synchronized null
+            if (hidden || paused || consoleInvalidated || presentationBlocked || explicitTakeover) {
+                return@synchronized null
+            }
+            current
+        } ?: return
+        // The committed/finished callback may have arrived before the first mount. Replay that
+        // exact read-only witness probe now that the page is visible; never navigate or blind-allow.
+        val pending = synchronized(lock) {
+            val current = autoGrantIdentityLocked(source) ?: return@synchronized null
+            if (current !== first) return@synchronized null
+            current.pendingReady?.takeIf {
+                it.viewId == first.viewId && it.ticket == first.ticket
+            }
+        }
+        if (pending != null && !source.ready) {
+            withContext(main) { acceptProbe(source, pending) }
+        }
         val intent = synchronized(lock) {
-            val current = autoGrantIntent ?: return@synchronized null
-            // A retry captured for an older page must never clear a newer open's intent.
-            if (current.page !== source) return@synchronized null
-            val bound = pages[current.tabId] ?: run {
-                autoGrantIntent = null
+            val current = autoGrantIdentityLocked(source) ?: return@synchronized null
+            if (current !== first) return@synchronized null
+            if (hidden || paused || consoleInvalidated || presentationBlocked || explicitTakeover) {
                 return@synchronized null
             }
-            val identity = current.page === source && bound.page === source && !bound.retired &&
-                page === source && selectedTabId == current.tabId &&
-                source.ticket() == current.ticket && source.viewId() == current.viewId &&
-                host?.consoleGeneration == current.consoleGeneration &&
-                (current.consoleSession == null || consoleSessionId == current.consoleSession) &&
-                current.connection != null && connectionId == current.connection
-            if (!identity) {
-                autoGrantIntent = null
-                return@synchronized null
-            }
-            // Keep it while the page is not ready or still presentation-blocked.
-            if (presentationBlocked || !source.ready) return@synchronized null
-            if (hidden || paused || consoleInvalidated || explicitTakeover) {
-                autoGrantIntent = null
-                return@synchronized null
-            }
+            if (!source.ready) return@synchronized null
             current
         } ?: return
         allowInternal(intent.connection, intent.page, intent.tabId)
@@ -2121,6 +2551,32 @@ class NativeBrowserPresenter(
         source.markUnknown()
         revokeAll("unknown navigation")
         synchronized(lock) { publishLocked() }
+    }
+
+    /**
+     * Session callback for the submit receipt. It only records the one-shot event for the exact
+     * captured page/load/transaction. It never calls execute, never takes the action mutex and
+     * never grants anything.
+     */
+    private fun onSubmitNavigation(source: ControlledBrowserPage, event: BrowserSubmitNavigation) {
+        val receipt = synchronized(lock) {
+            val current = submitReceipt ?: return@synchronized null
+            val bound = pages[current.tabId]
+            val grant = registry.currentGrant()
+            val exact = !current.events.isCompleted &&
+                current.page === source && page === source &&
+                bound != null && bound.page === source && !bound.retired &&
+                selectedTabId == current.tabId && connectionId == current.connectionId &&
+                source.tabId == current.tabId &&
+                source.viewId() == current.viewId && source.ticket() == current.ticket &&
+                grant != null && grant.grantEpoch == current.grantEpoch &&
+                grant.tabId == current.tabId && grant.connectionId == current.connectionId &&
+                grant.sessionId == current.ownerSessionId &&
+                !hidden && !paused && !consoleInvalidated && !presentationBlocked && !explicitTakeover
+            if (exact) current else null
+        } ?: return
+        // Record only. The action coroutine owns all execution and the mutex.
+        receipt.events.complete(event)
     }
 
     private fun onManualDocument(source: ControlledBrowserPage) {
@@ -2243,6 +2699,7 @@ class NativeBrowserPresenter(
         present = { tab -> page.loadOnce(tab.url) },
         instanceKey = host?.instanceKey ?: "local",
         clock = clock,
+        viewportMode = { if (page.desktopConfigured()) "desktop" else "mobile" },
         viewportSize = { page.width to page.height },
         documentFields = { ref -> page.currentField(ref)?.let { mapOf(ref to it) } ?: emptyMap() },
         requireCurrentDom = true,
@@ -2258,20 +2715,32 @@ class NativeBrowserPresenter(
             )
         },
         onOutcomeUnknown = {
-            synchronized(lock) { pages[page.tabId]?.outcomeUnknown = true }
+            synchronized(lock) {
+                val bound = pages[page.tabId]
+                // A late callback from the page this adapter was built for must never mark a
+                // newer page in the same tab.
+                if (bound != null && bound.page === page) bound.outcomeUnknown = true
+            }
         },
         onDispatch = {
-            notePageInteraction()
             synchronized(lock) {
-                pages[page.tabId]?.mutationInFlight = true
-                activeDispatched = true
-                android.util.Log.i("AndChamberProvider", "action=$activeAction phase=dispatched")
+                val bound = pages[page.tabId]
+                if (bound != null && bound.page === page) {
+                    notePageInteraction()
+                    bound.mutationInFlight = true
+                    activeDispatched = true
+                    android.util.Log.i("AndChamberProvider", "action=$activeAction phase=dispatched")
+                }
             }
         },
         onDispatchDone = { reply ->
             synchronized(lock) {
                 val bound = pages[page.tabId] ?: return@synchronized
+                if (bound.page !== page) return@synchronized
                 bound.mutationInFlight = false
+                // A known reply ends the dispatched phase. This matters for the submit handshake,
+                // which waits inside the same action while the page is later replaced.
+                if (reply != null) activeDispatched = false
                 if (reply == null) bound.outcomeUnknown = true
             }
         },
@@ -2284,6 +2753,7 @@ class NativeBrowserPresenter(
         inflightGeometry = null
         autoGrantIntent = null
         pendingWake = null
+        submitReceipt = null
         pages.values.forEach { it.page.destroy() }
         pages.clear()
         page?.destroy()
@@ -2344,6 +2814,8 @@ class NativeBrowserPresenter(
             eligible = transportEligible && !presentationBlocked && !hidden,
             presentationBlocked = presentationBlocked,
             desktopMode = tabModes[selectedTabId] == true,
+            desktopWidth = (desktopSizes[selectedTabId] ?: BrowserDesktopViewport.default).width,
+            desktopHeight = (desktopSizes[selectedTabId] ?: BrowserDesktopViewport.default).height,
             mouseMode = mouseMode,
             pointerX = geometry?.clientX(pointerViewX) ?: 0f,
             pointerY = geometry?.clientY(pointerViewY) ?: 0f,
@@ -2391,7 +2863,35 @@ class NativeBrowserPresenter(
         val consoleGeneration: Long,
         val consoleSession: String?,
         val connection: String?,
+        val hostInstanceKey: String,
         val page: ControlledBrowserPage,
+    ) {
+        /** A ready probe has been accepted for this page/load, so a retry may complete the grant. */
+        var readyAccepted: Boolean = false
+        /**
+         * The exact native ready callback that arrived before the page was mounted/visible. Once
+         * visible, the same read-only witness probe is replayed for this view/ticket within the
+         * open's budget; it is never a blind allow and never a page navigation.
+         */
+        var pendingReady: ReadyProbeIdentity? = null
+    }
+
+    /** The exact transaction a submit receipt belongs to. */
+    private data class SubmitReceipt(
+        val requestId: String,
+        val connectionId: String,
+        val ownerSessionId: String,
+        val directory: String,
+        val serverEpoch: String,
+        val tabId: String,
+        val page: ControlledBrowserPage,
+        val viewId: String,
+        val ticket: Long,
+        val documentId: String?,
+        val grantEpoch: Long,
+        val hostInstanceKey: String,
+        val consoleGeneration: Long,
+        val events: CompletableDeferred<BrowserSubmitNavigation>,
     )
 
     /** A hidden-window wake bound to the identity it was created for. */
@@ -2441,6 +2941,13 @@ interface ControlledBrowserPage {
     var onFatal: (() -> Unit)?
     var onUnknown: (() -> Unit)?
     var onManualDocument: (() -> Unit)?
+    /**
+     * One-shot submit-navigation receipt from the engine. The callback only records the event;
+     * it never calls execute or takes the action mutex. Default null for non-WebView fakes.
+     */
+    var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)?
+        get() = null
+        set(_) = Unit
     var onGeometry: ((GeometrySample) -> Unit)?
     var onGeometryRequested: (() -> Unit)?
     fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver
@@ -2458,6 +2965,8 @@ interface ControlledBrowserPage {
     fun acceptedDocument(): String? = null
     /** The live top-level URL the page is showing, when the implementation knows it. */
     fun currentUrl(): String? = null
+    /** Store the per-page desktop CSS viewport; production applies it with [setDesktopMode]. */
+    fun setDesktopViewport(width: Int, height: Int) = Unit
     fun setDesktopMode(enabled: Boolean) = Unit
     fun desktopConfigured(): Boolean = false
     fun applyMouseButton(plan: MouseEventPlan): Boolean = true
@@ -2539,7 +3048,15 @@ internal class WebControlledPage(
             field = value
             session.onManualDocument = value
         }
+    /** Engine session emits the one-shot submit navigation event here; it never executes. */
+    override var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)?
+        get() = session.onSubmitNavigation
+        set(value) {
+            session.onSubmitNavigation = value
+        }
     private var loaded = false
+    private var desktopWidth = BrowserDesktopViewport.DEFAULT_WIDTH
+    private var desktopHeight = BrowserDesktopViewport.DEFAULT_HEIGHT
 
     override fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver = BrowserPageDriver(
         session = { session },
@@ -2589,7 +3106,14 @@ internal class WebControlledPage(
     }
     override fun acceptedDocument(): String? = session.acceptedDocumentId
     override fun currentUrl(): String? = session.displayUrl
-    override fun setDesktopMode(enabled: Boolean) = session.configureDesktop(enabled)
+    override fun setDesktopViewport(width: Int, height: Int) {
+        if (BrowserDesktopViewport.isValid(width, height)) {
+            desktopWidth = width
+            desktopHeight = height
+        }
+    }
+    override fun setDesktopMode(enabled: Boolean) =
+        session.configureDesktop(enabled, desktopWidth, desktopHeight)
     override fun desktopConfigured(): Boolean = session.desktopConfigured
     override fun applyMouseButton(plan: MouseEventPlan): Boolean = true
     override fun controlledGetProvenance(): Boolean =

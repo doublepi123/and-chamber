@@ -18,6 +18,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.floatOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -34,11 +36,23 @@ import java.security.SecureRandom
 internal object BrowserDriverLogic {
     const val PROFILE_NAME = "andchamber_browser_v1"
     const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    fun desktopViewportScript(): String = """
+    fun desktopViewportScript(width: Int = BrowserDesktopViewport.DEFAULT_WIDTH): String {
+        require(width in BrowserDesktopViewport.MIN_WIDTH..BrowserDesktopViewport.MAX_WIDTH) { "desktop width" }
+        return """
         (function(){
-          if (window.__acDesktopViewport) return;
+          if (window.__acDesktopViewport) {
+            if (window.__acDesktopViewport.setWidth) window.__acDesktopViewport.setWidth($width);
+            return;
+          }
+          var currentWidth = $width;
+          // Capture the real device ratio once, before the meta applies. Re-reading it after the
+          // meta could feed the page scale back into the scale and oscillate.
+          var initialScale = 1 / ((typeof window.devicePixelRatio === "number" && window.devicePixelRatio > 0) ? window.devicePixelRatio : 1);
           var owned = null;
           var applying = false;
+          function content(){
+            return "width=" + currentWidth + ", initial-scale=" + initialScale + ", minimum-scale=" + initialScale;
+          }
           function pin(){
             if (applying) return;
             applying = true;
@@ -51,14 +65,15 @@ internal object BrowserDriverLogic {
                 owned.setAttribute('data-ac-viewport', 'desktop');
                 head.appendChild(owned);
               }
+              var wanted = content();
               var nodes = document.querySelectorAll('meta[name="viewport"]');
               for (var i = 0; i < nodes.length; i++) {
-                if (nodes[i].getAttribute('content') !== 'width=1024') {
-                  nodes[i].setAttribute('content', 'width=1024');
+                if (nodes[i].getAttribute('content') !== wanted) {
+                  nodes[i].setAttribute('content', wanted);
                 }
               }
-              if (owned.getAttribute('content') !== 'width=1024') {
-                owned.setAttribute('content', 'width=1024');
+              if (owned.getAttribute('content') !== wanted) {
+                owned.setAttribute('content', wanted);
               }
             } finally { applying = false; }
           }
@@ -67,14 +82,47 @@ internal object BrowserDriverLogic {
           if (root && window.MutationObserver) {
             var observer = new MutationObserver(function(){ pin(); });
             observer.observe(root, {childList:true, subtree:true, attributes:true, attributeFilter:['content','name']});
-            window.__acDesktopViewport = {stop:function(){ observer.disconnect(); if (owned) owned.remove(); window.__acDesktopViewport = null; }};
+            window.__acDesktopViewport = {
+              stop: function(){ observer.disconnect(); if (owned) owned.remove(); window.__acDesktopViewport = null; },
+              setWidth: function(w){ if (typeof w === "number" && isFinite(w) && w > 0 && w !== currentWidth){ currentWidth = w; pin(); } }
+            };
+          } else {
+            window.__acDesktopViewport = {
+              stop: function(){ if (owned) owned.remove(); window.__acDesktopViewport = null; },
+              setWidth: function(w){ if (typeof w === "number" && isFinite(w) && w > 0 && w !== currentWidth){ currentWidth = w; pin(); } }
+            };
           }
         })()
     """.trimIndent()
+    }
+
+    /** Updates the current document's injected desktop meta without reloading it. */
+    fun desktopViewportUpdateScript(width: Int): String {
+        require(width in BrowserDesktopViewport.MIN_WIDTH..BrowserDesktopViewport.MAX_WIDTH) { "desktop width" }
+        return """
+        (function(){
+          var w = $width;
+          var d = window.__acDesktopViewport;
+          if (d && d.setWidth) { d.setWidth(w); return "updated"; }
+          var dpr = (typeof window.devicePixelRatio === "number" && window.devicePixelRatio > 0) ? window.devicePixelRatio : 1;
+          var content = "width=" + w + ", initial-scale=" + (1 / dpr) + ", minimum-scale=" + (1 / dpr);
+          var nodes = document.querySelectorAll('meta[name="viewport"]');
+          for (var i = 0; i < nodes.length; i++) {
+            nodes[i].setAttribute('content', content);
+          }
+          return "fallback";
+        })()
+    """.trimIndent()
+    }
     const val PARAM_URL = "url"
     const val PARAM_REF = "ref"
     const val PARAM_TEXT = "text"
     const val PARAM_DIRECTION = "direction"
+    const val PARAM_SUBMIT = "submit"
+    const val PARAM_VIEWPORT = "viewport"
+    const val PARAM_WIDTH = "width"
+    const val PARAM_HEIGHT = "height"
+    const val RESULT_ENTER_DISPATCHED = "enterDispatched"
     const val RESULT_SNAPSHOT = "snapshot"
     const val RESULT_PHASE = "phase"
     const val RESULT_URL = "url"
@@ -127,6 +175,9 @@ internal object BrowserDriverLogic {
 
     fun validate(request: BrowserRequest): BrowserReply? {
         if (request.id.isBlank()) return requestError(BrowserErrorCode.INVALID_REQUEST, "missing id")
+        if (request.method != BrowserMethod.TYPE && request.params.containsKey(PARAM_SUBMIT)) {
+            return requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, "submit is only for type")
+        }
         return when (request.method) {
             BrowserMethod.NAVIGATE -> {
                 val url = request.params[PARAM_URL]
@@ -134,7 +185,15 @@ internal object BrowserDriverLogic {
             }
             BrowserMethod.SNAPSHOT, BrowserMethod.CAPTURE -> null
             BrowserMethod.CLICK -> requireRef(request)
-            BrowserMethod.TYPE -> requireRef(request) ?: requireText(request)
+            BrowserMethod.TYPE -> {
+                val submit = request.params[PARAM_SUBMIT]
+                when {
+                    submit != null && submit != "true" && submit != "false" ->
+                        requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, "submit must be true or false")
+                    else -> requireRef(request) ?: requireText(request)
+                }
+            }
+            BrowserMethod.RESIZE -> validateResize(request)
             BrowserMethod.SCROLL -> {
                 val direction = request.params[PARAM_DIRECTION]
                 if (direction !in SCROLL_DIRECTIONS) {
@@ -161,6 +220,25 @@ internal object BrowserDriverLogic {
         return when {
             text == null -> requestError(BrowserErrorCode.INVALID_REQUEST, "missing text")
             text.length > MAX_TEXT_CHARS -> requestError(BrowserErrorCode.INVALID_REQUEST, "text too long")
+            else -> null
+        }
+    }
+
+    /** RESIZE carries only a viewport and an optional desktop width/height pair. Never clamps. */
+    private fun validateResize(request: BrowserRequest): BrowserReply? {
+        val viewport = request.params[PARAM_VIEWPORT]
+        if (viewport !in setOf("desktop", "mobile", "fill")) {
+            return requestError(BrowserErrorCode.INVALID_REQUEST, "viewport must be desktop, mobile or fill")
+        }
+        val width = request.params[PARAM_WIDTH]
+        val height = request.params[PARAM_HEIGHT]
+        if (width == null && height == null) return null
+        if (viewport != "desktop") {
+            return requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, "width and height require desktop")
+        }
+        return when (BrowserDesktopViewport.parse(width, height)) {
+            is BrowserDesktopViewport.Parse.Invalid ->
+                requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, "invalid desktop size")
             else -> null
         }
     }
@@ -204,6 +282,43 @@ internal object BrowserDriverLogic {
             put("direction", direction)
         }.toString()
         return fillOnce(ACTION_TEMPLATE, payload)
+    }
+
+    /**
+     * Typing for `submit:true`. The same native input value setter is used, but only after the
+     * install slot has re-checked that this is a visible, non-sensitive, editable single-line
+     * `<input>` whose effective form would submit as a same-tab GET. It never submits in JS: the
+     * driver follows with one native Enter. A refusal happens before the value is changed.
+     */
+    fun submitTypeScript(
+        documentNonce: String,
+        documentId: String,
+        ref: String,
+        text: String,
+    ): String {
+        require(documentNonce.isHex() && documentId.isHex()) { "nonce" }
+        val payload = buildJsonObject {
+            put("doc", documentNonce)
+            put("documentId", documentId)
+            put("ref", ref)
+            put("text", text)
+        }.toString()
+        return fillOnce(SUBMIT_TYPE_TEMPLATE, payload)
+    }
+
+    /** Re-reads the same ref's DOM focus and submit safety immediately before one native Enter. */
+    fun enterReadyScript(
+        documentNonce: String,
+        documentId: String,
+        ref: String,
+    ): String {
+        require(documentNonce.isHex() && documentId.isHex()) { "nonce" }
+        val payload = buildJsonObject {
+            put("doc", documentNonce)
+            put("documentId", documentId)
+            put("ref", ref)
+        }.toString()
+        return fillOnce(ENTER_READY_TEMPLATE, payload)
     }
 
     /** Replaces the single marker. The inserted JSON is never scanned for further markers. */
@@ -260,12 +375,18 @@ internal object BrowserDriverLogic {
         }
         val text = obj["text"]?.jsonPrimitive?.contentOrNull.orEmpty().take(MAX_TEXT_SAMPLE)
         val truncated = obj["truncated"]?.jsonPrimitive?.booleanOrNull == true || elements.size > MAX_ELEMENTS
+        // Actual DOM readback only: no DPR or screen value is invented here.
+        val viewports = buildJsonObject {
+            viewportValue(obj, "layoutWidth", "layoutHeight", integer = true)?.let { put("layoutViewport", it) }
+            viewportValue(obj, "visualWidth", "visualHeight", integer = false)?.let { put("visualViewport", it) }
+        }
         var copy = buildJsonObject {
             put("url", obj["url"]?.jsonPrimitive?.contentOrNull.orEmpty().take(2_000))
             put("title", obj["title"]?.jsonPrimitive?.contentOrNull.orEmpty().take(300))
             put("text", text)
             put("elements", kept)
             put("truncated", truncated)
+            for ((key, value) in viewports) put(key, value)
         }
         if (copy.toString().length > MAX_SNAPSHOT_CHARS) {
             copy = buildJsonObject {
@@ -274,6 +395,7 @@ internal object BrowserDriverLogic {
                 put("text", text.take(1_500))
                 put("elements", kept)
                 put("truncated", true)
+                for ((key, value) in viewports) put(key, value)
             }
         }
         if (copy.toString().length > MAX_SNAPSHOT_CHARS) {
@@ -283,9 +405,41 @@ internal object BrowserDriverLogic {
                 put("text", "")
                 put("elements", JsonArray(emptyList()))
                 put("truncated", true)
+                for ((key, value) in viewports) put(key, value)
             }
         }
         return copy
+    }
+
+    /** One measured viewport size, or null when the page did not report a real positive value. */
+    private fun viewportValue(
+        obj: JsonObject,
+        widthKey: String,
+        heightKey: String,
+        integer: Boolean,
+    ): JsonObject? {
+        val width: Number = if (integer) {
+            obj[widthKey]?.jsonPrimitive?.intOrNull ?: return null
+        } else {
+            obj[widthKey]?.jsonPrimitive?.floatOrNull ?: return null
+        }
+        val height: Number = if (integer) {
+            obj[heightKey]?.jsonPrimitive?.intOrNull ?: return null
+        } else {
+            obj[heightKey]?.jsonPrimitive?.floatOrNull ?: return null
+        }
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (!w.isFinite() || !h.isFinite() || w <= 0f || h <= 0f || w > 100_000f || h > 100_000f) return null
+        return buildJsonObject {
+            if (integer) {
+                put("width", width.toInt())
+                put("height", height.toInt())
+            } else {
+                put("width", w)
+                put("height", h)
+            }
+        }
     }
 
     private fun boundElement(item: JsonObject): JsonObject = buildJsonObject {
@@ -379,6 +533,93 @@ internal object BrowserDriverLogic {
           function nameOf(el){
             return ((el.getAttribute("aria-label") || el.innerText || el.textContent || el.getAttribute("placeholder") || el.getAttribute("title") || el.getAttribute("alt") || "") + "").replace(/\s+/g, " ").trim().slice(0, 120);
           }
+          function autocompleteOf(el){
+            return ((el.getAttribute("autocomplete") || "") + "").toLowerCase();
+          }
+          function sensitiveField(el){
+            var type = ((el.getAttribute("type") || "text") + "").toLowerCase();
+            var name = ((el.getAttribute("name") || el.getAttribute("aria-label") || "") + "").toLowerCase();
+            var auto = autocompleteOf(el);
+            return type === "password" || type === "file" || type === "hidden" ||
+              type === "one-time-code" || auto === "one-time-code" ||
+              auto.indexOf("current-password") >= 0 || auto.indexOf("new-password") >= 0 ||
+              name.indexOf("password") >= 0 || name.indexOf("secret") >= 0 || name.indexOf("token") >= 0;
+          }
+          // The Enter submit serializes every control of the target form. Refuse a form that would
+          // send a credential or file field, even when the typed field itself is ordinary text.
+          // This is a bounded scan of form.elements only: username and general text are not sensitive.
+          function formSensitive(form){
+            if (!form || !form.elements) return false;
+            var list = form.elements;
+            for (var i = 0; i < list.length; i++){
+              var el = list[i];
+              if (!el || !el.tagName) continue;
+              var tag = (el.tagName || "").toLowerCase();
+              if (tag !== "input" && tag !== "textarea" && tag !== "select") continue;
+              var type = ((el.getAttribute("type") || "") + "").toLowerCase();
+              var auto = autocompleteOf(el);
+              if (type === "password" || type === "file") return true;
+              if (auto === "one-time-code" || auto.indexOf("current-password") >= 0 ||
+                  auto.indexOf("new-password") >= 0) return true;
+              var name = ((el.getAttribute("name") || "") + "").toLowerCase();
+              if (name.indexOf("password") >= 0) return true;
+            }
+            return false;
+          }
+          function selfTarget(value){
+            var t = ((value || "") + "").toLowerCase();
+            return t === "" || t === "_self" || t === "_top" || t === "_parent";
+          }
+          // The first submit button in tree order that belongs to this form, as implicit Enter uses.
+          function defaultSubmitter(form){
+            var list = document.querySelectorAll("button,input");
+            for (var i = 0; i < list.length; i++){
+              var el = list[i];
+              if (el.form !== form) continue;
+              var type = ((el.getAttribute("type") || "") + "").toLowerCase();
+              var tag = (el.tagName || "").toLowerCase();
+              if (type !== "submit" && !(tag === "button" && type === "")) continue;
+              if (el.disabled) continue;
+              return el;
+            }
+            return null;
+          }
+          // A single-line, non-credential input whose implicit Enter would be a same-tab GET.
+          function submitProblem(field){
+            var tag = (field.tagName || "").toLowerCase();
+            if (tag !== "input") return "not single-line input";
+            var type = ((field.getAttribute("type") || "text") + "").toLowerCase();
+            if (type !== "text" && type !== "search" && type !== "email" &&
+                type !== "url" && type !== "tel" && type !== "number") return "not single-line input";
+            if (field.disabled || field.readOnly) return "not actionable";
+            if (sensitiveField(field)) return "refused field";
+            var form = field.form;
+            if (!form) return null;
+            var method = ((form.method || "get") + "").toLowerCase();
+            if (method !== "get") return "form method";
+            if (!selfTarget(form.getAttribute("target"))) return "foreign target";
+            var submitter = defaultSubmitter(form);
+            if (submitter){
+              var override = ((submitter.getAttribute("formmethod") || "") + "").toLowerCase();
+              if (override && override !== "get") return "form method override";
+              if (!selfTarget(submitter.getAttribute("formtarget"))) return "foreign target";
+              if (!httpsAction(submitter.getAttribute("formaction"))) return "form action";
+            }
+            if (!httpsAction(form.getAttribute("action"))) return "form action";
+            // Enter would serialize the whole form, so other credential/file controls are refused.
+            if (formSensitive(form)) return "refused field";
+            return null;
+          }
+          function httpsAction(value){
+            var raw = ((value || "") + "").trim();
+            if (!raw) return true;
+            try {
+              var resolved = new URL(raw, document.baseURI);
+              return resolved.protocol === "https:";
+            } catch (e) {
+              return false;
+            }
+          }
           window[key] = {
             doc: doc,
             inspect: function(ref){
@@ -413,7 +654,11 @@ internal object BrowserDriverLogic {
               }
               var text = "";
               try { text = (document.body && (document.body.innerText || "") || "").replace(/\s+/g, " ").trim().slice(0, $MAX_TEXT_SAMPLE); } catch (e) { text = ""; }
-              return {ok:true, doc:doc, nonce:nonce, url: String(location.href || ""), title: document.title || "", text: text, elements: out, truncated: list.length > out.length};
+              return {ok:true, doc:doc, nonce:nonce, url: String(location.href || ""), title: document.title || "", text: text, elements: out, truncated: list.length > out.length,
+                layoutWidth: (typeof innerWidth === "number" ? innerWidth : 0),
+                layoutHeight: (typeof innerHeight === "number" ? innerHeight : 0),
+                visualWidth: (window.visualViewport && typeof visualViewport.width === "number" ? visualViewport.width : 0),
+                visualHeight: (window.visualViewport && typeof visualViewport.height === "number" ? visualViewport.height : 0)};
             },
             act: function(action, ref, text, direction){
               function refused(el){
@@ -460,6 +705,34 @@ internal object BrowserDriverLogic {
                 return {ok:true, action:"scroll"};
               }
               return {ok:false, error:"unknown action"};
+            },
+            submit: function(ref, text){
+              var field = nodes.get(ref);
+              if (!field || !field.isConnected) return {ok:false, error:"ref expired"};
+              if (!box(field)) return {ok:false, error:"not actionable"};
+              var problem = submitProblem(field);
+              if (problem) return {ok:false, error:problem};
+              field.focus();
+              if (document.activeElement !== field) return {ok:false, error:"not focused"};
+              var proto = window.HTMLInputElement;
+              var desc = proto && Object.getOwnPropertyDescriptor(proto.prototype, "value");
+              if (!desc || !desc.set) return {ok:false, error:"not editable"};
+              desc.set.call(field, text);
+              field.dispatchEvent(new Event("input", {bubbles:true}));
+              field.dispatchEvent(new Event("change", {bubbles:true}));
+              if (!field.isConnected || document.activeElement !== field) return {ok:false, error:"focus lost"};
+              if (submitProblem(field)) return {ok:false, error:"form changed"};
+              return {ok:true};
+            },
+            active: function(ref){
+              var field = nodes.get(ref);
+              if (!field || !field.isConnected) return {ok:false, error:"ref expired"};
+              if (!box(field)) return {ok:false, error:"not actionable"};
+              if (field.disabled || field.readOnly) return {ok:false, error:"not actionable"};
+              if (document.activeElement !== field) return {ok:false, error:"not focused"};
+              var problem = submitProblem(field);
+              if (problem) return {ok:false, error:problem};
+              return {ok:true};
             }
           };
           return "installed";
@@ -638,6 +911,34 @@ internal object BrowserDriverLogic {
           var acted = slot.act(arg.action, arg.ref, arg.text, arg.direction);
           acted.documentId = witness.documentId;
           return acted;
+        })()
+    """.trimIndent()
+
+    private val SUBMIT_TYPE_TEMPLATE = """
+        (function(){
+          var arg = __AC_ARG__;
+          var witness = window.__acWitness;
+          if (!witness || witness.documentId !== arg.documentId) return {ok:false, error:"document mismatch"};
+          if (document.readyState !== "interactive" && document.readyState !== "complete") return {ok:false, error:"not ready"};
+          var slot = window["__acB_" + arg.doc];
+          if (!slot || slot.doc !== arg.doc || !slot.submit) return {ok:false, error:"document not ready"};
+          var acted = slot.submit(arg.ref, arg.text);
+          acted.documentId = witness.documentId;
+          return acted;
+        })()
+    """.trimIndent()
+
+    private val ENTER_READY_TEMPLATE = """
+        (function(){
+          var arg = __AC_ARG__;
+          var witness = window.__acWitness;
+          if (!witness || witness.documentId !== arg.documentId) return {ok:false, error:"document mismatch"};
+          if (document.readyState !== "interactive" && document.readyState !== "complete") return {ok:false, error:"not ready"};
+          var slot = window["__acB_" + arg.doc];
+          if (!slot || slot.doc !== arg.doc || !slot.active) return {ok:false, error:"document not ready"};
+          var ready = slot.active(arg.ref);
+          ready.documentId = witness.documentId;
+          return ready;
         })()
     """.trimIndent()
 }

@@ -760,6 +760,7 @@ class NativeBrowserHiddenStateTest {
         override var onFatal: (() -> Unit)? = null
         override var onUnknown: (() -> Unit)? = null
         override var onManualDocument: (() -> Unit)? = null
+        override var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)? = null
         override var onGeometry: ((GeometrySample) -> Unit)? = null
         override var onGeometryRequested: (() -> Unit)? = null
         var loads = 0

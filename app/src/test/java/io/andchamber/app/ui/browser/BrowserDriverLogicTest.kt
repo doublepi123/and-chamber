@@ -100,6 +100,84 @@ class BrowserDriverLogicTest {
     }
 
     @Test
+    fun `submit validates only an exact true or false on type`() {
+        val ref = "abcdef01-1234abcd-1"
+        assertNull(
+            BrowserDriverLogic.validate(
+                BrowserRequest("1", BrowserMethod.TYPE, mapOf("ref" to ref, "text" to "q", "submit" to "true")),
+            ),
+        )
+        assertNull(
+            BrowserDriverLogic.validate(
+                BrowserRequest("1", BrowserMethod.TYPE, mapOf("ref" to ref, "text" to "q", "submit" to "false")),
+            ),
+        )
+        assertEquals(
+            BrowserErrorCode.UNSUPPORTED_PARAMETER,
+            BrowserDriverLogic.validate(
+                BrowserRequest("1", BrowserMethod.TYPE, mapOf("ref" to ref, "text" to "q", "submit" to "1")),
+            )?.error?.code,
+        )
+        assertEquals(
+            BrowserErrorCode.UNSUPPORTED_PARAMETER,
+            BrowserDriverLogic.validate(
+                BrowserRequest("1", BrowserMethod.CLICK, mapOf("ref" to ref, "submit" to "true")),
+            )?.error?.code,
+        )
+    }
+
+    @Test
+    fun `submit script checks post override target and credentials before the native setter`() {
+        val install = BrowserDriverLogic.installScript("b".repeat(32))
+        assertTrue(install.contains("submit: function(ref, text)"))
+        assertTrue(install.contains("document.activeElement !== field"))
+        assertTrue(install.contains("form.method"))
+        assertTrue(install.contains("formmethod"))
+        assertTrue(install.contains("formtarget"))
+        assertTrue(install.contains("formaction"))
+        assertTrue(install.contains("current-password"))
+        assertTrue(install.contains("new-password"))
+        assertTrue(install.contains("not single-line input"))
+        assertTrue(install.contains("function formSensitive(form)"))
+        assertTrue(install.contains("form.elements"))
+        // Other credential/file controls in the submitted form are refused; username is not.
+        val formScan = install.substringAfter("function formSensitive(form)").substringBefore("function httpsAction")
+        assertTrue(formScan.contains("type === \"password\""))
+        assertTrue(formScan.contains("type === \"file\""))
+        assertTrue(formScan.contains("current-password"))
+        assertTrue(formScan.contains("new-password"))
+        assertTrue(formScan.contains("name.indexOf(\"password\")"))
+        assertFalse(formScan.contains("secret"))
+        assertFalse(formScan.contains("token"))
+        assertFalse(formScan.contains("username"))
+        assertTrue(install.contains("desc.set.call(field, text)"))
+        assertFalse(install.contains("requestSubmit"))
+        assertFalse(install.contains("KeyboardEvent"))
+        assertFalse(install.contains("form.submit()"))
+        // The refusal checks precede the value setter inside the submit function itself.
+        val submitBlock = install.substringAfter("submit: function(ref, text)")
+        assertTrue(submitBlock.indexOf("submitProblem(field)") < submitBlock.indexOf("desc.set.call(field, text)"))
+
+        val typeScript = BrowserDriverLogic.submitTypeScript(
+            documentNonce = "a".repeat(32),
+            documentId = "b".repeat(32),
+            ref = "abcdef01-1234abcd-1",
+            text = "hello",
+        )
+        assertTrue(typeScript.contains("slot.submit"))
+        assertTrue(typeScript.contains("witness.documentId !== arg.documentId"))
+
+        val enter = BrowserDriverLogic.enterReadyScript(
+            documentNonce = "a".repeat(32),
+            documentId = "b".repeat(32),
+            ref = "abcdef01-1234abcd-1",
+        )
+        assertTrue(enter.contains("slot.active"))
+        assertTrue(enter.contains("witness.documentId !== arg.documentId"))
+        assertFalse(enter.contains("requestSubmit"))
+    }
+
+    @Test
     fun `a late callback from an older view cannot ready the replacement`() {
         val first = ControlledNavigation("view-a", ticket = 1, generation = 1)
         val second = ControlledNavigation("view-b", ticket = 2, generation = 1)
@@ -317,14 +395,61 @@ class BrowserDriverLogicTest {
         CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.presentation)
 
     @Test
-    fun `desktop viewport script pins a late site meta and can stop`() {
+    fun `desktop viewport script uses the configured width and the real dpr`() {
         val script = BrowserDriverLogic.desktopViewportScript()
+        assertTrue(script.contains("currentWidth = 1920"))
+        assertTrue(script.contains("initial-scale="))
+        assertTrue(script.contains("minimum-scale="))
+        assertFalse(script.contains("maximum-scale="))
+        assertTrue(script.contains("devicePixelRatio"))
         assertTrue(script.contains("MutationObserver"))
-        assertTrue(script.contains("width=1024"))
         assertTrue(script.contains("__acDesktopViewport"))
         assertTrue(script.contains("observer.disconnect()"))
         assertTrue(script.contains("applying"))
-        assertFalse(script.contains("initial-scale=1"))
+        assertFalse(script.contains("width=1024"))
+        assertFalse(script.contains("1024"))
+
+        val custom = BrowserDriverLogic.desktopViewportScript(2560)
+        assertTrue(custom.contains("currentWidth = 2560"))
+        val update = BrowserDriverLogic.desktopViewportUpdateScript(2560)
+        assertTrue(update.contains("setWidth"))
+        assertTrue(update.contains("initial-scale="))
+        assertTrue(update.contains("minimum-scale="))
+        assertTrue(update.contains("devicePixelRatio"))
+    }
+
+    @Test
+    fun `resize validation accepts only a valid desktop pair on explicit desktop`() {
+        fun resize(vararg params: Pair<String, String>) =
+            BrowserRequest("1", BrowserMethod.RESIZE, params.toMap())
+        assertNull(BrowserDriverLogic.validate(resize("viewport" to "desktop")))
+        assertNull(BrowserDriverLogic.validate(resize("viewport" to "desktop", "width" to "1920", "height" to "1080")))
+        assertNull(BrowserDriverLogic.validate(resize("viewport" to "fill")))
+        assertNull(BrowserDriverLogic.validate(resize("viewport" to "mobile")))
+        assertEquals(
+            BrowserErrorCode.UNSUPPORTED_PARAMETER,
+            BrowserDriverLogic.validate(resize("viewport" to "desktop", "width" to "100", "height" to "1080"))?.error?.code,
+        )
+        assertEquals(
+            BrowserErrorCode.UNSUPPORTED_PARAMETER,
+            BrowserDriverLogic.validate(resize("viewport" to "desktop", "width" to "1920"))?.error?.code,
+        )
+        assertEquals(
+            BrowserErrorCode.UNSUPPORTED_PARAMETER,
+            BrowserDriverLogic.validate(resize("viewport" to "mobile", "width" to "1920", "height" to "1080"))?.error?.code,
+        )
+    }
+
+    @Test
+    fun `snapshot carries measured layout and visual viewport numbers`() {
+        val obj = Json.parseToJsonElement(
+            """{"url":"https://public.example","title":"Hi","text":"hello","elements":[],"truncated":false,"layoutWidth":1920,"layoutHeight":1080,"visualWidth":1918.5,"visualHeight":1078.5}""",
+        ).jsonObject
+        val bounded = BrowserDriverLogic.boundSnapshot(obj)
+        assertEquals("1920", bounded["layoutViewport"]!!.jsonObject["width"]!!.jsonPrimitive.content)
+        assertEquals("1080", bounded["layoutViewport"]!!.jsonObject["height"]!!.jsonPrimitive.content)
+        assertEquals("1918.5", bounded["visualViewport"]!!.jsonObject["width"]!!.jsonPrimitive.content)
+        assertEquals("1078.5", bounded["visualViewport"]!!.jsonObject["height"]!!.jsonPrimitive.content)
     }
 
     @Test

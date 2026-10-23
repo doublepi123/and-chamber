@@ -956,41 +956,70 @@ function focusedCase(io) {
     const savedSy = beforeMetrics2.metrics ? beforeMetrics2.metrics.sy : beforeMetrics2.sy;
 
     // Contract for the focused page:
-    // - focus + IME is auto-full, the page stays inside the real IME-safe area (display rect),
-    //   and the chat composer may legitimately be underneath it (no composer-overlap check);
-    // - after a proven-shown IME is closed by real Back, the window auto-floats and the same
-    //   grant/view/document/scroll/value/focus/selection survive; only the float must avoid the
-    //   composer;
+    // - while the IME is genuinely shown, the real layout may be Full (auto because a float does
+    //   not fit, or explicit via its Small window control) or a Float that still fits above the
+    //   composer. The branch is read from the real controls and surface bounds, never assumed;
+    // - in either branch the actual displayed page stays inside the real IME-safe area. A Float
+    //   must not intersect the accepted composer rect; Full is not required to avoid it;
+    // - after a proven-shown IME is closed by real Back, the window proves a real Float (restored
+    //   or kept), and the same grant/view/document/scroll/value/focus/selection survive;
     // - the later Full screen / Small window cycle also preserves that state.
     async function verifyFocusedPresentation(presentation, label, options = {}) {
-      const autoFull = options.autoFull === true;
-      const float = options.float === true;
+      const expectedLayout = options.layout;
       const imeShown = options.imeShown === true;
       const page = fixturePage(presentation) || {};
       const native = fixtureNative(presentation) || {};
       const metrics = observeMetrics(presentation) || {};
       const sy = metrics.metrics ? metrics.metrics.sy : metrics.sy;
       const ime = presentation.fixture && isObject(presentation.fixture.outerime) ? presentation.fixture.outerime : null;
-      const labels = presentation.ui && isObject(presentation.ui.labels) ? presentation.ui.labels : null;
+      const ui = presentation.ui && isObject(presentation.ui) ? presentation.ui : null;
+      const labels = ui && isObject(ui.labels) ? ui.labels : null;
+      const surface = boundsOf(ui && ui.surface);
+      // The producer's actual displayed page rect (pageDisplayFrame, the same source as
+      // pageRect.physical); never the fixed viewport or a state constant.
       const frame = boundsOf(native.physicalFrame);
       const composer = acceptedComposerRect(presentation.composer);
       const diag = await io.readDiag();
-      const labelOk = autoFull
-        ? Boolean(labels && !labels['Full screen'] && !labels['Small window'])
-        : float
-          ? Boolean(labels && labels['Full screen'] && !labels['Small window'])
-          : Boolean(labels && labels['Small window'] && !labels['Full screen']);
-      if (!labelOk) return { ok: false, reason: `${label}-window-mode`, labels, presentation: presentation.raw };
+      if (native.presentationBlocked !== false) {
+        return { ok: false, reason: `${label}-blocked`, native, presentation: presentation.raw };
+      }
       if (!ime || ime.shown !== imeShown) return { ok: false, reason: `${label}-ime-state`, ime };
+      // Auto-full has no Full/Small control (there is nowhere to go back to), so its readable
+      // evidence is the real float surface filling the IME-safe area.
+      const fullSurface = Boolean(surface && ime &&
+        isNum(ime.windowLeftPx) && isNum(ime.windowRightPx) && isNum(ime.safeBottomPx) &&
+        Math.abs(surface.left - ime.windowLeftPx) <= 2 &&
+        Math.abs(surface.right - ime.windowRightPx) <= 2 &&
+        Math.abs(surface.bottom - ime.safeBottomPx) <= 2);
+      const smallControl = Boolean(labels && labels['Small window']);
+      const fullControl = Boolean(labels && labels['Full screen']);
+      let layout = null;
+      if (smallControl && !fullControl) layout = 'full';
+      else if (fullControl && !smallControl) layout = 'float';
+      else if (!smallControl && !fullControl && imeShown && fullSurface) layout = 'full-auto';
+      const layoutOk = expectedLayout === 'ime'
+        ? (layout === 'full' || layout === 'full-auto' || layout === 'float')
+        : layout === expectedLayout;
+      if (!layoutOk) {
+        return { ok: false, reason: `${label}-window-mode`, layout, labels, surface, presentation: presentation.raw };
+      }
+      if (imeShown && !surface) {
+        return { ok: false, reason: `${label}-surface-missing`, ui, presentation: presentation.raw };
+      }
+      if (imeShown && (layout === 'full' || layout === 'full-auto') && !fullSurface) {
+        return { ok: false, reason: `${label}-full-surface`, layout, surface, ime };
+      }
       if (!isNum(sy) || Math.abs(sy - savedSy) > 1 ||
           page.noteValue !== 'product-sticky' || page.noteFocused !== true ||
           page.noteEnabled !== true || page.noteReadOnly !== false || page.noteTag !== 'INPUT' ||
           !isNum(page.noteSelectionStart) || !isNum(page.noteSelectionEnd) ||
           page.noteSelectionStart < 0 || page.noteSelectionEnd < page.noteSelectionStart ||
+          page.noteSelectionStart !== beforePage.noteSelectionStart ||
+          page.noteSelectionEnd !== beforePage.noteSelectionEnd ||
           page.documentHasFocus !== true ||
           page.timeOrigin !== beforePage.timeOrigin || page.loads !== beforePage.loads ||
           beforeNative.viewHandle !== native.viewHandle || native.hasFocus !== true ||
-          native.presentationBlocked !== false) {
+          native.grantForSelected !== true || native.presentationBlocked !== false) {
         return { ok: false, reason: `${label}-identity`, page, native, sy, savedSy, presentation: presentation.raw };
       }
       if (!diag || diag.grantForSelected !== true) return { ok: false, reason: `${label}-grant-lost`, diag };
@@ -1003,15 +1032,19 @@ function focusedCase(io) {
           return { ok: false, reason: `${label}-page-outside-ime-safe`, frame, ime };
         }
       }
-      if (float) {
+      if (surface && (frame.left < surface.left - 1 || frame.right > surface.right + 1 ||
+          frame.top < surface.top - 1 || frame.bottom > surface.bottom + 1)) {
+        return { ok: false, reason: `${label}-page-outside-surface`, frame, surface };
+      }
+      if (layout === 'float') {
         if (!composer || intersects(composer, frame)) {
           return { ok: false, reason: `${label}-float-overlaps-composer`, frame, composer };
         }
       }
-      return { ok: true, page, native, sy, frame, composer, ime, labels };
+      return { ok: true, layout, page, native, sy, frame, composer, ime, labels, surface };
     }
 
-    const initial = await verifyFocusedPresentation(before, 'ime-autofull', { autoFull: true, imeShown: true });
+    const initial = await verifyFocusedPresentation(before, 'ime-shown', { layout: 'ime', imeShown: true });
     if (!initial.ok) return initial;
 
     const hidden = await io.imeHide();
@@ -1022,24 +1055,25 @@ function focusedCase(io) {
       return Boolean(ime && ime.shown === false && labels && labels['Full screen'] && !labels['Small window']);
     }, 'ime-gone-autfloat', 15000);
     if (!imeGone.ok) return { ok: false, reason: 'ime-gone-autfloat-timeout', imeGone };
-    const autoFloat = await verifyFocusedPresentation(imeGone.value, 'ime-gone-autfloat', { float: true, imeShown: false });
+    const autoFloat = await verifyFocusedPresentation(imeGone.value, 'ime-gone-autfloat', { layout: 'float', imeShown: false });
     if (!autoFloat.ok) return autoFloat;
 
     const enlarge = await io.tapUi('Full screen');
     if (!enlarge.ok) return { ok: false, reason: 'enlarge-failed', enlarge };
     const expanded = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels['Small window']), 'enlarged', 20000);
     if (!expanded.ok) return { ok: false, reason: 'enlarge-not-observed', before: before.raw };
-    const full = await verifyFocusedPresentation(expanded.value, 'full-screen', { imeShown: false });
+    const full = await verifyFocusedPresentation(expanded.value, 'full-screen', { layout: 'full', imeShown: false });
     if (!full.ok) return full;
 
     const restore = await io.tapUi('Small window');
     if (!restore.ok) return { ok: false, reason: 'restore-failed', restore };
     const restored = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels['Full screen']), 'restored', 20000);
     if (!restored.ok) return { ok: false, reason: 'restore-not-observed', before: before.raw };
-    const small = await verifyFocusedPresentation(restored.value, 'small-window', { float: true, imeShown: false });
+    const small = await verifyFocusedPresentation(restored.value, 'small-window', { layout: 'float', imeShown: false });
     if (!small.ok) return small;
     return {
-      ok: true, reason: 'completed',
+      ok: true, reason: 'completed', imeLayout: initial.layout,
+      autoFloatLayout: autoFloat.layout, fullLayout: full.layout, afterLayout: small.layout,
       before: before.raw, scrolled: scrolled.value.raw, ime: hidden.data,
       autoFloat: imeGone.value.raw, full: expanded.value.raw, after: restored.value.raw,
       savedSy,
@@ -1051,19 +1085,35 @@ function desktopCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'desktop');
     if (!opened.ok) return opened;
+    // The real page reports its own JS layout; this is not a state constant or a UA check.
+    const frame = await io.pageRect();
+    const page = frame && isObject(frame.page) ? frame.page : null;
     const presentation = await io.presentation();
     if (!presentation) return { ok: false, reason: 'presentation-missing' };
     const observe = observeMetrics(presentation) || {};
     const metrics = isObject(observe.metrics) ? observe.metrics : observe;
     const failures = [];
+    if (!page) failures.push('pageRect');
+    else {
+      // The real page may round the CSS viewport by 1-2 px.
+      if (!isNum(page.innerWidth) || Math.abs(page.innerWidth - 1920) > 2) failures.push('innerWidth');
+      if (!isNum(page.innerHeight) || Math.abs(page.innerHeight - 1080) > 2) failures.push('innerHeight');
+      if (page.media1000 !== true) failures.push('media1000');
+      if (!isNum(page.devicePixelRatio)) failures.push('devicePixelRatio');
+    }
     if (metrics.ua !== 'desktop') failures.push('ua');
-    if (metrics.clientWidth !== 1024) failures.push('clientWidth');
-    if (metrics.media1000 !== true) failures.push('media1000');
-    if (!isObject(metrics.visualViewport) && !isObject(observe.visualViewport)) failures.push('visualViewport');
-    if (!isNum(metrics.dpr) && !isNum(observe.dpr)) failures.push('dpr');
     if (!fixtureNative(presentation) || !isObject(fixtureNative(presentation).physicalFrame)) failures.push('physical');
-    if (failures.length) return { ok: false, reason: 'desktop-metrics-failed', failures, presentation: presentation.raw };
-    return { ok: true, reason: 'completed', presentation: presentation.raw };
+    if (failures.length) {
+      return {
+        ok: false, reason: 'desktop-metrics-failed', failures,
+        page, presentation: presentation.raw,
+      };
+    }
+    return {
+      ok: true, reason: 'completed',
+      page: { innerWidth: page.innerWidth, innerHeight: page.innerHeight },
+      presentation: presentation.raw,
+    };
   })();
 }
 
@@ -1213,39 +1263,97 @@ function mouseHoverA11yOffCase(io) {
     const frameWait = await waitFor(io, () => io.pageRect(), (state) => Boolean(state && isObject(state.pointerUi) &&
       state.pointerUi.geometryReady === true), 'hover-geometry', 8000);
     if (!frameWait.ok) return { ok: false, reason: 'hover-geometry-timeout', frameWait };
-    const frame = frameWait.value;
-    const pointer = frame && isObject(frame.pointerUi) ? frame.pointerUi : null;
-    const physical = frame && isObject(frame.physical) ? frame.physical : null;
-    const viewport = frame && isObject(frame.page) && isObject(frame.page.visualViewport) ? frame.page.visualViewport : null;
+    let frame = frameWait.value;
+    let pointer = frame && isObject(frame.pointerUi) ? frame.pointerUi : null;
+    let physical = frame && isObject(frame.physical) ? frame.physical : null;
+    let viewport = frame && isObject(frame.page) && isObject(frame.page.visualViewport) ? frame.page.visualViewport : null;
     if (!pointer || !physical || !viewport || pointer.geometryReady !== true || !isNum(pointer.pointerViewX) || !isNum(pointer.pointerViewY) ||
         !isNum(physical.left) || !isNum(physical.top) || !isNum(physical.width) || !isNum(viewport.width) || viewport.width <= 0) {
       return { ok: false, reason: 'hover-geometry-missing', frame };
     }
-    const scale = physical.width / viewport.width;
+    let scale = physical.width / viewport.width;
     const beforePointer = pointerCss(frame, pointer);
-    const pointerCssX = beforePointer.x;
-    const pointerCssY = beforePointer.y;
+    let pointerCssX = beforePointer.x;
+    let pointerCssY = beforePointer.y;
     const aim = await io.fixtureTarget('box', pointerCssX, pointerCssY);
     if (!aim || !isObject(aim.box)) return { ok: false, reason: 'hover-box-missing', aim };
     const box = aim.box;
-    // The pointer persists across cases (move-click leaves it on the box centre), so aim at the
-    // farthest inset box corner: that keeps the single relative move above the 32px hover threshold
-    // while the target still hit-tests to the box.
-    const inset = Math.min(10, Math.min((box.right - box.left) / 4, (box.bottom - box.top) / 4));
-    const corners = [
-      { x: box.left + inset, y: box.top + inset },
-      { x: box.right - inset, y: box.top + inset },
-      { x: box.left + inset, y: box.bottom - inset },
-      { x: box.right - inset, y: box.bottom - inset },
-    ];
-    const distance = (point) => Math.hypot(point.x - pointerCssX, point.y - pointerCssY);
-    const target = corners.reduce((best, corner) => (distance(corner) > distance(best) ? corner : best), corners[0]);
-    const hover = await io.fixtureTarget('box', target.x, target.y);
+    const pickTarget = (fromX, fromY) => {
+      // Farthest inset box corner from the current pointer: with the desktop viewport the box can be
+      // only ~40 display px wide, so the inset corner is chosen for distance, not a fixed threshold.
+      const inset = Math.min(10, Math.min((box.right - box.left) / 4, (box.bottom - box.top) / 4));
+      const corners = [
+        { x: box.left + inset, y: box.top + inset },
+        { x: box.right - inset, y: box.top + inset },
+        { x: box.left + inset, y: box.bottom - inset },
+        { x: box.right - inset, y: box.bottom - inset },
+      ];
+      const distance = (point) => Math.hypot(point.x - fromX, point.y - fromY);
+      return corners.reduce((best, corner) => (distance(corner) > distance(best) ? corner : best), corners[0]);
+    };
+    let target = pickTarget(pointerCssX, pointerCssY);
+    let hover = await io.fixtureTarget('box', target.x, target.y);
     if (!hover || hover.hit !== true) return { ok: false, reason: 'hover-target-not-box', target, hover };
-    const dx = Math.round((target.x - pointerCssX) * scale);
-    const dy = Math.round((target.y - pointerCssY) * scale);
+    let dx = Math.round((target.x - pointerCssX) * scale);
+    let dy = Math.round((target.y - pointerCssY) * scale);
+    let away = null;
+    if (aim.hit === true && Math.hypot(dx, dy) <= 32) {
+      // The pointer persists from the move-click case on the box centre. At the desktop scale the
+      // whole box may be only ~40 display px wide, so a centre-to-inset-corner move is naturally
+      // below the 32 px hover threshold. Do not lower the threshold: make a real, significant
+      // relative touchpad move away from the box first, prove via pageRect that the pointer left the
+      // box, then use the normal (now large) move back to the target for the hover DOM evidence.
+      const candidates = [80, 64].flatMap((distance) => [
+        { dx: distance, dy: 0 }, { dx: -distance, dy: 0 },
+        { dx: 0, dy: distance }, { dx: 0, dy: -distance },
+      ]).map((move) => ({ ...move, start: gestureStart(frame, move.dx, move.dy) }));
+      const awayMove = candidates.find((move) => move.start);
+      if (!awayMove) {
+        return { ok: false, reason: 'hover-away-stroke-outside-page', physical, pointer: { x: pointerCssX, y: pointerCssY } };
+      }
+      const awaySent = await io.finger(`finger:${awayMove.start.x},${awayMove.start.y},${awayMove.dx},${awayMove.dy},0,4`);
+      if (!awaySent) return { ok: false, reason: 'hover-away-move-not-sent', awayMove };
+      const awayFrameWait = await waitFor(io, () => io.pageRect(), (state) => {
+        const next = state && isObject(state.pointerUi) ? state.pointerUi : null;
+        return Boolean(next && next.geometryReady === true &&
+          (Math.abs(next.pointerViewX - pointer.pointerViewX) > 1 ||
+            Math.abs(next.pointerViewY - pointer.pointerViewY) > 1));
+      }, 'hover-away-geometry', 8000);
+      if (!awayFrameWait.ok) return { ok: false, reason: 'hover-away-geometry-timeout', awayFrameWait };
+      const awayFrame = awayFrameWait.value;
+      const awayPointer = awayFrame && isObject(awayFrame.pointerUi) ? awayFrame.pointerUi : null;
+      const awayPhysical = awayFrame && isObject(awayFrame.physical) ? awayFrame.physical : null;
+      const awayViewport = awayFrame && isObject(awayFrame.page) && isObject(awayFrame.page.visualViewport)
+        ? awayFrame.page.visualViewport : null;
+      if (!awayPointer || !awayPhysical || !awayViewport || awayPointer.geometryReady !== true ||
+          !isNum(awayPointer.pointerViewX) || !isNum(awayPointer.pointerViewY) ||
+          !isNum(awayPhysical.width) || !isNum(awayViewport.width) || awayViewport.width <= 0) {
+        return { ok: false, reason: 'hover-away-geometry-missing', frame: awayFrame };
+      }
+      const awayCss = pointerCss(awayFrame, awayPointer);
+      const awayHit = await io.fixtureTarget('box', awayCss.x, awayCss.y);
+      away = {
+        displayDx: awayMove.dx, displayDy: awayMove.dy, css: awayCss,
+        hit: awayHit ? awayHit.hit : null,
+      };
+      if (!awayHit || awayHit.hit !== false) {
+        return { ok: false, reason: 'hover-away-not-outside', away, frame: awayFrame };
+      }
+      frame = awayFrame;
+      pointer = awayPointer;
+      physical = awayPhysical;
+      viewport = awayViewport;
+      scale = physical.width / viewport.width;
+      pointerCssX = awayCss.x;
+      pointerCssY = awayCss.y;
+      target = pickTarget(pointerCssX, pointerCssY);
+      hover = await io.fixtureTarget('box', target.x, target.y);
+      if (!hover || hover.hit !== true) return { ok: false, reason: 'hover-target-not-box', target, hover, away };
+      dx = Math.round((target.x - pointerCssX) * scale);
+      dy = Math.round((target.y - pointerCssY) * scale);
+    }
     // Same sizing rule as move-click: a correction at or below 32px is a tap-sized move, not a hover.
-    if (Math.hypot(dx, dy) <= 32) return { ok: false, reason: 'hover-move-tiny', dx, dy, target, aim };
+    if (Math.hypot(dx, dy) <= 32) return { ok: false, reason: 'hover-move-tiny', dx, dy, target, aim, away };
     const start = gestureStart(frame, dx, dy);
     if (!start) return { ok: false, reason: 'hover-stroke-outside-page', physical, dx, dy };
     const before = await io.presentation();
@@ -1316,6 +1424,7 @@ function mouseHoverA11yOffCase(io) {
       dy,
       hover: 'observed',
       pointermoveObserved: true,
+      away,
       restore,
       moves: moves.length,
       lastMove: last,

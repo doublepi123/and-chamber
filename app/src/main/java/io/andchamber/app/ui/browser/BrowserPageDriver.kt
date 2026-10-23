@@ -44,9 +44,14 @@ internal class BrowserPageDriver(
             BrowserMethod.NAVIGATE -> navigate(page, request)
             BrowserMethod.SNAPSHOT -> snapshot(page)
             BrowserMethod.CLICK -> act(page, "click", request)
-            BrowserMethod.TYPE -> act(page, "type", request)
+            BrowserMethod.TYPE -> if (request.params[BrowserDriverLogic.PARAM_SUBMIT] == "true") {
+                typeSubmit(page, request)
+            } else {
+                act(page, "type", request)
+            }
             BrowserMethod.SCROLL -> act(page, "scroll", request)
             BrowserMethod.CAPTURE -> capture(page)
+            BrowserMethod.RESIZE -> resize(page, request)
         }
     }
 
@@ -135,6 +140,106 @@ internal class BrowserPageDriver(
             }
         }
     }
+
+    private suspend fun typeSubmit(page: BrowserSession, request: BrowserRequest): BrowserReply {
+        val documentId = page.acceptedDocumentId
+        if (!page.committed || documentId == null || page.unknownNavigation) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "the page is still loading")
+        }
+        val epoch = page.epoch()
+        val nonce = page.documentNonce
+        val viewId = page.viewId
+        val ticket = page.ticket
+        if (page.installedNonce != nonce || page.epoch() != epoch) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "refs expired")
+        }
+        val ref = request.params[BrowserDriverLogic.PARAM_REF].orEmpty()
+        if (!ref.startsWith(nonce.take(8))) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "ref expired")
+        }
+        val text = request.params[BrowserDriverLogic.PARAM_TEXT].orEmpty()
+        // The script refuses a known POST/override/foreign target/credential/textarea before it
+        // changes the value, then uses the same native setter as the ordinary TYPE action.
+        val raw = page.eval(BrowserDriverLogic.submitTypeScript(nonce, documentId, ref, text), epoch) ?: return stale()
+        if (page.epoch() != epoch || !page.owns(viewId, ticket) || page.acceptedDocumentId != documentId) return stale()
+        when (val parsed = BrowserDriverLogic.parseScriptResult(raw)) {
+            is ScriptResult.Failed -> return submitFailure(parsed.message)
+            is ScriptResult.Ok -> {
+                if (parsed.json["documentId"]?.jsonPrimitive?.contentOrNull != documentId) return stale()
+            }
+        }
+        onChanged()
+        // Enter is native and exactly one DOWN/UP. A false return from the platform is not treated
+        // as completion; the real navigation receipt is the presenter's separate confirmation.
+        return when (val press = page.pressEnter(ref, epoch, request.timeoutMs)) {
+            EnterPress.Dispatched -> BrowserReply(
+                ok = true,
+                result = mapOf(
+                    "action" to "type",
+                    BrowserDriverLogic.RESULT_ENTER_DISPATCHED to "true",
+                ),
+            )
+            EnterPress.Stale -> stale()
+            EnterPress.NotVisible -> BrowserDriverLogic.requestError(BrowserErrorCode.NOT_VISIBLE, "the page is not visible")
+            EnterPress.Failed -> BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "enter dispatch failed")
+            is EnterPress.Refused -> submitFailure(press.reason)
+        }
+    }
+
+    /** A fixed refusal reason from the submit/active script. Never page text. */
+    private fun submitFailure(message: String): BrowserReply = when (message) {
+        "ref expired", "document mismatch", "document not ready", "not ready" -> stale()
+        "refused field", "not single-line input", "form method", "form method override",
+        "foreign target", "form action", "form changed" ->
+            BrowserDriverLogic.requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, message)
+        "not focused", "focus lost", "not editable", "not actionable" ->
+            BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, message)
+        else -> BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, message)
+    }
+
+    /**
+     * Applies a viewport mode/size to the live session without loading or reloading anything. The
+     * result is the configured pair, not a claim that the DOM already measured it; snapshot probe
+     * fields are the measured truth.
+     */
+    private fun resize(page: BrowserSession, request: BrowserRequest): BrowserReply {
+        val viewport = request.params[BrowserDriverLogic.PARAM_VIEWPORT]
+            ?: return BrowserDriverLogic.requestError(BrowserErrorCode.INVALID_REQUEST, "missing viewport")
+        val enabled = when (viewport) {
+            "desktop" -> true
+            "mobile" -> false
+            "fill" -> page.desktopConfigured
+            else -> return BrowserDriverLogic.requestError(BrowserErrorCode.INVALID_REQUEST, "viewport must be desktop, mobile or fill")
+        }
+        val width = request.params[BrowserDriverLogic.PARAM_WIDTH]
+        val height = request.params[BrowserDriverLogic.PARAM_HEIGHT]
+        return when (val parsed = BrowserDesktopViewport.parse(width, height)) {
+            is BrowserDesktopViewport.Parse.Invalid ->
+                BrowserDriverLogic.requestError(BrowserErrorCode.UNSUPPORTED_PARAMETER, "invalid desktop size")
+            is BrowserDesktopViewport.Parse.Valid -> {
+                if (viewport != "desktop") {
+                    return BrowserDriverLogic.requestError(
+                        BrowserErrorCode.UNSUPPORTED_PARAMETER,
+                        "width and height require desktop",
+                    )
+                }
+                page.configureDesktop(true, parsed.size.width, parsed.size.height)
+                BrowserReply(ok = true, result = resizeResult(page, viewport))
+            }
+            BrowserDesktopViewport.Parse.Unspecified -> {
+                // Bool-only configure preserves a custom desktop pair.
+                page.configureDesktop(enabled)
+                BrowserReply(ok = true, result = resizeResult(page, viewport))
+            }
+        }
+    }
+
+    private fun resizeResult(page: BrowserSession, viewport: String): Map<String, String> = mapOf(
+        BrowserDriverLogic.PARAM_VIEWPORT to viewport,
+        "desktop" to page.desktopConfigured.toString(),
+        BrowserDriverLogic.PARAM_WIDTH to page.desktopWidth.toString(),
+        BrowserDriverLogic.PARAM_HEIGHT to page.desktopHeight.toString(),
+    )
 
     private suspend fun capture(page: BrowserSession): BrowserReply {
         val image = withTimeoutOrNull(BrowserLimits.DEFAULT_TIMEOUT_MS) { page.captureViewport() }

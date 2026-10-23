@@ -15,8 +15,11 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.lifecycle.Lifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import io.andchamber.app.MainActivity
@@ -24,6 +27,7 @@ import io.andchamber.app.browser.provider.ProviderCodes
 import io.andchamber.app.browser.provider.ProviderMode
 import io.andchamber.app.browser.provider.ProviderRequest
 import io.andchamber.app.browser.provider.ProviderResult
+import io.andchamber.app.ui.browser.BrowserDesktopViewport
 import io.andchamber.app.ui.browser.BrowserSiteDataClearer
 import io.andchamber.app.ui.browser.FixedViewportContainer
 import io.andchamber.app.ui.browser.NativeBrowserPresenter
@@ -45,6 +49,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.json.JSONTokener
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -53,6 +58,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.net.InetAddress
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
@@ -92,6 +98,14 @@ private fun JsonObject.dataBoolean(name: String): Boolean? =
 
 private fun jsString(value: String): String = "\"" + value + "\""
 
+/** Same fixed public example.com resolver as the smoke test; no fixture test does real DNS. */
+private fun fixturePolicy(): BrowserUrlPolicy = BrowserUrlPolicy(
+    resolver = DnsResolver { host ->
+        check(host == "example.com") { "unexpected fixture host" }
+        listOf(InetAddress.getByName("93.184.216.34"))
+    },
+)
+
 /** The exact selector a current snapshot returned for a named element. */
 private fun selectorFor(data: JsonObject, name: String): String? {
     val elements = data["elements"]?.jsonArray ?: return null
@@ -111,14 +125,16 @@ private fun cookieValue(header: String?, name: String): String? =
         ?.substringAfter('=')
 
 /**
- * Owns one MainActivity, one test presenter, one host FrameLayout and one background scope for a
- * single test. It delegates every authority decision to the production presenter; the only test
- * hooks are the debug-only page decorator and held ready callbacks used to prove the pre-ready
- * refusal. Neither hook grants anything.
+ * Owns one test presenter, one host FrameLayout and one background scope for a single test. It
+ * reuses a real RESUMED MainActivity but never an old host, grant or source. It delegates every
+ * authority decision to the production presenter; the only test hooks are the debug-only page
+ * decorator and held ready callbacks used to prove the pre-ready refusal. Neither hook grants
+ * anything.
  */
 internal class BrowserAuthorityHarness(
     private val instrumentation: Instrumentation,
     private val instanceKey: String,
+    private val policy: BrowserUrlPolicy = fixturePolicy(),
 ) {
     val activity: MainActivity
     val presenter: NativeBrowserPresenter
@@ -129,6 +145,7 @@ internal class BrowserAuthorityHarness(
     private val auxiliary = mutableListOf<WebView>()
     private val heldReady = mutableListOf<() -> Unit>()
     private var pageContainer: FixedViewportContainer? = null
+    private var pendingDesktopSize: BrowserDesktopViewport.Size? = null
 
     @Volatile
     private var holdReady = false
@@ -142,12 +159,17 @@ internal class BrowserAuthorityHarness(
             "DOCUMENT_START_SCRIPT is required for a controlled browser page",
             WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT),
         )
-        activity = instrumentation.startActivitySync(
-            Intent(instrumentation.targetContext, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        ) as MainActivity
-        instrumentation.waitForIdleSync()
-        presenter = NativeBrowserPresenter()
+        // Reuse a real RESUMED MainActivity left by a prior harness; only launch when none exists.
+        // A singleTop Compose activity keeps animating, so startActivitySync would wait for global
+        // idle instead of Activity readiness.
+        activity = resumedMainActivity() ?: launchMainActivity()
+        // Never call waitForIdleSync here: a reused Compose/WebView activity keeps animating, and
+        // global idle is not the readiness signal. RESUMED + attached decor is.
+        assertTrue(
+            "MainActivity must be genuinely RESUMED with an attached decor; state=${activity.lifecycle.currentState}",
+            awaitMainActivityResumed(activity),
+        )
+        presenter = NativeBrowserPresenter(policy = { policy })
         host = mainValue {
             FrameLayout(activity).also { frame ->
                 val content = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
@@ -206,10 +228,16 @@ internal class BrowserAuthorityHarness(
                 // The real production wrapper: the WebView keeps one fixed viewport and the
                 // container only scales it when the window is moved, resized or made full screen.
                 val container = FixedViewportContainer(activity)
-                val viewportWidth = host.width.takeIf { it > 1 }
-                    ?: activity.resources.displayMetrics.widthPixels
-                val viewportHeight = host.height.takeIf { it > 1 }
-                    ?: activity.resources.displayMetrics.heightPixels
+                val current = presenter.state.value
+                val desktopSize = pendingDesktopSize ?: if (current.desktopMode) {
+                    BrowserDesktopViewport.Size(current.desktopWidth, current.desktopHeight)
+                } else {
+                    null
+                }
+                val viewportWidth = desktopSize?.width ?: host.width.takeIf { it > 1 }
+                    ?: contentWidth()
+                val viewportHeight = desktopSize?.height ?: host.height.takeIf { it > 1 }
+                    ?: contentHeight()
                 container.setViewport(viewportWidth, viewportHeight)
                 container.onPresentationChanged = { presenter.onGeometrySettled() }
                 container.addView(
@@ -229,20 +257,32 @@ internal class BrowserAuthorityHarness(
                 pageContainer = container
             }
         }
-        // The host must have a real size before the first page takes its fixed viewport.
-        instrumentation.waitForIdleSync()
+        // The host is attached; the first page takes host/content dimensions, falling back to the
+        // real content view rather than waiting for a global idle that may never arrive.
     }
 
     val state: NativeBrowserState
         get() = presenter.state.value
 
-    fun openRequest(url: String, requestId: String, allowWaitMs: Int = 0): ProviderRequest =
+    fun openRequest(
+        url: String,
+        requestId: String,
+        allowWaitMs: Int = 0,
+        viewport: String = "mobile",
+        width: Int? = null,
+        height: Int? = null,
+    ): ProviderRequest =
         ProviderRequest(
             serverEpoch = "instrumentation-test",
             connectionId = connectionId,
             requestId = requestId,
             action = "browser.open",
-            parameters = mapOf("url" to url, "viewport" to "mobile"),
+            parameters = buildMap {
+                put("url", url)
+                put("viewport", viewport)
+                if (width != null) put("width", width.toString())
+                if (height != null) put("height", height.toString())
+            },
             directory = "/",
             sessionId = sessionId,
             timeoutMs = 90_000L,
@@ -261,6 +301,134 @@ internal class BrowserAuthorityHarness(
             null,
             SystemClock.elapsedRealtime() + 90_000L,
         ) { SystemClock.elapsedRealtime() }
+    }
+
+    /** Production open with an explicit viewport; desktop may carry a valid width/height pair. */
+    fun openViewport(
+        url: String,
+        requestId: String,
+        viewport: String,
+        width: Int? = null,
+        height: Int? = null,
+    ): ProviderResult {
+        pendingDesktopSize = when {
+            viewport != "desktop" -> null
+            width != null && height != null ->
+                runCatching { BrowserDesktopViewport.Size(width, height) }.getOrNull()
+            else -> BrowserDesktopViewport.default
+        }
+        try {
+            return runBlocking {
+                presenter.execute(
+                    openRequest(url, requestId, DEFAULT_ALLOW_WAIT_MS, viewport, width, height),
+                    presenter.registry,
+                    ProviderMode.MANUAL,
+                    null,
+                    SystemClock.elapsedRealtime() + 90_000L,
+                ) { SystemClock.elapsedRealtime() }
+            }
+        } finally {
+            pendingDesktopSize = null
+            syncContainerViewport()
+        }
+    }
+
+    /** Agent resize RPC; the test container follows the real state pair, never a fake innerWidth. */
+    fun resizeViewport(viewport: String, width: Int?, height: Int?, requestId: String): ProviderResult {
+        val result = runBlocking {
+            presenter.execute(
+                ProviderRequest(
+                    serverEpoch = "instrumentation-test",
+                    connectionId = connectionId,
+                    requestId = requestId,
+                    action = "browser.resize",
+                    parameters = buildMap {
+                        put("viewport", viewport)
+                        if (width != null) put("width", width.toString())
+                        if (height != null) put("height", height.toString())
+                    },
+                    directory = "/",
+                    sessionId = sessionId,
+                    timeoutMs = 10_000L,
+                ),
+                presenter.registry,
+                state.mode,
+                state.selectedTabId,
+                SystemClock.elapsedRealtime() + 10_000L,
+            ) { SystemClock.elapsedRealtime() }
+        }
+        syncContainerViewport()
+        return result
+    }
+
+    fun resizeDesktop(width: Int, height: Int, requestId: String): ProviderResult =
+        resizeViewport("desktop", width, height, requestId)
+
+    /** Mirrors the production UI: desktop uses state.desktopWidth/Height, mobile uses the window. */
+    fun syncContainerViewport() = onMain {
+        val container = pageContainer ?: return@onMain
+        val current = presenter.state.value
+        if (current.desktopMode) {
+            container.setViewport(current.desktopWidth, current.desktopHeight)
+        } else {
+            val width = host.width.takeIf { it > 1 } ?: contentWidth()
+            val height = host.height.takeIf { it > 1 } ?: contentHeight()
+            container.setViewport(width, height)
+        }
+    }
+
+    /**
+     * Failure-only evidence: raw WebView size, real CSS inner/visual viewport, DPR and the current
+     * meta viewport. It is never used as a pass predicate or production log.
+     */
+    fun desktopDiagnostics(): String {
+        val current = state
+        val view = currentWebView() ?: return "state(desktopMode=${current.desktopMode}," +
+            "desktopWidth=${current.desktopWidth},desktopHeight=${current.desktopHeight}," +
+            "agentOn=${current.agentOn},pageReady=${current.pageReady}); no-view"
+        val rawSize = mainValue { view.width to view.height }
+        val script = """(function(){
+            var v = window.visualViewport || {};
+            var m = document.querySelector('meta[name="viewport"]');
+            return JSON.stringify({
+              innerWidth: innerWidth, innerHeight: innerHeight,
+              visualWidth: v.width || 0, visualHeight: v.height || 0, visualScale: v.scale || 0,
+              dpr: devicePixelRatio, meta: m ? m.getAttribute('content') : null,
+              ready: document.readyState, url: String(location.href)
+            });
+        })()"""
+        val rawCss = runCatching { eval(view, script) }.getOrNull()
+        val css = rawCss?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
+            ?: "eval-null"
+        val (containerWidth, containerHeight) = containerSize()
+        return "state(desktopMode=${current.desktopMode},desktopWidth=${current.desktopWidth}," +
+            "desktopHeight=${current.desktopHeight},agentOn=${current.agentOn}," +
+            "pageReady=${current.pageReady},viewHandle=${current.viewHandle},selected=${current.selectedTabId}); " +
+            "rawView=${rawSize.first}x${rawSize.second}; " +
+            "container=${containerWidth}x$containerHeight scale=${containerScale()}; css=$css"
+    }
+
+    /** Real JS layout size, not a reported constant. Strict 2 CSS px target. */
+    fun awaitDesktopViewport(width: Int, height: Int, timeoutMs: Long = 20_000L) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (state.desktopMode) {
+                val view = currentWebView()
+                if (view != null) {
+                    val actualWidth = runCatching { eval(view, "String(innerWidth)") }.getOrNull()
+                        ?.trim('"')?.toDoubleOrNull()
+                    val actualHeight = runCatching { eval(view, "String(innerHeight)") }.getOrNull()
+                        ?.trim('"')?.toDoubleOrNull()
+                    if (actualWidth != null && actualHeight != null &&
+                        abs(actualWidth - width) <= 2.0 && abs(actualHeight - height) <= 2.0
+                    ) {
+                        return
+                    }
+                }
+            }
+            SystemClock.sleep(50L)
+        }
+        throw AssertionError("timed out waiting for desktop viewport ${width}x$height; ${desktopDiagnostics()}")
     }
 
     /** Starts an open without the executor so the test can inspect the pre-ready state. */
@@ -333,6 +501,58 @@ internal class BrowserAuthorityHarness(
             state.mode,
             state.selectedTabId,
             SystemClock.elapsedRealtime() + 5_000L,
+        ) { SystemClock.elapsedRealtime() }
+    }
+
+    private fun typeRequest(
+        selector: String,
+        value: String,
+        submit: Boolean,
+        requestId: String,
+    ): ProviderRequest = ProviderRequest(
+        serverEpoch = "instrumentation-test",
+        connectionId = connectionId,
+        requestId = requestId,
+        action = "browser.type",
+        parameters = buildMap {
+            put("selector", selector)
+            put("value", value)
+            if (submit) put("submit", "true")
+        },
+        directory = "/",
+        sessionId = sessionId,
+        timeoutMs = 10_000L,
+    )
+
+    /** Production browser.type; submit=true is the target form-submit contract. */
+    fun type(
+        selector: String,
+        value: String,
+        submit: Boolean,
+        requestId: String,
+    ): ProviderResult = runBlocking {
+        presenter.execute(
+            typeRequest(selector, value, submit, requestId),
+            presenter.registry,
+            state.mode,
+            state.selectedTabId,
+            SystemClock.elapsedRealtime() + 10_000L,
+        ) { SystemClock.elapsedRealtime() }
+    }
+
+    /** Same production request, started without blocking so a race can hide while it is live. */
+    fun startType(
+        selector: String,
+        value: String,
+        submit: Boolean,
+        requestId: String,
+    ): Deferred<ProviderResult> = scope.async {
+        presenter.execute(
+            typeRequest(selector, value, submit, requestId),
+            presenter.registry,
+            state.mode,
+            state.selectedTabId,
+            SystemClock.elapsedRealtime() + 10_000L,
         ) { SystemClock.elapsedRealtime() }
     }
 
@@ -409,6 +629,19 @@ internal class BrowserAuthorityHarness(
         return mainValue { view.width to view.height }
     }
 
+    /** Real content size before the host's first layout pass; not a guessed constant. */
+    private fun contentWidth(): Int =
+        activity.window?.decorView
+            ?.findViewById<ViewGroup>(android.R.id.content)
+            ?.width?.takeIf { it > 1 }
+            ?: activity.resources.displayMetrics.widthPixels
+
+    private fun contentHeight(): Int =
+        activity.window?.decorView
+            ?.findViewById<ViewGroup>(android.R.id.content)
+            ?.height?.takeIf { it > 1 }
+            ?: activity.resources.displayMetrics.heightPixels
+
     fun containerSize(): Pair<Int, Int> =
         mainValue { pageContainer?.let { it.width to it.height } ?: (0 to 0) }
 
@@ -483,16 +716,68 @@ internal class BrowserAuthorityHarness(
 
     fun dispose() {
         scope.cancel()
-        runCatching {
-            onMain {
-                auxiliary.forEach { runCatching { it.destroy() } }
-                auxiliary.clear()
-                heldReady.clear()
+        onMain {
+            auxiliary.forEach { runCatching { it.destroy() } }
+            auxiliary.clear()
+            heldReady.clear()
+            try {
                 presenter.detachHost(instanceKey, 1L)
+            } finally {
+                // The Activity is intentionally kept RESUMED for reuse; this harness's host and
+                // all of its pages must still leave the window completely.
                 (host.parent as? ViewGroup)?.removeView(host)
                 host.removeAllViews()
             }
         }
+    }
+
+    /** Main thread only; the lifecycle registry rejects calls off Main. */
+    private fun resumedMainActivity(): MainActivity? {
+        var found: MainActivity? = null
+        instrumentation.runOnMainSync {
+            found = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED)
+                .filterIsInstance<MainActivity>()
+                .firstOrNull {
+                    !it.isFinishing && !it.isDestroyed &&
+                        it.window?.decorView?.isAttachedToWindow == true
+                }
+        }
+        return found
+    }
+
+    /**
+     * Launch only when no RESUMED MainActivity exists. ActivityMonitor observes the target
+     * Activity directly; startActivitySync would wait for global idle while Compose/WebView keeps
+     * animating.
+     */
+    private fun launchMainActivity(): MainActivity {
+        val monitor = instrumentation.addMonitor(MainActivity::class.java.name, null, false)
+        return try {
+            instrumentation.targetContext.startActivity(
+                Intent(instrumentation.targetContext, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            )
+            instrumentation.waitForMonitorWithTimeout(monitor, 30_000L) as? MainActivity
+                ?: throw AssertionError("MainActivity launch monitor timed out")
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+    }
+
+    /** Lifecycle observation, not a blind delay: RESUMED plus a real attached decor. */
+    private fun awaitMainActivityResumed(activity: MainActivity, timeoutMs: Long = 30_000L): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val ready = mainValue {
+                activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                    activity.window?.decorView?.isAttachedToWindow == true &&
+                    !activity.isFinishing && !activity.isDestroyed
+            }
+            if (ready) return true
+            SystemClock.sleep(50L)
+        }
+        return false
     }
 
     private fun onMain(block: () -> Unit) {
