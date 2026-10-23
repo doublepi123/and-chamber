@@ -495,12 +495,94 @@ class ProviderPageAdapterTest {
         assertEquals(0, driver.calls)
     }
 
+    @Test
+    fun `a malformed snapshot is unknown without a page-level callback`() = runBlocking {
+        val driver = FakeDriver()
+        var unknown = 0
+        val pages = granted(driver, onOutcomeUnknown = { unknown += 1 })
+        driver.snapshotJson = "not-json"
+        val snap = pages.second.execute(request("browser.snapshot"), pages.first, "tab-1", ProviderMode.AGENT, 1_000L)
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, snap.errorCode)
+        assertEquals("a read failure never marks the document uncertain", 0, unknown)
+    }
+
+    @Test
+    fun `a scroll with no reply or a cancelled scroll is unknown without a page-level callback`() = runBlocking {
+        val driver = FakeDriver()
+        var unknown = 0
+        val pages = granted(driver, onOutcomeUnknown = { unknown += 1 })
+        driver.failing = setOf(BrowserMethod.SCROLL)
+        val before = driver.calls
+        val failed = pages.second.execute(
+            request("browser.scroll", mapOf("direction" to "down")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, failed.errorCode)
+        assertEquals("the increment is sent exactly once", before + 1, driver.calls)
+        assertEquals("a failed scroll keeps the page trustworthy", 0, unknown)
+
+        driver.failing = emptySet()
+        driver.cancelling = setOf(BrowserMethod.SCROLL)
+        val afterFailure = driver.calls
+        var cancelled = false
+        try {
+            pages.second.execute(
+                request("browser.scroll", mapOf("direction" to "down")),
+                pages.first,
+                "tab-1",
+                ProviderMode.AGENT,
+                1_000L,
+            )
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            cancelled = true
+        }
+        assertTrue("the cancellation still propagates", cancelled)
+        assertEquals("a cancelled scroll is not replayed", afterFailure + 1, driver.calls)
+        assertEquals("a cancelled scroll keeps the page trustworthy", 0, unknown)
+    }
+
+    @Test
+    fun `a click with no reply is unknown and marks the document uncertain`() = runBlocking {
+        val driver = FakeDriver()
+        var unknown = 0
+        val pages = granted(driver, onOutcomeUnknown = { unknown += 1 })
+        driver.failing = setOf(BrowserMethod.CLICK)
+        val clicked = pages.second.execute(
+            request("browser.click", mapOf("selector" to """[data-andchamber-ref="$ref"]""")),
+            pages.first,
+            "tab-1",
+            ProviderMode.AGENT,
+            1_000L,
+        )
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, clicked.errorCode)
+        assertEquals("an unobserved click effect is page-level uncertainty", 1, unknown)
+    }
+
+    @Test
+    fun `a capture without geometry is unavailable without a page-level callback`() = runBlocking {
+        val driver = FakeDriver()
+        var unknown = 0
+        val pages = granted(driver, onOutcomeUnknown = { unknown += 1 })
+        driver.captureNoGeometry = true
+        val shot = pages.second.execute(request("browser.capture"), pages.first, "tab-1", ProviderMode.AGENT, 1_000L)
+        assertEquals(ProviderCodes.BROWSER_PAGE_UNAVAILABLE, shot.errorCode)
+        assertEquals(1, pages.second.captures)
+        assertEquals("a capture geometry failure is not a document uncertainty", 0, unknown)
+    }
+
     private fun adapter(driver: BrowserDriver, present: suspend (String) -> Boolean = { true }) =
         OpenChamberPageAdapter(driver, present = { tab -> present(tab.url) }, viewportSize = { 12 to 34 })
 
-    private fun granted(driver: FakeDriver, json: String = snapshotJson(ref, "Sign in")): Pair<ProviderRegistry, OpenChamberPageAdapter> {
+    private fun granted(
+        driver: FakeDriver,
+        json: String = snapshotJson(ref, "Sign in"),
+        onOutcomeUnknown: () -> Unit = {},
+    ): Pair<ProviderRegistry, OpenChamberPageAdapter> {
         driver.snapshotJson = json
-        val pages = adapter(driver)
+        val pages = OpenChamberPageAdapter(driver, viewportSize = { 12 to 34 }, onOutcomeUnknown = onOutcomeUnknown)
         val registry = ProviderRegistry { "tab-1" }
         registry.open("s1", "/proj", "local", "https://public.example", "tab-1")
         registry.grant(1L, "c1", "s1", "tab-1")
@@ -533,6 +615,9 @@ class ProviderPageAdapterTest {
         var lastParams: Map<String, String> = emptyMap()
         var lastRequest: BrowserRequest? = null
         var typeReply: BrowserReply? = null
+        var failing: Set<BrowserMethod> = emptySet()
+        var cancelling: Set<BrowserMethod> = emptySet()
+        var captureNoGeometry = false
         var snapshotJson: String = """{"url":"https://public.example","title":"Hi","text":"hello","elements":[{"ref":"abcdef01-1234abcd-1","role":"button","name":"Sign in"}]}"""
 
         override suspend fun execute(request: BrowserRequest): BrowserReply {
@@ -541,6 +626,8 @@ class ProviderPageAdapterTest {
             lastRef = request.params[BrowserDriverLogic.PARAM_REF]
             lastParams = request.params
             lastRequest = request
+            if (request.method in cancelling) throw kotlinx.coroutines.CancellationException("cancelled")
+            if (request.method in failing) error("driver failure")
             return when (request.method) {
                 BrowserMethod.NAVIGATE -> BrowserReply(ok = true, result = mapOf("phase" to "started"))
                 BrowserMethod.SNAPSHOT -> BrowserReply(ok = true, result = mapOf(BrowserDriverLogic.RESULT_SNAPSHOT to snapshotJson))
@@ -554,24 +641,28 @@ class ProviderPageAdapterTest {
                         BrowserDriverLogic.PARAM_HEIGHT to (request.params[BrowserDriverLogic.PARAM_HEIGHT] ?: "1080"),
                     ),
                 )
-                BrowserMethod.CAPTURE -> BrowserReply(
-                    ok = true,
-                    result = mapOf(
-                        BrowserDriverLogic.RESULT_DATA to "aGVsbG8=",
-                        BrowserDriverLogic.RESULT_MIME to "image/png",
-                        BrowserDriverLogic.RESULT_URL to "https://public.example",
-                        "title" to "Hi",
-                        "width" to "12",
-                        "height" to "34",
-                        "cssWidth" to "1024",
-                        "cssHeight" to "768",
-                        "dpr" to "2.625",
-                        "visualWidth" to "819",
-                        "visualHeight" to "600",
-                        "scale" to "1",
-                        "viewport" to "fill",
-                    ),
-                )
+                BrowserMethod.CAPTURE -> if (captureNoGeometry) {
+                    BrowserReply(ok = true, result = mapOf(BrowserDriverLogic.RESULT_DATA to "aGVsbG8="))
+                } else {
+                    BrowserReply(
+                        ok = true,
+                        result = mapOf(
+                            BrowserDriverLogic.RESULT_DATA to "aGVsbG8=",
+                            BrowserDriverLogic.RESULT_MIME to "image/png",
+                            BrowserDriverLogic.RESULT_URL to "https://public.example",
+                            "title" to "Hi",
+                            "width" to "12",
+                            "height" to "34",
+                            "cssWidth" to "1024",
+                            "cssHeight" to "768",
+                            "dpr" to "2.625",
+                            "visualWidth" to "819",
+                            "visualHeight" to "600",
+                            "scale" to "1",
+                            "viewport" to "fill",
+                        ),
+                    )
+                }
                 else -> BrowserReply(ok = true)
             }
         }

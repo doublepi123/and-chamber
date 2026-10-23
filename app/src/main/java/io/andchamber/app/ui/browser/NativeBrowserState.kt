@@ -3,6 +3,19 @@ package io.andchamber.app.ui.browser
 import io.andchamber.app.browser.provider.ProviderMode
 
 /**
+ * The smallest per-page recovery classification. It is derived from explicit presenter state,
+ * never from a page-provided string.
+ */
+internal enum class PageRecovery {
+    /** Normal page: reads and mutations follow the normal grant. */
+    NONE,
+    /** A click/type effect is uncertain: only snapshot/capture reads are admitted. */
+    OBSERVE_ONLY,
+    /** The document identity/renderer is invalid: the UI must reopen, not replay. */
+    REOPEN_REQUIRED,
+}
+
+/**
  * What the floating window may render. This is presentation only: no token, no claim nonce, and
  * no page command. [viewGeneration] advances whenever the owned WebView is replaced.
  */
@@ -14,6 +27,14 @@ data class NativeBrowserState(
     val agentOn: Boolean = false,
     val pageError: String? = null,
     val pageReady: Boolean = false,
+    /** True only for a document-invalid/unavailable page; the UI offers reload/reopen. */
+    val requiresReopen: Boolean = false,
+    /**
+     * A dispatched click/type left its effect unconfirmed. Reads stay possible with the same
+     * existing grant; the UI asks the person to check the page and hand control back explicitly.
+     * Mutations are refused (OUTCOME_UNKNOWN) and the old action is never replayed.
+     */
+    val actionOutcomeUnknown: Boolean = false,
     val viewHandle: Int = 0,
     val viewGeneration: Long = 0L,
     val hostAttached: Boolean = false,

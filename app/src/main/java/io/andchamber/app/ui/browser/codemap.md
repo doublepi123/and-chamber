@@ -9,7 +9,8 @@ WebView pool, and not a `WebSessionProfiles` profile.
 
 Files:
 - `NativeBrowserPresenter.kt`: the single authority. Owns pages, tabs, grants, connection ids and
-  transport eligibility; implements the provider page executor.
+  transport eligibility; implements the provider page executor. Per-page recovery separates an
+  unconfirmed action (observation only) from an invalid document (reopen required).
 - `BrowserFloatWindow.kt`, `BrowserFloatPage.kt`, `BrowserFloatLayout.kt`, `BrowserHostSurface.kt`:
   the Compose window, its header/menu/status and the host surface that reports the console session.
 - `BrowserSession.kt`: one WebView, profile bind, clients, viewport capture.
@@ -80,6 +81,11 @@ Files:
   window closing revokes control. Page scrolling and window dragging/resizing do not revoke it.
 - Test entry points (`attachHostForTest`, `installPageDecorator`, `beginForTest`,
   `acceptProbeForTest`) refuse to run outside a debug build.
+- Snapshot/capture errors and missing scroll replies do not alone invalidate the page. An uncertain
+  dispatched click/type restricts it to snapshot/capture under the existing verified grant, without
+  replaying that action. Only explicit user resume can clear the action uncertainty after rechecking
+  identity; document-invalid states require a fresh load. `NativeBrowserState.requiresReopen` and
+  `actionOutcomeUnknown` drive the recovery UI, never website text.
 
 ## Flow
 

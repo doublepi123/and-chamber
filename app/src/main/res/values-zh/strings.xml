@@ -357,4 +357,5 @@
     <string name="browser_address_go">前往</string>
     <string name="browser_address_cancel">取消编辑</string>
     <string name="browser_reload">重新加载页面</string>
+    <string name="browser_action_outcome_unknown">上次操作未确认，核对后交给代理。</string>
 </resources>

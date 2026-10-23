@@ -361,4 +361,5 @@
     <string name="browser_address_go">Go</string>
     <string name="browser_address_cancel">Stop editing</string>
     <string name="browser_reload">Reload page</string>
+    <string name="browser_action_outcome_unknown">Last action unconfirmed. Check the page before resuming.</string>
 </resources>

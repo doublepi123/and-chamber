@@ -47,9 +47,8 @@ private fun selectorFor(data: JsonObject, name: String): String? {
  * BrowserSession, FixedViewportContainer and the debug page decorator; the fixture is served
  * entirely from androidTest memory. No test grant, no URL concatenation as a fake submit.
  *
- * The positive case intentionally fails on the current tree with UNSUPPORTED_PARAMETER until the
- * provider implementation lands. Negative cases assert refusal/no silent GET replay and must stay
- * green before and after.
+ * The GET case proves navigation and one arrival; the SPA Enter case in
+ * BrowserRecoveryInstrumentationTest proves the short OUTCOME_UNKNOWN path without a reload.
  */
 @RunWith(AndroidJUnit4::class)
 class BrowserSubmitInstrumentationTest {

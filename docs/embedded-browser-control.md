@@ -103,6 +103,31 @@ not replayed as GET. No navigation, timeout, cancellation or an uncertain outcom
 a successful search and never causes an automatic second Enter. Arbitrary in-page handler completion
 without a main-frame GET is not inferred from a DOM change.
 
+### Recovering from an unconfirmed action
+
+An action's `OUTCOME_UNKNOWN` reply is not proof that the document is invalid, nor proof that the
+action failed. The browser distinguishes three states:
+
+- **Normal**: snapshot/capture failures and missing scroll replies do not by themselves quarantine
+  the page. The failed action still returns an error; a missing scroll reply is never replayed
+  automatically. Real document, connection or foreground failures still close admission.
+- **Observation only**: an already-dispatched click, input or Enter has an unconfirmed effect, but
+  the original document remains verifiable. Snapshot and capture may observe it under the same
+  existing grant; they do not grant control, confirm completion or clear the uncertainty. New agent
+  mutations are refused. Successful observation replies carry `drivable:false`, `observationOnly:true`
+  and `actionOutcomeUnknown:true`; an agent open cannot clear that state either. The person checks
+  the page and explicitly chooses **Resume agent** to
+  reverify the document before further actions. Nothing replays the earlier action.
+- **Reopen required**: document identity was lost, a renderer failed or the page cannot be verified.
+  The window offers **Reopen**, not a Resume button that cannot work. The person's tap performs a
+  fresh checked load, not a replay of the previous click or submission. Reopening cannot undo an
+  external action that may already have happened.
+
+Takeover, backgrounding and connection/owner changes still revoke the existing grant. Observation
+only is not a way to bypass that revocation. A missing main-frame GET after Enter can occur with SPA
+handlers; the browser reports the submission as unconfirmed rather than inferring success from a
+changed page.
+
 ## Limits
 
 - Pages must be public `https`. This is not a complete outbound firewall. Redirects, non-document

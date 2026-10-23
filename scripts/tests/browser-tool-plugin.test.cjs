@@ -193,6 +193,10 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /one action per call/i);
   assert.match(tool.description, /AUTHORIZATION_REQUIRED/);
   assert.match(tool.description, /REF_EXPIRED/);
+  assert.match(tool.description, /OUTCOME_UNKNOWN/);
+  assert.match(tool.description, /Never repeat a click, typing or submission/);
+  assert.match(tool.description, /snapshot or capture to observe/);
+  assert.match(tool.description, /observation does not confirm/i);
   assert.match(tool.description, /BROWSER_PAGE_UNAVAILABLE/);
   assert.match(tool.description, /do not retry in a loop/i);
   assert.doesNotMatch(tool.description, /must tap Allow/i);

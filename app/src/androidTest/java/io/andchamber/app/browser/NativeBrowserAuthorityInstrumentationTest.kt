@@ -4,8 +4,10 @@ import android.app.Instrumentation
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.http.SslError
+import android.os.Build
 import android.os.SystemClock
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -15,6 +17,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -28,12 +31,14 @@ import io.andchamber.app.browser.provider.ProviderMode
 import io.andchamber.app.browser.provider.ProviderRequest
 import io.andchamber.app.browser.provider.ProviderResult
 import io.andchamber.app.ui.browser.BrowserDesktopViewport
+import io.andchamber.app.ui.browser.BrowserFloatPage
 import io.andchamber.app.ui.browser.BrowserSiteDataClearer
 import io.andchamber.app.ui.browser.FixedViewportContainer
 import io.andchamber.app.ui.browser.NativeBrowserPresenter
 import io.andchamber.app.ui.browser.NativeBrowserState
 import io.andchamber.app.ui.browser.PresenterSiteDataOps
 import io.andchamber.app.ui.browser.SiteDataClearResult
+import io.andchamber.app.ui.theme.AndChamberTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +62,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
+import java.util.IdentityHashMap
 import org.junit.runner.RunWith
 import java.net.InetAddress
 import kotlin.coroutines.resume
@@ -146,6 +153,7 @@ internal class BrowserAuthorityHarness(
     private val heldReady = mutableListOf<() -> Unit>()
     private var pageContainer: FixedViewportContainer? = null
     private var pendingDesktopSize: BrowserDesktopViewport.Size? = null
+    private var productionUi: ComposeView? = null
 
     @Volatile
     private var holdReady = false
@@ -530,13 +538,14 @@ internal class BrowserAuthorityHarness(
         value: String,
         submit: Boolean,
         requestId: String,
+        timeoutMs: Long = 10_000L,
     ): ProviderResult = runBlocking {
         presenter.execute(
-            typeRequest(selector, value, submit, requestId),
+            typeRequest(selector, value, submit, requestId).copy(timeoutMs = timeoutMs),
             presenter.registry,
             state.mode,
             state.selectedTabId,
-            SystemClock.elapsedRealtime() + 10_000L,
+            SystemClock.elapsedRealtime() + timeoutMs,
         ) { SystemClock.elapsedRealtime() }
     }
 
@@ -623,6 +632,101 @@ internal class BrowserAuthorityHarness(
     }
 
     fun currentWebView(): WebView? = presenter.currentView() as? WebView
+
+    /**
+     * Test-only document-invalid trigger: one extra main-frame start on the real production
+     * WebViewClient, with no URL/renderer replacement. It exercises the same unknown-document path
+     * a real late navigation callback reaches; it never grants or changes presenter flags.
+     */
+    fun triggerExtraPageStarted() = onMain {
+        val view = currentWebView() ?: error("no current view for extra page start")
+        val client = view.webViewClient ?: error("no current WebViewClient")
+        client.onPageStarted(view, view.url, null)
+    }
+
+    /**
+     * Render the real production [BrowserFloatPage] over this harness's test presenter. The page is
+     * the same session-factory page and in-memory fixture; the AndroidView reparents it into the
+     * Compose tree. Only the document-invalid test uses this, so the other recovery cases stay
+     * lightweight.
+     */
+    fun showProductionBrowserUi() = onMain {
+        if (productionUi != null) return@onMain
+        val content = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
+            ?: error("activity content view missing")
+        val compose = ComposeView(activity)
+        compose.setContent {
+            AndChamberTheme {
+                BrowserFloatPage(presenter)
+            }
+        }
+        content.addView(
+            compose,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        productionUi = compose
+    }
+
+    /** Exact text/contentDescription match in the current app window; never a substring label. */
+    private fun findUiLabel(label: String): AccessibilityNodeInfo? {
+        // Compose may reuse a node id while its text changes; API 34 can answer from a stale cache.
+        if (Build.VERSION.SDK_INT >= 34) runCatching { instrumentation.uiAutomation.clearCache() }
+        val root = runCatching { instrumentation.uiAutomation.rootInActiveWindow }.getOrNull()
+            ?: return null
+        val seen = Collections.newSetFromMap(IdentityHashMap<AccessibilityNodeInfo, Boolean>())
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (!seen.add(node)) continue
+            val actionMatch = node.actionList.any { action -> action.label?.toString() == label }
+            if (node.packageName?.toString() == activity.packageName && node.isVisibleToUser &&
+                (node.text?.toString() == label || node.contentDescription?.toString() == label || actionMatch)
+            ) {
+                return node
+            }
+            for (index in 0 until node.childCount) node.getChild(index)?.let { queue.add(it) }
+        }
+        return null
+    }
+
+    /** Wait for a real Compose accessibility node; no idle sync and no fixed delay as evidence. */
+    fun awaitUiLabel(label: String, timeoutMs: Long = 15_000L): AccessibilityNodeInfo {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            findUiLabel(label)?.let { return it }
+            SystemClock.sleep(100L)
+        }
+        throw AssertionError("UI label '$label' not found; state=$state")
+    }
+
+    /** Null means absent; otherwise the real clickable control's enabled state. */
+    fun uiLabelEnabled(label: String): Boolean? {
+        val node = findUiLabel(label) ?: return null
+        val fallback = node.isEnabled
+        var current: AccessibilityNodeInfo? = node
+        while (current != null) {
+            if (current.isClickable) return current.isEnabled
+            current = current.parent
+        }
+        return fallback
+    }
+
+    /** One real ACTION_CLICK on the matched node or its first clickable parent. Never retries. */
+    fun clickUiLabel(label: String): Boolean {
+        var current: AccessibilityNodeInfo? = findUiLabel(label) ?: return false
+        while (current != null) {
+            if (current.isClickable) {
+                if (!current.isEnabled || !current.isVisibleToUser) return false
+                return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            current = current.parent
+        }
+        return false
+    }
 
     fun viewSize(): Pair<Int, Int> {
         val view = currentWebView() ?: return 0 to 0
@@ -720,11 +824,18 @@ internal class BrowserAuthorityHarness(
             auxiliary.forEach { runCatching { it.destroy() } }
             auxiliary.clear()
             heldReady.clear()
+            val ui = productionUi
+            productionUi = null
             try {
+                try {
+                    ui?.disposeComposition()
+                } finally {
+                    ui?.let { (it.parent as? ViewGroup)?.removeView(it) }
+                }
                 presenter.detachHost(instanceKey, 1L)
             } finally {
-                // The Activity is intentionally kept RESUMED for reuse; this harness's host and
-                // all of its pages must still leave the window completely.
+                // The Activity is intentionally kept RESUMED for reuse; this harness's host, any
+                // production ComposeView it owned, and all pages must leave the window completely.
                 (host.parent as? ViewGroup)?.removeView(host)
                 host.removeAllViews()
             }

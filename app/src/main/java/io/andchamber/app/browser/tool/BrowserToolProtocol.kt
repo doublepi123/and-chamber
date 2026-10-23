@@ -171,7 +171,7 @@ object BrowserToolProtocol {
             ProviderCodes.REF_EXPIRED -> "The element reference expired. Take a new snapshot."
             ProviderCodes.BUSY -> "The browser is busy with another action."
             ProviderCodes.DEADLINE -> "The action timed out."
-            ProviderCodes.OUTCOME_UNKNOWN -> "The action's outcome is unknown. Re-open the page."
+            ProviderCodes.OUTCOME_UNKNOWN -> "The action's outcome is unconfirmed. Do not repeat it. Use snapshot or capture if available, then ask the person to check the page before resuming. Reopen only if the browser requires it."
             ProviderCodes.CANCELLED -> "Cancelled."
             ProviderCodes.UNSUPPORTED_ACTION -> "Unsupported action."
             ProviderCodes.UNSUPPORTED_PARAMETER -> "Unsupported parameter for this action."

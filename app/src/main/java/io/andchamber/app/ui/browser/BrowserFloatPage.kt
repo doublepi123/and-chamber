@@ -84,6 +84,7 @@ internal fun BrowserFloatPage(
     val context = LocalContext.current
     val ui = remember(presenter) { BrowserWindowUiState() }
     var clearingSiteData by remember(presenter) { mutableStateOf(false) }
+    var reopening by remember(presenter) { mutableStateOf(false) }
     // The drawn page's scale and offset, for the mouse pointer overlay.
     var transform by remember(presenter) { mutableStateOf(ViewportTransform(1f, 0f, 0f)) }
 
@@ -118,6 +119,8 @@ internal fun BrowserFloatPage(
         mouseMode = state.mouseMode,
         accessibilityEnabled = accessibilityEnabled,
         awaitingAllow = state.awaitingAllow,
+        requiresReopen = state.requiresReopen,
+        actionOutcomeUnknown = state.actionOutcomeUnknown,
     )
     // No resource: the page's own error text, shown as it was reported.
     val status = if (statusResource != null) stringResource(statusResource) else state.pageError.orEmpty()
@@ -134,6 +137,24 @@ internal fun BrowserFloatPage(
     fun reload() {
         scope.launch { manual.reload() }
     }
+    // Reopen after an unconfirmed action: one fresh load of the shown address, only on the
+    // person's tap. A second tap while it runs does nothing; a failure always says so.
+    fun reopen() {
+        if (reopening || presenter.state.value.mousePressActive) return
+        reopening = true
+        scope.launch {
+            try {
+                val result = presenter.reloadManual()
+                browserReopenFailureResource(result.ok, result.message)?.let {
+                    Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                reopening = false
+            }
+        }
+    }
+    // The retired placeholder has its own Reopen; the bar does not offer a second one.
+    val reopenNeeded = browserReopenNeeded(state.requiresReopen, state.pageRetired)
 
     BrowserFloatWindow(
         ui = ui,
@@ -142,15 +163,18 @@ internal fun BrowserFloatPage(
         status = status,
         agentOn = state.agentOn,
         // Resume is offered only when it can work: a live agent connection and a ready page.
-        canResume = state.connected && !state.pageRetired && !state.mousePressActive &&
+        canResume = !reopenNeeded && state.connected && !state.pageRetired && !state.mousePressActive &&
             browserFloatCanAllow(state.eligible, state.pageReady, owner),
-        loading = !state.pageReady && !state.pageRetired && state.pageError == null,
+        reopenNeeded = reopenNeeded,
+        canReopen = browserCanReopen(address, state.mousePressActive, state.eligible, reopening),
+        loading = !state.pageReady && !state.pageRetired && !state.requiresReopen && state.pageError == null,
         desktopOn = state.desktopMode,
         mouseOn = state.mouseMode,
         mousePressActive = state.mousePressActive,
         isPagePressActive = { presenter.state.value.mousePressActive },
         onResume = { scope.launch { presenter.resumeAgent() } },
         onTakeOver = { presenter.takeover() },
+        onReopen = ::reopen,
         onHide = { presenter.background() },
         onClosePage = { presenter.close(state.selectedTabId.orEmpty()) },
         onNavigate = if (owner.isNullOrBlank() || state.pageRetired) null else ::navigate,
@@ -382,6 +406,17 @@ private fun BrowserShowTab(onShow: () -> Unit) {
 internal fun browserInputSourceMatches(source: Any?, current: Any?): Boolean =
     source != null && source === current
 
+/** The bar's Reopen: the app says a fresh load is needed, and no retired placeholder offers one. */
+internal fun browserReopenNeeded(requiresReopen: Boolean, pageRetired: Boolean): Boolean =
+    requiresReopen && !pageRetired
+
+/**
+ * Reopen can run: the shown address is known, no press is under way, the window is presentable in
+ * the foreground, and no reopen is already running. Projection only; the presenter checks again.
+ */
+internal fun browserCanReopen(address: String?, mousePressActive: Boolean, eligible: Boolean, reopening: Boolean): Boolean =
+    address != null && !mousePressActive && eligible && !reopening
+
 /** Availability is a projection only; allow() still owns all native admission checks. */
 internal fun browserFloatCanAllow(eligible: Boolean, pageReady: Boolean, owner: String?): Boolean =
     eligible && pageReady && !owner.isNullOrBlank()
@@ -400,6 +435,9 @@ internal fun browserFloatErrorResource(error: String?): Int? = when (error) {
  * 1. A page error: retired page, reopen required, layout change, mouse unsupported, or the
  *    page's own load error, such as a refused address or an untrusted certificate.
  * 2. The agent is in control. Who controls the page always shows.
+ * 0. An earlier action's outcome is unconfirmed but the page is still usable: check it, then
+ *    Resume. Comes first unless a real page error is shown, and never uses the reopen wording.
+ * 2a. The app confirmed the page needs a fresh load (shown next to the Reopen button).
  * 3. Mouse mode while an accessibility service is on. Websites get no hover then; clicks, drags and
  *    scrolling still work. A retired page has nothing to hover and never shows it. Loading does not
  *    replace it, so the line stays put while links load.
@@ -415,9 +453,18 @@ internal fun browserFloatStatusResource(
     mouseMode: Boolean,
     accessibilityEnabled: Boolean,
     awaitingAllow: Boolean = false,
+    requiresReopen: Boolean = false,
+    actionOutcomeUnknown: Boolean = false,
 ): Int? = when {
+    // An unconfirmed action on a page that is still usable is not a reopen: never say "reopen"
+    // for it, even if an older reopen notice is still attached as the page error.
+    actionOutcomeUnknown && !requiresReopen && !pageRetired && !agentOn &&
+        (pageError == null || browserFloatErrorResource(pageError) == R.string.browser_reopen_required) ->
+        R.string.browser_action_outcome_unknown
     pageError != null -> browserFloatErrorResource(pageError)
     agentOn -> R.string.browser_status_on
+    // Matches the Reopen button, even when no page error text came with it.
+    requiresReopen && !pageRetired -> R.string.browser_reopen_required
     mouseMode && accessibilityEnabled && !pageRetired -> R.string.browser_mouse_hover_accessibility
     !pageReady -> R.string.browser_page_loading
     awaitingAllow -> R.string.browser_float_status_agent_waiting

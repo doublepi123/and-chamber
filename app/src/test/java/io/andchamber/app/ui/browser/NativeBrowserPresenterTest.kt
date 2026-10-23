@@ -30,6 +30,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -562,7 +564,7 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
-    fun `a submit with no navigation returns unknown and leaves no drivable old page`() = runTest {
+    fun `a submit with no navigation returns unknown and keeps the old page read-only`() = runTest {
         val page = FakePage()
         val presenter = presenter(policy = { submitPolicy }) { page }
         presenter.setConnection("c1", 4L)
@@ -586,15 +588,37 @@ class NativeBrowserPresenterTest {
                 1_000L,
             ) { 0L }
         }
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
         runCurrent()
         advanceTimeBy(1_001)
         val result = pending.await()
         assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
-        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
-        assertNull("the submitted page's grant is not kept", presenter.registry.currentGrant())
-        assertFalse(presenter.state.value.agentOn)
+        assertNull("no page string is used for recovery", presenter.state.value.pageError)
+        assertFalse("an uncertain effect is not agent-on", presenter.state.value.agentOn)
+        assertFalse("an uncertain effect is not a document reopen", presenter.state.value.requiresReopen)
+        assertTrue("the UI is told the last effect is unconfirmed", presenter.state.value.actionOutcomeUnknown)
+        assertSame("read admission keeps the existing grant", grant, presenter.registry.currentGrant())
         val after = presenter.execute(request("browser.snapshot", id = "after-submit"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
-        assertEquals("the old page is not drivable", ProviderCodes.AUTHORIZATION_REQUIRED, after.errorCode)
+        assertTrue("a snapshot can observe the submitted page's result: ${after.errorCode ?: "ok"}", after.ok)
+        assertEquals("an observed page is not drivable", false, after.data["drivable"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, after.data["observationOnly"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, after.data["actionOutcomeUnknown"]?.jsonPrimitive?.booleanOrNull)
+        val actions = page.actions
+        val refusedMutation = presenter.execute(
+            request("browser.click", id = "after-submit-click", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            1_000L,
+        ) { 0L }
+        assertEquals("a mutation is refused while the effect is uncertain", ProviderCodes.OUTCOME_UNKNOWN, refusedMutation.errorCode)
+        assertEquals(
+            "the refusal explains the unconfirmed effect, not a missing Allow",
+            "the previous action's outcome is unknown; verify the page, then resume agent control",
+            refusedMutation.message,
+        )
+        assertEquals("the uncertain action is never replayed", actions, page.actions)
     }
 
     @Test
@@ -631,26 +655,32 @@ class NativeBrowserPresenterTest {
         runCurrent()
         assertFalse("the allow probe is suspended", suspendedAllow.isCompleted)
 
-        // No GET arrives: the submit times out, marks the exact page unknown and revokes its grant.
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
+        // No GET arrives: the submit times out and marks the exact page observe-only. The original
+        // grant stays for reads; automatic allow/retry cannot clear the uncertainty.
         advanceTimeBy(1_001)
         runCurrent()
         val submitResult = submit.await()
         assertEquals(ProviderCodes.OUTCOME_UNKNOWN, submitResult.errorCode)
-        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
-        assertNull(presenter.registry.currentGrant())
+        assertNull(presenter.state.value.pageError)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertTrue("the UI sees the unconfirmed submit effect", presenter.state.value.actionOutcomeUnknown)
         assertFalse(presenter.state.value.agentOn)
+        assertSame(grant, presenter.registry.currentGrant())
 
-        // The suspended probe may return an Accept witness now, but the final fence must see the
-        // unknown page and refuse to mint a late grant.
+        // The suspended probe may return an Accept witness now, but the automatic allow path must
+        // refuse observe-only and must not mint a late grant.
         probeGate.complete(Unit)
         runCurrent()
-        assertFalse("a late allow probe cannot revive a submitted page", suspendedAllow.await())
-        assertNull(presenter.registry.currentGrant())
+        assertFalse("a late automatic allow cannot clear observe-only", suspendedAllow.await())
+        assertSame("no late grant epoch", grant, presenter.registry.currentGrant())
         assertFalse(presenter.state.value.agentOn)
-        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
-        assertEquals(
-            ProviderCodes.AUTHORIZATION_REQUIRED,
-            presenter.execute(request("browser.snapshot", id = "after-unknown"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        assertFalse(presenter.state.value.requiresReopen)
+        assertTrue("an automatic allow never clears the unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
+        assertTrue(
+            "a snapshot can observe the page",
+            presenter.execute(request("browser.snapshot", id = "after-uncertain"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.ok,
         )
 
         // A later person's open replaces the page and gets a clean, independent authority.
@@ -658,6 +688,7 @@ class NativeBrowserPresenterTest {
         assertTrue(presenter.allow())
         assertNotNull(presenter.registry.currentGrant())
         assertTrue(presenter.state.value.agentOn)
+        assertFalse("a fresh page clears the unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
         assertNull("the old unknown page does not pollute the new user page", presenter.state.value.pageError)
         assertTrue(presenter.execute(request("browser.snapshot", id = "later"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
     }
@@ -708,12 +739,19 @@ class NativeBrowserPresenterTest {
         assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
         assertNull(presenter.registry.currentGrant())
         assertFalse(presenter.state.value.agentOn)
+        assertTrue("the failed replacement needs a reopen", presenter.state.value.requiresReopen)
+        assertFalse("a reopen is not an effect-only uncertainty", presenter.state.value.actionOutcomeUnknown)
+        assertNull("the reopen is state, not a page string", presenter.state.value.pageError)
         val fresh = pages[1]
         fresh.readyForAllow = true
         presenter.acceptProbeForTest(fresh, readyIdentity(fresh))
         assertNull("a late ready on the failed replacement never grants", presenter.registry.currentGrant())
         assertFalse(presenter.state.value.agentOn)
-        assertEquals("Re-open this page before allowing control", presenter.state.value.pageError)
+        assertTrue(presenter.state.value.requiresReopen)
+        assertEquals(
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            presenter.execute(request("browser.snapshot", id = "reopen-required"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        )
     }
 
     @Test
@@ -1458,6 +1496,480 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `a malformed snapshot does not close or revoke the page`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        val grant = presenter.registry.currentGrant()
+        page.malformedSnapshot = true
+        val failed = presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, failed.errorCode)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertNull(presenter.state.value.pageError)
+        assertTrue(presenter.state.value.agentOn)
+        assertFalse("a read failure does not latch an unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
+        assertSame("a read failure keeps its grant", grant, presenter.registry.currentGrant())
+        page.malformedSnapshot = false
+        assertTrue(presenter.execute(request("browser.snapshot", id = "after-read"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+    }
+
+    @Test
+    fun `a failed scroll does not close the page or replay the increment`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        val grant = presenter.registry.currentGrant()
+        page.scrollFails = true
+        val calls = page.driverCalls
+        val failed = presenter.execute(
+            request("browser.scroll", parameters = mapOf("direction" to "down")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            5_000L,
+        ) { 0L }
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, failed.errorCode)
+        assertEquals("the increment was sent exactly once", calls + 1, page.driverCalls)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertTrue("scroll is not a page-closing mutation", presenter.state.value.agentOn)
+        assertFalse("a scroll failure is not an unconfirmed mutation effect", presenter.state.value.actionOutcomeUnknown)
+        assertSame(grant, presenter.registry.currentGrant())
+        page.scrollFails = false
+        assertTrue(presenter.execute(request("browser.snapshot", id = "after-scroll"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+    }
+
+    @Test
+    fun `an uncertain click allows reads only and explicit resume never replays it`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val grant = presenter.registry.currentGrant()
+        page.clickFails = true
+        val failed = presenter.execute(
+            request("browser.click", id = "uncertain-click", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            5_000L,
+        ) { 0L }
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, failed.errorCode)
+        assertFalse("an uncertain effect is not a document reopen", presenter.state.value.requiresReopen)
+        assertNull(presenter.state.value.pageError)
+        assertFalse(presenter.state.value.agentOn)
+        assertTrue("the UI sees the unconfirmed click effect", presenter.state.value.actionOutcomeUnknown)
+        assertSame("the grant stays for observation", grant, presenter.registry.currentGrant())
+        val observed = presenter.execute(request("browser.snapshot", id = "observe-click"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertTrue("a snapshot can observe the result", observed.ok)
+        assertEquals("observation is not drivable", false, observed.data["drivable"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, observed.data["observationOnly"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, observed.data["actionOutcomeUnknown"]?.jsonPrimitive?.booleanOrNull)
+        val actions = page.actions
+        val refused = presenter.execute(
+            request("browser.click", id = "refused-click", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+            presenter.registry,
+            ProviderMode.AGENT,
+            null,
+            5_000L,
+        ) { 0L }
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, refused.errorCode)
+        assertEquals(
+            "the refusal explains the unconfirmed effect, not a missing Allow",
+            "the previous action's outcome is unknown; verify the page, then resume agent control",
+            refused.message,
+        )
+        assertEquals("the old click is never replayed", actions, page.actions)
+
+        assertTrue(presenter.resumeAgent())
+        assertTrue(presenter.state.value.agentOn)
+        assertFalse("explicit resume clears the unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
+        assertNotNull(presenter.registry.currentGrant())
+        assertEquals("resume does not execute the old click", actions, page.actions)
+
+        page.clickFails = false
+        assertTrue(
+            presenter.execute(
+                request("browser.click", id = "fresh-click", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.ok,
+        )
+        assertEquals(actions + 1, page.actions)
+    }
+
+    @Test
+    fun `a resume probe cannot clear an uncertainty recorded while it ran`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val grant = presenter.registry.currentGrant()
+        assertFalse(presenter.state.value.actionOutcomeUnknown)
+
+        // A type is already dispatched when the person's Resume probe begins.
+        val typeGate = CompletableDeferred<Unit>()
+        page.typeFails = true
+        page.block = { typeGate.await() }
+        val typed = async(Dispatchers.Unconfined) {
+            presenter.execute(
+                request(
+                    "browser.type",
+                    id = "in-flight-type",
+                    parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""", "value" to "x"),
+                ),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }
+        }
+        runCurrent()
+        assertFalse("the type is still in flight", typed.isCompleted)
+
+        val probeGate = CompletableDeferred<Unit>()
+        page.plainProbeGates.add(probeGate)
+        val resumed = async(Dispatchers.Unconfined) { presenter.resumeAgent() }
+        runCurrent()
+        assertFalse("the resume probe is suspended", resumed.isCompleted)
+
+        // The in-flight type's result becomes unknown while the resume probe is still running.
+        typeGate.complete(Unit)
+        runCurrent()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, typed.await().errorCode)
+        assertTrue("the new event is visible", presenter.state.value.actionOutcomeUnknown)
+
+        probeGate.complete(Unit)
+        runCurrent()
+        assertFalse("a new unconfirmed event during the probe keeps Resume refused", resumed.await())
+        assertTrue("the page stays observe-only", presenter.state.value.actionOutcomeUnknown)
+        assertFalse(presenter.state.value.agentOn)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertSame("the unverified event mints no new grant", grant, presenter.registry.currentGrant())
+    }
+
+    @Test
+    fun `an agent open cannot reset an unconfirmed effect or create a new page`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        page.clickFails = true
+        assertEquals(
+            ProviderCodes.OUTCOME_UNKNOWN,
+            presenter.execute(
+                request("browser.click", id = "uncertain-open", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.errorCode,
+        )
+        val grant = presenter.registry.currentGrant()
+        val loads = page.loads
+        val tabs = presenter.state.value.tabs.map { it.id }
+        val selected = presenter.state.value.selectedTabId
+        val refused = presenter.execute(openRequest(id = "agent-open"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals(ProviderCodes.AUTHORIZATION_REQUIRED, refused.errorCode)
+        assertEquals(
+            "the refusal explains the unconfirmed effect instead of opening a page",
+            "the previous action's outcome is unknown; resume agent control before requesting a new page",
+            refused.message,
+        )
+        assertEquals("an agent open does not load a page", loads, page.loads)
+        assertEquals("an agent open does not create a tab", tabs, presenter.state.value.tabs.map { it.id })
+        assertEquals("the selection does not move", selected, presenter.state.value.selectedTabId)
+        assertSame("the observation grant is preserved", grant, presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+
+        // The person's own open is the explicit decision and starts a fresh page.
+        assertTrue(presenter.navigateManual("https://example.com/later").ok)
+        assertTrue("the user open loaded a fresh page", page.loads > loads)
+        assertFalse(presenter.state.value.actionOutcomeUnknown)
+        assertTrue(presenter.allow())
+        page.clickFails = false
+        val fresh = presenter.execute(request("browser.snapshot", id = "user-page-read"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        assertTrue(fresh.ok)
+        assertEquals("a normal page result keeps drivable", true, fresh.data["drivable"]?.jsonPrimitive?.booleanOrNull)
+        val actions = page.actions
+        assertTrue(
+            presenter.execute(
+                request("browser.click", id = "after-user-open", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.ok,
+        )
+        assertEquals("the old uncertain action is not replayed", actions + 1, page.actions)
+    }
+
+    @Test
+    fun `a true unknown document requires reopen and reopen clears it`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        page.onUnknown?.invoke()
+        assertTrue("a true unknown document is reopen-only", presenter.state.value.requiresReopen)
+        assertFalse(presenter.state.value.agentOn)
+        assertFalse("reopen is not an effect-only uncertainty", presenter.state.value.actionOutcomeUnknown)
+        assertNull(presenter.registry.currentGrant())
+        assertFalse("Resume never clears a document-invalid page", presenter.resumeAgent())
+        assertTrue("Resume failure keeps the Reopen requirement", presenter.state.value.requiresReopen)
+        assertEquals(
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            presenter.execute(request("browser.snapshot", id = "reopen-blocked"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        )
+        val reopened = presenter.reloadManual()
+        assertTrue(reopened.errorCode ?: "ok", reopened.ok)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot", id = "after-reopen"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+    }
+
+    @Test
+    fun `a fatal page stays a reopen placeholder on the same tab without an old grant`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertNotNull(presenter.registry.currentGrant())
+        val tab = presenter.state.value.selectedTabId
+        pages[0].onFatal?.invoke()
+
+        assertTrue("a fatal renderer requires a reopen", presenter.state.value.requiresReopen)
+        assertTrue("the window stays open for Reopen", presenter.state.value.shown)
+        assertFalse("the dead page is not reported ready", presenter.state.value.pageReady)
+        assertFalse(presenter.state.value.pageRetired)
+        assertEquals("no page is bound", 0, presenter.state.value.viewHandle)
+        assertNull("the fatal page keeps no grant", presenter.registry.currentGrant())
+
+        val reopened = presenter.reloadManual()
+        assertTrue(reopened.errorCode ?: "ok", reopened.ok)
+        assertEquals("Reopen stays on the same tab", tab, presenter.state.value.selectedTabId)
+        assertEquals("Reopen creates a new controlled page", 2, pages.size)
+        assertNotEquals("the old view is replaced", pages[0].handle, presenter.state.value.viewHandle)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertNull("Reopen itself mints no grant", presenter.registry.currentGrant())
+        assertTrue(presenter.allow())
+        assertNotNull("the default grant returns after a fresh ready probe", presenter.registry.currentGrant())
+    }
+
+    @Test
+    fun `a fatal reopen placeholder does not survive a new host`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        page.onFatal?.invoke()
+        assertTrue(presenter.state.value.requiresReopen)
+        assertTrue(presenter.state.value.shown)
+
+        presenter.detachHostAny("local")
+        assertFalse("the host that owned the placeholder is gone", presenter.state.value.requiresReopen)
+        assertFalse(presenter.state.value.shown)
+
+        presenter.attachHostForTest("local-new", 2L)
+        assertFalse("a new host does not inherit the stale placeholder", presenter.state.value.requiresReopen)
+        assertFalse("no page is shown without an explicit open", presenter.state.value.shown)
+    }
+
+    @Test
+    fun `a targeted agent open cannot replace an observe-only tab behind another selection`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+
+        // A is a normal page with a real grant and refs.
+        assertTrue(presenter.openClaimed(openRequest(id = "open-a"), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot", id = "snap-a"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val tabA = presenter.state.value.selectedTabId!!
+        val pageA = pages[0]
+        val urlA = presenter.registry.find(tabA)!!.url
+
+        // A second, normal tab exists; its open revokes A's grant but leaves A a valid page.
+        assertTrue(presenter.openClaimed(openRequest(id = "open-b"), 1_000L).ok)
+        val tabB = presenter.state.value.selectedTabId!!
+        val pageB = pages[1]
+        assertNotEquals(tabA, tabB)
+
+        // Back on A by the person's selection, then a real dispatched click with no reply.
+        assertTrue(presenter.select(tabA))
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot", id = "snap-a2", parameters = mapOf("tabId" to tabA)), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        pageA.clickFails = true
+        assertEquals(
+            ProviderCodes.OUTCOME_UNKNOWN,
+            presenter.execute(
+                request("browser.click", id = "click-a", parameters = mapOf("tabId" to tabA, "selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.errorCode,
+        )
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+
+        // The person selects B. A's tab stays observe-only in the background.
+        assertTrue(presenter.select(tabB))
+        val grantBefore = presenter.registry.currentGrant()
+        val loadsA = pageA.loads
+        val handleA = pageA.handle
+        val tabs = presenter.state.value.tabs.map { it.id }
+
+        val refused = presenter.execute(openRequest(id = "agent-open-a", tabId = tabA), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
+        assertEquals(
+            "targeting A by tab id cannot bypass its uncertainty",
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            refused.errorCode,
+        )
+        assertEquals(
+            "the refusal explains the unconfirmed effect",
+            "the previous action's outcome is unknown; resume agent control before requesting a new page",
+            refused.message,
+        )
+        assertEquals("the selection stays on B", tabB, presenter.state.value.selectedTabId)
+        assertSame("B's grant state is unchanged", grantBefore, presenter.registry.currentGrant())
+        assertEquals("A keeps its URL", urlA, presenter.registry.find(tabA)?.url)
+        assertEquals("A keeps its view", handleA, pageA.handle)
+        assertFalse("A's view is not destroyed", pageA.destroyed)
+        assertEquals("A is not reloaded", loadsA, pageA.loads)
+        assertEquals("no page is created", 2, pages.size)
+        assertFalse("B's view is untouched", pageB.destroyed)
+        assertEquals("the tab set is unchanged", tabs, presenter.state.value.tabs.map { it.id })
+
+        // The public compatibility open path (used by tests/bindings) must apply the same guard,
+        // not only the tool's execute() entry.
+        val direct = presenter.openClaimed(openRequest(id = "direct-open-a", tabId = tabA), 1_000L)
+        assertEquals(
+            "a direct open cannot bypass the named tab's uncertainty",
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            direct.errorCode,
+        )
+        assertEquals(
+            "the direct refusal explains the unconfirmed effect",
+            "the previous action's outcome is unknown; resume agent control before requesting a new page",
+            direct.message,
+        )
+        assertEquals("the direct open leaves the selection on B", tabB, presenter.state.value.selectedTabId)
+        assertSame("the direct open leaves B's grant state", grantBefore, presenter.registry.currentGrant())
+        assertEquals("the direct open does not load A", loadsA, pageA.loads)
+        assertEquals("the direct open does not replace A's view", handleA, pageA.handle)
+        assertEquals("the direct open keeps A's URL", urlA, presenter.registry.find(tabA)?.url)
+        assertEquals("the direct open does not create a page", 2, pages.size)
+        assertEquals("the direct open leaves the tab set", tabs, presenter.state.value.tabs.map { it.id })
+
+        // A is still observe-only: only the person's explicit Resume or open may clear it.
+        assertTrue(presenter.select(tabA))
+        assertTrue("the targeted open did not clear A's uncertainty", presenter.state.value.actionOutcomeUnknown)
+        assertFalse(presenter.state.value.requiresReopen)
+    }
+
+    @Test
+    fun `a takeover after an uncertain effect refuses observation and old callbacks stay fenced`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        pages[0].clickFails = true
+        assertEquals(
+            ProviderCodes.OUTCOME_UNKNOWN,
+            presenter.execute(
+                request("browser.click", id = "uncertain", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.errorCode,
+        )
+        presenter.takeover()
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals(
+            "a real takeover rejects observation",
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            presenter.execute(request("browser.snapshot", id = "after-takeover"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        )
+        assertTrue("takeover does not erase the unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
+        assertEquals(
+            "a refused mutation still explains the unconfirmed effect",
+            ProviderCodes.OUTCOME_UNKNOWN,
+            presenter.execute(
+                request("browser.click", id = "after-takeover-click", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                1_000L,
+            ) { 0L }.errorCode,
+        )
+        assertTrue(presenter.navigateManual("https://example.com/later").ok)
+        assertTrue(presenter.allow())
+        assertFalse("a fresh page is not an unconfirmed effect", presenter.state.value.actionOutcomeUnknown)
+        val grant = presenter.registry.currentGrant()
+        val loads = pages.map { it.loads }
+        pages[0].onUnknown?.invoke()
+        assertSame("a late old callback cannot replace the later grant", grant, presenter.registry.currentGrant())
+        assertEquals(loads, pages.map { it.loads })
+        assertEquals(pages.last().tabId, presenter.state.value.selectedTabId)
+
+        // Background revokes authority; observation is refused after resume until an explicit resume.
+        presenter.onHostPaused()
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        presenter.onHostResumed()
+        assertEquals(
+            ProviderCodes.AUTHORIZATION_REQUIRED,
+            presenter.execute(request("browser.snapshot", id = "after-background"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        )
+    }
+
+    @Test
+    fun `a cancelled scroll is not a page-level uncertainty`() = runBlocking {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        val reached = CompletableDeferred<Unit>()
+        page.block = { reached.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+        val acting = launch(Dispatchers.Unconfined) {
+            presenter.execute(
+                request("browser.scroll", id = "scroll-1", parameters = mapOf("direction" to "down")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                1_000L,
+            ) { 0L }
+        }
+        reached.await()
+        presenter.revokeAll("takeover")
+        acting.join()
+        page.block = {}
+        assertFalse("a scroll cancellation is not a document reopen", presenter.state.value.requiresReopen)
+        // A real revoke still clears authority, but it must not leave a permanent observe-only latch:
+        // a fresh explicit allow is possible exactly as before a scroll.
+        assertTrue("a scroll cancellation does not block a later allow", presenter.allow())
+    }
+
+    @Test
     fun `a dispatched mutation cancelled by revoke becomes outcome unknown until reopened`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
@@ -1482,7 +1994,8 @@ class NativeBrowserPresenterTest {
         acting.join()
         page.block = {}
         assertFalse(presenter.allow())
-        presenter.openClaimed(openRequest(id = "open-2"), 1_000L)
+        // Only the person's own open is the explicit decision; an agent open may not replace the page.
+        assertTrue(presenter.navigateManual("https://example.com/later").ok)
         assertTrue(presenter.allow())
     }
 
@@ -3083,6 +3596,10 @@ class NativeBrowserPresenterTest {
         var reads = 0
         var actions = 0
         var driverCalls = 0
+        var malformedSnapshot = false
+        var scrollFails = false
+        var clickFails = false
+        var typeFails = false
         var presentationVisible = true
         var readyAccepted = true
         var probeResultOverride: ProbeAcceptance? = null
@@ -3117,10 +3634,17 @@ class NativeBrowserPresenterTest {
                 actions += 1
                 lastRef = request.params[BrowserDriverLogic.PARAM_REF]
             }
+            if (request.method == BrowserMethod.CLICK && clickFails) error("click outcome unknown")
+            if (request.method == BrowserMethod.TYPE && typeFails) error("type outcome unknown")
+            if (request.method == BrowserMethod.SCROLL && scrollFails) error("scroll outcome unknown")
             BrowserReply(
                 ok = true,
                 result = buildMap {
-                    put(BrowserDriverLogic.RESULT_SNAPSHOT, """{"url":"https://example.com","title":"$text","text":"$text","elements":[{"ref":"$REF","role":"input","type":"text","name":"$text"}]}""")
+                    put(
+                        BrowserDriverLogic.RESULT_SNAPSHOT,
+                        if (malformedSnapshot) "not-json"
+                        else """{"url":"https://example.com","title":"$text","text":"$text","elements":[{"ref":"$REF","role":"input","type":"text","name":"$text"}]}""",
+                    )
                     put("width", "320")
                     put("height", "240")
                     if (request.method == BrowserMethod.TYPE && request.params[BrowserDriverLogic.PARAM_SUBMIT] == "true") {

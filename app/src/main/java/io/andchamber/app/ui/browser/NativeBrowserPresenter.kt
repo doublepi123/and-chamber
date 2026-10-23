@@ -111,6 +111,8 @@ class NativeBrowserPresenter(
     private val tabModes = linkedMapOf<String, Boolean>()
     /** Per-tab desktop CSS viewport; a mobile page keeps its stored pair for a later desktop switch. */
     private val desktopSizes = linkedMapOf<String, BrowserDesktopViewport.Size>()
+    /** Recovery for a tab whose page was released/retired (fatal/renderer unavailable). */
+    private val tabRecovery = linkedMapOf<String, PageRecovery>()
     /**
      * Legacy presentation set from before default control. An explicit open no longer waits for an
      * Allow tap, so nothing is added here; the field and its state output stay for binding
@@ -169,6 +171,8 @@ class NativeBrowserPresenter(
     private var documentEpoch = 0L
     private var activeJob: Job? = null
     private var activeAction: String? = null
+    /** The effect class of the active action, captured when it begins. */
+    private var activeEffect: ActionEffect = ActionEffect.NONE
     private var activeDispatched = false
     private var activePageAccess = false
     /** Tab whose page the active action dispatched to. Lets a retirement cancel only that action. */
@@ -277,7 +281,11 @@ class NativeBrowserPresenter(
                 }
                 // The console document may survive (pooled WebView) across an Activity change, and it
                 // would not re-report the same session. Its recorded session stays valid here.
-                synchronized(lock) { releasePageLocked() }
+                synchronized(lock) {
+                    releasePageLocked()
+                    // A different host context must not inherit the old host's reopen placeholder.
+                    tabRecovery.clear()
+                }
             }
             // A new document of the same trusted console (load, reload, re-commit): the old page's
             // bridge is gone, so the grant goes too, but the native tabs and their pages stay.
@@ -530,6 +538,18 @@ class NativeBrowserPresenter(
         const val READY_REPROBE_LIMIT = 4
         /** Tick for a bounded default-control retry while an open is still waiting for its grant. */
         const val OPEN_GRANT_RETRY_TICK_MS = 250L
+        /**
+         * Fixed internal explanation for a mutation refused because a dispatched click/type effect
+         * is still unconfirmed. It is not a missing Allow and it never asks for a reload.
+         */
+        const val OUTCOME_UNKNOWN_MUTATION_MESSAGE =
+            "the previous action's outcome is unknown; verify the page, then resume agent control"
+        /**
+         * Fixed internal explanation for an agent open refused while the current page's last
+         * effect is unconfirmed. Opening another page is not the person's explicit decision.
+         */
+        const val OBSERVE_ONLY_OPEN_MESSAGE =
+            "the previous action's outcome is unknown; resume agent control before requesting a new page"
     }
 
     private var windowContext: WindowContentContext? = null
@@ -704,11 +724,17 @@ class NativeBrowserPresenter(
             activeJob = null
             activeRequestId = null
             activeAction = null
+            activeEffect = ActionEffect.NONE
             activeDispatched = false
             activePageAccess = false
             activeTab = null
             if (mutated) {
-                pages.values.forEach { if (it.mutationInFlight) it.outcomeUnknown = true }
+                pages.values.forEach {
+                    if (it.mutationInFlight) {
+                        markObserveOnly(it)
+                        it.mutationInFlight = false
+                    }
+                }
                 registry.revoke()
                 mode = ProviderMode.MANUAL
             }
@@ -883,6 +909,9 @@ class NativeBrowserPresenter(
         revokeAll("host left")
         synchronized(lock) {
             releasePageLocked()
+            // The host that owned this placeholder is gone; a later host starts without a stale
+            // reopen state. A fatal page still keeps its placeholder while the host exists.
+            tabRecovery.clear()
             host = null
             hidden = false
             explicitTakeover = false
@@ -967,9 +996,10 @@ class NativeBrowserPresenter(
             pages.values.forEach {
                 it.adapter.clearRefs()
                 if (it.mutationInFlight) {
-                it.outcomeUnknown = true
-                it.mutationInFlight = false
-            }
+                    // Only a dispatched click/type is high risk. Read/scroll never set this flag.
+                    markObserveOnly(it)
+                    it.mutationInFlight = false
+                }
             }
             loadJob?.cancel()
             val running = activeJob
@@ -985,6 +1015,7 @@ class NativeBrowserPresenter(
             activeJob = null
             activeRequestId = null
             activeAction = null
+            activeEffect = ActionEffect.NONE
             activeDispatched = false
             activeTab = null
             running
@@ -1086,10 +1117,9 @@ class NativeBrowserPresenter(
             bound.retireReason = reason
             wasSelected = selectedTabId == entry.key
             // A dispatched mutation on this page is isolated: its outcome is unknown, never retried.
-            if (bound.mutationInFlight) {
-                bound.outcomeUnknown = true
-                bound.mutationInFlight = false
-            }
+            // A retired page cannot be driven again; its placeholder has its own reopen path.
+            markReopenRequired(bound)
+            bound.mutationInFlight = false
             bound.adapter.clearRefs()
             target.invalidateSessionRefs()
             target.clearGeometryCache()
@@ -1106,6 +1136,7 @@ class NativeBrowserPresenter(
                 activeJob = null
                 activeRequestId = null
                 activeAction = null
+                activeEffect = ActionEffect.NONE
                 activeDispatched = false
                 activePageAccess = false
                 activeTab = null
@@ -1303,6 +1334,7 @@ class NativeBrowserPresenter(
             val storedDesktop = tabModes[tab.tabId] == true
             val storedSize = desktopSizeFor(tab.tabId)
             if (desktopSizes[tab.tabId] == null) desktopSizes[tab.tabId] = storedSize
+            tabRecovery.remove(tab.tabId)
             // Store the pair before the mode, exactly like a fresh/reopened page.
             created.setDesktopViewport(storedSize.width, storedSize.height)
             created.setDesktopMode(storedDesktop)
@@ -1317,7 +1349,9 @@ class NativeBrowserPresenter(
             val still = synchronized(lock) {
                 foreground && selectedTabId == tab.tabId && documentEpoch == epoch && pages[tab.tabId]?.page === created
             }
-            if (!still || !created.loadOnce(tab.url)) synchronized(lock) { pages[tab.tabId]?.outcomeUnknown = true }
+            if (!still || !created.loadOnce(tab.url)) {
+                synchronized(lock) { pages[tab.tabId]?.let { markReopenRequired(it) } }
+            }
             synchronized(lock) { publishLocked() }
         }
     }
@@ -1333,6 +1367,7 @@ class NativeBrowserPresenter(
             if (submitReceipt?.tabId == removed.tabId) submitReceipt = null
             tabModes.remove(removed.tabId)
             desktopSizes.remove(removed.tabId)
+            tabRecovery.remove(removed.tabId)
         }
         pages.remove(removed.tabId)?.page?.destroy()
         if (selectedTabId == removed.tabId) {
@@ -1417,7 +1452,7 @@ class NativeBrowserPresenter(
             explicitTakeover = false
             was
         }
-        val granted = allowInternal()
+        val granted = allowInternal(clearObserveOnly = true)
         if (!granted && hadLatch) {
             // A resume of an existing takeover that did not verify must not silently hand control
             // to an ordinary action: keep the explicit decision unless a grant already exists.
@@ -1440,6 +1475,7 @@ class NativeBrowserPresenter(
         expectedConnection: String? = null,
         expectedPage: ControlledBrowserPage? = null,
         expectedTabId: String? = null,
+        clearObserveOnly: Boolean = false,
     ): Boolean = withContext(main) {
         val snapshot = synchronized(lock) {
             val current = host
@@ -1456,7 +1492,8 @@ class NativeBrowserPresenter(
                 tab.ownerSessionId.isBlank() -> "no owner"
                 bound == null -> "no page"
                 expectedPage != null && bound.page !== expectedPage -> "page changed"
-                bound.outcomeUnknown -> "outcome unknown"
+                bound.recovery == PageRecovery.REOPEN_REQUIRED -> "reopen required"
+                bound.recovery == PageRecovery.OBSERVE_ONLY && !clearObserveOnly -> "observe only"
                 bound.page.tabId != tab.tabId -> "page tab mismatch"
                 bound.retired -> "mouse-gesture-interrupted"
                 bound.page.mousePressActive() -> "mouse press active"
@@ -1469,14 +1506,22 @@ class NativeBrowserPresenter(
                 null
             } else {
                 // Every value was checked non-null in the refusal above.
-                AllowSnapshot(current!!, tab!!, connection!!, bound!!.page, documentEpoch, bound.generation)
+                AllowSnapshot(
+                    current!!,
+                    tab!!,
+                    connection!!,
+                    bound!!.page,
+                    documentEpoch,
+                    bound.generation,
+                    bound.recovery,
+                    bound.recoveryRevision,
+                )
             }
         } ?: return@withContext false
         if (!foreground) return@withContext false
-        if (synchronized(lock) { pages[snapshot.tab.tabId]?.outcomeUnknown } == true) {
-            synchronized(lock) {
-                _state.value = _state.value.copy(pageError = "Re-open this page before allowing control")
-            }
+        if (snapshot.recovery == PageRecovery.REOPEN_REQUIRED ||
+            (snapshot.recovery == PageRecovery.OBSERVE_ONLY && !clearObserveOnly)
+        ) {
             return@withContext false
         }
         val probed = snapshot.page?.probe() ?: return@withContext false
@@ -1493,7 +1538,20 @@ class NativeBrowserPresenter(
             // move, a replaced page, a temporary hide/block or a different connection invalidates
             // the late grant. Keep the complete check and grant write in one critical section:
             // a submit timeout must not mark the page unknown between these two operations.
-            if (bound.outcomeUnknown || bound.retired || !pageNow.ready ||
+            //
+            // An explicit Resume may clear only the uncertainty its own probe started on: the same
+            // page still in OBSERVE_ONLY at the same revision. A new unconfirmed effect recorded
+            // during the probe bumps the revision and must keep the page observe-only.
+            val sameUncertainty = clearObserveOnly &&
+                snapshot.recovery == PageRecovery.OBSERVE_ONLY &&
+                bound.recovery == PageRecovery.OBSERVE_ONLY &&
+                bound.recoveryRevision == snapshot.recoveryRevision
+            val recoveryAllowed = when {
+                clearObserveOnly -> sameUncertainty ||
+                    (snapshot.recovery == PageRecovery.NONE && bound.recovery == PageRecovery.NONE)
+                else -> bound.recovery == PageRecovery.NONE
+            }
+            if (!recoveryAllowed || bound.retired || !pageNow.ready ||
                 current.instanceKey != snapshot.host.instanceKey ||
                 current.consoleGeneration != snapshot.host.consoleGeneration ||
                 bound.page !== snapshot.page || bound.generation != snapshot.generation ||
@@ -1506,6 +1564,9 @@ class NativeBrowserPresenter(
             ) {
                 false
             } else {
+                // Explicit resume clears only the exact uncertainty it verified. Automatic
+                // allow/ready paths never pass clearObserveOnly.
+                if (sameUncertainty) markRecoveryNone(bound)
                 pageNow.manualNavigation = false
                 pageNow.syncWitness(probed.documentId)
                 // Two concurrent ready probes for the same verified document must share one grant
@@ -1587,6 +1648,7 @@ class NativeBrowserPresenter(
                 activeJob = job
                 activeRequestId = requestId
                 activeAction = actionName
+                activeEffect = effectOf(actionName)
                 activeDispatched = false
                 activePageAccess = false
                 activeTab = null
@@ -1601,6 +1663,7 @@ class NativeBrowserPresenter(
                 activeJob = null
                 activeRequestId = null
                 activeAction = null
+                activeEffect = ActionEffect.NONE
                 activeDispatched = false
                 activePageAccess = false
                 activeTab = null
@@ -1712,8 +1775,8 @@ class NativeBrowserPresenter(
         } finally {
             clearSubmitReceipt(receipt)
             if (!keepReplacement) {
-                // Clear only the replacement intent this exact submit created, then mark only the
-                // exact transaction page (original or its own replacement) unknown. A later user
+                // Clear only the replacement intent this exact submit created, then classify only
+                // the exact transaction page (original or its own replacement). A later user
                 // open/replacement is never touched.
                 clearAutoGrantIntent(replacementIntent)
                 markSubmitUnknown(receipt, replacementIntent)
@@ -1727,10 +1790,11 @@ class NativeBrowserPresenter(
     }
 
     /**
-     * A submit whose Enter was dispatched but whose GET was not continued leaves no drivable page
-     * and no auto-replay. It marks only the exact original page or the exact replacement this
-     * submit created; if a person's later open replaced it, nothing is touched. The grant on that
-     * exact page/connection/epoch is cleared; a different/new grant is left alone.
+     * A submit whose Enter was dispatched but whose GET was not continued. The original page, if
+     * still the exact transaction page, becomes OBSERVE_ONLY: its existing grant stays for
+     * snapshot/capture reads, mutations/auto-replay stop, and the result remains OUTCOME_UNKNOWN.
+     * A replacement this submit created but could not bring to ready becomes REOPEN_REQUIRED and
+     * its own intent is cleared. A later person's open/replacement is never touched.
      */
     private fun markSubmitUnknown(receipt: SubmitReceipt, replacement: AutoGrantIntent?) {
         synchronized(lock) {
@@ -1746,18 +1810,20 @@ class NativeBrowserPresenter(
             }
             val originalTarget = originalBound != null
             val targetTab = if (originalTarget) receipt.tabId else replacement?.tabId ?: receipt.tabId
-            targetBound.outcomeUnknown = true
-            val grant = registry.currentGrant()
-            val exactEpoch = if (originalTarget) receipt.grantEpoch else null
-            if (grant != null && grant.tabId == targetTab &&
-                grant.connectionId == receipt.connectionId &&
-                grant.sessionId == receipt.ownerSessionId &&
-                (exactEpoch == null || grant.grantEpoch == exactEpoch)
-            ) {
-                registry.revoke()
-                grantEpoch = 0L
-                witnessForGrant = null
-                mode = ProviderMode.MANUAL
+            if (originalTarget) {
+                markObserveOnly(targetBound)
+            } else {
+                markReopenRequired(targetBound)
+                val grant = registry.currentGrant()
+                if (grant != null && grant.tabId == targetTab &&
+                    grant.connectionId == receipt.connectionId &&
+                    grant.sessionId == receipt.ownerSessionId
+                ) {
+                    registry.revoke()
+                    grantEpoch = 0L
+                    witnessForGrant = null
+                    mode = ProviderMode.MANUAL
+                }
             }
             if (autoGrantIntent?.page === targetBound.page) autoGrantIntent = null
             if (pendingWake?.page === targetBound.page) pendingWake = null
@@ -1887,16 +1953,21 @@ class NativeBrowserPresenter(
         // Authority is decided before the page is marked as accessed. A refused action (no grant,
         // retired page, other tab) never sets activePageAccess, so a later geometry change cannot
         // report it as outcome-unknown. The check is repeated under the lock to close the race.
-        val pageAtDispatch = synchronized(lock) {
+        val (pageAtDispatch, effectAtDispatch) = synchronized(lock) {
             val bound = pages[shown]
             if (bound == null || bound.retired || presentationBlocked ||
                 !registry.authorized(request, request.connectionId, shown)
             ) {
                 return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
             }
+            // Re-check the recorded recovery under the same lock as the page: a callback may have
+            // marked the effect uncertain after the pre-dispatch refusal but before this point.
+            recoveryRefusal(bound, request.action)?.let { return it }
             activePageAccess = true
             activeTab = shown
-            bound.page
+            // Capture the effect class with the page: a later global reset must not reclassify the
+            // failure of the action that actually ran.
+            bound.page to activeEffect
         }
         val pageAdapter = initialAdapter
         val isSubmit = request.action == "browser.type" && request.parameters["submit"] == "true"
@@ -1914,24 +1985,29 @@ class NativeBrowserPresenter(
         val result = withContext(main) { pageAdapter.execute(request, registry, shown, currentMode, deadlineElapsed) }
         if (result.errorCode == ProviderCodes.OUTCOME_UNKNOWN) {
             submit?.let { clearSubmitReceipt(it) }
-            synchronized(lock) {
-                val bound = pages[shown]
-                // Only the exact page this dispatch touched; a replaced/user page is untouched.
-                if (bound != null && bound.page === pageAtDispatch) {
-                    bound.outcomeUnknown = true
-                    publishLocked()
+            // A read/scroll failure keeps the page usable. Only a dispatched click/type has an
+            // uncertain external effect and becomes observe-only.
+            if (effectAtDispatch == ActionEffect.MUTATION) {
+                synchronized(lock) {
+                    val bound = pages[shown]
+                    // Only the exact page this dispatch touched; a replaced/user page is untouched.
+                    if (bound != null && bound.page === pageAtDispatch) {
+                        markObserveOnly(bound)
+                        publishLocked()
+                    }
                 }
             }
             return result
         }
-        if (submit == null) return result
-        if (!result.ok || result.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull != true) {
+        val observed = observationMetadata(request.action, result, shown, pageAtDispatch)
+        if (submit == null) return observed
+        if (!observed.ok || observed.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull != true) {
             clearSubmitReceipt(submit)
-            return result
+            return observed
         }
         // The adapter only confirmed the input/Enter dispatch. The original execute coroutine
         // still owns the action lock while it waits for the engine's one-shot navigation receipt.
-        return awaitSubmitNavigation(request, submit, result, deadlineElapsed, now)
+        return awaitSubmitNavigation(request, submit, observed, deadlineElapsed, now)
     }
 
     /**
@@ -1994,6 +2070,10 @@ class NativeBrowserPresenter(
             is BrowserDesktopViewport.Parse.Valid -> parsed.size
             BrowserDesktopViewport.Parse.Unspecified -> null
         }
+        // Reuse the same guard here: a caller that enters the open path directly (the public
+        // compatibility entry or a submit continuation) must not clear an unconfirmed effect by
+        // replacing the selected page or the named tab.
+        agentOpenUncertainty(request, session)?.let { return@withContext it }
         val activeOwner = synchronized(lock) { registry.find(selectedTabId.orEmpty())?.ownerSessionId }
         // The person is looking at [session] in the chat console, so the page it asked for is the one
         // to show: it takes the selection from another owner's visible page. That page is kept, not
@@ -2057,6 +2137,7 @@ class NativeBrowserPresenter(
                 created.tabId = tabId
                 tabModes[tabId] = requestedDesktop
                 desktopSizes[tabId] = desktopSize
+                tabRecovery.remove(tabId)
                 pages[tabId] = BoundPage(created, pageAdapter, viewGeneration + 1, desktop = requestedDesktop)
                 page = created
                 adapter = pageAdapter
@@ -2127,6 +2208,117 @@ class NativeBrowserPresenter(
 
     private enum class OpenWait { WAITING, GRANTED, STOPPED }
 
+    private enum class ActionEffect { NONE, READ, SCROLL, MUTATION }
+
+    private fun effectOf(action: String): ActionEffect = when (action) {
+        "browser.snapshot", "browser.capture" -> ActionEffect.READ
+        "browser.scroll" -> ActionEffect.SCROLL
+        "browser.click", "browser.type" -> ActionEffect.MUTATION
+        else -> ActionEffect.NONE
+    }
+
+    private fun isReadAction(action: String): Boolean =
+        action == "browser.snapshot" || action == "browser.capture"
+
+    /**
+     * The one agent-open uncertainty guard. It is reused by the pre-dispatch refusal and by the
+     * open path itself, so a caller that enters [openClaimed] directly cannot clear an unconfirmed
+     * click/type effect by replacing the selected page or the named target tab. Both pages must be
+     * owned by this session; the person's own open (serverEpoch "user") is the explicit decision.
+     * Deliberately checks no connection or presentation gate: the open path keeps its previous
+     * manual-open behavior.
+     */
+    private fun agentOpenUncertainty(request: ProviderRequest, session: String): ProviderResult? =
+        synchronized(lock) {
+            if (request.serverEpoch == "user") return@synchronized null
+            val selectedBound = selectedTabId?.let { pages[it] }
+            val selectedOwner = selectedTabId?.let { registry.find(it)?.ownerSessionId }
+            val namedTab = request.parameters["tabId"]?.takeIf { it.isNotBlank() }
+                ?.let { registry.find(it) }
+            val namedBound = namedTab?.let { pages[it.tabId] }
+            val selectedUnconfirmed = selectedBound != null && !selectedBound.retired &&
+                selectedOwner == session && selectedBound.recovery == PageRecovery.OBSERVE_ONLY
+            val targetUnconfirmed = namedBound != null && !namedBound.retired &&
+                namedTab?.ownerSessionId == session && namedBound.recovery == PageRecovery.OBSERVE_ONLY
+            if (selectedUnconfirmed || targetUnconfirmed) {
+                ProviderResult(
+                    false,
+                    errorCode = ProviderCodes.AUTHORIZATION_REQUIRED,
+                    message = OBSERVE_ONLY_OPEN_MESSAGE,
+                )
+            } else {
+                null
+            }
+        }
+
+    /**
+     * Records an unconfirmed click/type effect. Every event bumps the generation, even when the
+     * value already is OBSERVE_ONLY, so a Resume probe that began earlier cannot clear a newer
+     * event it did not verify.
+     */
+    private fun markObserveOnly(bound: BoundPage) {
+        if (bound.recovery == PageRecovery.REOPEN_REQUIRED) return
+        bound.recovery = PageRecovery.OBSERVE_ONLY
+        bound.recoveryRevision += 1
+    }
+
+    /** Records a document-invalid/unavailable page. */
+    private fun markReopenRequired(bound: BoundPage) {
+        bound.recovery = PageRecovery.REOPEN_REQUIRED
+        bound.recoveryRevision += 1
+    }
+
+    /** Clears recovery only as part of an explicit person decision (Resume/manual document). */
+    private fun markRecoveryNone(bound: BoundPage) {
+        if (bound.recovery == PageRecovery.NONE) return
+        bound.recovery = PageRecovery.NONE
+        bound.recoveryRevision += 1
+    }
+
+    /**
+     * A successful read on an OBSERVE_ONLY page stays readable, but its payload must not claim the
+     * page is drivable: mutations are refused until the person explicitly resumes. A normal page's
+     * result is returned unchanged.
+     */
+    private fun observationMetadata(
+        action: String,
+        result: ProviderResult,
+        shown: String?,
+        pageAtDispatch: ControlledBrowserPage,
+    ): ProviderResult {
+        if (!result.ok || !isReadAction(action)) return result
+        val observeOnly = synchronized(lock) {
+            val bound = pages[shown]
+            bound != null && !bound.retired && bound.page === pageAtDispatch &&
+                bound.recovery == PageRecovery.OBSERVE_ONLY
+        }
+        if (!observeOnly) return result
+        val data = JsonObject(result.data.toMutableMap().apply {
+            put("drivable", JsonPrimitive(false))
+            put("observationOnly", JsonPrimitive(true))
+            put("actionOutcomeUnknown", JsonPrimitive(true))
+        })
+        return result.copy(data = data)
+    }
+
+    /**
+     * The per-page recovery gate: OBSERVE_ONLY admits only reads and refuses a mutation as an
+     * unconfirmed effect, never as a missing Allow; REOPEN_REQUIRED refuses the page entirely.
+     * Uses only the recorded classification, never a page-provided string.
+     */
+    private fun recoveryRefusal(bound: BoundPage?, action: String): ProviderResult? = when {
+        bound == null -> null
+        bound.recovery == PageRecovery.REOPEN_REQUIRED ->
+            ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
+        bound.recovery == PageRecovery.OBSERVE_ONLY && !isReadAction(action) ->
+            ProviderResult(
+                false,
+                errorCode = ProviderCodes.OUTCOME_UNKNOWN,
+                message = OUTCOME_UNKNOWN_MUTATION_MESSAGE,
+            )
+        else -> null
+    }
+
     /**
      * Watches the opened page until control exists for it: either the default control granted when
      * the explicit open becomes ready, or the person's own explicit Allow tap. It observes only:
@@ -2169,6 +2361,7 @@ class NativeBrowserPresenter(
         // A hidden window, another selection, a replaced/retired page, a hand navigation or a lost
         // connection can no longer become this open's Allow: end the wait.
         val watchable = current.shown && selectedTabId == tabId && bound != null && !bound.retired &&
+            bound.recovery != PageRecovery.REOPEN_REQUIRED &&
             bound.page === page && !page.manualNavigation && page.tabId == tabId &&
             connectionId == connection && host != null && !paused && !consoleInvalidated &&
             !explicitTakeover
@@ -2211,7 +2404,9 @@ class NativeBrowserPresenter(
             // This is the same foreground admission the ready request and command dispatch already use.
             if (host == null || paused || hidden || consoleInvalidated || presentationBlocked) return
             val bound = pages[selectedTabId]
-            if (page !== source || bound?.page !== source || bound.retired || bound.outcomeUnknown) return
+            if (page !== source || bound?.page !== source || bound.retired ||
+                bound.recovery == PageRecovery.REOPEN_REQUIRED
+            ) return
             if (!source.nativePresentationVisible()) return
             val witness = source.acceptedDocument() ?: return
             if (source.tabId != selectedTabId) return
@@ -2427,7 +2622,13 @@ class NativeBrowserPresenter(
             if (hidden || explicitTakeover || paused || consoleInvalidated || presentationBlocked) return
             if (!presentableLocked()) return
             val bound = pages[intent.tabId] ?: return
-            if (bound.retired || bound.page !== page || selectedTabId != intent.tabId) return
+            // An uncertain/reopen page needs an explicit decision; automatic ready retry never
+            // clears that state or mints a late grant.
+            if (bound.retired || bound.recovery != PageRecovery.NONE ||
+                bound.page !== page || selectedTabId != intent.tabId
+            ) {
+                return
+            }
             if (intent.connection == null || connectionId != intent.connection) return
             if (host?.instanceKey != intent.hostInstanceKey ||
                 host?.consoleGeneration != intent.consoleGeneration
@@ -2491,7 +2692,9 @@ class NativeBrowserPresenter(
         witness: String,
     ): ProbeIdentity? {
         val bound = pages[selectedTabId] ?: return null
-        if (page !== source || bound.page !== source || bound.retired || bound.outcomeUnknown) return null
+        if (page !== source || bound.page !== source || bound.retired ||
+            bound.recovery == PageRecovery.REOPEN_REQUIRED
+        ) return null
         if (host == null || paused || hidden || consoleInvalidated || presentationBlocked) return null
         if (!source.matchesReady(identity)) return null
         if (source.acceptedDocument() != witness) return null
@@ -2538,6 +2741,10 @@ class NativeBrowserPresenter(
     private fun onFatal(source: ControlledBrowserPage) {
         val current = synchronized(lock) { page === source }
         if (!current) return
+        synchronized(lock) {
+            val tabId = source.tabId ?: selectedTabId
+            if (tabId != null) tabRecovery[tabId] = PageRecovery.REOPEN_REQUIRED
+        }
         revokeAll("fatal")
         synchronized(lock) {
             releasePageLocked()
@@ -2549,6 +2756,12 @@ class NativeBrowserPresenter(
         val current = synchronized(lock) { page === source }
         if (!current) return
         source.markUnknown()
+        synchronized(lock) {
+            val bound = pages[source.tabId]
+            if (bound != null && bound.page === source) markReopenRequired(bound)
+            val tabId = source.tabId ?: selectedTabId
+            if (tabId != null) tabRecovery[tabId] = PageRecovery.REOPEN_REQUIRED
+        }
         revokeAll("unknown navigation")
         synchronized(lock) { publishLocked() }
     }
@@ -2589,8 +2802,9 @@ class NativeBrowserPresenter(
             source.clearAcceptedWitness()
             inflightGeometry = null
             scrollMemory.observePage(scrollIdentity())
-            pages[source.tabId]?.outcomeUnknown = false
+            pages[source.tabId]?.let { markRecoveryNone(it) }
             pages[source.tabId]?.modeNotice = null
+            source.tabId?.let { tabRecovery.remove(it) }
             publishLocked()
         }
     }
@@ -2684,13 +2898,18 @@ class NativeBrowserPresenter(
         if (connectionId == null || connectionId != request.connectionId) {
             return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "connection refused")
         }
-        if (request.action != "browser.open") {
-            val named = request.parameters["tabId"]
-            val target = if (named.isNullOrBlank()) registry.find(selectedTabId.orEmpty()) else registry.find(named)
-            if (target == null || target.ownerSessionId != session || pages[target.tabId]?.outcomeUnknown == true) {
-                return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
-            }
+        if (request.action == "browser.open") {
+            // An agent open must not erase an unconfirmed click/type effect on the selected page or
+            // on the named target tab. The person's own open (serverEpoch "user") is the explicit
+            // decision; a different owner's page is an independent session.
+            return agentOpenUncertainty(request, session)
         }
+        val named = request.parameters["tabId"]
+        val target = if (named.isNullOrBlank()) registry.find(selectedTabId.orEmpty()) else registry.find(named)
+        if (target == null || target.ownerSessionId != session) {
+            return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
+        }
+        recoveryRefusal(target.let { pages[it.tabId] }, request.action)?.let { return it }
         return null
     }
 
@@ -2716,32 +2935,49 @@ class NativeBrowserPresenter(
         },
         onOutcomeUnknown = {
             synchronized(lock) {
+                if (activeRequestId == null || activeEffect != ActionEffect.MUTATION ||
+                    activeTab != page.tabId
+                ) return@synchronized
                 val bound = pages[page.tabId]
                 // A late callback from the page this adapter was built for must never mark a
                 // newer page in the same tab.
-                if (bound != null && bound.page === page) bound.outcomeUnknown = true
+                if (bound != null && bound.page === page && !bound.retired) {
+                    // Any new unconfirmed event bumps the generation, even if the page already is
+                    // OBSERVE_ONLY: a Resume probe in flight did not verify this event.
+                    markObserveOnly(bound)
+                    publishLocked()
+                }
             }
         },
         onDispatch = {
             synchronized(lock) {
                 val bound = pages[page.tabId]
-                if (bound != null && bound.page === page) {
+                if (bound != null && bound.page === page && !bound.retired) {
                     notePageInteraction()
-                    bound.mutationInFlight = true
-                    activeDispatched = true
-                    android.util.Log.i("AndChamberProvider", "action=$activeAction phase=dispatched")
+                    // Only click/type are high-risk mutations. Scroll is not.
+                    if (activeRequestId != null && activeEffect == ActionEffect.MUTATION &&
+                        activeTab == page.tabId
+                    ) {
+                        bound.mutationInFlight = true
+                        activeDispatched = true
+                        android.util.Log.i("AndChamberProvider", "action=$activeAction phase=dispatched")
+                    }
                 }
             }
         },
         onDispatchDone = { reply ->
             synchronized(lock) {
+                if (activeEffect != ActionEffect.MUTATION || activeTab != page.tabId) return@synchronized
                 val bound = pages[page.tabId] ?: return@synchronized
-                if (bound.page !== page) return@synchronized
+                if (bound.page !== page || bound.retired) return@synchronized
                 bound.mutationInFlight = false
                 // A known reply ends the dispatched phase. This matters for the submit handshake,
                 // which waits inside the same action while the page is later replaced.
                 if (reply != null) activeDispatched = false
-                if (reply == null) bound.outcomeUnknown = true
+                if (reply == null) {
+                    markObserveOnly(bound)
+                    publishLocked()
+                }
             }
         },
     )
@@ -2767,15 +3003,21 @@ class NativeBrowserPresenter(
         // must not keep it on: its menu cannot turn it off there. This only ever switches it off.
         if (mouseMode && tabModes[selectedTabId] != true) mouseMode = false
         val bound = pages[selectedTabId]
+        val recovery = pages[selectedTabId]?.recovery
+            ?: tabRecovery[selectedTabId]
+            ?: PageRecovery.NONE
         val forced = when {
             bound?.page?.pageError != null -> bound.page.pageError
-            bound?.outcomeUnknown == true -> "Re-open this page before allowing control"
+            // REOPEN_REQUIRED is a state classification, not a page-provided error string.
+            recovery == PageRecovery.REOPEN_REQUIRED -> null
             else -> bound?.modeNotice ?: error
         }
         // A retired selection stays visible as its placeholder; it is not a hidden page. A hidden
         // window stays hidden across every publish until show/restore or an explicit open.
         val retiredSelected = bound?.retired == true
-        val visible = !hidden && (shown ?: (selectedTabId != null && (page != null || retiredSelected) && host != null))
+        val recoverableSelection = recovery == PageRecovery.REOPEN_REQUIRED && selectedTabId != null
+        val visible = !hidden && (shown ?: (selectedTabId != null &&
+            (page != null || retiredSelected || recoverableSelection) && host != null))
         val tabs = registry.tabs().map { tab ->
             NativeBrowserTab(
                 id = tab.tabId,
@@ -2796,9 +3038,12 @@ class NativeBrowserPresenter(
             selectedTabId = selectedTabId,
             shown = visible,
             mode = mode,
-            agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null && !presentationBlocked && !hidden,
+            agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null &&
+                !presentationBlocked && !hidden && recovery == PageRecovery.NONE,
             pageError = if (pages[selectedTabId]?.retired == true) "mouse-gesture-interrupted" else forced,
             pageReady = pages[selectedTabId]?.retired != true && page?.ready == true,
+            requiresReopen = recovery == PageRecovery.REOPEN_REQUIRED,
+            actionOutcomeUnknown = recovery == PageRecovery.OBSERVE_ONLY,
             pageRetired = pages[selectedTabId]?.retired == true,
             mousePressActive = page?.mousePressActive() == true,
             viewHandle = page?.handle ?: 0,
@@ -2846,7 +3091,9 @@ class NativeBrowserPresenter(
         val adapter: OpenChamberPageAdapter,
         val generation: Long,
         val desktop: Boolean = false,
-        var outcomeUnknown: Boolean = false,
+        var recovery: PageRecovery = PageRecovery.NONE,
+        /** Bumped on every recorded recovery event; a Resume clears only the generation it started on. */
+        var recoveryRevision: Long = 0L,
         var modeNotice: String? = null,
         var mutationInFlight: Boolean = false,
         var retired: Boolean = false,
@@ -2918,6 +3165,9 @@ class NativeBrowserPresenter(
         val page: ControlledBrowserPage?,
         val epoch: Long,
         val generation: Long,
+        /** Recovery as it stood when this probe began; only this exact uncertainty may be cleared. */
+        val recovery: PageRecovery,
+        val recoveryRevision: Long,
     )
 }
 

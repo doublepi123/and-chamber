@@ -128,6 +128,13 @@ internal fun BrowserFloatWindow(
     status: String,
     agentOn: Boolean,
     canResume: Boolean,
+    /**
+     * The app has confirmed the page needs a fresh load before the agent can use it again (an
+     * earlier action's outcome is unknown). Resume is then replaced by Reopen.
+     */
+    reopenNeeded: Boolean = false,
+    /** Reopen can run now (known address, no press, presentable, not already reopening). */
+    canReopen: Boolean = false,
     loading: Boolean,
     desktopOn: Boolean,
     mouseOn: Boolean,
@@ -135,6 +142,8 @@ internal fun BrowserFloatWindow(
     isPagePressActive: () -> Boolean = { mousePressActive },
     onResume: () -> Unit,
     onTakeOver: () -> Unit,
+    /** The person's own Reopen tap: one fresh load of the shown address. Never a replay. */
+    onReopen: () -> Unit = {},
     onHide: () -> Unit,
     onClosePage: () -> Unit,
     /** Opens a checked address in this window. Null hides address editing. */
@@ -200,6 +209,7 @@ internal fun BrowserFloatWindow(
         SideEffect { onPresentationBlocked(blocked) }
         val full = layout.presentation == BrowserPresentation.Full
         val float = layout.presentation == BrowserPresentation.Float
+        val action = browserControlAction(agentOn, reopenNeeded, canResume)
 
         // Back leaves full screen first, like a phone browser; it never hides or stops the agent.
         BackHandler(enabled = ui.fullRequested && !editing) { ui.fullRequested = false }
@@ -285,15 +295,21 @@ internal fun BrowserFloatWindow(
                         }
                         // Compact toolbar (keyboard open in full screen): the control action moves up
                         // here, so it is never out of reach.
-                        if (!layout.showBottomBar && agentOn) {
-                            IconButton(onClick = onTakeOver, modifier = Modifier.size(48.dp)) {
-                                Icon(Icons.Rounded.PanTool, contentDescription = stringResource(R.string.browser_take_over),
-                                    tint = MaterialTheme.colorScheme.primary)
-                            }
-                        } else if (!layout.showBottomBar && canResume) {
-                            IconButton(onClick = onResume, modifier = Modifier.size(48.dp)) {
-                                Icon(Icons.Rounded.SmartToy, contentDescription = stringResource(R.string.browser_turn_on))
-                            }
+                        if (!layout.showBottomBar) when (action) {
+                            BrowserControlAction.TakeOver ->
+                                IconButton(onClick = onTakeOver, modifier = Modifier.size(48.dp)) {
+                                    Icon(Icons.Rounded.PanTool, contentDescription = stringResource(R.string.browser_take_over),
+                                        tint = MaterialTheme.colorScheme.primary)
+                                }
+                            BrowserControlAction.Reopen ->
+                                IconButton(onClick = onReopen, enabled = canReopen, modifier = Modifier.size(48.dp)) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.browser_reopen_page))
+                                }
+                            BrowserControlAction.Resume ->
+                                IconButton(onClick = onResume, modifier = Modifier.size(48.dp)) {
+                                    Icon(Icons.Rounded.SmartToy, contentDescription = stringResource(R.string.browser_turn_on))
+                                }
+                            BrowserControlAction.None -> Unit
                         }
                         IconButton(onClick = onHide, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Rounded.VisibilityOff, contentDescription = stringResource(R.string.browser_hide))
@@ -352,10 +368,12 @@ internal fun BrowserFloatWindow(
                     ControlBar(
                         status = status,
                         agentOn = agentOn,
-                        canResume = canResume,
+                        action = action,
+                        canReopen = canReopen,
                         resizable = float,
                         onResume = onResume,
                         onTakeOver = onTakeOver,
+                        onReopen = onReopen,
                         onResize = { dx, dy ->
                             // The grip sits at the bottom-start corner: the window's top-end corner
                             // stays put, so dragging left/down grows the page and right/up shrinks it.
@@ -587,10 +605,12 @@ private fun BrowserMenu(
 private fun ControlBar(
     status: String,
     agentOn: Boolean,
-    canResume: Boolean,
+    action: BrowserControlAction,
+    canReopen: Boolean,
     resizable: Boolean,
     onResume: () -> Unit,
     onTakeOver: () -> Unit,
+    onReopen: () -> Unit,
     onResize: (dx: Float, dy: Float) -> Unit,
 ) {
     val density = LocalDensity.current
@@ -625,20 +645,43 @@ private fun ControlBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f).padding(end = 6.dp),
         )
-        when {
-            agentOn -> Button(
+        when (action) {
+            BrowserControlAction.TakeOver -> Button(
                 onClick = onTakeOver,
                 modifier = Modifier.heightIn(min = 40.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text(stringResource(R.string.browser_take_over), maxLines = 1) }
-            canResume -> FilledTonalButton(
+            BrowserControlAction.Reopen -> FilledTonalButton(
+                onClick = onReopen,
+                enabled = canReopen,
+                modifier = Modifier.heightIn(min = 40.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp),
+            ) { Text(stringResource(R.string.browser_reopen_page), maxLines = 1) }
+            BrowserControlAction.Resume -> FilledTonalButton(
                 onClick = onResume,
                 modifier = Modifier.heightIn(min = 40.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp),
             ) { Text(stringResource(R.string.browser_turn_on), maxLines = 1) }
+            BrowserControlAction.None -> Unit
         }
     }
 }
+
+/** The one control action the window offers. */
+internal enum class BrowserControlAction { TakeOver, Reopen, Resume, None }
+
+/**
+ * Which control action to show. The agent in control: Take over. The page needs a fresh load
+ * (confirmed by the app, not page text): Reopen, never Resume, because Resume would be refused.
+ * Otherwise Resume when it can work, or nothing.
+ */
+internal fun browserControlAction(agentOn: Boolean, reopenNeeded: Boolean, canResume: Boolean): BrowserControlAction =
+    when {
+        agentOn -> BrowserControlAction.TakeOver
+        reopenNeeded -> BrowserControlAction.Reopen
+        canResume -> BrowserControlAction.Resume
+        else -> BrowserControlAction.None
+    }
 
 /** Three short diagonal strokes in the bottom-start corner, the usual sign for "drag to resize". */
 @Composable

@@ -251,8 +251,9 @@ class OpenChamberPageAdapter(
             ),
         )
         }
-        // No reply means the page may have acted without our seeing it: outcome unknown.
-        if (reply == null) return revokedDuringAction()
+        // No reply means the page may have acted without our seeing it: outcome unknown. A click
+        // has an external effect, so the page-level uncertainty is reported to the presenter.
+        if (reply == null) return outcomeUnknownAfterDispatch(mutation = true)
         // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
@@ -292,8 +293,9 @@ class OpenChamberPageAdapter(
             ),
         )
         }
-        // No reply means the page may have acted without our seeing it: outcome unknown.
-        if (reply == null) return revokedDuringAction()
+        // No reply means the page may have acted without our seeing it: outcome unknown. A type
+        // has an external effect, so the page-level uncertainty is reported to the presenter.
+        if (reply == null) return outcomeUnknownAfterDispatch(mutation = true)
         // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
@@ -369,7 +371,10 @@ class OpenChamberPageAdapter(
                 ),
             )
         }
-        if (reply == null) return revokedDuringAction()
+        // A scroll that got no reply may or may not have moved the page. Its own readback was not
+        // confirmed, so the increment is never replayed; that alone does not make the document
+        // invalid. (It is not a claim that a JS scroll handler had no side effect.)
+        if (reply == null) return outcomeUnknownAfterDispatch(mutation = false)
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
         return ProviderResult(ok = true, data = buildJsonObject { put("direction", direction) })
@@ -517,10 +522,18 @@ class OpenChamberPageAdapter(
     private fun revokedBeforeDispatch(): ProviderResult =
         ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
 
-    /** Revoked after the action was sent to the page: what it did is unknown. */
-    private fun revokedDuringAction(): ProviderResult {
-        onOutcomeUnknown()
-        android.util.Log.w("AndChamberProvider", "action=mutate code=${ProviderCodes.OUTCOME_UNKNOWN} class=Revoked")
+    /**
+     * No reply after the action reached the page. Only a click/type may have changed something
+     * outside the page, so only that reports a page-level uncertainty; a scroll keeps the page
+     * trustworthy for this action, is never replayed and does not by itself prove the document
+     * invalid.
+     */
+    private fun outcomeUnknownAfterDispatch(mutation: Boolean): ProviderResult {
+        if (mutation) onOutcomeUnknown()
+        android.util.Log.w(
+            "AndChamberProvider",
+            "action=${if (mutation) "mutate" else "scroll"} code=${ProviderCodes.OUTCOME_UNKNOWN} class=Revoked",
+        )
         return ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN)
     }
 

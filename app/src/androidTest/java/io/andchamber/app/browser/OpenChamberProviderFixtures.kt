@@ -27,6 +27,7 @@ internal object OpenChamberProviderFixtures {
     const val SEARCH_SENSITIVE_URL = "https://example.com/openchamber-provider-search-sensitive"
     const val SEARCH_RACE_URL = "https://example.com/openchamber-provider-search-race"
     const val SEARCH_RACE_RESULTS_URL = "https://example.com/openchamber-provider-search-race-results"
+    const val SPA_ENTER_URL = "https://example.com/openchamber-provider-spa-enter"
     const val DESKTOP_VIEWPORT_URL = "https://example.com/openchamber-provider-desktop-viewport"
 
     /** Real GET/POST arrivals of the search fixture, for one-submit / no-replay proof. */
@@ -389,6 +390,36 @@ internal object OpenChamberProviderFixtures {
         </body></html>
     """.trimIndent()
 
+    private val spaEnterHtml = """
+        <!doctype html><html><head><title>spa-enter</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <span id="marker">spa-form</span>
+          <p><input id="spa-query" type="text" aria-label="SPA query" value=""></p>
+          <p><button id="spa-apply" type="button" aria-label="Apply SPA">Apply</button></p>
+          <span id="spa-result">spa-result:none</span>
+          <span id="spa-enter-count">enter-count:0</span>
+          <span id="spa-click-count">click-count:0</span>
+          <script>
+            var input = document.getElementById('spa-query');
+            var result = document.getElementById('spa-result');
+            input.addEventListener('keydown', function(event){
+              if (event.key !== 'Enter') return;
+              // A real SPA handler consumes Enter: update the same document, never navigate.
+              event.preventDefault();
+              window.__enterCount = (window.__enterCount || 0) + 1;
+              result.textContent = 'spa-result:' + String(input.value);
+              document.getElementById('spa-enter-count').textContent = 'enter-count:' + window.__enterCount;
+            });
+            document.getElementById('spa-apply').addEventListener('click', function(){
+              window.__clickCount = (window.__clickCount || 0) + 1;
+              document.getElementById('spa-click-count').textContent = 'click-count:' + window.__clickCount;
+            });
+            window.__loads = (Number(sessionStorage.getItem('spa-loads') || 0)) + 1;
+            sessionStorage.setItem('spa-loads', String(window.__loads));
+          </script>
+        </body></html>
+    """.trimIndent()
+
     private val searchSensitiveHtml = """
         <!doctype html><html><head><title>search-sensitive</title>
         <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
@@ -412,6 +443,7 @@ internal object OpenChamberProviderFixtures {
         method.equals("GET", true) && url == SEARCH_URL -> searchHtml
         method.equals("GET", true) && url == DESKTOP_VIEWPORT_URL -> desktopViewportHtml
         method.equals("GET", true) && url == SEARCH_RACE_URL -> searchRaceHtml
+        method.equals("GET", true) && url == SPA_ENTER_URL -> spaEnterHtml
         method.equals("GET", true) && url == SEARCH_SENSITIVE_URL -> searchSensitiveHtml
         method.equals("GET", true) && (url == SEARCH_RACE_RESULTS_URL || url.startsWith("$SEARCH_RACE_RESULTS_URL?")) -> {
             searchRaceGetArrivals += 1
