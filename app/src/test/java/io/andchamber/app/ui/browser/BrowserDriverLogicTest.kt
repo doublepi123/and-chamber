@@ -441,6 +441,63 @@ class BrowserDriverLogicTest {
     }
 
     @Test
+    fun `enter ready script exposes the starting url and never mutates history`() {
+        val script = BrowserDriverLogic.enterReadyScript(
+            documentNonce = "a".repeat(32),
+            documentId = "b".repeat(32),
+            ref = "abcdef01-1234abcd-1",
+        )
+        assertTrue(script.contains("ready.url"))
+        assertTrue(script.contains("location.href"))
+        assertFalse(script.contains("pushState"))
+        assertFalse(script.contains("replaceState"))
+        assertFalse(script.contains("requestSubmit"))
+        assertFalse(script.contains("KeyboardEvent"))
+    }
+
+    @Test
+    fun `same document probe parses only a real witness url and ready state`() {
+        val script = BrowserDriverLogic.sameDocumentProbeScript()
+        assertTrue(script.contains("__acWitness"))
+        assertTrue(script.contains("location.href"))
+        assertTrue(script.contains("readyState"))
+        assertFalse(script.contains("pushState"))
+        assertFalse(script.contains("replaceState"))
+        val probe = BrowserDriverLogic.parseSameDocumentProbe(
+            """{"ok":true,"documentId":"abcd","url":"https://example.com/search?q=opencode&type=repositories","ready":"complete"}""",
+        )
+        assertEquals("abcd", probe?.documentId)
+        assertEquals("https://example.com/search?q=opencode&type=repositories", probe?.url)
+        assertEquals("complete", probe?.ready)
+        assertNull(BrowserDriverLogic.parseSameDocumentProbe("""{"ok":false,"error":"no witness"}"""))
+        assertNull(BrowserDriverLogic.parseSameDocumentProbe("""{"ok":true,"documentId":"","url":"https://example.com","ready":"complete"}"""))
+    }
+
+    @Test
+    fun `same document origin requires absolute https and the same effective port`() {
+        assertTrue(BrowserDriverLogic.sameHttpsOrigin("https://example.com/a", "https://example.com/b?q=1"))
+        assertTrue(BrowserDriverLogic.sameHttpsOrigin("https://example.com:443/a", "https://example.com/b"))
+        assertFalse(BrowserDriverLogic.sameHttpsOrigin("https://example.com/a", "http://example.com/b"))
+        assertFalse(BrowserDriverLogic.sameHttpsOrigin("https://example.com/a", "https://other.example/b"))
+        assertFalse(BrowserDriverLogic.sameHttpsOrigin("https://example.com:8443/a", "https://example.com/b"))
+        assertFalse(BrowserDriverLogic.sameHttpsOrigin("about:blank", "https://example.com/b"))
+    }
+
+    @Test
+    fun `submit arm budget uses the caller deadline and refuses an expired one`() {
+        assertEquals(1_500L, BrowserDriverLogic.actionExpiresAt(1_000L, 500L))
+        assertEquals(1_000L, BrowserDriverLogic.actionExpiresAt(1_000L, 0L))
+        assertNull(BrowserDriverLogic.actionExpiresAt(1_000L, null))
+        assertEquals(500L, BrowserDriverLogic.submitArmRemaining(1_500L, 1_000L))
+        assertNull(BrowserDriverLogic.submitArmRemaining(1_500L, 1_500L))
+        assertNull(BrowserDriverLogic.submitArmRemaining(1_500L, 1_600L))
+        assertEquals(
+            BrowserDriverLogic.SUBMIT_ARM_CAP_MS,
+            BrowserDriverLogic.submitArmRemaining(1_000_000L, 1_000L),
+        )
+    }
+
+    @Test
     fun `snapshot carries measured layout and visual viewport numbers`() {
         val obj = Json.parseToJsonElement(
             """{"url":"https://public.example","title":"Hi","text":"hello","elements":[],"truncated":false,"layoutWidth":1920,"layoutHeight":1080,"visualWidth":1918.5,"visualHeight":1078.5}""",

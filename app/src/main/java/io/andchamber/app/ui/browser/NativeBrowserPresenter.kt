@@ -30,6 +30,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -538,6 +540,12 @@ class NativeBrowserPresenter(
         const val READY_REPROBE_LIMIT = 4
         /** Tick for a bounded default-control retry while an open is still waiting for its grant. */
         const val OPEN_GRANT_RETRY_TICK_MS = 250L
+        /**
+         * Kept free between the submit's work deadline and the transport's own timeout, so a
+         * dispatched-but-unconfirmed Enter returns OUTCOME_UNKNOWN instead of being cut into
+         * DEADLINE by the outer tool timeout.
+         */
+        const val SUBMIT_TRANSPORT_RESERVE_MS = 500L
         /**
          * Fixed internal explanation for a mutation refused because a dispatched click/type effect
          * is still unconfirmed. It is not a missing Allow and it never asks for a reload.
@@ -1476,6 +1484,7 @@ class NativeBrowserPresenter(
         expectedPage: ControlledBrowserPage? = null,
         expectedTabId: String? = null,
         clearObserveOnly: Boolean = false,
+        autoGrantDeadline: AutoGrantDeadline? = null,
     ): Boolean = withContext(main) {
         val snapshot = synchronized(lock) {
             val current = host
@@ -1524,6 +1533,9 @@ class NativeBrowserPresenter(
         ) {
             return@withContext false
         }
+        // An automatic submit-continuation grant also expires with its captured Dwork. This is the
+        // entry check; the final fence checks the same object again before writing the grant.
+        if (autoGrantDeadline?.expired() == true) return@withContext false
         val probed = snapshot.page?.probe() ?: return@withContext false
         if (!foreground) return@withContext false
         if (probed !is ProbeAcceptance.Accept) {
@@ -1551,7 +1563,8 @@ class NativeBrowserPresenter(
                     (snapshot.recovery == PageRecovery.NONE && bound.recovery == PageRecovery.NONE)
                 else -> bound.recovery == PageRecovery.NONE
             }
-            if (!recoveryAllowed || bound.retired || !pageNow.ready ||
+            if (!recoveryAllowed || autoGrantDeadline?.expired() == true ||
+                bound.retired || !pageNow.ready ||
                 current.instanceKey != snapshot.host.instanceKey ||
                 current.consoleGeneration != snapshot.host.consoleGeneration ||
                 bound.page !== snapshot.page || bound.generation != snapshot.generation ||
@@ -1700,6 +1713,7 @@ class NativeBrowserPresenter(
             viewId = pageNow.viewId(),
             ticket = pageNow.ticket(),
             documentId = pageNow.acceptedDocument(),
+            originalUrl = pageNow.currentUrl(),
             grantEpoch = grant.grantEpoch,
             hostInstanceKey = hostNow.instanceKey,
             consoleGeneration = hostNow.consoleGeneration,
@@ -1713,14 +1727,37 @@ class NativeBrowserPresenter(
         synchronized(lock) { if (submitReceipt === receipt) submitReceipt = null }
     }
 
+    /**
+     * Ends this submit transaction's own session arm. This may run on the tool caller's dispatcher
+     * or after cancellation, so it hops to main under NonCancellable and re-checks under the lock
+     * that this exact receipt's page is still bound and no newer request owns the slot. It never
+     * clears a newer page's intent.
+     */
+    private suspend fun disarmSubmitNavigation(receipt: SubmitReceipt) {
+        withContext(NonCancellable + main) {
+            val page = synchronized(lock) {
+                if ((activeRequestId == null || activeRequestId == receipt.requestId) &&
+                    pages[receipt.tabId]?.page === receipt.page
+                ) {
+                    receipt.page
+                } else {
+                    null
+                }
+            }
+            page?.finishSubmitNavigation()
+        }
+    }
+
     private fun submitUnknown(message: String) =
         ProviderResult(false, errorCode = ProviderCodes.OUTCOME_UNKNOWN, message = message)
 
     /**
-     * Waits for the engine's one-shot submit event inside the original action budget, applies URL
-     * policy off main, re-verifies the exact transaction on main, then performs one controlled
-     * replacement open with the same request id/tab/owner/non-user epoch. The action mutex is still
-     * held, so no other action can interleave.
+     * Waits for the engine's one-shot submit event inside the work budget, then either:
+     * - a main-frame GET: applies URL policy and performs one controlled replacement open;
+     * - a same-document route change: re-probes the unchanged document read-only and keeps the
+     *   page/grant, never reloading or minting a new grant;
+     * - anything unconfirmed: returns OUTCOME_UNKNOWN for the existing observe-only recovery.
+     * The action mutex is still held, so no other action can interleave.
      */
     private suspend fun awaitSubmitNavigation(
         request: ProviderRequest,
@@ -1730,7 +1767,7 @@ class NativeBrowserPresenter(
         now: () -> Long,
     ): ProviderResult {
         var replacementIntent: AutoGrantIntent? = null
-        var keepReplacement = false
+        var confirmed = false
         try {
             val remaining = deadlineElapsed - now()
             if (remaining <= 0L) return submitUnknown("submit navigation timed out")
@@ -1741,12 +1778,26 @@ class NativeBrowserPresenter(
                 null -> return submitUnknown("submit navigation timed out")
                 is BrowserSubmitNavigation.Rejected ->
                     return submitUnknown("submit navigation rejected: ${event.reason}")
+                is BrowserSubmitNavigation.SameDocument -> {
+                    // The confirmation touches the WebView; awaitSubmitNavigation itself runs on the
+                    // tool caller's dispatcher.
+                    val sameDocument = withContext(main) {
+                        confirmSameDocument(receipt, event, adapterResult, deadlineElapsed, now)
+                    } ?: return submitUnknown("same-document navigation not confirmed")
+                    confirmed = true
+                    return sameDocument
+                }
                 is BrowserSubmitNavigation.Get -> Unit
             }
             val rawUrl = (event as BrowserSubmitNavigation.Get).url
             if (rawUrl.isBlank()) return submitUnknown("submit navigation rejected")
-            // The open path here is a new load chosen by the page, so its own DNS preflight is required.
-            val decision = withContext(Dispatchers.IO) { policy().preflight(rawUrl) }
+            // The open path here is a new load chosen by the page, so its own DNS preflight is
+            // required. It stays inside the submit work budget too.
+            val dnsRemaining = deadlineElapsed - now()
+            if (dnsRemaining <= 0L) return submitUnknown("submit navigation timed out")
+            val decision = withTimeoutOrNull(dnsRemaining) {
+                withContext(Dispatchers.IO) { policy().preflight(rawUrl) }
+            } ?: return submitUnknown("submit navigation timed out")
             if (decision !is UrlDecision.Allow) return submitUnknown("submit navigation refused")
             val follow = withContext(main) { submitFollowUp(request, receipt, rawUrl, deadlineElapsed, now) }
                 ?: return submitUnknown("submit navigation changed")
@@ -1756,12 +1807,13 @@ class NativeBrowserPresenter(
                 deadlineElapsed,
                 now,
                 onAutoGrantIntent = { replacementIntent = it },
+                autoGrantDeadline = AutoGrantDeadline(deadlineElapsed, now),
             )
             if (!opened.ok) return submitUnknown("submit page did not open")
             if (opened.data["drivable"]?.jsonPrimitive?.booleanOrNull != true) {
                 return submitUnknown("submit page not ready")
             }
-            keepReplacement = true
+            confirmed = true
             val finalUrl = replacementIntent?.page?.currentUrl()?.takeIf { it.isNotBlank() } ?: rawUrl
             val typed = adapterResult.data["typed"] ?: opened.data["typed"]
             val data = JsonObject(opened.data.toMutableMap().apply {
@@ -1774,7 +1826,8 @@ class NativeBrowserPresenter(
             return ProviderResult(ok = true, data = data)
         } finally {
             clearSubmitReceipt(receipt)
-            if (!keepReplacement) {
+            disarmSubmitNavigation(receipt)
+            if (!confirmed) {
                 // Clear only the replacement intent this exact submit created, then classify only
                 // the exact transaction page (original or its own replacement). A later user
                 // open/replacement is never touched.
@@ -1782,6 +1835,95 @@ class NativeBrowserPresenter(
                 markSubmitUnknown(receipt, replacementIntent)
             }
         }
+    }
+
+    /**
+     * The exact current submit transaction. The action mutex keeps the original request current;
+     * this also requires the same page/document/grant and an ordinary, foreground page.
+     */
+    private fun submitTransactionCurrentLocked(receipt: SubmitReceipt): Boolean {
+        val bound = pages[receipt.tabId] ?: return false
+        val grant = registry.currentGrant() ?: return false
+        val tab = registry.find(receipt.tabId) ?: return false
+        return activeRequestId == receipt.requestId && activeAction == "browser.type" &&
+            page === receipt.page && bound.page === receipt.page && !bound.retired &&
+            bound.recovery == PageRecovery.NONE &&
+            selectedTabId == receipt.tabId && connectionId == receipt.connectionId &&
+            tab.ownerSessionId == receipt.ownerSessionId &&
+            receipt.page.tabId == receipt.tabId &&
+            receipt.page.viewId() == receipt.viewId &&
+            receipt.page.ticket() == receipt.ticket &&
+            receipt.page.acceptedDocument() == receipt.documentId &&
+            grant.grantEpoch == receipt.grantEpoch && grant.tabId == receipt.tabId &&
+            grant.connectionId == receipt.connectionId && grant.sessionId == receipt.ownerSessionId &&
+            mode == ProviderMode.AGENT &&
+            host?.instanceKey == receipt.hostInstanceKey &&
+            host?.consoleGeneration == receipt.consoleGeneration &&
+            !hidden && !paused && !consoleInvalidated && !presentationBlocked && !explicitTakeover
+    }
+
+    /**
+     * Confirms an SPA/history route change that kept the same document. It is read-only: a fresh
+     * probe must still name the original witness and the displayed URL must equal the event URL.
+     * It keeps the same view, tab, ticket, document, grant and desktop size; it never reloads,
+     * navigates or grants. Stale refs/geometry are dropped so the next action needs a snapshot.
+     */
+    private suspend fun confirmSameDocument(
+        receipt: SubmitReceipt,
+        event: BrowserSubmitNavigation.SameDocument,
+        adapterResult: ProviderResult,
+        deadlineElapsed: Long,
+        now: () -> Long,
+    ): ProviderResult? {
+        if (event.url.isBlank()) return null
+        if (event.documentId != receipt.documentId) return null
+        // The URL must actually have changed; a same-URL event proves no navigation.
+        if (receipt.originalUrl != null && event.url == receipt.originalUrl) return null
+        // Do not rely solely on the engine's callback: an allowed URL, same canonical origin and
+        // an actual path/query change. This is not a DNS preflight and never reloads.
+        if (policy().checkSyntax(event.url) !is UrlDecision.Allow) return null
+        val originalOrigin = receipt.originalUrl?.let { BrowserUrlPolicy.canonicalOrigin(it) } ?: return null
+        val eventOrigin = BrowserUrlPolicy.canonicalOrigin(event.url) ?: return null
+        if (eventOrigin != originalOrigin) return null
+        if (!synchronized(lock) { submitTransactionCurrentLocked(receipt) }) return null
+        val remaining = deadlineElapsed - now()
+        if (remaining <= 0L) return null
+        // A real observation of the document already shown; no grant, reload or GET.
+        val probed = withTimeoutOrNull(remaining) { receipt.page.probe() }
+        if (probed !is ProbeAcceptance.Accept || probed.documentId != receipt.documentId) return null
+        if (receipt.page.currentUrl() != event.url) return null
+        val applied = synchronized(lock) {
+            if (!submitTransactionCurrentLocked(receipt)) return@synchronized false
+            // The confirmation itself must finish inside Dwork and on a still-current page.
+            if (now() >= deadlineElapsed) return@synchronized false
+            if (!receipt.page.ready) return@synchronized false
+            if (receipt.page.currentUrl() != event.url) return@synchronized false
+            val bound = pages[receipt.tabId] ?: return@synchronized false
+            // Same view/tab/ticket/document/grant/desktop size. Only state derived from the old URL
+            // is dropped, so the agent must take a fresh snapshot.
+            bound.adapter.clearRefs()
+            receipt.page.invalidateSessionRefs()
+            receipt.page.clearGeometryCache()
+            inflightGeometry = null
+            geometry = null
+            // Display only: this is not a controlled GET and changes no load provenance.
+            registry.updateUrl(receipt.tabId, event.url)
+            true
+        }
+        if (!applied) return null
+        onGeometrySettled()
+        synchronized(lock) { publishLocked() }
+        val data = JsonObject(buildJsonObject {
+            adapterResult.data["typed"]?.let { put("typed", it) }
+            put("enterDispatched", JsonPrimitive(true))
+            put("navigation", JsonPrimitive("same-document"))
+            put("phase", JsonPrimitive("navigation-observed"))
+            put("url", JsonPrimitive(event.url))
+            put("finalURL", JsonPrimitive(event.url))
+            put("requiresSnapshot", JsonPrimitive(true))
+            put("drivable", JsonPrimitive(true))
+        })
+        return ProviderResult(ok = true, data = data)
     }
 
     private fun clearAutoGrantIntent(intent: AutoGrantIntent?) {
@@ -1950,6 +2092,22 @@ class NativeBrowserPresenter(
         val initialAdapter = synchronized(lock) { adapter } ?: return unavailable()
         ignored(incomingMode.name)
         ignored(visibleTabId)
+        val isSubmit = request.action == "browser.type" && request.parameters["submit"] == "true"
+        // A submit must hand back OUTCOME_UNKNOWN before the transport's own timeout can turn the
+        // same wait into DEADLINE. The work budget also limits the adapter's typing/Enter window,
+        // the receipt wait, the DNS preflight and any GET replacement. Refuse before touching the
+        // page when there is no budget to dispatch and confirm.
+        val actionDeadline = if (isSubmit) {
+            val reserve = minOf(SUBMIT_TRANSPORT_RESERVE_MS, request.timeoutMs / 10)
+            // One absolute value, no second clock read that could extend the budget.
+            val workDeadline = deadlineElapsed - reserve
+            if (now() >= workDeadline) {
+                return ProviderResult(false, errorCode = ProviderCodes.DEADLINE, message = "submit budget too short")
+            }
+            workDeadline
+        } else {
+            deadlineElapsed
+        }
         // Authority is decided before the page is marked as accessed. A refused action (no grant,
         // retired page, other tab) never sets activePageAccess, so a later geometry change cannot
         // report it as outcome-unknown. The check is repeated under the lock to close the race.
@@ -1970,7 +2128,6 @@ class NativeBrowserPresenter(
             bound.page to activeEffect
         }
         val pageAdapter = initialAdapter
-        val isSubmit = request.action == "browser.type" && request.parameters["submit"] == "true"
         val submit = if (isSubmit) {
             val submitTab = shown ?: return ProviderResult(false, errorCode = ProviderCodes.AUTHORIZATION_REQUIRED)
             synchronized(lock) { registerSubmitLocked(request, session, submitTab) }
@@ -1982,9 +2139,52 @@ class NativeBrowserPresenter(
         // Outcome-unknown is decided by the adapter at dispatch time (no reply after the action was
         // sent). A refusal before dispatch (expired ref, no grant, refused field) changed nothing.
         // Cancellation mid-dispatch is marked by the adapter's dispatch hook before it propagates.
-        val result = withContext(main) { pageAdapter.execute(request, registry, shown, currentMode, deadlineElapsed) }
+        // A submit is also bounded by Dwork here: the field probe/typing may await, and its own
+        // driver deadline cannot stop a continuation that resumes after Dwork.
+        val workRemaining = if (isSubmit) (actionDeadline - now()).coerceAtLeast(1L) else 0L
+        val result: ProviderResult? = try {
+            withContext(main) {
+                if (isSubmit) {
+                    withTimeoutOrNull(workRemaining) {
+                        pageAdapter.execute(request, registry, shown, currentMode, actionDeadline)
+                    }
+                } else {
+                    pageAdapter.execute(request, registry, shown, currentMode, actionDeadline)
+                }
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // A real cancel still propagates, but this transaction's own arm ends with it.
+            submit?.let {
+                clearSubmitReceipt(it)
+                disarmSubmitNavigation(it)
+            }
+            throw cancelled
+        }
+        if (result == null) {
+            val receipt = submit
+            if (receipt != null) {
+                clearSubmitReceipt(receipt)
+                disarmSubmitNavigation(receipt)
+            }
+            val dispatched = synchronized(lock) { activeDispatched }
+            if (dispatched) {
+                // The Enter reached the page but Dwork ended before any navigation was confirmed.
+                synchronized(lock) {
+                    val bound = pages[shown]
+                    if (bound != null && bound.page === pageAtDispatch) {
+                        markObserveOnly(bound)
+                        publishLocked()
+                    }
+                }
+                return submitUnknown("submit navigation timed out")
+            }
+            return ProviderResult(false, errorCode = ProviderCodes.DEADLINE, message = "submit budget exhausted")
+        }
         if (result.errorCode == ProviderCodes.OUTCOME_UNKNOWN) {
-            submit?.let { clearSubmitReceipt(it) }
+            if (submit != null) {
+                clearSubmitReceipt(submit)
+                disarmSubmitNavigation(submit)
+            }
             // A read/scroll failure keeps the page usable. Only a dispatched click/type has an
             // uncertain external effect and becomes observe-only.
             if (effectAtDispatch == ActionEffect.MUTATION) {
@@ -2003,11 +2203,12 @@ class NativeBrowserPresenter(
         if (submit == null) return observed
         if (!observed.ok || observed.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull != true) {
             clearSubmitReceipt(submit)
+            disarmSubmitNavigation(submit)
             return observed
         }
         // The adapter only confirmed the input/Enter dispatch. The original execute coroutine
         // still owns the action lock while it waits for the engine's one-shot navigation receipt.
-        return awaitSubmitNavigation(request, submit, observed, deadlineElapsed, now)
+        return awaitSubmitNavigation(request, submit, observed, actionDeadline, now)
     }
 
     /**
@@ -2029,6 +2230,7 @@ class NativeBrowserPresenter(
         deadlineElapsed: Long,
         now: () -> Long,
         onAutoGrantIntent: ((AutoGrantIntent) -> Unit)? = null,
+        autoGrantDeadline: AutoGrantDeadline? = null,
     ): ProviderResult = withContext(main) {
         // An explicit open is one of the two ways to show a hidden window again. It still fails closed
         // if the host or console cannot present; only the person's hide choice is overridden.
@@ -2110,7 +2312,6 @@ class NativeBrowserPresenter(
                 return@withContext unavailable()
             }
         }
-        revokeAll("open", keepRequestId = request.requestId)
         val requestedDesktop = when (viewport) {
             "desktop" -> true
             "mobile" -> false
@@ -2124,6 +2325,15 @@ class NativeBrowserPresenter(
         created.setDesktopViewport(desktopSize.width, desktopSize.height)
         created.setDesktopMode(requestedDesktop)
         val pageAdapter = adapterFor(created)
+        // Creation and viewport configuration may consume the submit work budget. Check after
+        // both, before revoking old authority or touching the registry/loading the new page.
+        if (autoGrantDeadline != null &&
+            (autoGrantDeadline.expired() || !currentCoroutineContext().isActive)
+        ) {
+            created.destroy()
+            return@withContext ProviderResult(false, errorCode = ProviderCodes.DEADLINE, message = "submit page deadline")
+        }
+        revokeAll("open", keepRequestId = request.requestId)
         android.util.Log.i("AndChamberProvider", "open step=load-start")
         val opened = pageAdapter.openClaimed(request, registry, session)
         android.util.Log.i("AndChamberProvider", "open step=load-done ok=${opened.result.ok}")
@@ -2169,6 +2379,7 @@ class NativeBrowserPresenter(
                     connection = request.connectionId.takeIf { it.isNotBlank() } ?: connectionId,
                     hostInstanceKey = prepared.host.instanceKey,
                     page = created,
+                    deadline = autoGrantDeadline,
                 )
                 autoGrantIntent = intent
                 // A submit continuation captures exactly the replacement intent it created, so a
@@ -2491,7 +2702,7 @@ class NativeBrowserPresenter(
             synchronized(lock) { storePendingReadyLocked(source, identity) }
         }
         var geometryRequest: Pair<ControlledBrowserPage, ProbeIdentity>? = null
-        var autoGrantConnection: String? = null
+        var autoGrant: AutoGrantAllow? = null
         synchronized(lock) {
             if (page !== source || !source.matchesReady(identity) || probed == null) {
                 android.util.Log.i("AndChamberProvider", "probe discard ticket=${identity.ticket} epoch=${identity.sessionEpoch} reason=stale")
@@ -2505,7 +2716,7 @@ class NativeBrowserPresenter(
                         // The first layout/commit can reach geometry before this probe is accepted. The
                         // accepted witness now admits a probe, so request it once with this captured view.
                         geometryRequest = readyGeometryLocked(source, identity, probed.documentId)?.let { source to it }
-                        autoGrantConnection = pendingAutoGrantConnectionLocked(source, identity)
+                        autoGrant = pendingAutoGrantConnectionLocked(source, identity)
                     } else {
                         android.util.Log.i("AndChamberProvider", "probe reject ticket=${identity.ticket} epoch=${identity.sessionEpoch} reason=ready-refused")
                         onUnknown(source)
@@ -2532,8 +2743,10 @@ class NativeBrowserPresenter(
         // Default control for this explicit open, once and through the same [allow] verification.
         // Without an intent (a probe, a page-finished callback, a restored window) this is a no-op.
         // A temporary block/visibility failure keeps the intent and schedules one bounded retry.
-        autoGrantConnection?.let { expected ->
-            if (!allowInternal(expected, source, source.tabId)) scheduleAutoGrantRetry()
+        autoGrant?.let { expected ->
+            if (!allowInternal(expected.connection, source, source.tabId, autoGrantDeadline = expected.deadline)) {
+                scheduleAutoGrantRetry()
+            }
         }
         return null
     }
@@ -2543,8 +2756,11 @@ class NativeBrowserPresenter(
      * open's default control. Identity failures clear the intent; a temporary presentation block or
      * not-yet-visible page keeps it for the bounded retry. Runs under the lock.
      */
-    private fun pendingAutoGrantConnectionLocked(source: ControlledBrowserPage, identity: ReadyProbeIdentity): String? {
+    private fun pendingAutoGrantConnectionLocked(source: ControlledBrowserPage, identity: ReadyProbeIdentity): AutoGrantAllow? {
         val intent = autoGrantIntent ?: return null
+        // A submit continuation's intent is bound to Dwork. A probe accepted after it must not
+        // become a grant request.
+        if (intent.deadline?.expired() == true) return null
         // A probe for a different page must not touch another open's pending intent.
         if (intent.page !== source) return null
         val bound = pages[intent.tabId] ?: run {
@@ -2575,7 +2791,7 @@ class NativeBrowserPresenter(
             autoGrantIntent = null
             return null
         }
-        return intent.connection
+        return AutoGrantAllow(intent.connection, intent.deadline)
     }
 
     /**
@@ -2618,6 +2834,8 @@ class NativeBrowserPresenter(
         val source = synchronized(lock) {
             if (autoGrantRetryActive) return
             val intent = autoGrantIntent ?: return
+            // Entry check only; the probe and the final grant write check the same captured deadline.
+            if (intent.deadline?.expired() == true) return
             if (!intent.readyAccepted && intent.pendingReady == null) return
             if (hidden || explicitTakeover || paused || consoleInvalidated || presentationBlocked) return
             if (!presentableLocked()) return
@@ -2678,7 +2896,7 @@ class NativeBrowserPresenter(
             if (!source.ready) return@synchronized null
             current
         } ?: return
-        allowInternal(intent.connection, intent.page, intent.tabId)
+        allowInternal(intent.connection, intent.page, intent.tabId, autoGrantDeadline = intent.deadline)
     }
 
     /**
@@ -3112,6 +3330,8 @@ class NativeBrowserPresenter(
         val connection: String?,
         val hostInstanceKey: String,
         val page: ControlledBrowserPage,
+        /** Set only for a submit continuation; bounds this intent's automatic grant. */
+        val deadline: AutoGrantDeadline? = null,
     ) {
         /** A ready probe has been accepted for this page/load, so a retry may complete the grant. */
         var readyAccepted: Boolean = false
@@ -3122,6 +3342,18 @@ class NativeBrowserPresenter(
          */
         var pendingReady: ReadyProbeIdentity? = null
     }
+
+    /**
+     * The absolute work deadline of a submit continuation, captured with its replacement intent.
+     * Checked before an automatic ready probe and again in the final grant write, so a delayed
+     * probe cannot grant after Dwork even if the global intent was cleared by another callback.
+     */
+    private class AutoGrantDeadline(val expiresAt: Long, val clock: () -> Long) {
+        fun expired(): Boolean = clock() >= expiresAt
+    }
+
+    /** One pending automatic default-control decision and the connection it may grant on. */
+    private data class AutoGrantAllow(val connection: String, val deadline: AutoGrantDeadline?)
 
     /** The exact transaction a submit receipt belongs to. */
     private data class SubmitReceipt(
@@ -3135,6 +3367,8 @@ class NativeBrowserPresenter(
         val viewId: String,
         val ticket: Long,
         val documentId: String?,
+        /** The displayed URL when the submit began; a SameDocument confirmation requires a change. */
+        val originalUrl: String?,
         val grantEpoch: Long,
         val hostInstanceKey: String,
         val consoleGeneration: Long,
@@ -3198,6 +3432,11 @@ interface ControlledBrowserPage {
     var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)?
         get() = null
         set(_) = Unit
+    /**
+     * Disarms this page's own one-shot Enter intent when the presenter's submit transaction ends,
+     * so a late history candidate cannot be treated as a new navigation. Default no-op for fakes.
+     */
+    fun finishSubmitNavigation() = Unit
     var onGeometry: ((GeometrySample) -> Unit)?
     var onGeometryRequested: (() -> Unit)?
     fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver
@@ -3304,6 +3543,7 @@ internal class WebControlledPage(
         set(value) {
             session.onSubmitNavigation = value
         }
+    override fun finishSubmitNavigation() = session.finishSubmitNavigation()
     private var loaded = false
     private var desktopWidth = BrowserDesktopViewport.DEFAULT_WIDTH
     private var desktopHeight = BrowserDesktopViewport.DEFAULT_HEIGHT

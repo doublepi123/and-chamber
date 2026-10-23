@@ -202,6 +202,9 @@ internal class BrowserAuthorityHarness(
                 OpenChamberProviderFixtures.attach(view, view.webViewClient)
                 val fixture = view.webViewClient
                 view.webViewClient = object : WebViewClient() {
+                    override fun doUpdateVisitedHistory(target: WebView, url: String?, isReload: Boolean) =
+                        fixture.doUpdateVisitedHistory(target, url, isReload)
+
                     override fun shouldOverrideUrlLoading(target: WebView, request: WebResourceRequest): Boolean =
                         fixture.shouldOverrideUrlLoading(target, request)
 

@@ -17,7 +17,8 @@ Files:
 - `BrowserDesktopViewport.kt`: bounded, paired desktop CSS dimensions (1920 × 1080 by default),
   retained per tab independently of phone window presentation.
 - `BrowserSubmitNavigation.kt`: one-shot native Enter navigation receipts; callbacks report an event,
-  while the original presenter action owns policy checks and controlled replacement.
+  while the original presenter action owns policy checks and confirmation. GET uses controlled
+  replacement; verified same-document URL navigation retains the existing view and grant.
 - `BrowserSiteData.kt`: the "Clear site data" action. Revokes the agent grant, then clears this
   profile's cookies and JavaScript storage, then the shown page's cache and history, then reloads it as
   a person's navigation. If the page cache/history step fails after cookies and storage are gone, the
@@ -58,9 +59,17 @@ Files:
   main-document start is NotReady and cannot be saved by a later finished event. Page-reported text is
   not treated as verified. Caller values are inserted once as one JSON argument. Type uses the native
   input value setter. `submit:true` adds one native Enter for a safe single-line input; the original
-  action waits for a native GET receipt and a new ready/granted view before reporting success. POST,
+  action waits for a native GET receipt and a new ready/granted view, or a verified same-document
+  URL navigation under its original grant. Native history callbacks are candidates only: fresh
+  URL/witness and native URL checks must agree with the exact armed Enter identity. Same-document
+  success says navigation was observed, not that SPA data or a business action completed; old refs
+  expire without reloading or repeating Enter. POST,
   credential/file-bearing forms and unsupported submitter overrides are refused, with no automatic
   second Enter. Other site-driven navigation needs the user to take over.
+- Submit uses a work deadline before the transport's hard timeout, leaving bounded time for recovery
+  classification and its reply. Cancel still propagates immediately; final Session disarming runs on
+  Main and only for the original request/page. A URL change during typing, before Enter, is not a
+  submission receipt.
 - Desktop layout uses an exact fixed native child canvas for the configured CSS dimensions and a
   document-start viewport width/initial scale derived from real DPR; desktop overview auto-shrink is
   disabled. Agents may choose mobile/desktop and paired custom desktop dimensions on open/resize.

@@ -142,6 +142,11 @@ internal class BrowserPageDriver(
     }
 
     private suspend fun typeSubmit(page: BrowserSession, request: BrowserRequest): BrowserReply {
+        val startedAt = android.os.SystemClock.uptimeMillis()
+        val deadline = BrowserDriverLogic.actionExpiresAt(startedAt, request.timeoutMs)
+        if (deadline != null && android.os.SystemClock.uptimeMillis() >= deadline) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.TIMEOUT, "submit deadline")
+        }
         val documentId = page.acceptedDocumentId
         if (!page.committed || documentId == null || page.unknownNavigation) {
             return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "the page is still loading")
@@ -168,10 +173,14 @@ internal class BrowserPageDriver(
                 if (parsed.json["documentId"]?.jsonPrimitive?.contentOrNull != documentId) return stale()
             }
         }
+        // Focus/URL probing happens inside pressEnter; the absolute deadline counts that time too.
+        if (deadline != null && android.os.SystemClock.uptimeMillis() >= deadline) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.TIMEOUT, "submit deadline")
+        }
         onChanged()
         // Enter is native and exactly one DOWN/UP. A false return from the platform is not treated
         // as completion; the real navigation receipt is the presenter's separate confirmation.
-        return when (val press = page.pressEnter(ref, epoch, request.timeoutMs)) {
+        return when (val press = page.pressEnter(ref, epoch, deadline)) {
             EnterPress.Dispatched -> BrowserReply(
                 ok = true,
                 result = mapOf(
@@ -181,6 +190,7 @@ internal class BrowserPageDriver(
             )
             EnterPress.Stale -> stale()
             EnterPress.NotVisible -> BrowserDriverLogic.requestError(BrowserErrorCode.NOT_VISIBLE, "the page is not visible")
+            EnterPress.Expired -> BrowserDriverLogic.requestError(BrowserErrorCode.TIMEOUT, "submit deadline")
             EnterPress.Failed -> BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "enter dispatch failed")
             is EnterPress.Refused -> submitFailure(press.reason)
         }

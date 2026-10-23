@@ -27,7 +27,7 @@ const DESCRIPTION = [
   "Take one action per call.",
   'Choose "viewport":"mobile" or "desktop" yourself to suit the site and task; do not ask the person merely to choose the layout. Desktop uses a fixed 1920x1080 CSS viewport by default. Supply both "width" and "height" to choose another desktop resolution for "open" or "resize". Page layout is independent of the small-window/full-screen display; take a fresh snapshot after changing the page viewport.',
   'Take "snapshot" first and use refs from the latest snapshot; navigation or DOM changes invalidate old refs, so snapshot again instead of guessing.',
-  'For a search, "type" with "submit":true enters the value and dispatches Enter once. Success requires confirmed same-tab GET navigation; POST forms, redirects and sensitive fields are not supported. An unknown outcome must not be retried automatically.',
+  'For a search, "type" with "submit":true enters the value and dispatches Enter once. Success requires confirmed same-tab GET navigation or a verified same-document URL change after Enter. A same-document navigation-observed reply does not prove the business operation completed: take a fresh snapshot to inspect the result. POST forms, redirects and sensitive fields are not supported. An unknown outcome must not be retried automatically.',
   'An OUTCOME_UNKNOWN result does not prove that the action failed. Never repeat a click, typing or submission to find out. If the same document remains verifiable, use snapshot or capture to observe it; observation does not confirm the previous action completed. Ask the person to check the page before Resume agent. If the app instead shows Reopen, the document must be reopened explicitly; do not replay the previous action.',
   '"click", "type", "scroll", "capture" and "resize" may be refused with AUTHORIZATION_REQUIRED (agent control is absent, was taken over or revoked, or the window is not in front), REF_EXPIRED (take a new snapshot) or BROWSER_PAGE_UNAVAILABLE (the AndChamber chat screen is not open).',
   "When that happens, ask the person to hand control back with Resume agent in the window; do not expect a tap before every action, and do not retry in a loop.",
@@ -213,7 +213,7 @@ export default {
             },
             submit: {
               type: "boolean",
-              description: 'After typing into a non-sensitive single-line input, press Enter once and wait for confirmed same-tab GET navigation. POST forms and redirects are unsupported ("type" only).',
+              description: 'After typing into a non-sensitive single-line input, press Enter once and wait for confirmed same-tab GET navigation or a verified same-document URL change. Read a fresh snapshot afterward; POST forms and redirects are unsupported ("type" only).',
             },
             direction: {
               type: "string",

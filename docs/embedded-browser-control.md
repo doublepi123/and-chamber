@@ -17,7 +17,7 @@ One tool, one action per call:
 | `open` | Open one public `https` URL in the in-app window; a ready foreground page defaults to agent control |
 | `snapshot` | Read a text snapshot and element refs |
 | `click` | Activate a ref from the latest snapshot |
-| `type` | Type into a snapshot ref; optional `submit:true` sends one native Enter and confirms a supported GET navigation |
+| `type` | Type into a snapshot ref; optional `submit:true` sends one native Enter and confirms a supported GET or same-document URL navigation |
 | `scroll` | Scroll `up` or `down` |
 | `capture` | Capture the browser view as PNG |
 | `resize` | Choose mobile/desktop page layout and an optional fixed desktop resolution |
@@ -96,12 +96,23 @@ submitter overrides and non-current-tab targets are refused before typing. The a
 rechecks the same input and focus, then sends exactly one native Enter DOWN/UP pair without forcing
 the software keyboard open.
 
-The input/Enter acknowledgement alone is not success. The original request waits for a supported
-same-tab main-frame GET, preflights its URL and DNS off the main thread, replaces the view in the same
-tab, and confirms the new document witness and grant. Old refs expire. POST and redirect loads are
-not replayed as GET. No navigation, timeout, cancellation or an uncertain outcome is not reported as
-a successful search and never causes an automatic second Enter. Arbitrary in-page handler completion
-without a main-frame GET is not inferred from a DOM change.
+The input/Enter acknowledgement alone is not success. The original request recognizes two navigation
+paths:
+
+- A supported same-tab main-frame GET is URL/DNS-preflighted off the main thread, loaded in a new view
+  in the same tab, and confirmed with the new document witness and grant.
+- A same-origin URL change within the existing document can be confirmed without a reload. The native
+  history callback is only a candidate: the current native URL, a fresh page URL/witness probe, the
+  exact Enter intent and the original authority must agree. The URL baseline is recorded after typing
+  and immediately before Enter, so typing-triggered changes alone cannot count. The existing view,
+  document and grant remain; this does not invent a new GET or grant.
+
+Old refs expire after either confirmed navigation; take a fresh snapshot. A `navigation-observed`
+reply for a same-document route change does not assert that SPA data finished loading or that a
+business operation succeeded. A DOM-only change with no URL navigation is still unconfirmed. POST and
+redirect loads are not replayed as GET. Timeout, cancellation and an uncertain outcome never cause an
+automatic second Enter. Submit work stops before the transport's hard deadline, reserving bounded
+time to report an unconfirmed dispatched action rather than losing its result to the outer timeout.
 
 ### Recovering from an unconfirmed action
 
@@ -124,9 +135,8 @@ action failed. The browser distinguishes three states:
   external action that may already have happened.
 
 Takeover, backgrounding and connection/owner changes still revoke the existing grant. Observation
-only is not a way to bypass that revocation. A missing main-frame GET after Enter can occur with SPA
-handlers; the browser reports the submission as unconfirmed rather than inferring success from a
-changed page.
+only is not a way to bypass that revocation. A SPA handler that changes only the DOM, without a
+confirmed URL navigation, remains unconfirmed; a changed page alone is not proof of completion.
 
 ## Limits
 

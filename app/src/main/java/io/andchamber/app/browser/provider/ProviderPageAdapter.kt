@@ -276,8 +276,10 @@ class OpenChamberPageAdapter(
         if (isSensitive(field) || !isEditable(field) || isSubmissionControl(field)) {
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "refused field")
         }
-        // A submit receipt must live inside the caller's own budget, not a fixed short window.
-        val remaining = (deadlineElapsed - clock()).coerceAtLeast(1L)
+        // A submit receipt must live inside the caller's own work budget. If it is already gone,
+        // refuse before dispatch rather than extending it with a fresh full window.
+        val remaining = deadlineElapsed - clock()
+        if (remaining <= 0L) return ProviderResult(false, errorCode = ProviderCodes.DEADLINE, message = "submit deadline")
         val reply = dispatched {
             driver.execute(
             BrowserRequest(

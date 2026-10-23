@@ -89,7 +89,7 @@ internal class BrowserSession private constructor(
     private var destroyed = false
     var onFatal: (() -> Unit)? = null
     var onMainGet: ((String) -> Unit)? = null
-    /** One-shot `browser.type` submit receipt; completed by a real main-frame navigation. */
+    /** One-shot submit receipt for a main-frame GET or a verified same-document URL navigation. */
     var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)? = null
     var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
@@ -104,6 +104,7 @@ internal class BrowserSession private constructor(
         val ticket: Long,
         val epoch: Long,
         val documentId: String,
+        val baselineUrl: String,
         val expiresAt: Long,
     )
 
@@ -621,10 +622,12 @@ internal class BrowserSession private constructor(
     /**
      * Confirms the same DOM ref is still the active, safe single-line input, then dispatches exactly
      * one native Enter DOWN/UP. No JS submit, no JS KeyboardEvent, no IME call and no second press.
-     * A platform return value is not treated as completion; the presenter waits for a real GET.
+     * A platform return value is not completion; the presenter waits for a verified navigation.
      */
-    suspend fun pressEnter(ref: String, requestEpoch: Long, armedForMs: Long? = null): EnterPress {
+    suspend fun pressEnter(ref: String, requestEpoch: Long, expiresAt: Long? = null): EnterPress {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return EnterPress.Failed
+        // The fallback is fixed on entry; focus/probe time counts against it, never a fresh budget.
+        val fallbackDeadline = android.os.SystemClock.uptimeMillis() + SUBMIT_INTENT_MS
         // A new submit replaces any previous one-shot receipt; a failed press must not leave it.
         clearSubmitIntent()
         if (destroyed || fatal || unknownNavigation) return EnterPress.Stale
@@ -645,16 +648,23 @@ internal class BrowserSession private constructor(
         }
         if (!view.isAttachedToWindow || !view.isShown || !view.hasWindowFocus()) return EnterPress.NotVisible
         if (!keyInputAdmitted()) return EnterPress.Stale
-        when (val parsed = BrowserDriverLogic.parseScriptResult(raw)) {
+        val baselineUrl = when (val parsed = BrowserDriverLogic.parseScriptResult(raw)) {
             is ScriptResult.Failed -> return EnterPress.Refused(parsed.message)
             is ScriptResult.Ok -> {
                 if (parsed.json["documentId"]?.jsonPrimitive?.contentOrNull != documentId) return EnterPress.Stale
+                parsed.json["url"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return EnterPress.Stale
             }
         }
+        // The native URL and locationHref must name the same starting document before Enter. This
+        // baseline is taken after typing, so an input handler's earlier URL change is not attributed
+        // to Enter. A mismatch means the page is moving; refuse instead of guessing.
+        if (view.url != baselineUrl) return EnterPress.Stale
+        val deadline = expiresAt ?: fallbackDeadline
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now >= deadline) return EnterPress.Expired
         // Only this one native navigation may complete the submit receipt.
         currentCoroutineContext().ensureActive()
-        armSubmitIntent(documentId, armedForMs ?: SUBMIT_INTENT_MS)
-        val now = android.os.SystemClock.uptimeMillis()
+        if (!armSubmitIntent(documentId, baselineUrl, deadline)) return EnterPress.Expired
         return try {
             view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_DOWN))
             view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_UP))
@@ -688,18 +698,20 @@ internal class BrowserSession private constructor(
         target?.removeCallbacks(submitIntentTimeout)
     }
 
-    private fun armSubmitIntent(documentId: String, armedForMs: Long) {
+    private fun armSubmitIntent(documentId: String, baselineUrl: String, expiresAt: Long): Boolean {
         clearSubmitIntent()
         val now = android.os.SystemClock.uptimeMillis()
-        val budget = armedForMs.coerceIn(1L, MAX_SUBMIT_ARM_MS)
+        val budget = BrowserDriverLogic.submitArmRemaining(expiresAt, now) ?: return false
         submitIntent = SubmitIntent(
             viewId = viewId,
             ticket = ticket,
             epoch = epoch,
             documentId = documentId,
+            baselineUrl = baselineUrl,
             expiresAt = now + budget,
         )
         view.postDelayed(submitIntentTimeout, budget)
+        return true
     }
 
     /** The one-shot Enter intent for the current page/load/document, or null and cleared. */
@@ -719,6 +731,60 @@ internal class BrowserSession private constructor(
     private fun emitSubmitNavigation(event: BrowserSubmitNavigation) {
         clearSubmitIntent()
         onSubmitNavigation?.invoke(event)
+    }
+
+    /**
+     * Main-thread disarm used by the presenter after the original submit action ends. Off-main is
+     * a no-op instead of posting a late clear that could erase a newer armed submit. The caller
+     * still re-checks the exact page and request under its lock; this method only drops this
+     * session's current one-shot receipt.
+     */
+    fun finishSubmitNavigation() {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return
+        clearSubmitIntent()
+    }
+
+    /**
+     * A history update is only a navigation fact. It becomes a submit receipt only while the exact
+     * armed intent is current, the candidate is a different same-origin policy-allowed https URL,
+     * and a fresh read-only probe confirms the same document, URL and native view URL. The old
+     * intent object reference is what stops a late probe from matching a newer armed submit.
+     */
+    private fun probeSameDocument(intent: SubmitIntent, candidateUrl: String) {
+        if (destroyed || manualNavigation) return
+        view.evaluateJavascript(BrowserDriverLogic.sameDocumentProbeScript()) { raw ->
+            if (submitIntent !== intent) return@evaluateJavascript
+            if (destroyed || manualNavigation || unknownNavigation) return@evaluateJavascript
+            if (epoch != intent.epoch || ticket != intent.ticket || viewId != intent.viewId) return@evaluateJavascript
+            if (acceptedDocumentId != intent.documentId) return@evaluateJavascript
+            if (android.os.SystemClock.uptimeMillis() >= intent.expiresAt) {
+                clearSubmitIntent()
+                return@evaluateJavascript
+            }
+            val probe = BrowserDriverLogic.parseSameDocumentProbe(raw) ?: return@evaluateJavascript
+            if (probe.documentId != intent.documentId) return@evaluateJavascript
+            if (probe.ready != "interactive" && probe.ready != "complete") return@evaluateJavascript
+            if (probe.url != candidateUrl) return@evaluateJavascript
+            if (view.url != candidateUrl) return@evaluateJavascript
+            if (!BrowserDriverLogic.sameHttpsOrigin(intent.baselineUrl, candidateUrl)) return@evaluateJavascript
+            if (policyProvider().checkSyntax(candidateUrl) !is io.andchamber.app.browser.UrlDecision.Allow) {
+                return@evaluateJavascript
+            }
+            // The real candidate is visible to a later snapshot/probe. It is not a controlled GET:
+            // do not mark controlledGet or claim new-load provenance for a same-document route.
+            displayUrl = candidateUrl
+            emitSubmitNavigation(
+                BrowserSubmitNavigation.SameDocument(candidateUrl, intent.documentId),
+            )
+        }
+    }
+
+    /** Ordinary history change: display only, never a receipt, refs drop, grant or controlled GET. */
+    private fun updateDisplayUrlFromHistory(url: String) {
+        if (destroyed) return
+        if (policyProvider().checkSyntax(url) is io.andchamber.app.browser.UrlDecision.Allow) {
+            displayUrl = url
+        }
     }
 
     /**
@@ -1049,6 +1115,22 @@ internal class BrowserSession private constructor(
             }
         }
 
+        override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+            if (destroyed || isReload || url.isNullOrBlank()) return
+            val intent = if (manualNavigation) null else activeSubmitIntent()
+            if (intent != null && url != intent.baselineUrl &&
+                BrowserDriverLogic.sameHttpsOrigin(intent.baselineUrl, url) &&
+                policyProvider().checkSyntax(url) is io.andchamber.app.browser.UrlDecision.Allow
+            ) {
+                // Candidate only. The async probe must still prove the same document and URL.
+                probeSameDocument(intent, url)
+                return
+            }
+            // No valid armed candidate: a same-document history update is display-only. It is not a
+            // load, a receipt, a grant, a ref drop or a controlled GET.
+            updateDisplayUrlFromHistory(url)
+        }
+
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
             if (destroyed) return
             // A new document under a pressed mouse is an unavoidable interruption. Retire before the
@@ -1306,6 +1388,7 @@ internal sealed interface EnterPress {
     data object Dispatched : EnterPress
     data object Stale : EnterPress
     data object NotVisible : EnterPress
+    data object Expired : EnterPress
     data class Refused(val reason: String) : EnterPress
     data object Failed : EnterPress
 }
@@ -1340,10 +1423,8 @@ data class GeometrySample(
     val probe: GeometryProbe,
 )
 
-/** The Enter receipt falls back to this when a caller supplies no budget. */
+/** The Enter receipt falls back to this when a caller supplies no absolute deadline. */
 private const val SUBMIT_INTENT_MS = 2_000L
-/** A caller budget is bounded; the marker is never permanent. */
-private const val MAX_SUBMIT_ARM_MS = 60_000L
 private const val SUBMIT_REASON_POST = "post"
 private const val SUBMIT_REASON_REDIRECT = "redirect"
 private const val SUBMIT_REASON_METHOD = "method"

@@ -14,6 +14,20 @@ sealed interface BrowserSubmitNavigation {
     data class Get(val url: String) : BrowserSubmitNavigation
 
     /**
+     * The armed Enter changed only the top-level URL in the same document (an SPA/history route
+     * change), for example `pushState`/`replaceState` without a main-frame navigation.
+     *
+     * The engine emits this only for the current armed Enter, from a native history candidate that
+     * kept the original document witness, within the same origin, with a changed URL that matches
+     * both the native and JS URL views, and inside the intent deadline. The engine must not also
+     * emit [Get]/[Rejected] for the same Enter.
+     *
+     * [documentId] is the unchanged document witness; [url] is the new top-level URL, never page
+     * text. The presenter re-verifies both read-only and never navigates, grants or reloads.
+     */
+    data class SameDocument(val url: String, val documentId: String) : BrowserSubmitNavigation
+
+    /**
      * The submit cannot continue as a GET (POST, redirect, policy refusal, lost document, ...).
      * [reason] is a fixed engine constant, never page content.
      */

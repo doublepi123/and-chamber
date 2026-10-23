@@ -122,6 +122,8 @@ internal object BrowserDriverLogic {
     const val PARAM_VIEWPORT = "viewport"
     const val PARAM_WIDTH = "width"
     const val PARAM_HEIGHT = "height"
+    /** A caller budget is bounded; the submit armed window is never permanent. */
+    const val SUBMIT_ARM_CAP_MS = 60_000L
     const val RESULT_ENTER_DISPATCHED = "enterDispatched"
     const val RESULT_SNAPSHOT = "snapshot"
     const val RESULT_PHASE = "phase"
@@ -319,6 +321,63 @@ internal object BrowserDriverLogic {
             put("ref", ref)
         }.toString()
         return fillOnce(ENTER_READY_TEMPLATE, payload)
+    }
+
+    /**
+     * Read-only same-document probe. It never touches history, forms, focus or the DOM. The caller
+     * still compares its URL with the native view and the candidate before emitting a receipt.
+     */
+    fun sameDocumentProbeScript(): String = """
+        (function(){
+          var witness = window.__acWitness;
+          if (!witness || !witness.documentId) return {ok:false, error:"no witness"};
+          var state = document.readyState;
+          if (state === "loading") return {ok:false, error:"loading"};
+          return {ok:true, documentId:witness.documentId, url:String(location.href || ""), ready:state};
+        })()
+    """.trimIndent()
+
+    data class SameDocumentProbe(
+        val documentId: String,
+        val url: String,
+        val ready: String,
+    )
+
+    fun parseSameDocumentProbe(raw: String?): SameDocumentProbe? {
+        if (raw.isNullOrBlank()) return null
+        val parsed = parseScriptResult(raw) as? ScriptResult.Ok ?: return null
+        val json = parsed.json
+        val documentId = json["documentId"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
+        val url = json["url"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
+        val ready = json["ready"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        return SameDocumentProbe(documentId, url, ready)
+    }
+
+    /** True for two absolute public https URLs on the same host and effective port. */
+    fun sameHttpsOrigin(baseline: String, candidate: String): Boolean {
+        val a = runCatching { URI(baseline) }.getOrNull() ?: return false
+        val b = runCatching { URI(candidate) }.getOrNull() ?: return false
+        if (!a.scheme.equals("https", ignoreCase = true) || !b.scheme.equals("https", ignoreCase = true)) return false
+        val hostA = a.host?.takeIf { it.isNotBlank() } ?: return false
+        val hostB = b.host?.takeIf { it.isNotBlank() } ?: return false
+        if (!hostA.equals(hostB, ignoreCase = true)) return false
+        return effectivePort(a) == effectivePort(b)
+    }
+
+    private fun effectivePort(uri: URI): Int = if (uri.port == -1) 443 else uri.port
+
+    /** Absolute monotonic deadline from an action start and a caller-provided remaining budget. */
+    fun actionExpiresAt(startedAt: Long, timeoutMs: Long?): Long? =
+        timeoutMs?.let { startedAt + it.coerceAtLeast(0L) }
+
+    /**
+     * The armed window may use only the remaining caller budget, capped so it is never permanent.
+     * Null means this action is already expired; the caller must refuse instead of continuing.
+     */
+    fun submitArmRemaining(expiresAt: Long, now: Long, capMs: Long = SUBMIT_ARM_CAP_MS): Long? {
+        val remaining = expiresAt - now
+        if (remaining <= 0L) return null
+        return minOf(remaining, capMs.coerceAtLeast(1L))
     }
 
     /** Replaces the single marker. The inserted JSON is never scanned for further markers. */
@@ -938,6 +997,7 @@ internal object BrowserDriverLogic {
           if (!slot || slot.doc !== arg.doc || !slot.active) return {ok:false, error:"document not ready"};
           var ready = slot.active(arg.ref);
           ready.documentId = witness.documentId;
+          ready.url = String(location.href || "");
           return ready;
         })()
     """.trimIndent()

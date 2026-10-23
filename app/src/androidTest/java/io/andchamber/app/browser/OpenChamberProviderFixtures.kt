@@ -28,6 +28,9 @@ internal object OpenChamberProviderFixtures {
     const val SEARCH_RACE_URL = "https://example.com/openchamber-provider-search-race"
     const val SEARCH_RACE_RESULTS_URL = "https://example.com/openchamber-provider-search-race-results"
     const val SPA_ENTER_URL = "https://example.com/openchamber-provider-spa-enter"
+    const val SAME_DOCUMENT_URL = "https://example.com/openchamber-provider-same-document"
+    const val SAME_DOCUMENT_ASYNC_URL = "https://example.com/openchamber-provider-same-document-async"
+    const val SAME_DOCUMENT_INPUT_URL = "https://example.com/openchamber-provider-same-document-input"
     const val DESKTOP_VIEWPORT_URL = "https://example.com/openchamber-provider-desktop-viewport"
 
     /** Real GET/POST arrivals of the search fixture, for one-submit / no-replay proof. */
@@ -43,6 +46,10 @@ internal object OpenChamberProviderFixtures {
     /** A GET that lands on the POST result URL is a silent replay, never a valid submit. */
     @Volatile
     var searchPostGetArrivals: Int = 0
+
+    /** Any real GET to a same-document fixture route; a history-only submit must not add one. */
+    @Volatile
+    var sameDocumentArrivals: Int = 0
 
     /**
      * Desktop/mouse fixture. Reports the CSS viewport and records which real pointer events the page
@@ -420,6 +427,43 @@ internal object OpenChamberProviderFixtures {
         </body></html>
     """.trimIndent()
 
+    private fun sameDocumentHtml(async: Boolean, inputChangesUrl: Boolean): String {
+        val inputHistory = if (inputChangesUrl) {
+            "input.addEventListener('input', function(){ history.replaceState(null,'', '?q='+encodeURIComponent(input.value)+'&type=input'); });"
+        } else {
+            ""
+        }
+        val enterHistory = when {
+            inputChangesUrl -> ""
+            async -> "setTimeout(function(){ window.__historyFired=true; history.pushState(null,'', '?q='+encodeURIComponent(input.value)+'&type=issues'); }, 250);"
+            else -> "window.__historyFired=true; history.replaceState(null,'', '?q='+encodeURIComponent(input.value)+'&type=issues');"
+        }
+        return """
+        <!doctype html><html><head><title>same-document</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+          <span id="marker">same-document-form</span>
+          <input id="same-doc-input" type="text" aria-label="Same doc query" value="">
+          <span id="same-doc-result">same-doc:none</span>
+          <span id="same-doc-count">enter-count:0</span>
+          <script>
+            var input = document.getElementById('same-doc-input');
+            window.__enterCount = 0;
+            window.__historyFired = false;
+            $inputHistory
+            input.addEventListener('keydown', function(event){
+              if (event.key !== 'Enter') return;
+              // No form: consume Enter, edit the same document, then change history only.
+              event.preventDefault();
+              window.__enterCount += 1;
+              document.getElementById('same-doc-result').textContent = 'same-doc:' + String(input.value);
+              document.getElementById('same-doc-count').textContent = 'enter-count:' + window.__enterCount;
+              $enterHistory
+            });
+          </script>
+        </body></html>
+        """.trimIndent()
+    }
+
     private val searchSensitiveHtml = """
         <!doctype html><html><head><title>search-sensitive</title>
         <meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
@@ -444,6 +488,18 @@ internal object OpenChamberProviderFixtures {
         method.equals("GET", true) && url == DESKTOP_VIEWPORT_URL -> desktopViewportHtml
         method.equals("GET", true) && url == SEARCH_RACE_URL -> searchRaceHtml
         method.equals("GET", true) && url == SPA_ENTER_URL -> spaEnterHtml
+        method.equals("GET", true) && (url == SAME_DOCUMENT_URL || url.startsWith("$SAME_DOCUMENT_URL?")) -> {
+            sameDocumentArrivals += 1
+            sameDocumentHtml(async = false, inputChangesUrl = false)
+        }
+        method.equals("GET", true) && (url == SAME_DOCUMENT_ASYNC_URL || url.startsWith("$SAME_DOCUMENT_ASYNC_URL?")) -> {
+            sameDocumentArrivals += 1
+            sameDocumentHtml(async = true, inputChangesUrl = false)
+        }
+        method.equals("GET", true) && (url == SAME_DOCUMENT_INPUT_URL || url.startsWith("$SAME_DOCUMENT_INPUT_URL?")) -> {
+            sameDocumentArrivals += 1
+            sameDocumentHtml(async = false, inputChangesUrl = true)
+        }
         method.equals("GET", true) && url == SEARCH_SENSITIVE_URL -> searchSensitiveHtml
         method.equals("GET", true) && (url == SEARCH_RACE_RESULTS_URL || url.startsWith("$SEARCH_RACE_RESULTS_URL?")) -> {
             searchRaceGetArrivals += 1
@@ -494,6 +550,9 @@ internal object OpenChamberProviderFixtures {
 
     fun attach(view: WebView, production: WebViewClient) {
         view.webViewClient = object : WebViewClient() {
+            override fun doUpdateVisitedHistory(target: WebView, url: String?, isReload: Boolean) =
+                production.doUpdateVisitedHistory(target, url, isReload)
+
             override fun shouldOverrideUrlLoading(target: WebView, request: WebResourceRequest): Boolean =
                 production.shouldOverrideUrlLoading(target, request)
 

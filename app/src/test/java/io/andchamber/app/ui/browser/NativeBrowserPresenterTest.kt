@@ -25,8 +25,10 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
@@ -752,6 +754,400 @@ class NativeBrowserPresenterTest {
             ProviderCodes.AUTHORIZATION_REQUIRED,
             presenter.execute(request("browser.snapshot", id = "reopen-required"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
         )
+    }
+
+    private fun submitRequest(id: String, timeoutMs: Long = 5_000L) = request(
+        "browser.type",
+        id = id,
+        parameters = mapOf(
+            "selector" to """[data-andchamber-ref="$REF"]""",
+            "value" to "q",
+            "submit" to "true",
+        ),
+    ).copy(timeoutMs = timeoutMs)
+
+    @Test
+    fun `a same-document route change confirms without reload or a new grant`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        val nextUrl = "https://example.com/search?q=q&type=repositories"
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        val tab = presenter.state.value.selectedTabId!!
+        val grant = presenter.registry.currentGrant()
+        val loads = page.loads
+        val handle = page.handle
+        val ticket = page.ticket()
+        val document = page.documentId
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-same"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        page.currentUrlValue = nextUrl
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, document!!))
+        runCurrent()
+        val result = pending.await()
+        assertTrue(result.errorCode ?: "ok", result.ok)
+        assertEquals("same-document", result.data["navigation"]?.jsonPrimitive?.content)
+        assertEquals("navigation-observed", result.data["phase"]?.jsonPrimitive?.content)
+        assertEquals(nextUrl, result.data["url"]?.jsonPrimitive?.content)
+        assertEquals(nextUrl, result.data["finalURL"]?.jsonPrimitive?.content)
+        assertEquals(true, result.data["requiresSnapshot"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, result.data["drivable"]?.jsonPrimitive?.booleanOrNull)
+        assertEquals(true, result.data["enterDispatched"]?.jsonPrimitive?.booleanOrNull)
+        assertSame("the same grant is kept", grant, presenter.registry.currentGrant())
+        assertEquals(tab, presenter.state.value.selectedTabId)
+        assertEquals(handle, presenter.state.value.viewHandle)
+        assertEquals(ticket, page.ticket())
+        assertEquals(document, page.documentId)
+        assertTrue(presenter.state.value.agentOn)
+        assertEquals("only the displayed URL changed", nextUrl, presenter.registry.find(tab)?.url)
+        assertEquals("the same document is not reloaded", loads, page.loads)
+        assertEquals(0, page.reloads)
+        assertEquals("the transaction disarms only its own intent", 1, page.submitDisarmed)
+        assertEquals(
+            "old refs are invalid after the route change",
+            ProviderCodes.REF_EXPIRED,
+            presenter.execute(
+                request("browser.click", id = "old-ref", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""")),
+                presenter.registry,
+                ProviderMode.AGENT,
+                null,
+                5_000L,
+            ) { 0L }.errorCode,
+        )
+    }
+
+    @Test
+    fun `a same-document event with a different witness stays unknown`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        val nextUrl = "https://example.com/results"
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        val tab = presenter.state.value.selectedTabId!!
+        val grant = presenter.registry.currentGrant()
+        val loads = page.loads
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-witness"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        }
+        runCurrent()
+        page.currentUrlValue = nextUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("other-doc")
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, "doc"))
+        runCurrent()
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+        assertSame("observation keeps the existing grant", grant, presenter.registry.currentGrant())
+        assertEquals("the URL is not claimed", originalUrl, presenter.registry.find(tab)?.url)
+        assertEquals("the page is not reloaded", loads, page.loads)
+        assertEquals(1, page.submitDisarmed)
+    }
+
+    @Test
+    fun `a same-document event without a URL change stays unknown`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        val tab = presenter.state.value.selectedTabId!!
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-same-url"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        }
+        runCurrent()
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(originalUrl, "doc"))
+        runCurrent()
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+        assertEquals(originalUrl, presenter.registry.find(tab)?.url)
+        assertEquals(1, page.submitDisarmed)
+    }
+
+    @Test
+    fun `a late same-document event cannot confirm after the submit timed out`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        val nextUrl = "https://example.com/results"
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        val tab = presenter.state.value.selectedTabId!!
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-late-same"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        }
+        runCurrent()
+        advanceTimeBy(5_001)
+        runCurrent()
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+        val grant = presenter.registry.currentGrant()
+        val loads = page.loads
+
+        page.currentUrlValue = nextUrl
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, "doc"))
+        runCurrent()
+        assertEquals("a late event never updates the URL", originalUrl, presenter.registry.find(tab)?.url)
+        assertEquals("a late event never reloads", loads, page.loads)
+        assertSame("a late event never mints a grant", grant, presenter.registry.currentGrant())
+        assertTrue("the page stays observe-only", presenter.state.value.actionOutcomeUnknown)
+    }
+
+    @Test
+    fun `cancelling a submit propagates and a late same-document event changes nothing`() = runTest {
+        val page = FakePage()
+        val presenter = presenter { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        val nextUrl = "https://example.com/results"
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        val tab = presenter.state.value.selectedTabId!!
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-cancel-same"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+        }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        presenter.revokeAll("takeover")
+        pending.join()
+        assertTrue("a cancel still propagates", pending.isCancelled)
+        val loads = page.loads
+
+        page.currentUrlValue = nextUrl
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, "doc"))
+        runCurrent()
+        assertEquals("a late event after cancel never updates the URL", originalUrl, presenter.registry.find(tab)?.url)
+        assertEquals("a late event after cancel never reloads", loads, page.loads)
+        assertNull("a cancel keeps no grant", presenter.registry.currentGrant())
+        assertTrue("the dispatched Enter is not confirmed", presenter.state.value.actionOutcomeUnknown)
+    }
+
+    @Test
+    fun `a submit with no confirmation returns unknown before the transport timeout`() = runTest {
+        val page = FakePage()
+        val presenter = presenter(clock = { testScheduler.currentTime }) { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val transportBudget = 600L
+        val action = async {
+            // Mirrors BrowserToolServer.execute: one real outer timeout around the whole action.
+            withTimeout(transportBudget) {
+                presenter.execute(
+                    submitRequest("submit-budget", transportBudget),
+                    presenter.registry,
+                    ProviderMode.AGENT,
+                    null,
+                    testScheduler.currentTime + transportBudget,
+                ) { testScheduler.currentTime }
+            }
+        }
+        runCurrent()
+        advanceTimeBy(transportBudget + 1)
+        runCurrent()
+        assertTrue("the action settles before the transport timeout", action.isCompleted)
+        val result = action.await()
+        assertEquals(
+            "a dispatched but unconfirmed Enter is OUTCOME_UNKNOWN, never DEADLINE",
+            ProviderCodes.OUTCOME_UNKNOWN,
+            result.errorCode,
+        )
+    }
+
+    @Test
+    fun `a same-document confirmation probes on the presenter main dispatcher`() = runBlocking {
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "browser-main-test").apply { isDaemon = true }
+        }
+        val mainDispatcher = executor.asCoroutineDispatcher()
+        try {
+            val page = FakePage()
+            val presenter = presenter(main = mainDispatcher) { page }
+            presenter.setConnection("c1", 4L)
+            assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+            assertTrue(presenter.allow())
+            assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+            val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+            val nextUrl = "https://example.com/search?q=q&type=repositories"
+            page.currentUrlValue = originalUrl
+            page.probeResultOverride = ProbeAcceptance.Accept("doc")
+            val typed = CompletableDeferred<Unit>()
+            // Runs inside the driver, after the receipt captured the original URL.
+            page.block = {
+                page.currentUrlValue = nextUrl
+                typed.complete(Unit)
+            }
+            val pending = async {
+                presenter.execute(submitRequest("submit-main"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }
+            }
+            typed.await()
+            page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, "doc"))
+            val result = pending.await()
+            assertTrue(result.errorCode ?: "ok", result.ok)
+            assertEquals(
+                "the confirmation probe must run on the presenter main dispatcher",
+                "browser-main-test",
+                page.probeThread?.substringBefore(" @coroutine#"),
+            )
+            assertEquals(nextUrl, presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))?.url)
+        } finally {
+            mainDispatcher.close()
+        }
+    }
+
+    @Test
+    fun `a same-document probe that reaches the work deadline does not confirm`() = runTest {
+        var virtualNow = 0L
+        val page = FakePage()
+        val presenter = presenter(clock = { virtualNow }) { page }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val originalUrl = requireNotNull(presenter.registry.find(requireNotNull(presenter.state.value.selectedTabId))).url
+        val nextUrl = "https://example.com/results"
+        page.currentUrlValue = originalUrl
+        page.probeResultOverride = ProbeAcceptance.Accept("doc")
+        // The probe itself consumes the remaining Dwork; the confirmation must fail afterwards.
+        page.probeAction = { virtualNow = 5_000L }
+        val tab = presenter.state.value.selectedTabId!!
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-past-deadline"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { virtualNow }
+        }
+        runCurrent()
+        page.currentUrlValue = nextUrl
+        page.onSubmitNavigation?.invoke(BrowserSubmitNavigation.SameDocument(nextUrl, "doc"))
+        runCurrent()
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertTrue(presenter.state.value.actionOutcomeUnknown)
+        assertEquals("a past-deadline probe never updates the URL", originalUrl, presenter.registry.find(tab)?.url)
+    }
+
+    @Test
+    fun `a submit replacement created after Dwork loads nothing and keeps the old page`() = runTest {
+        var virtualNow = 0L
+        val pages = mutableListOf<FakePage>()
+        var created = 0
+        val presenter = presenter(clock = { virtualNow }, policy = { submitPolicy }) {
+            created += 1
+            // The replacement factory itself consumes the remaining Dwork.
+            if (created > 1) virtualNow = 4_600L
+            FakePage().also { pages += it }
+        }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+        val tab = presenter.state.value.selectedTabId!!
+        val grant = presenter.registry.currentGrant()
+        val old = pages[0]
+        val loads = old.loads
+        val handle = old.handle
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-late-create"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { virtualNow }
+        }
+        runCurrent()
+        old.onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
+        repeat(200) {
+            if (pages.size < 2) {
+                runCurrent()
+                yield()
+            }
+        }
+        assertEquals("the replacement page was created", 2, pages.size)
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertTrue("the old page stays observable", presenter.state.value.actionOutcomeUnknown)
+        assertEquals("the old page stays selected", tab, presenter.state.value.selectedTabId)
+        assertEquals("the old view stays bound", handle, presenter.state.value.viewHandle)
+        assertEquals("the old page is not reloaded", loads, old.loads)
+        assertFalse("the old page is not destroyed", old.destroyed)
+        assertEquals("the new page never loads", 0, pages[1].loads)
+        assertTrue("the new page is destroyed", pages[1].destroyed)
+        assertSame("the old grant is kept for observation", grant, presenter.registry.currentGrant())
+    }
+
+    @Test
+    fun `an auto grant probe released after Dwork mints no grant`() = runTest {
+        var virtualNow = 0L
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(clock = { virtualNow }, policy = { submitPolicy }) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 4L)
+        assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
+        assertTrue(presenter.allow())
+        assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { 0L }.ok)
+
+        val pending = async {
+            presenter.execute(submitRequest("submit-auto-late"), presenter.registry, ProviderMode.AGENT, null, 5_000L) { virtualNow }
+        }
+        runCurrent()
+        pages[0].onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
+        repeat(200) {
+            if (pages.size < 2) {
+                runCurrent()
+                yield()
+            }
+        }
+        assertEquals("the controlled replacement was created", 2, pages.size)
+        val fresh = pages[1]
+
+        // The replacement's default control probes through the plain allow path.
+        val probeGate = CompletableDeferred<Unit>()
+        // Ready and geometry callbacks may each request an allow. Hold every overlapping probe,
+        // rather than allowing a second probe to legitimately grant before the clock advances.
+        repeat(32) { fresh.plainProbeGates.add(probeGate) }
+        val automatic = async { presenter.acceptProbeForTest(fresh, readyIdentity(fresh)) }
+        runCurrent()
+        assertFalse("the automatic grant probe is suspended", automatic.isCompleted)
+        assertNull("no other probe granted before the deadline test", presenter.registry.currentGrant())
+
+        // Let Dwork (and the replacement's grant wait) pass before the probe returns.
+        virtualNow = 4_600L
+        advanceTimeBy(4_501)
+        runCurrent()
+        probeGate.complete(Unit)
+        runCurrent()
+        automatic.await()
+
+        val result = pending.await()
+        assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
+        assertNull("an expired auto grant mints nothing", presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        assertTrue("the unready replacement needs a reopen", presenter.state.value.requiresReopen)
     }
 
     @Test
@@ -3542,15 +3938,17 @@ class NativeBrowserPresenterTest {
                 listOf(java.net.InetAddress.getByName("93.184.216.34"))
             })
         },
+        clock: () -> Long = { 0L },
+        main: kotlinx.coroutines.CoroutineDispatcher = kotlinx.coroutines.Dispatchers.Main,
         pageFactory: (android.content.Context?) -> ControlledBrowserPage,
     ): NativeBrowserPresenter {
         var ids = 0
         return NativeBrowserPresenter(
             registry = ProviderRegistry { if (uniqueTabs) "tab-${++ids}" else "tab-real" },
-            scope = CoroutineScope(kotlinx.coroutines.Dispatchers.Main),
+            scope = CoroutineScope(main),
             sessionFactory = pageFactory,
-            main = kotlinx.coroutines.Dispatchers.Main,
-            clock = { 0L },
+            main = main,
+            clock = clock,
             policy = policy,
             awaitPageVisible = awaitPageVisible,
         ).also { it.attachHostForTest("local", 1L) }
@@ -3660,7 +4058,11 @@ class NativeBrowserPresenterTest {
         }
         /** Gates for overlapping allow probes; an unqueued gate means immediate return. */
         val plainProbeGates = ArrayDeque<CompletableDeferred<Unit>>()
+        var probeThread: String? = null
+        var probeAction: (() -> Unit)? = null
         override suspend fun probe(): ProbeAcceptance {
+            probeThread = Thread.currentThread().name
+            probeAction?.invoke()
             plainProbeGates.removeFirstOrNull()?.await()
             return probeResultOverride ?: probe
         }
@@ -3679,7 +4081,9 @@ class NativeBrowserPresenterTest {
         override suspend fun probe(identity: ReadyProbeIdentity): ProbeAcceptance? {
             probeCalls += 1
             onProbeCall?.invoke()
-            return probe()
+            // A ready probe is not one of the queued plain allow probes; those gates are consumed
+            // only by probe()/allow(), so a test can suspend the automatic grant probe itself.
+            return probeResultOverride ?: probe
         }
         override fun owns(viewId: String, ticket: Long): Boolean = true
         override fun markUnknown() = Unit
@@ -3727,6 +4131,11 @@ class NativeBrowserPresenterTest {
         override fun ticket(): Long = 1L
         var documentId: String? = "doc"
         override fun acceptedDocument(): String? = documentId
+        /** The URL the fake page currently shows; the submit receipt captures it at registration. */
+        var currentUrlValue: String? = null
+        override fun currentUrl(): String? = currentUrlValue
+        var submitDisarmed = 0
+        override fun finishSubmitNavigation() { submitDisarmed += 1 }
         var probeReleases = 0
         var holdGeometry = false
         var frame = NativeFrame(100, 80, 1, 2, 1, 2, 101, 82)

@@ -275,6 +275,8 @@ test('type preserves the submit boolean and the confirmed submission result with
   }
   assert.equal(server.requests.length, 2);
   assert.match(tool.input.properties.submit.description, /same-tab GET/);
+  assert.match(tool.input.properties.submit.description, /same-document URL change/);
+  assert.match(tool.description, /does not prove the business operation completed/);
   assert.match(tool.input.properties.submit.description, /POST/);
 });
 
