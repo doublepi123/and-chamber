@@ -1,22 +1,16 @@
 'use strict';
 
-// Flow logic for the lifecycle gate (B3 mode/tab switching, B5 enlarge/restore scroll memory).
+// Flow logic for the lifecycle gate (B3 mode/tab switching, B5 Float/Full window cycle).
 // The device side is createLifecycleGateAdapters() in provider_gate_adapters.cjs.
 // Every value used here is an awaited, normalised reply: tool results, lifecycle-diag fields, page JS
 // metrics (__report/__geometry/__loads/__posts) and real status phases. Nothing is hard-coded to pass.
 // A missing producer field is null and refuses the case; it is never coerced to false or to a pass.
 
 const STAGE_MS = 20000;
-const RESTORE_TOLERANCE_CSS = 1;
+const SCROLL_TOLERANCE_CSS = 1;
 
 function isNum(value) {
   return typeof value === 'number' && Number.isFinite(value);
-}
-
-/** Restore is Restored only inside the 1 CSS px tolerance. A clamped readback is never a restored one. */
-function restoredWithin(saved, actual) {
-  if (!saved || !actual || !isNum(saved.y) || !isNum(actual.y)) return null;
-  return Math.abs(actual.y - saved.y) <= RESTORE_TOLERANCE_CSS;
 }
 
 /**
@@ -94,72 +88,156 @@ function summary(value) {
   };
 }
 
+/** Bounds may arrive as left/top/right/bottom or with an explicit width/height; both are real geometry. */
+function surfaceSize(surface) {
+  if (!surface) return null;
+  const width = isNum(surface.width) ? surface.width : isNum(surface.right) && isNum(surface.left) ? surface.right - surface.left : null;
+  const height = isNum(surface.height) ? surface.height : isNum(surface.bottom) && isNum(surface.top) ? surface.bottom - surface.top : null;
+  if (!isNum(width) || !isNum(height)) return null;
+  return { width, height };
+}
+
+/** A real UI surface needs finite size. Missing geometry refuses instead of being treated as 0. */
+function validSurface(surface) {
+  const size = surfaceSize(surface);
+  return Boolean(size && size.width > 1 && size.height > 1);
+}
+
+/** The fixed layout viewport: the CSS width and its media query must not change across the window cycle. */
+function fixedViewport(before, after) {
+  return Boolean(before && after && before.metrics && after.metrics &&
+    isNum(before.metrics.clientWidth) && isNum(after.metrics.clientWidth) &&
+    before.metrics.clientWidth === after.metrics.clientWidth &&
+    typeof before.metrics.media1000 === 'boolean' && before.metrics.media1000 === after.metrics.media1000);
+}
+
+/** Control is kept only when both reads carry the same real grant boolean. */
+function grantKept(before, after) {
+  return Boolean(before && after && typeof before.grantForSelected === 'boolean' &&
+    before.grantForSelected === after.grantForSelected);
+}
+
+/** Same document plus unchanged page counters. Unknown counters never count as unchanged. */
+function samePage(before, after) {
+  if (sameDocument(before, after) !== true) return false;
+  return before.loads != null && after.loads != null && before.loads === after.loads &&
+    before.posts != null && after.posts != null && before.posts === after.posts;
+}
+
+/** No user scroll means the page's own scrollY stays put within the CSS tolerance. */
+function scrollHeld(before, after) {
+  return Boolean(before && after && before.metrics && after.metrics &&
+    isNum(before.metrics.sy) && isNum(after.metrics.sy) &&
+    Math.abs(before.metrics.sy - after.metrics.sy) <= SCROLL_TOLERANCE_CSS);
+}
+
+/** The Full screen surface really changed size; the small window surface really returned. */
+function surfaceChanged(before, after) {
+  const a = surfaceSize(before), b = surfaceSize(after);
+  return Boolean(a && b && a.width > 1 && a.height > 1 && b.width > 1 && b.height > 1 &&
+    (a.width !== b.width || a.height !== b.height));
+}
+
+function surfaceReturned(before, after) {
+  const a = surfaceSize(before), b = surfaceSize(after);
+  return Boolean(a && b && Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1);
+}
+
 /**
- * A restore result is accepted only when it belongs to this cycle: the window is small again (Restore gone,
- * Enlarge visible), the surface is back, and the restore object differs from the one that existed before
- * Enlarge. A stale result from an earlier cycle is never taken as this cycle's answer.
+ * The shared precondition for the three B5 cases: a real small-window page at a non-zero scroll,
+ * with the fixed viewport, grant and document identity all readable. A missing field refuses.
  */
-function freshRestore(value, priorRestore) {
-  if (!value || !value.restore || !value.restore.kind) return false;
-  if (value.enlarged !== false) return false;
-  if (!value.surface) return false;
-  // The window cycle clears the previous result (restore === null) while enlarged. A result is fresh only
-  // after that clear has been observed in this cycle, so an identical legitimate coordinate is not refused.
-  return value.clearedThisCycle === true;
+function smallWindowBaseline(state) {
+  if (!state) return { ok: false, reason: 'precondition-unreadable' };
+  if (state.enlarged !== false) return { ok: false, reason: 'precondition-not-small-window', enlarged: state.enlarged };
+  if (!isNum(state.metrics && state.metrics.sy) || state.metrics.sy <= 0) return { ok: false, reason: 'precondition-no-scroll' };
+  if (!isNum(state.metrics.clientWidth) || typeof state.metrics.media1000 !== 'boolean') {
+    return { ok: false, reason: 'precondition-viewport-unreadable' };
+  }
+  if (typeof state.grantForSelected !== 'boolean') return { ok: false, reason: 'precondition-grant-unreadable' };
+  if (state.selectedTabId == null || state.viewHandle == null || state.timeOrigin == null) {
+    return { ok: false, reason: 'precondition-identity-unreadable' };
+  }
+  if (!validSurface(state.surface)) return { ok: false, reason: 'precondition-surface-missing' };
+  return { ok: true };
+}
+
+/** Full screen contract for the same document: real surface growth, fixed viewport, grant and scroll. */
+function fullScreenContract(before, after) {
+  const checks = {
+    samePage: samePage(before, after),
+    viewportFixed: fixedViewport(before, after),
+    grantKept: grantKept(before, after),
+    surfaceChanged: surfaceChanged(before.surface, after.surface),
+    scrollHeld: scrollHeld(before, after),
+  };
+  return { ok: checks.samePage && checks.viewportFixed && checks.grantKept && checks.surfaceChanged && checks.scrollHeld, ...checks };
+}
+
+/** Back-in-small-window contract for the same document: surface returned, viewport, grant and scroll kept. */
+function smallWindowContract(before, expanded, after) {
+  const checks = {
+    samePage: samePage(before, after),
+    viewportFixed: fixedViewport(before, after),
+    grantKept: grantKept(before, after),
+    surfaceReturned: surfaceReturned(before.surface, after.surface),
+    surfaceChangedFromFull: surfaceChanged(expanded.surface, after.surface),
+    scrollHeld: scrollHeld(before, after),
+  };
+  return {
+    ok: checks.samePage && checks.viewportFixed && checks.grantKept && checks.surfaceReturned &&
+      checks.surfaceChangedFromFull && checks.scrollHeld,
+    ...checks,
+  };
 }
 
 function stop(trace, reason, evidence = {}) {
   return { ok: false, trace, reason, ...evidence };
 }
 
-/** Carries the observed clear of this cycle onto a reading. The clear itself was checked before Restore. */
-function withClearedFlag(value, cleared) {
-  return value ? { ...value, clearedThisCycle: cleared === true } : value;
-}
-
 /**
- * B5-1: long page scrolled to a real non-zero offset, Enlarge once, Restore once. The restore kind must be
- * Restored (not Clamped), and the actual scrollY must return to the saved one within 1 CSS px. Document,
- * load count and native view handle must not change.
+ * B5-1 (same document window cycle): a real long page at a non-zero offset, Full screen once, then
+ * Small window once. The current Float/Full contract does not refresh a WindowExpansion/scrollRestore
+ * result, so this case proves the UI contract instead: the Full screen UI is visible with a larger
+ * surface, the same view/document keeps its fixed inner viewport and grant, and with no user scroll the
+ * page keeps its scroll position. The small window returns to its previous surface.
  */
 async function runEnlargeRestoreSameDoc(deps) {
   const trace = [];
-  // The runner passes its own stage list, so a cut flow still leaves every finished stage in the record.
   const stages = Array.isArray(deps.stages) ? deps.stages : [];
   const flowDeps = { ...deps, stages };
   const withStages = (extra) => ({ stages, ...extra });
-  // The offset saved for this cycle is the one present at Enlarge. The setup already produced a non-zero offset.
   const saved = await readStage(flowDeps, trace, stages, 'before-read');
-  if (!saved || !isNum(saved.metrics && saved.metrics.sy) || saved.metrics.sy <= 0) return stop(trace, 'precondition-no-scroll', withStages({ saved: saved && summary(saved) }));
-  const priorRestore = saved.restore;
-  const enlarged = await tapStage(flowDeps, trace, stages, 'tap-enlarge', () => deps.tapEnlarge());
-  if (!enlarged.ok) return stop(trace, 'enlarge-tap-failed', withStages({ enlarged, saved: summary(saved) }));
-  const expanded = await waitFor(flowDeps, (value) => value && value.enlarged === true, trace, 'enlarged');
-  if (!expanded) return stop(trace, 'enlarge-not-observed', withStages({ saved: summary(saved) }));
-  // The window cycle clears the previous restore result. Observe that clear before taking any new result.
-  if (expanded.restore !== null) return stop(trace, 'restore-not-cleared-on-enlarge', withStages({ restore: expanded.restore, saved: summary(saved), expanded: summary(expanded) }));
-  const restored = await tapStage(flowDeps, trace, stages, 'tap-restore', () => deps.tapRestore());
-  if (!restored.ok) return stop(trace, 'restore-tap-failed', withStages({ restored, saved: summary(saved), expanded: summary(expanded) }));
-  const result = await waitFor(flowDeps, (value) => freshRestore(withClearedFlag(value, true), priorRestore), trace, 'restore-fresh');
-  if (!result) return stop(trace, 'restore-result-not-fresh', withStages({ saved: summary(saved), expanded: summary(expanded) }));
+  const baseline = smallWindowBaseline(saved);
+  if (!baseline.ok) return stop(trace, baseline.reason, withStages({ saved: saved && summary(saved) }));
+
+  const full = await tapStage(flowDeps, trace, stages, 'tap-full-screen', () => deps.tapEnlarge());
+  if (!full.ok) return stop(trace, 'full-screen-tap-failed', withStages({ full, saved: summary(saved) }));
+  const expanded = await waitFor(flowDeps, (value) => value && value.enlarged === true, trace, 'full-screen');
+  if (!expanded) return stop(trace, 'full-screen-not-observed', withStages({ saved: summary(saved) }));
+  const fullChecks = fullScreenContract(saved, expanded);
+  if (!fullChecks.ok) {
+    return stop(trace, 'full-screen-contract-failed', withStages({ saved: summary(saved), expanded: summary(expanded), checks: fullChecks }));
+  }
+
+  const small = await tapStage(flowDeps, trace, stages, 'tap-small-window', () => deps.tapRestore());
+  if (!small.ok) return stop(trace, 'small-window-tap-failed', withStages({ small, saved: summary(saved), expanded: summary(expanded) }));
+  const restored = await waitFor(flowDeps,
+    (value) => value && value.enlarged === false && validSurface(value.surface), trace, 'small-window');
+  if (!restored) return stop(trace, 'small-window-not-observed', withStages({ saved: summary(saved), expanded: summary(expanded) }));
+  // A separate complete read after the small window is the evidence used by the contract; its own
+  // values must still show the small window, never a cached earlier sample.
   const after = await readStage(flowDeps, trace, stages, 'after-read');
-  const sameDoc = sameDocument(saved, after);
-  const actualY = result.restore.actual ? result.restore.actual.y : null;
-  // Restored only when the producer's readback matches the saved offset within 1 CSS px. Clamped never counts.
-  const pass = result.restore.kind === 'Restored' &&
-    restoredWithin({ y: saved.metrics.sy }, { y: actualY }) === true &&
-    isNum(after.metrics && after.metrics.sy) && restoredWithin({ y: saved.metrics.sy }, { y: after.metrics.sy }) === true &&
-    sameDoc === true && after.loads === saved.loads && after.posts === saved.posts &&
-    saved.grantForSelected === after.grantForSelected && saved.grantForSelected != null;
+  if (!after || after.enlarged !== false) return stop(trace, 'small-window-not-observed', withStages({ saved: summary(saved), expanded: summary(expanded) }));
+  const checks = smallWindowContract(saved, expanded, after);
   return withStages({
-    ok: pass,
+    ok: checks.ok,
     trace,
-    reason: pass ? 'completed' : 'enlarge-restore-same-doc-failed',
-    saved: { sy: saved.metrics.sy, loads: saved.loads, viewHandle: saved.viewHandle, timeOrigin: saved.timeOrigin, witness: saved.witness },
-    expanded: { enlarged: expanded.enlarged, restore: expanded.restore, sy: expanded.metrics && expanded.metrics.sy, surface: expanded.surface },
-    restore: result.restore,
-    after: { sy: after.metrics && after.metrics.sy, loads: after.loads, viewHandle: after.viewHandle, timeOrigin: after.timeOrigin, witness: after.witness, enlarged: after.enlarged, surface: after.surface },
-    sameDoc,
+    reason: checks.ok ? 'completed' : 'window-cycle-same-doc-failed',
+    saved: { sy: saved.metrics.sy, clientWidth: saved.metrics.clientWidth, loads: saved.loads, posts: saved.posts, viewHandle: saved.viewHandle, timeOrigin: saved.timeOrigin, grant: saved.grantForSelected, surface: saved.surface },
+    expanded: { enlarged: expanded.enlarged, sy: expanded.metrics && expanded.metrics.sy, clientWidth: expanded.metrics && expanded.metrics.clientWidth, surface: expanded.surface, grant: expanded.grantForSelected },
+    after: { enlarged: after.enlarged, sy: after.metrics && after.metrics.sy, clientWidth: after.metrics && after.metrics.clientWidth, loads: after.loads, posts: after.posts, viewHandle: after.viewHandle, timeOrigin: after.timeOrigin, grant: after.grantForSelected, surface: after.surface },
+    checks,
   });
 }
 
@@ -184,101 +262,133 @@ async function tapStage(deps, trace, stages, label, action) {
 }
 
 /**
- * B5-2: old offset saved, Enlarge, then a real two-finger scroll chooses a new Y that differs from the saved
- * one and is still inside the small range. Restore must not return to the old offset. The restore result
- * must be Discarded (user moved) or an explicit unchanged user position, and the actual scrollY must be the
- * new user position.
+ * B5-2 (user scroll wins in Full screen): the user scrolls the page while it is Full screen, then
+ * returns to the Small window. The window cycle must not reflow the page or jump back to the old
+ * offset: the user's latest scroll position is kept, the fixed viewport and grant are unchanged, and
+ * the small surface returns. No RestoreResult event is required.
  */
 async function runUserScrollWins(deps) {
   const trace = [];
   const stages = Array.isArray(deps.stages) ? deps.stages : [];
   const withStages = (extra) => ({ stages, ...extra });
   const saved = await readStage(deps, trace, stages, 'before-read');
-  if (!saved || !isNum(saved.metrics && saved.metrics.sy) || saved.metrics.sy <= 0) return stop(trace, 'precondition-no-scroll', withStages({ saved: saved && summary(saved) }));
-  const priorRestore = saved.restore;
-  const enlarged = await tapStage(deps, trace, stages, 'tap-enlarge', () => deps.tapEnlarge());
-  if (!enlarged.ok) return stop(trace, 'enlarge-tap-failed', withStages({ enlarged, saved: summary(saved) }));
-  const expanded = await waitFor(deps, (value) => value && value.enlarged === true, trace, 'enlarged');
-  if (!expanded) return stop(trace, 'enlarge-not-observed', withStages({ saved: summary(saved) }));
-  // The window cycle must clear the previous result, and it is observed here, not inferred. Same rule as B5-1.
-  if (expanded.restore !== null) return stop(trace, 'restore-not-cleared-on-enlarge', withStages({ restore: expanded.restore, saved: summary(saved), expanded: summary(expanded) }));
-  // A real two-finger move on the enlarged page. The move is measured against the enlarged Y, not the saved one:
-  // Enlarge may already have clamped the page, so a no-op wheel must not count as a user position.
+  const baseline = smallWindowBaseline(saved);
+  if (!baseline.ok) return stop(trace, baseline.reason, withStages({ saved: saved && summary(saved) }));
+
+  const full = await tapStage(deps, trace, stages, 'tap-full-screen', () => deps.tapEnlarge());
+  if (!full.ok) return stop(trace, 'full-screen-tap-failed', withStages({ full, saved: summary(saved) }));
+  const expanded = await waitFor(deps, (value) => value && value.enlarged === true, trace, 'full-screen');
+  if (!expanded) return stop(trace, 'full-screen-not-observed', withStages({ saved: summary(saved) }));
+  const fullChecks = fullScreenContract(saved, expanded);
+  if (!fullChecks.ok) {
+    return stop(trace, 'full-screen-contract-failed', withStages({ saved: summary(saved), expanded: summary(expanded), checks: fullChecks }));
+  }
+  const expandedY = expanded.metrics.sy;
+
+  // A real two-finger move while Full screen. It must change the page's own scrollY, not a constant.
   const userScroll = await tapStage(deps, trace, stages, 'user-scroll', () => deps.twoFingerScroll({ dy: 120 }));
   if (!userScroll.ok) return stop(trace, 'user-scroll-failed', withStages({ userScroll, saved: summary(saved), expanded: summary(expanded) }));
   const movedUser = await readStage(deps, trace, stages, 'after-user-scroll-read');
-  if (!movedUser || !isNum(movedUser.metrics && movedUser.metrics.sy)) return stop(trace, 'user-scroll-unreadable', withStages({ saved: summary(saved), expanded: summary(expanded) }));
-  const expandedY = expanded.metrics && expanded.metrics.sy;
-  const userScrollDidMove = isNum(expandedY) && movedUser.metrics.sy !== expandedY;
-  if (!userScrollDidMove) return stop(trace, 'user-scroll-did-not-move', withStages({ saved: summary(saved), expanded: summary(expanded), movedUser: summary(movedUser) }));
-  // The user Y must fit the small range too. Otherwise a natural clamp could look like an applied saved offset.
-  const smallRange = deps.smallRangeMax;
-  if (isNum(smallRange) && movedUser.metrics.sy > smallRange) return stop(trace, 'user-y-outside-small-range', withStages({ userY: movedUser.metrics.sy, smallRange }));
-  const restored = await tapStage(deps, trace, stages, 'tap-restore', () => deps.tapRestore());
-  if (!restored.ok) return stop(trace, 'restore-tap-failed', withStages({ restored, saved: summary(saved), movedUser: summary(movedUser) }));
-  const result = await waitFor(deps, (value) => freshRestore(withClearedFlag(value, true), priorRestore), trace, 'restore-fresh');
-  if (!result) return stop(trace, 'restore-result-not-fresh', withStages({ saved: summary(saved), expanded: summary(expanded), movedUser: summary(movedUser) }));
-  const after = await readStage(deps, trace, stages, 'after-read');
-  const notOld = isNum(after.metrics && after.metrics.sy) && Math.abs(after.metrics.sy - saved.metrics.sy) > RESTORE_TOLERANCE_CSS;
-  const userKept = isNum(after.metrics && after.metrics.sy) && Math.abs(after.metrics.sy - movedUser.metrics.sy) <= RESTORE_TOLERANCE_CSS;
-  const identity = sameDocument(saved, after) === true && after.loads === saved.loads;
-  // The one accepted outcome is the intentional drop of a moved user position: NotSaved(INTERACTION_CHANGED).
-  // Every other NotSaved reason, Restored, Clamped, Discarded or an unknown kind fails. The reason is the exact one
-  // ScrollMemory produces for a user interaction, so a coincidental position alone can never pass.
-  const acceptedRestore = result.restore.kind === 'NotSaved' && result.restore.reason === 'INTERACTION_CHANGED';
-  const pass = acceptedRestore && notOld && userKept && identity;
+  const movedChecks = {
+    stillFull: Boolean(movedUser && movedUser.enlarged === true),
+    samePage: Boolean(movedUser && samePage(saved, movedUser)),
+    viewportFixed: Boolean(movedUser && fixedViewport(saved, movedUser)),
+    grantKept: Boolean(movedUser && grantKept(saved, movedUser)),
+    surfaceValid: Boolean(movedUser && validSurface(movedUser.surface)),
+    scrollMoved: Boolean(movedUser && isNum(movedUser.metrics && movedUser.metrics.sy) &&
+      isNum(expandedY) && Math.abs(movedUser.metrics.sy - expandedY) > SCROLL_TOLERANCE_CSS),
+  };
+  if (!Object.values(movedChecks).every(Boolean)) {
+    return stop(trace, 'user-scroll-contract-failed', withStages({ saved: summary(saved), expanded: summary(expanded), movedUser: movedUser ? summary(movedUser) : null, checks: movedChecks }));
+  }
+  const userY = movedUser.metrics.sy;
+
+  const small = await tapStage(deps, trace, stages, 'tap-small-window', () => deps.tapRestore());
+  if (!small.ok) return stop(trace, 'small-window-tap-failed', withStages({ small, movedUser: summary(movedUser) }));
+  const restored = await waitFor(deps,
+    (value) => value && value.enlarged === false && validSurface(value.surface), trace, 'small-window');
+  if (!restored) return stop(trace, 'small-window-not-observed', withStages({ saved: summary(saved), movedUser: summary(movedUser) }));
+  const checks = {
+    samePage: samePage(saved, restored),
+    viewportFixed: fixedViewport(saved, restored),
+    grantKept: grantKept(saved, restored),
+    surfaceReturned: surfaceReturned(saved.surface, restored.surface),
+    surfaceChangedFromFull: surfaceChanged(expanded.surface, restored.surface),
+    userScrollKept: isNum(restored.metrics && restored.metrics.sy) &&
+      Math.abs(restored.metrics.sy - userY) <= SCROLL_TOLERANCE_CSS,
+    userDiffersFromOld: Math.abs(userY - saved.metrics.sy) > SCROLL_TOLERANCE_CSS,
+  };
+  const pass = Object.values(checks).every(Boolean);
   return withStages({
     ok: pass,
     trace,
-    reason: pass ? 'completed' : (acceptedRestore ? 'user-scroll-wins-failed' : 'user-scroll-restore-unexpected-kind'),
-    saved: { sy: saved.metrics.sy, loads: saved.loads, viewHandle: saved.viewHandle, timeOrigin: saved.timeOrigin },
-    expanded: { enlarged: expanded.enlarged, restore: expanded.restore, sy: expandedY },
-    userMoved: { sy: movedUser.metrics.sy, deltaFromExpanded: movedUser.metrics.sy - expandedY },
-    restore: result.restore,
-    after: { sy: after.metrics && after.metrics.sy, loads: after.loads, viewHandle: after.viewHandle, timeOrigin: after.timeOrigin },
-    checks: { acceptedRestore, notOld, userKept, identity },
+    reason: pass ? 'completed' : 'user-scroll-wins-failed',
+    saved: { sy: saved.metrics.sy, clientWidth: saved.metrics.clientWidth, loads: saved.loads, posts: saved.posts, viewHandle: saved.viewHandle, timeOrigin: saved.timeOrigin, grant: saved.grantForSelected, surface: saved.surface },
+    expanded: { enlarged: expanded.enlarged, sy: expandedY, clientWidth: expanded.metrics && expanded.metrics.clientWidth, surface: expanded.surface, grant: expanded.grantForSelected },
+    userMoved: { sy: userY, deltaFromFull: userY - expandedY, checks: movedChecks },
+    after: { sy: restored.metrics && restored.metrics.sy, clientWidth: restored.metrics && restored.metrics.clientWidth, viewHandle: restored.viewHandle, timeOrigin: restored.timeOrigin, grant: restored.grantForSelected, surface: restored.surface },
+    checks,
   });
 }
 
 /**
- * B5-3: a page is enlarged and its offset saved, then a real document change happens (browser.open of a
- * different tab on the same owner). Restore must not apply the old saved offset to the new document.
+ * B5-3 (document change during Full screen): while the window is Full screen, an explicit open
+ * replaces the document. Returning to the Small window must not apply the old document's scroll to
+ * the new one. The new document keeps the fixed viewport and the default grant; its identity must be
+ * readable and actually different, and its own scroll must not equal the old saved offset.
  */
 async function runDocumentChangeDiscards(deps) {
   const trace = [];
-  const saved = await deps.readLifecycle();
-  if (!saved || !isNum(saved.metrics && saved.metrics.sy) || saved.metrics.sy <= 0) return stop(trace, 'precondition-no-scroll', { saved });
-  const priorRestore = saved.restore;
-  const enlarged = await deps.tapEnlarge();
-  if (!enlarged.ok) return stop(trace, 'enlarge-tap-failed', { enlarged });
-  const expanded = await waitFor(deps, (value) => value && value.enlarged === true, trace, 'enlarged');
-  if (!expanded) return stop(trace, 'enlarge-not-observed');
-  // Same rule as the same-document flow: the previous result must be cleared by this window cycle first.
-  if (expanded.restore !== null) return stop(trace, 'restore-not-cleared-on-enlarge', { restore: expanded.restore });
-  // A real document change on the same owner. Its own identity must differ from the saved document.
-  const opened = await deps.openNewDocument();
-  if (!opened.ok) return stop(trace, 'open-new-document-failed', { opened });
-  const restored = await deps.tapRestore();
-  if (!restored.ok) return stop(trace, 'restore-tap-failed', { restored });
-  const result = await waitFor(deps, (value) => freshRestore(withClearedFlag(value, true), priorRestore), trace, 'restore-fresh');
-  if (!result) return stop(trace, 'restore-result-not-fresh');
-  const after = await deps.readLifecycle();
-  // The new document must be a different page identity (tab, native handle or timeOrigin). Unknown is not a pass.
-  const identity = sameDocument(saved, after);
-  const changedDoc = identity === false;
-  // The old saved offset must never be applied to the new document. Discarded or NotSaved is the honest answer.
-  const kindOk = result.restore.kind === 'Discarded' || result.restore.kind === 'NotSaved';
-  const notApplied = isNum(after.metrics && after.metrics.sy) && Math.abs(after.metrics.sy - saved.metrics.sy) > RESTORE_TOLERANCE_CSS;
-  const pass = changedDoc && kindOk && notApplied;
-  return {
+  const stages = Array.isArray(deps.stages) ? deps.stages : [];
+  const withStages = (extra) => ({ stages, ...extra });
+  const saved = await readStage(deps, trace, stages, 'before-read');
+  const baseline = smallWindowBaseline(saved);
+  if (!baseline.ok) return stop(trace, baseline.reason, withStages({ saved: saved && summary(saved) }));
+
+  const full = await tapStage(deps, trace, stages, 'tap-full-screen', () => deps.tapEnlarge());
+  if (!full.ok) return stop(trace, 'full-screen-tap-failed', withStages({ full, saved: summary(saved) }));
+  const expanded = await waitFor(deps, (value) => value && value.enlarged === true, trace, 'full-screen');
+  if (!expanded) return stop(trace, 'full-screen-not-observed', withStages({ saved: summary(saved) }));
+  const fullChecks = fullScreenContract(saved, expanded);
+  if (!fullChecks.ok) {
+    return stop(trace, 'full-screen-contract-failed', withStages({ saved: summary(saved), expanded: summary(expanded), checks: fullChecks }));
+  }
+
+  const opened = await tapStage(deps, trace, stages, 'open-new-document', () => deps.openNewDocument());
+  if (!opened.ok) return stop(trace, 'open-new-document-failed', withStages({ opened, saved: summary(saved) }));
+  // The identity must be readable and actually different; unknown identity is not a changed document.
+  const newDoc = await waitFor(deps,
+    (value) => value && value.pageReady === true && sameDocument(saved, value) === false, trace, 'new-document');
+  if (!newDoc) return stop(trace, 'new-document-not-observed', withStages({ saved: summary(saved), opened }));
+  // The explicit open may keep the window Full screen or return it; tap Small window only if it is full.
+  let small = { ok: true, skipped: true };
+  if (newDoc.enlarged === true) {
+    small = await tapStage(deps, trace, stages, 'tap-small-window', () => deps.tapRestore());
+    if (!small.ok) return stop(trace, 'small-window-tap-failed', withStages({ small, newDoc: summary(newDoc) }));
+  }
+  const restored = await waitFor(deps,
+    (value) => value && value.enlarged === false && value.pageReady === true && sameDocument(newDoc, value) === true,
+    trace, 'small-window');
+  if (!restored) return stop(trace, 'small-window-not-observed', withStages({ saved: summary(saved), newDoc: summary(newDoc) }));
+  const checks = {
+    newDocumentStable: samePage(newDoc, restored),
+    viewportFixed: fixedViewport(saved, restored),
+    grantKept: grantKept(saved, restored),
+    surfaceValid: validSurface(restored.surface),
+    oldScrollNotApplied: isNum(restored.metrics && restored.metrics.sy) &&
+      Math.abs(restored.metrics.sy - saved.metrics.sy) > SCROLL_TOLERANCE_CSS,
+  };
+  const pass = Object.values(checks).every(Boolean);
+  return withStages({
     ok: pass,
     trace,
     reason: pass ? 'completed' : 'document-change-failed',
-    saved: { sy: saved.metrics.sy, timeOrigin: saved.timeOrigin, viewHandle: saved.viewHandle },
-    restore: result.restore,
-    after: { sy: after.metrics && after.metrics.sy, timeOrigin: after.timeOrigin, viewHandle: after.viewHandle },
-    changedDoc,
-  };
+    saved: { sy: saved.metrics.sy, clientWidth: saved.metrics.clientWidth, timeOrigin: saved.timeOrigin, viewHandle: saved.viewHandle, selectedTabId: saved.selectedTabId, grant: saved.grantForSelected, surface: saved.surface },
+    expanded: { enlarged: expanded.enlarged, surface: expanded.surface },
+    newDoc: { selectedTabId: newDoc.selectedTabId, viewHandle: newDoc.viewHandle, timeOrigin: newDoc.timeOrigin, sy: newDoc.metrics && newDoc.metrics.sy, grant: newDoc.grantForSelected, enlarged: newDoc.enlarged },
+    after: { sy: restored.metrics && restored.metrics.sy, clientWidth: restored.metrics && restored.metrics.clientWidth, viewHandle: restored.viewHandle, timeOrigin: restored.timeOrigin, grant: restored.grantForSelected, surface: restored.surface, enlarged: restored.enlarged },
+    checks,
+  });
 }
 
 /**
@@ -381,9 +491,8 @@ module.exports = {
   runDocumentChangeDiscards,
   runTabRoundTripMode,
   runPostRoundTripMode,
-  restoredWithin,
   sameDocument,
   brief,
   fenced,
-  RESTORE_TOLERANCE_CSS,
+  SCROLL_TOLERANCE_CSS,
 };

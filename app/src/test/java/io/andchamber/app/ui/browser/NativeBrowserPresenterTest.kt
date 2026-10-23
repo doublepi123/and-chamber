@@ -313,44 +313,59 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
-    fun `an agent open awaits allow and allow takeover or a person's open clears it`() = runBlocking {
-        val page = FakePage()
-        val presenter = presenter(uniqueTabs = true) { page }
+    fun `an explicit open grants default control after ready and takeover or hide revokes it`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
         presenter.setConnection("c1", 1L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
-        assertTrue("an agent open awaits Allow", presenter.state.value.awaitingAllow)
+        assertFalse("default control is not a tap notice", presenter.state.value.awaitingAllow)
+        assertNull("opening alone is not a grant", presenter.registry.currentGrant())
 
-        assertTrue(presenter.allow())
-        assertFalse("allow clears the notice", presenter.state.value.awaitingAllow)
+        // Ready consumes the open's one-shot intent through allow().
+        presenter.acceptProbeForTest(pages[0], readyIdentity(pages[0]))
+        assertNotNull("a ready explicit open is controlled by default", presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertEquals(ProviderMode.AGENT, presenter.state.value.mode)
 
-        assertTrue(presenter.openClaimed(openRequest(id = "open-2"), 1_000L).ok)
-        assertTrue(presenter.state.value.awaitingAllow)
+        // Takeover revokes, and a late ready/page-finished callback does not grant again.
         presenter.takeover()
-        assertFalse("takeover clears the notice", presenter.state.value.awaitingAllow)
+        assertNull(presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        presenter.acceptProbeForTest(pages[0], readyIdentity(pages[0]))
+        assertNull("a probe after takeover never regrants", presenter.registry.currentGrant())
 
-        assertTrue(presenter.openClaimed(openRequest(id = "open-3"), 1_000L).ok)
-        assertTrue(presenter.state.value.awaitingAllow)
-        assertTrue(presenter.openUser("https://example.com/user", "session-a").ok)
-        assertFalse("a person's own open never awaits Allow", presenter.state.value.awaitingAllow)
+        // An agent open cannot reclaim the takeover; only a person's explicit open does. It clears
+        // the latch, then the same ready-time allow path grants again.
+        assertTrue(presenter.navigateManual("https://example.com/next").ok)
+        presenter.acceptProbeForTest(pages[1], readyIdentity(pages[1]))
+        assertNotNull(presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
 
-        assertTrue(presenter.openClaimed(openRequest(id = "open-4"), 1_000L).ok)
-        assertTrue(presenter.state.value.awaitingAllow)
-        presenter.close(presenter.state.value.selectedTabId!!)
-        assertFalse("closing the tab clears the notice", presenter.state.value.awaitingAllow)
+        // Hide revokes. Restoring the kept page does not restore control, and a probe does not either.
+        presenter.hide()
+        assertNull(presenter.registry.currentGrant())
+        presenter.show()
+        assertNull("restore never restores a grant", presenter.registry.currentGrant())
+        presenter.acceptProbeForTest(pages[1], readyIdentity(pages[1]))
+        assertNull("a probe after restore never regrants", presenter.registry.currentGrant())
     }
 
     @Test
-    fun `switching to a tab that is not awaiting allow hides the notice`() = runBlocking {
-        val presenter = presenter(uniqueTabs = true) { FakePage() }
+    fun `switching tabs clears default control and a selection never waits for allow`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
         presenter.setConnection("c1", 1L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
         val first = presenter.state.value.selectedTabId!!
-        assertTrue(presenter.allow())
+        presenter.acceptProbeForTest(pages[0], readyIdentity(pages[0]))
+        assertNotNull(presenter.registry.currentGrant())
         assertFalse(presenter.state.value.awaitingAllow)
         assertTrue(presenter.openClaimed(openRequest(id = "open-2"), 1_000L).ok)
-        assertTrue(presenter.state.value.awaitingAllow)
+        // A new open revoked the previous tab's grant; selecting the old page does not revive it.
         assertTrue(presenter.select(first))
-        assertFalse("the allowed tab is not awaiting Allow", presenter.state.value.awaitingAllow)
+        assertNull(presenter.registry.currentGrant())
+        assertEquals(ProviderMode.MANUAL, presenter.state.value.mode)
+        assertFalse("a selection never shows an Allow notice", presenter.state.value.awaitingAllow)
     }
 
     @Test
@@ -362,8 +377,8 @@ class NativeBrowserPresenterTest {
             presenter.execute(openRequest(allowWaitMs = 60_000), presenter.registry, ProviderMode.AGENT, null, 60_000L) { 0L }
         }
         runCurrent()
-        assertFalse("the open waits for the tap", pending.isCompleted)
-        assertTrue(presenter.state.value.awaitingAllow)
+        assertFalse("the open waits until control exists", pending.isCompleted)
+        assertFalse("no Allow tap notice is pending", presenter.state.value.awaitingAllow)
         assertFalse(presenter.state.value.agentOn)
 
         assertTrue(presenter.allow())
@@ -392,7 +407,7 @@ class NativeBrowserPresenterTest {
         assertEquals("false", opened.data.getValue("drivable").toString())
         assertEquals("authorization_required", opened.data.getValue("reason").toString().trim('"'))
         assertFalse(presenter.state.value.agentOn)
-        assertTrue("nobody allowed, so the notice stays", presenter.state.value.awaitingAllow)
+        assertFalse("no control was granted, so no Allow notice is pending", presenter.state.value.awaitingAllow)
         assertEquals(1, page.loads)
     }
 
@@ -543,7 +558,7 @@ class NativeBrowserPresenterTest {
         presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }
         presenter.takeover()
         page.onManualDocument?.invoke()
-        presenter.allow()
+        presenter.resumeAgent()
         val typed = presenter.execute(
             request("browser.type", id = "r-after", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""", "value" to "again")),
             presenter.registry,
@@ -589,7 +604,7 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
-    fun `desktop mode revokes and a post page is not reloaded`() = runBlocking {
+    fun `desktop mode on a post page is refused and revokes without a reload`() = runBlocking {
         val page = FakePage(post = true)
         val presenter = presenter { page }
         presenter.setConnection("c1", 4L)
@@ -662,7 +677,7 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
-    fun `mouse input takes over before delivery and old geometry is rejected`() = runBlocking {
+    fun `mouse input before measured geometry delivers nothing and does not take over`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
         presenter.setConnection("c1", 4L)
@@ -672,7 +687,7 @@ class NativeBrowserPresenterTest {
         presenter.setDesktopMode(true)
         presenter.setMouseMode(true)
         presenter.mouseInput(PointerSample(MouseInput.ACTION_DOWN, 12f, 8f, 1, false, 0L), 1024, 768)
-        assertTrue(page.takenOver)
+        assertFalse("a drag is not a takeover", page.takenOver)
         presenter.mouseInput(PointerSample(MouseInput.ACTION_UP, 12f, 8f, 1, false, 50L), 1024, 768)
         assertTrue(page.mousePlans.none { it.action == MouseAction.PRESS })
         val before = page.mousePlans.size
@@ -727,15 +742,96 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
-    fun `takeover happens before any mouse event and does not restore the grant`() = runBlocking {
+    fun `dragging the page keeps the agent grant and an explicit takeover still revokes`() = runBlocking {
         val page = FakePage()
         val presenter = armed(page)
         presenter.allow()
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
         presenter.onGeometrySettled()
         presenter.mouseInput(PointerSample(MouseInput.ACTION_DOWN, 10f, 10f, 1, false, 0L), 100, 80)
-        assertTrue(page.takenOver)
+        presenter.mouseInput(PointerSample(MouseInput.ACTION_MOVE, 60f, 40f, 1, false, 40L), 100, 80)
+        presenter.mouseInput(PointerSample(MouseInput.ACTION_UP, 60f, 40f, 1, false, 80L), 100, 80)
+        assertSame("a gesture never replaces the grant", grant, presenter.registry.currentGrant())
+        // Turning the touchpad on/off is an input preference too, not a takeover.
+        presenter.setMouseMode(false)
+        presenter.setMouseMode(true)
+        assertSame("mouse mode does not revoke", grant, presenter.registry.currentGrant())
+        assertTrue("the agent stays in control after a drag", presenter.state.value.agentOn)
+        assertEquals(ProviderMode.AGENT, presenter.state.value.mode)
+        assertFalse("a gesture is not a takeover", page.takenOver)
+
+        // The explicit takeover entry is still the person's revoke.
+        presenter.takeover()
         assertNull(presenter.registry.currentGrant())
-        assertTrue(page.mousePlans.isEmpty())
+        assertFalse(presenter.state.value.agentOn)
+        assertEquals(ProviderMode.MANUAL, presenter.state.value.mode)
+    }
+
+    @Test
+    fun `window presentation changes keep refs geometry an active press and the grant`() = runBlocking {
+        val page = FakePage()
+        val presenter = armed(page)
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
+        presenter.onGeometrySettled()
+        assertTrue(presenter.state.value.pointerUi.geometryReady)
+        // Start a held mouse drag so a press is genuinely active.
+        presenter.mouseInput(PointerSample(MouseInput.ACTION_DOWN, 10f, 10f, 1, false, 0L), 100, 80)
+        presenter.mouseInput(PointerSample(MouseInput.ACTION_MOVE, 80f, 10f, 1, false, 1_200L), 100, 80)
+        assertTrue(page.mousePressActive())
+        val invalidations = page.sessionInvalidations
+        val clears = page.geometryClears
+        val buttons = page.buttonsCleared
+        val serial = presenter.state.value.presentationRequestSerial
+
+        // Float/full/drag/window-resize is presentation only.
+        presenter.onPresentationChanged()
+
+        assertSame("presentation never changes the grant", grant, presenter.registry.currentGrant())
+        assertEquals("presentation never requests a small-window switch", serial, presenter.state.value.presentationRequestSerial)
+        assertTrue("presentation keeps the window shown", presenter.state.value.shown)
+        assertTrue(presenter.state.value.agentOn)
+        assertEquals("refs are not cleared", invalidations, page.sessionInvalidations)
+        assertEquals("geometry is not cleared", clears, page.geometryClears)
+        assertEquals("an active press is not retired", buttons, page.buttonsCleared)
+        assertTrue("an active press stays active", page.mousePressActive())
+        assertTrue("the same measured geometry stays valid", presenter.state.value.pointerUi.geometryReady)
+    }
+
+    @Test
+    fun `native frame changes keep the grant but drop old refs and a viewport resize reloads`() = runBlocking {
+        val page = FakePage()
+        val presenter = armed(page)
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        assertNotNull(presenter.registry.currentGrant())
+        presenter.onGeometrySettled()
+        assertTrue(presenter.state.value.pointerUi.geometryReady)
+        val invalidations = page.sessionInvalidations
+        val clears = page.geometryClears
+
+        // A real native page-frame change still invalidates refs/geometry (not a window drag).
+        presenter.onGeometryChanged()
+        presenter.onGeometryChanged()
+        assertNotNull("a window drag keeps the grant", presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertTrue("old refs are invalidated", page.sessionInvalidations > invalidations)
+        assertTrue("old geometry is dropped", page.geometryClears > clears)
+        assertFalse(presenter.state.value.pointerUi.geometryReady)
+
+        // A viewport resize reloads the same controlled URL, so the document is replaced and refs
+        // are dropped, but the grant is not revoked and a new ready probe can use it.
+        val reloads = page.reloads
+        presenter.setDesktopMode(false)
+        assertNotNull("a viewport resize keeps the grant", presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertEquals("the controlled GET is reloaded for the new mode", reloads + 1, page.reloads)
+        assertFalse(presenter.state.value.desktopMode)
+        page.documentId = null
+        presenter.acceptProbeForTest(page, readyIdentity(page))
+        assertNotNull("the same grant now covers the reloaded document", presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
     }
 
     @Test
@@ -823,7 +919,7 @@ class NativeBrowserPresenterTest {
         ) { 0L }
         assertFalse(refused.ok)
         presenter.takeover()
-        assertTrue(presenter.allow())
+        assertTrue(presenter.resumeAgent())
     }
 
     @Test
@@ -1682,18 +1778,21 @@ class NativeBrowserPresenterTest {
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
         assertTrue(presenter.allow())
         assertTrue(presenter.execute(request("browser.snapshot"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.ok)
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
         val driverCalls = page.driverCalls
         presenter.setPresentationBlocked(true)
         assertTrue(presenter.state.value.presentationBlocked)
         assertFalse(presenter.state.value.eligible)
         assertFalse(presenter.state.value.agentOn)
-        // This is an admission gate, not a hide: an idle page stays shown and mounted.
+        // This is a temporary admission gate, not a hide: an idle page stays shown, mounted and
+        // authorized, so clearing the gate resumes control without another Allow.
         assertTrue(presenter.state.value.shown)
         assertFalse(presenter.state.value.pageRetired)
         assertFalse(page.destroyed)
         assertEquals(1, page.loads)
-        assertNull(presenter.registry.currentGrant())
-        assertEquals(ProviderMode.MANUAL, presenter.state.value.mode)
+        assertSame(grant, presenter.registry.currentGrant())
+        assertEquals(ProviderMode.AGENT, presenter.state.value.mode)
         assertFalse(presenter.allow())
         val commands = listOf(
             request("browser.snapshot", id = "p-snap"),
@@ -1710,19 +1809,21 @@ class NativeBrowserPresenterTest {
         assertEquals("blocked commands never reach the driver", driverCalls, page.driverCalls)
         assertEquals(0, page.actions)
         assertEquals(1, page.reads)
-        assertNull(presenter.registry.currentGrant())
+        assertSame("blocking presentation never drops the grant", grant, presenter.registry.currentGrant())
     }
 
     @Test
-    fun `entering a blocked presentation cancels the action and a later command cannot reuse its refs`() = runBlocking {
+    fun `a temporary presentation block keeps an in-flight action and its refs`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
         presenter.setConnection("c1", 4L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
         assertTrue(presenter.allow())
+        val grant = presenter.registry.currentGrant()
         assertTrue(presenter.execute(request("browser.snapshot", id = "s-before"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.ok)
         val reached = CompletableDeferred<Unit>()
-        page.block = { reached.complete(Unit); kotlinx.coroutines.awaitCancellation() }
+        val release = CompletableDeferred<Unit>()
+        page.block = { reached.complete(Unit); release.await() }
         val acting = launch(Dispatchers.Unconfined) {
             presenter.execute(
                 request("browser.snapshot", id = "s-block"),
@@ -1734,27 +1835,30 @@ class NativeBrowserPresenterTest {
         }
         reached.await()
         presenter.setPresentationBlocked(true)
+        assertSame("a temporary block does not drop the grant", grant, presenter.registry.currentGrant())
+        release.complete(Unit)
         acting.join()
         page.block = {}
-        assertNull(presenter.registry.currentGrant())
-        assertEquals("the cancelled read never completed on the page", 1, page.reads)
-        // Clearing the gate only reopens admission. It neither grants nor revives the cleared refs.
+        assertSame("the in-flight action was not cancelled", grant, presenter.registry.currentGrant())
+        assertEquals("the read completed on the page", 2, page.reads)
+        // Clearing the gate reopens admission with the same grant and refs; no reload, no new allow.
         presenter.setPresentationBlocked(false)
         assertTrue(presenter.state.value.eligible)
-        assertNull("clearing the gate never restores the grant", presenter.registry.currentGrant())
-        assertTrue(presenter.allow())
-        val stale = presenter.execute(
-            request("browser.type", id = "t-stale", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""", "value" to "again")),
+        assertTrue(presenter.state.value.agentOn)
+        assertSame(grant, presenter.registry.currentGrant())
+        val reused = presenter.execute(
+            request("browser.type", id = "t-reused", parameters = mapOf("selector" to """[data-andchamber-ref="$REF"]""", "value" to "again")),
             presenter.registry,
             ProviderMode.AGENT,
             null,
             1_000L,
         ) { 0L }
-        assertEquals(ProviderCodes.REF_EXPIRED, stale.errorCode)
-        assertEquals("the stale command never reached the page", 0, page.actions)    }
+        assertTrue(reused.errorCode ?: "ok", reused.ok)
+        assertEquals("the ref from the interrupted snapshot stayed usable", 1, page.actions)
+    }
 
     @Test
-    fun `clearing the presentation gate keeps the same mounted page without a grant`() = runBlocking {
+    fun `clearing the presentation gate keeps the same mounted page and its grant`() = runBlocking {
         val page = FakePage()
         val presenter = presenter { page }
         presenter.setConnection("c1", 4L)
@@ -1763,19 +1867,21 @@ class NativeBrowserPresenterTest {
         val handle = presenter.state.value.viewHandle
         val generation = presenter.state.value.viewGeneration
         val loads = page.loads
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
         presenter.setPresentationBlocked(true)
         presenter.setPresentationBlocked(false)
         assertFalse(presenter.state.value.presentationBlocked)
         assertTrue(presenter.state.value.eligible)
-        assertFalse(presenter.state.value.agentOn)
-        assertEquals(ProviderMode.MANUAL, presenter.state.value.mode)
-        assertNull(presenter.registry.currentGrant())
+        assertTrue("control resumes because the grant was kept", presenter.state.value.agentOn)
+        assertEquals(ProviderMode.AGENT, presenter.state.value.mode)
+        assertSame("a temporary block does not replace the grant", grant, presenter.registry.currentGrant())
         assertEquals(handle, presenter.state.value.viewHandle)
         assertEquals(generation, presenter.state.value.viewGeneration)
         assertEquals(loads, page.loads)
         assertFalse(page.destroyed)
         assertTrue(presenter.state.value.shown)
-        // The page is visible again but not authorized: a later allow is still the explicit grant.
+        // No Allow tap and no reload are needed; the same mounted page is still authorized.
         assertTrue(presenter.allow())
     }
 
@@ -1913,7 +2019,7 @@ class NativeBrowserPresenterTest {
         assertEquals("one re-probe with the current epoch", 2, page.probeCalls)
         assertEquals("witness-1", page.acceptedDocument())
         assertEquals("no reload", 1, page.loads)
-        assertNull("ready is not a grant", presenter.registry.currentGrant())
+        assertNull("the fake page never reports itself ready, so default control is refused", presenter.registry.currentGrant())
     }
 
     @Test
@@ -1973,7 +2079,7 @@ class NativeBrowserPresenterTest {
         assertTrue((page.lastIdentity?.probeSerial ?: 0L) > 1L)
         assertEquals(2, page.probeReleases)
         assertEquals(1, page.loads)
-        assertNull(presenter.registry.currentGrant())
+        assertNotNull(presenter.registry.currentGrant())
     }
 
     @Test
@@ -1995,7 +2101,7 @@ class NativeBrowserPresenterTest {
         presenter.onGeometrySettled()
         assertTrue(presenter.state.value.pointerUi.geometryReady)
         assertEquals(1, page.probeReleases)
-        assertNull(presenter.registry.currentGrant())
+        assertNotNull(presenter.registry.currentGrant())
     }
 
     @Test
@@ -2053,7 +2159,7 @@ class NativeBrowserPresenterTest {
         assertTrue(presenter.state.value.pointerUi.geometryReady)
         presenter.onGeometrySettled()
         assertEquals(validSerial + 1, page.lastIdentity?.probeSerial)
-        assertNull(presenter.registry.currentGrant())
+        assertNotNull(presenter.registry.currentGrant())
     }
 
     @Test
@@ -2101,11 +2207,13 @@ class NativeBrowserPresenterTest {
         assertEquals("blocked ready does not request geometry", 0, blockedPage.probeReleases)
         assertFalse(blocked.state.value.pointerUi.geometryReady)
         assertNull(blocked.registry.currentGrant())
-        // A real presentation/layout event after clearing may fill geometry; it still grants nothing.
+        // Clearing the temporary gate completes the kept one-shot intent through allow, with no
+        // person tapping Allow. The ready page and geometry settle as usual.
         blocked.setPresentationBlocked(false)
         blocked.onGeometrySettled()
         assertTrue(blocked.state.value.pointerUi.geometryReady)
-        assertNull(blocked.registry.currentGrant())
+        assertNotNull("unblocking completes the pending default grant", blocked.registry.currentGrant())
+        assertTrue(blocked.state.value.agentOn)
     }
 
     @Test
@@ -2134,7 +2242,7 @@ class NativeBrowserPresenterTest {
         fresh.documentId = null
         presenter.acceptProbeForTest(fresh, readyIdentity(fresh))
         assertTrue(presenter.state.value.pointerUi.geometryReady)
-        assertNull(presenter.registry.currentGrant())
+        assertNotNull("the new explicit open granted default control", presenter.registry.currentGrant())
     }
 
     @Test
@@ -2208,7 +2316,7 @@ class NativeBrowserPresenterTest {
         presenter.acceptProbeForTest(fresh, readyIdentity(fresh))
         assertTrue(presenter.state.value.pointerUi.geometryReady)
         assertEquals(first + 2, fresh.lastIdentity?.probeSerial)
-        assertNull(presenter.registry.currentGrant())
+        assertNotNull("the new explicit open granted default control", presenter.registry.currentGrant())
     }
 
     private fun readyIdentity(page: FakePage) = ReadyProbeIdentity(page.viewId(), page.ticket(), 4L)
@@ -2243,13 +2351,16 @@ class NativeBrowserPresenterTest {
         assertNull("transport admission does not grant", presenter.registry.currentGrant())
         assertTrue(presenter.allow())
         assertTrue(presenter.state.value.agentOn)
+        assertNotNull("a presentation block must not lose this grant", presenter.registry.currentGrant())
+        val grant = presenter.registry.currentGrant()
         val driverCalls = page.driverCalls
         val invalidation = presenter.state.value.transportInvalidation
 
         presenter.setPresentationBlocked(true)
         assertTrue("blocking presentation keeps transport", presenter.state.value.transportEligible)
         assertFalse(presenter.state.value.eligible)
-        assertNull(presenter.registry.currentGrant())
+        assertSame("a temporary presentation block keeps the grant", grant, presenter.registry.currentGrant())
+        assertFalse("control is gated while blocked", presenter.state.value.agentOn)
         assertEquals("presentation block does not invalidate transport", invalidation, presenter.state.value.transportInvalidation)
         assertEquals(
             ProviderCodes.BROWSER_PAGE_UNAVAILABLE,
@@ -2259,20 +2370,18 @@ class NativeBrowserPresenterTest {
             ProviderCodes.BROWSER_PAGE_UNAVAILABLE,
             presenter.execute(request("browser.capture", id = "blocked-capture"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
         )
+        assertEquals("blocked commands never touched the driver", driverCalls, page.driverCalls)
         presenter.setPresentationBlocked(false)
         assertTrue(presenter.state.value.transportEligible)
         assertTrue(presenter.state.value.eligible)
         assertEquals("presentation unblock does not invalidate transport", invalidation, presenter.state.value.transportInvalidation)
-        assertNull("unblocking is not a grant", presenter.registry.currentGrant())
-        assertEquals(
-            ProviderCodes.AUTHORIZATION_REQUIRED,
-            presenter.execute(request("browser.snapshot", id = "after-block"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
+        assertSame("unblocking is not a new grant", grant, presenter.registry.currentGrant())
+        assertTrue("control resumes without another Allow", presenter.state.value.agentOn)
+        assertTrue(
+            "an unblocked command runs under the kept grant",
+            presenter.execute(request("browser.snapshot", id = "after-block"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.ok,
         )
-        assertEquals(
-            ProviderCodes.AUTHORIZATION_REQUIRED,
-            presenter.execute(request("browser.capture", id = "after-block-capture"), presenter.registry, ProviderMode.AGENT, null, 1_000L) { 0L }.errorCode,
-        )
-        assertEquals("blocked/unblocked commands never touched the driver", driverCalls, page.driverCalls)
+        assertTrue(page.driverCalls > driverCalls)
         assertTrue(presenter.allow())
         assertTrue(presenter.state.value.agentOn)
 

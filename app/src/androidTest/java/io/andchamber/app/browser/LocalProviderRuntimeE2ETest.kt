@@ -29,7 +29,10 @@ private const val SENTINEL_COOKIE = "ac_sentinel"
  * Koin graph: no controller/server/authenticator/launcher override and no loadKoinModules. Runtime
  * install/start go through RuntimeService exactly as Home does; the chat page is the real guest
  * server. The only fixture is the target browser page's HTTPS response, attached after a real
- * `browser.open`, and the only human grant is a host `adb shell input tap` on "Allow agent".
+ * `browser.open`. An explicit open gets the ready default grant through the presenter's own allow
+ * verification; the remaining real human UI taps are "Take over" (revocation) and "Resume agent"
+ * (the explicit handback after it). The fixture page is then brought by the production manual
+ * navigation entry (`navigateManual`), whose own ready default grant is observed from native diag.
  *
  * The test deliberately FAILS (never skips) when the guest is not x86_64, the installed
  * @openchamber/web is not the stock npm version from the runtime manifest, the guest plugin files
@@ -161,6 +164,12 @@ class LocalProviderRuntimeE2ETest {
             if (!endpointFound) run.fail("plugin-endpoint-missing")
             run.record("toolTransport", LocalBrowserToolClient.AgentReply.TRANSPORT)
             val agent = LocalBrowserToolClient(run, endpoint!!, sessionId)
+            // Test-only observer: every production browser page gets the in-memory fixture client.
+            // It serves only exact fixture URLs; the initial example.com page still loads normally.
+            presenter.installPageDecorator { page ->
+                val view = page.view as? WebView ?: return@installPageDecorator
+                OpenChamberProviderFixtures.attach(view, view.webViewClient)
+            }
 
             run.countOnce("open")
             val opened = agent.call("browser.open", JSONObject().put("url", "https://example.com/"))
@@ -169,18 +178,19 @@ class LocalProviderRuntimeE2ETest {
             if (tabId.isBlank()) run.fail("browser-open-tab-missing")
             run.record("openedTabId", tabId)
 
-            val targetView = waitTargetPage(run, presenter, tabId)
-            val allowTarget = run.awaitHumanTap(
-                phase = "await-allow-tap",
-                label = "Allow agent",
-                sourceViewHandle = { presenter.state.value.viewHandle.takeIf { it != 0 } },
-            ) { presenter.state.value.agentOn }
-            if (allowTarget == null) run.fail("allow-target-not-observed")
-            run.phase("allow-active")
+            waitTargetPage(run, presenter, tabId)
+            // Agent-first baseline: this explicit open performs one ready default grant. The
+            // presenter still runs its real allow verification; the test only observes the grant.
+            val defaultGrant = run.waitFor("open-default-grant", 30_000) {
+                val state = presenter.state.value
+                state.agentOn && state.selectedTabId == tabId && state.mode.name == "AGENT"
+            }
+            if (!defaultGrant) run.fail("open-default-grant-missing: ${presenter.state.value}")
+            run.phase("initial-open-granted")
 
-            // Fixture preparation only: the host taps the production "Take over" button to return
-            // the current tab to manual navigation, then the test loads the fixed fixture as a
-            // manual document. This is not a new tool open or an action result.
+            // Revocation check: the host taps the production "Take over" button. The fixture page
+            // is then brought by the production manual navigation entry, not a test load or Allow
+            // tap; its ready default grant is observed from diag below.
             val takeoverTarget = run.awaitHumanTap(
                 phase = "await-takeover-tap",
                 label = "Take over",
@@ -189,14 +199,29 @@ class LocalProviderRuntimeE2ETest {
             if (takeoverTarget == null) run.fail("takeover-target-not-observed")
             run.phase("takeover-active")
 
-            attachTargetFixture(run, presenter, tabId, targetView)
-            val fixtureAllowTarget = run.awaitHumanTap(
-                phase = "await-allow-fixture-tap",
-                label = "Allow agent",
+            // The person's real UI handback after an explicit takeover: tap Resume agent and
+            // observe the real presenter grant, not a test-side state change.
+            val resumeTarget = run.awaitHumanTap(
+                phase = "await-resume-agent-tap",
+                label = "Resume agent",
                 sourceViewHandle = { presenter.state.value.viewHandle.takeIf { it != 0 } },
             ) { presenter.state.value.agentOn }
-            if (fixtureAllowTarget == null) run.fail("fixture-allow-target-not-observed")
-            run.phase("fixture-allow-active")
+            if (resumeTarget == null) run.fail("resume-agent-target-not-observed")
+            run.phase("resume-agent-active")
+
+            run.phase("fixture-manual-navigate")
+            val navigated = runBlocking { presenter.navigateManual(OpenChamberProviderFixtures.ORIGIN) }
+            if (!navigated.ok) run.fail("fixture-manual-navigate-failed: ${navigated.errorCode}")
+            val fixtureTabId = presenter.state.value.selectedTabId.orEmpty()
+            if (fixtureTabId.isBlank()) run.fail("fixture-manual-navigate-tab-missing")
+            val fixtureView = waitTargetPage(run, presenter, fixtureTabId)
+            val fixtureGrant = run.waitFor("fixture-default-grant", 30_000) {
+                val state = presenter.state.value
+                state.agentOn && state.selectedTabId == fixtureTabId && state.mode.name == "AGENT"
+            }
+            if (!fixtureGrant) run.fail("fixture-default-grant-missing: ${presenter.state.value}")
+            run.waitFixtureDocument(presenter, fixtureView, fixtureTabId)
+            run.phase("fixture-granted")
 
             run.bump("snapshot")
             val firstSnapshot = agent.call("browser.snapshot")
@@ -259,11 +284,11 @@ class LocalProviderRuntimeE2ETest {
             if (!finalSnapshot.ok || finalSnapshot.data == null) run.fail("final-snapshot-failed: ${finalSnapshot.error}")
             val finalText = finalSnapshot.data.optString("text")
             // Snapshot refs only cover visible elements; scrolling legitimately removes the input.
-            if (run.onMain { presenter.currentView() !== targetView } || presenter.state.value.selectedTabId != tabId) {
+            if (run.onMain { presenter.currentView() !== fixtureView } || presenter.state.value.selectedTabId != fixtureTabId) {
                 run.fail("type-observation-source-changed")
             }
-            val observedNote = run.eval(targetView, "document.getElementById('note')&&document.getElementById('note').value")
-            if (run.onMain { presenter.currentView() !== targetView } || presenter.state.value.selectedTabId != tabId) {
+            val observedNote = run.eval(fixtureView, "document.getElementById('note')&&document.getElementById('note').value")
+            if (run.onMain { presenter.currentView() !== fixtureView } || presenter.state.value.selectedTabId != fixtureTabId) {
                 run.fail("type-observation-source-changed")
             }
             run.record("observedFixtureInput", observedNote ?: JSONObject.NULL)
@@ -501,25 +526,6 @@ class LocalProviderRuntimeE2ETest {
         return page!!
     }
 
-    private fun attachTargetFixture(
-        run: LocalProviderRun,
-        presenter: io.andchamber.app.ui.browser.NativeBrowserPresenter,
-        tabId: String,
-        view: WebView,
-    ): WebView {
-        // The browser page WebView only: the existing androidTest fixture wraps its production
-        // client and serves exact example.com URLs from memory. The chat page is not touched.
-        run.onMain {
-            OpenChamberProviderFixtures.attach(view, view.webViewClient)
-            view.loadUrl(OpenChamberProviderFixtures.ORIGIN)
-        }
-        // Read the real document and its identities, not the registry tab.url. The registry only
-        // updates its URL on a later provider open/snapshot; state pageReady at this point can still
-        // carry the old metadata URL.
-        run.waitFixtureDocument(presenter, view, tabId)
-        return view
-    }
-
     private fun verifyStopRestart(
         run: LocalProviderRun,
         base: String,
@@ -609,6 +615,7 @@ class LocalProviderRuntimeE2ETest {
         run.record("restartToolEndpoint", run.waitToolEndpoint(RuntimePaths.under(context.filesDir)))
         val sessionId = run.createSession(base, auth.header)
         val agent = LocalBrowserToolClient(run, endpoint!!, sessionId)
+        // A restart is not an explicit open: no ready default grant may be minted by the reconnect.
         run.bump("unauthorizedSnapshot")
         val denied = agent.call("browser.snapshot")
         if (denied.ok) run.fail("restart-auto-granted: old token or browser read succeeded")

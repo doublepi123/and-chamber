@@ -41,6 +41,8 @@ internal object LocalProviderRegressionProtocol {
     val UI_LABELS: Set<String> = setOf(
         "More", "Computer layout", "Phone layout", "Confirm", "Mouse", "Touch",
         "Enlarge", "Restore", "Allow agent", "Take over", "Reopen", "Open", "Close", "Turn off",
+        "Full screen", "Small window", "Resume agent", "Close page", "Hide browser", "Show browser",
+        "Web address", "Go", "Stop editing", "Reload page", "Clear site data",
         "Browser", "New chat", "New session", "Open sessions and projects",
         "AndChamber menu", "Open web page", "Address", "Cancel",
     )
@@ -112,6 +114,7 @@ internal object LocalProviderRegressionProtocol {
         "native-entry-state",
         "a11y-off:begin",
         "a11y-off:end",
+        "ime:hide",
     )
 
     private val FIXTURE_FIELDS = setOf("login-user", "Sign in", "note", "Apply")

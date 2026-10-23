@@ -11,16 +11,19 @@ const lifecycle = require('../lib/provider_lifecycle_gate_probe.cjs');
 
 /**
  * Scene-budget device. Every serial device read advances a fake clock by [readMs], so one lifecycle read costs
- * several round trips. Reads are counted per stage, and the page keeps its real Enlarge/Restore state. A mutation
- * advances the clock by [tapMs] (a real tap is short and well inside the per-stage budget).
+ * several round trips. Reads are counted per stage. The Float window reports a real small/full UI surface and
+ * the page keeps its own metrics; the window cycle no longer produces a restore result.
  */
-function timedDevice({ readMs = 900, tapMs = 300, restoreKind = 'Restored', restoreY = 893, sy = 893 } = {}) {
+function timedDevice({ readMs = 900, tapMs = 300, sy = 893, surfaceChanges = true } = {}) {
   const clock = { t: 0 };
+  const smallSurface = { left: 0, top: 0, right: 390, bottom: 800 };
+  const fullSurface = { left: 0, top: 0, right: 1024, bottom: 800 };
   const dev = {
     producer: { phase: 'lifecycle-diag', selectedTabId: 'tab-a', tabIds: ['tab-a'], pageRetired: false, agentOn: true, grantForSelected: true, mousePressActive: false, mode: 'MANUAL', desktopMode: false, mouseMode: true, pageReady: true, viewHandle: 7, documentEpoch: 1, restore: null, recorderReady: true, totalClicks: 0, recordedDocuments: {}, lastRetired: null },
     metrics: { ua: 'mobile', clientWidth: 390, media1000: false, sy, loads: 1, timeOrigin: 1700000000.5 },
     fixture: { page: { url: 'https://example.com/openchamber-provider-mouse', loads: 1, posts: 0 }, postArrivals: 0, native: null },
     enlarged: false,
+    surfaceChanges,
     counts: { taps: 0, reads: 0, mutations: 0 },
     order: [],
   };
@@ -36,19 +39,17 @@ function timedDevice({ readMs = 900, tapMs = 300, restoreKind = 'Restored', rest
     readLifecycleRaw: () => read('diag', dev.producer),
     readFixtureRaw: () => read('fixture', dev.fixture),
     readMetricsRaw: () => read('metrics', { ...dev.metrics, sy: dev.metrics.sy }),
-    readUiRaw: () => read('ui', { enlarged: dev.enlarged, surface: { left: 0, top: 0, right: 1024, bottom: 800 } }),
+    readUiRaw: () => read('ui', {
+      enlarged: dev.enlarged,
+      surface: dev.enlarged && dev.surfaceChanges ? fullSurface : smallSurface,
+    }),
     tapLabelRaw: async (label) => {
       clock.t += tapMs;
       dev.counts.taps += 1;
       dev.counts.mutations += 1;
       dev.order.push(`tap:${label}`);
-      if (label === 'Enlarge') { dev.enlarged = true; dev.producer.restore = null; return true; }
-      if (label === 'Restore') {
-        dev.enlarged = false;
-        dev.producer.restore = restoreKind === 'Restored' ? { kind: 'Restored', actualX: 0, actualY: restoreY } : { kind: restoreKind, reason: 'PAGE_CHANGED' };
-        dev.metrics.sy = restoreY;
-        return true;
-      }
+      if (label === 'Full screen') { dev.enlarged = true; return true; }
+      if (label === 'Small window') { dev.enlarged = false; return true; }
       return false;
     },
     call: async () => { dev.counts.mutations += 1; return { ok: false, error: { code: 'UNSUPPORTED' } }; },
@@ -56,7 +57,7 @@ function timedDevice({ readMs = 900, tapMs = 300, restoreKind = 'Restored', rest
   return { dev, io, clock };
 }
 
-test('scene budget: 90s covers serial reads that together exceed 20s, and a correct restore still passes', async () => {
+test('scene budget: 90s covers serial reads that together exceed 20s, and a correct window cycle still passes', async () => {
   // Four serial reads of ~1.6 s each make one lifecycle read ~6.4 s, the real order of magnitude on the device.
   const { dev, io, clock } = timedDevice({ readMs: 1600, tapMs: 300 });
   const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
@@ -65,22 +66,24 @@ test('scene budget: 90s covers serial reads that together exceed 20s, and a corr
   const sceneMs = clock.t - started;
   assert.ok(sceneMs > 20000, `the scene really spent more than the old 20s limit: ${sceneMs}ms`);
   assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 600));
-  assert.equal(flow.restore.kind, 'Restored');
+  assert.equal(flow.expanded.enlarged, true);
+  assert.equal(flow.after.enlarged, false);
+  assert.equal(flow.checks.surfaceChangedFromFull, true);
   // Every stage stays inside its own per-stage budget; the scene total is what exceeded 20s.
   for (const stage of flow.stages.filter((item) => item.elapsedMs != null && item.outcome !== 'read')) {
     assert.ok(stage.elapsedMs <= 20000, `${stage.label} ${stage.elapsedMs}ms is inside its own 20s stage budget`);
   }
-  assert.deepEqual(dev.order.filter((name) => name.startsWith('tap:')), ['tap:Enlarge', 'tap:Restore'], 'one Enlarge and one Restore only');
+  assert.deepEqual(dev.order.filter((name) => name.startsWith('tap:')), ['tap:Full screen', 'tap:Small window'], 'one Full screen and one Small window only');
 });
 
-test('a wrong restore value stays FAIL under the 90s scene budget (no product value is hidden by budget)', async () => {
-  const { io, clock } = timedDevice({ readMs: 1600, tapMs: 300, restoreY: 488 });
+test('a Full screen with no real surface change stays FAIL on real serial reads', async () => {
+  const { io, clock } = timedDevice({ readMs: 1600, tapMs: 300, surfaceChanges: false });
   const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
   const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
-  assert.ok(clock.t > 20000, 'the scene ran past the old 20s limit');
+  assert.ok(clock.t > 6000, 'the case ran real serial reads, not a constant');
   assert.equal(flow.ok, false);
-  assert.equal(flow.reason, 'enlarge-restore-same-doc-failed');
-  assert.equal(flow.restore.actual.y, 488, 'the actual wrong value is reported, not replaced');
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.surfaceChanged, false, 'the real UI facts decide, not the budget');
 });
 
 test('a scene longer than its budget is cut in real time: the timeout keeps stages, last read and blocks later taps', async () => {
@@ -95,8 +98,8 @@ test('a scene longer than its budget is cut in real time: the timeout keeps stag
     readLifecycleRaw: async () => { dev.reads += 1; await slow(40); return { phase: 'lifecycle-diag', selectedTabId: 'tab-a', tabIds: ['tab-a'], pageRetired: false, agentOn: true, grantForSelected: true, mousePressActive: false, mode: 'MANUAL', desktopMode: false, mouseMode: true, pageReady: true, viewHandle: 7, documentEpoch: 1, restore: dev.restore, recorderReady: true, totalClicks: 0, recordedDocuments: {}, lastRetired: null }; },
     readFixtureRaw: async () => { await slow(40); return { page: { url: 'x', loads: 1, posts: 0 }, postArrivals: 0, native: null }; },
     readMetricsRaw: async () => { await slow(40); return { ua: 'mobile', clientWidth: 390, media1000: false, sy: 893, loads: 1, timeOrigin: 1700000000.5 }; },
-    readUiRaw: async () => { await slow(40); return { enlarged: dev.enlarged, surface: { left: 0, top: 0, right: 1, bottom: 1 } }; },
-    tapLabelRaw: async (label) => { dev.mutations += 1; await slow(5); if (label === 'Enlarge') { dev.enlarged = true; dev.restore = null; } return true; },
+    readUiRaw: async () => { await slow(40); return { enlarged: dev.enlarged, surface: dev.enlarged ? { left: 0, top: 0, right: 1024, bottom: 800 } : { left: 0, top: 0, right: 390, bottom: 800 } }; },
+    tapLabelRaw: async (label) => { dev.mutations += 1; await slow(5); if (label === 'Full screen') { dev.enlarged = true; dev.restore = null; } return true; },
     call: async () => ({ ok: false, error: { code: 'UNSUPPORTED' } }),
   };
   const fence = harness.createCaseFence();
@@ -304,117 +307,190 @@ test('an unreadable mouse state refuses the case rather than tapping blind', asy
 });
 
 /**
- * B5-2 user-scroll-wins device. Saved offset 893. Enlarge clamps the page to the expanded Y (488). The user's
- * two-finger move sets the Y to `userY`. Restore returns `restoreKind`/`restoreReason`. Each knob is set by the case.
- * The restore is observed only after a clear: the device clears restore on Enlarge, as Core does.
+ * Float/Full device shared by the three B5 window-cycle cases. It reports a real small and full UI
+ * surface, the page's own metrics, and the producer identity. The window cycle produces no restore
+ * result; only the page/UI facts are used. Each knob models one contract violation.
  */
-function userScrollDevice({ userY = 300, expandedY = 488, restoreKind = 'NotSaved', restoreReason = 'INTERACTION_CHANGED', restoreActualY = null, clearOnEnlarge = true, identityChanged = false, wheelMoves = true } = {}) {
-  // The previous cycle's result is still present before Enlarge. When Enlarge does not clear it, it must be seen.
-  const dev = { enlarged: false, sy: 893, restore: clearOnEnlarge ? null : { kind: 'Restored', reason: null, actual: { x: 0, y: 893 } }, taps: [], wheels: 0, loads: 1, timeOrigin: 1700000000.5, tabId: 'tab-a', handle: 7, identityChanged: false, clock: 0 };
+function b5Device({
+  sy = 893,
+  userY = 400,
+  surfaceChanges = true,
+  fullScrollDelta = 0,
+  dropGrantOnFull = false,
+  smallToOld = false,
+  timeOriginOnScroll = false,
+  unknownIdentityOnOpen = false,
+  newSy = 0,
+  newTimeOrigin = 1700000999.25,
+  openReturnsSmall = false,
+  noSurface = false,
+  noClientWidth = false,
+} = {}) {
+  const smallSurface = { left: 0, top: 0, right: 390, bottom: 800 };
+  const fullSurface = { left: 0, top: 0, right: 1024, bottom: 800 };
+  const dev = {
+    enlarged: false, sy, initialSy: sy, tabId: 'tab-a', tabs: ['tab-a'], timeOrigin: 1700000000.5,
+    handle: 7, loads: 2, grant: true, agentOn: true, mode: 'AGENT', clock: 0,
+    taps: [], wheels: 0, opens: 0,
+  };
+  const surfaceFor = (enlarged) => {
+    if (noSurface) return null;
+    return enlarged && surfaceChanges ? fullSurface : smallSurface;
+  };
   const io = {
-    now: () => dev.clock || 0,
-    sleepMs: async (ms) => { dev.clock = (dev.clock || 0) + ms; await new Promise((r) => setImmediate(r)); },
-    readLifecycleRaw: async () => ({ phase: 'lifecycle-diag', selectedTabId: dev.tabId, tabIds: [dev.tabId], pageRetired: false, agentOn: false, grantForSelected: false, mousePressActive: false, mode: 'MANUAL', desktopMode: false, mouseMode: true, pageReady: true, viewHandle: dev.handle, documentEpoch: 1, restore: dev.restore, recorderReady: true, totalClicks: 0, recordedDocuments: {}, lastRetired: null }),
-    readFixtureRaw: async () => ({ page: { url: 'https://example.com/openchamber-provider-mouse', loads: dev.loads, posts: 0 }, postArrivals: 0, native: { physicalFrame: { left: 0, top: 0, width: 390, height: 800 } } }),
-    readMetricsRaw: async () => ({ ua: 'mobile', clientWidth: 390, media1000: false, sy: dev.sy, loads: dev.loads, timeOrigin: dev.identityChanged ? 1 : dev.timeOrigin }),
-    readUiRaw: async () => ({ enlarged: dev.enlarged, surface: { left: 0, top: 0, right: 1, bottom: 1 } }),
+    now: () => dev.clock,
+    sleepMs: async (ms) => { dev.clock += ms; await new Promise((r) => setImmediate(r)); },
+    readLifecycleRaw: async () => ({
+      phase: 'lifecycle-diag', selectedTabId: dev.tabId, tabIds: dev.tabs, pageRetired: false,
+      agentOn: dev.agentOn, grantForSelected: dev.grant, mousePressActive: false, mode: dev.mode,
+      desktopMode: true, mouseMode: true, pageReady: true, viewHandle: dev.handle, documentEpoch: 1,
+      restore: null, recorderReady: true, totalClicks: 0, recordedDocuments: {}, lastRetired: null,
+    }),
+    readFixtureRaw: async () => ({
+      page: { url: URL_MOUSE, loads: dev.loads, posts: 0 },
+      postArrivals: 0,
+      native: { physicalFrame: { left: 0, top: 0, width: 390, height: 800 } },
+    }),
+    readMetricsRaw: async () => ({
+      ua: 'desktop', clientWidth: noClientWidth ? null : 1024, media1000: true, sy: dev.sy,
+      loads: dev.loads, timeOrigin: dev.timeOrigin,
+    }),
+    readUiRaw: async () => ({ enlarged: dev.enlarged, surface: surfaceFor(dev.enlarged) }),
     tapLabelRaw: async (label) => {
       dev.taps.push(label);
-      if (label === 'Enlarge') {
+      if (label === 'Full screen') {
         dev.enlarged = true;
-        dev.sy = Math.min(dev.sy, expandedY);
-        if (clearOnEnlarge) dev.restore = null;
+        if (dropGrantOnFull) { dev.grant = false; dev.agentOn = false; dev.mode = 'MANUAL'; }
+        dev.sy += fullScrollDelta;
       }
-      if (label === 'Restore') {
-        // A real document change happens during the restore cycle, not before the saved read.
-        if (identityChanged) dev.identityChanged = true;
+      if (label === 'Small window') {
         dev.enlarged = false;
-        // Restore is observed only once it is set: the case decides its kind, reason and actual Y.
-        dev.restore = restoreKind === 'NotSaved'
-          ? { kind: 'NotSaved', reason: restoreReason, actual: null }
-          : { kind: restoreKind, reason: restoreReason, actual: restoreActualY == null ? null : { x: 0, y: restoreActualY } };
-        if (restoreActualY != null) dev.sy = restoreActualY;
+        if (smallToOld) dev.sy = dev.initialSy;
       }
       return true;
     },
     twoFingerRaw: async () => {
       dev.wheels += 1;
-      if (wheelMoves) dev.sy = userY;
+      dev.sy = userY;
+      if (timeOriginOnScroll) dev.timeOrigin += 1;
       return true;
     },
-    call: async () => ({ ok: false, error: { code: 'UNSUPPORTED' } }),
-    readLifecycle: undefined,
+    newDocumentUrl: URL_SECOND,
+    call: async (action, input = {}) => {
+      if (action !== 'browser.open') return { ok: false, error: { code: 'UNSUPPORTED' } };
+      dev.opens += 1;
+      dev.sy = newSy;
+      if (unknownIdentityOnOpen) {
+        // Same tab/handle but an unreadable timeOrigin: identity is unknown, not a changed document.
+        dev.timeOrigin = null;
+      } else {
+        dev.tabId = 'tab-b';
+        dev.tabs = ['tab-a', 'tab-b'];
+        dev.handle = 9;
+        dev.timeOrigin = newTimeOrigin;
+      }
+      if (openReturnsSmall) dev.enlarged = false;
+      return { ok: true, data: { tabId: dev.tabId, url: input.url } };
+    },
   };
-  // identityChanged is applied only at the Restore tap (see tapLabelRaw), never before the saved read.
-  return { dev, io };
-}
-
-function userScrollAdapters(io) {
   const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  return { ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs };
+  const deps = {
+    ...adapters,
+    readLifecycle: adapters.readLifecycle,
+    now: io.now,
+    sleep: io.sleepMs,
+    openNewDocument: () => adapters.openNewDocument(),
+  };
+  return { dev, io, adapters, deps };
 }
 
-test('B5-2: a restore that is not cleared on enlarge stops before any user move', async () => {
-  const { io, dev } = userScrollDevice({ clearOnEnlarge: false });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-  assert.equal(flow.ok, false);
-  assert.equal(flow.reason, 'restore-not-cleared-on-enlarge');
-  assert.equal(dev.wheels, 0, 'no user scroll was sent after the uncleared state was seen');
-});
-
-test('B5-2: a wheel that does not change the expanded Y is refused', async () => {
-  const { io } = userScrollDevice({ wheelMoves: false, restoreKind: 'NotSaved', restoreReason: 'INTERACTION_CHANGED' });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-  assert.equal(flow.ok, false);
-  assert.equal(flow.reason, 'user-scroll-did-not-move');
-});
-
-test('B5-2: the exact INTERACTION_CHANGED drop with the new user position kept passes', async () => {
-  const { io } = userScrollDevice({ userY: 300, expandedY: 488, restoreKind: 'NotSaved', restoreReason: 'INTERACTION_CHANGED' });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 400));
+test('B5-1: Full screen changes the real surface and Small window returns it without reflow or scroll change', async () => {
+  const { deps } = b5Device();
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
+  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 700));
   assert.equal(flow.reason, 'completed');
-  assert.equal(flow.restore.reason, 'INTERACTION_CHANGED');
-  assert.equal(flow.after.sy, 300, 'the new user position is kept');
-  assert.equal(flow.checks.acceptedRestore, true);
+  assert.deepEqual(flow.saved.surface, { left: 0, top: 0, right: 390, bottom: 800 });
+  assert.deepEqual(flow.expanded.surface, { left: 0, top: 0, right: 1024, bottom: 800 });
+  assert.deepEqual(flow.after.surface, { left: 0, top: 0, right: 390, bottom: 800 });
+  assert.equal(flow.saved.sy, flow.expanded.sy);
+  assert.equal(flow.saved.sy, flow.after.sy, 'no user scroll means the offset stays put');
+  assert.equal(flow.saved.grant, true);
+  assert.equal(flow.after.grant, true);
+  assert.equal(flow.checks.surfaceChangedFromFull, true);
 });
 
-test('B5-2: the same intentional reason but after returns to the old 893 fails', async () => {
-  const { io } = userScrollDevice({ userY: 300, restoreKind: 'NotSaved', restoreReason: 'INTERACTION_CHANGED', restoreActualY: 893 });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-  assert.equal(flow.ok, false, 'an applied old offset never passes');
-  assert.equal(flow.checks.notOld, false);
-});
-
-test('B5-2: every other NotSaved reason fails even when the position coincides', async () => {
-  for (const reason of ['NO_TARGET_LAYOUT', 'CAPTURE_FAILED', 'NO_BOOKMARK', 'READBACK_FAILED', 'LOADING']) {
-    const { io } = userScrollDevice({ userY: 300, restoreKind: 'NotSaved', restoreReason: reason });
-    const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-    assert.equal(flow.ok, false, `${reason} must not pass`);
-    assert.equal(flow.reason, 'user-scroll-restore-unexpected-kind', `${reason} is an unexpected kind`);
-  }
-});
-
-test('B5-2: a Discarded or Restored restore is not the accepted outcome for a moved user position', async () => {
-  for (const kind of ['Discarded', 'Restored', 'Clamped']) {
-    const { io } = userScrollDevice({ userY: 300, restoreKind: kind, restoreReason: 'SUPERSEDED', restoreActualY: 300 });
-    const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
-    assert.equal(flow.ok, false, `${kind} must not pass`);
-  }
-});
-
-test('B5-2: a changed document or load count keeps the case failing even with the right reason and position', async () => {
-  const { io } = userScrollDevice({ userY: 300, restoreKind: 'NotSaved', restoreReason: 'INTERACTION_CHANGED', identityChanged: true });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
+test('B5-1: a Full screen with the same surface refuses as a UI contract failure', async () => {
+  const { deps } = b5Device({ surfaceChanges: false });
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
   assert.equal(flow.ok, false);
-  assert.equal(flow.checks.identity, false, 'identity is required');
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.surfaceChanged, false);
 });
 
-test('B5-2: a failed case still carries its stages and the last read as evidence', async () => {
-  const { io } = userScrollDevice({ wheelMoves: false });
-  const flow = await lifecycle.runUserScrollWins(userScrollAdapters(io));
+test('B5-1: the page scrolling during Full screen without a user scroll refuses', async () => {
+  const { deps } = b5Device({ fullScrollDelta: 12 });
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.scrollHeld, false);
+});
+
+test('B5-1: losing the grant on Full screen refuses instead of pretending control', async () => {
+  const { deps } = b5Device({ dropGrantOnFull: true });
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.grantKept, false);
+});
+
+test('B5-1: a missing surface or fixed viewport refuses before any tap', async () => {
+  for (const [options, reason] of [
+    [{ noSurface: true }, 'precondition-surface-missing'],
+    [{ noClientWidth: true }, 'precondition-viewport-unreadable'],
+  ]) {
+    const { deps, dev } = b5Device(options);
+    const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
+    assert.equal(flow.ok, false, reason);
+    assert.equal(flow.reason, reason);
+    assert.deepEqual(dev.taps, [], 'missing producer fields refuse before UI actions');
+  }
+});
+
+test('B5-2: a user scroll in Full screen is kept after Small window; no old offset is applied', async () => {
+  const { deps } = b5Device({ userY: 400 });
+  const flow = await lifecycle.runUserScrollWins(deps);
+  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 700));
+  assert.equal(flow.userMoved.sy, 400);
+  assert.equal(flow.after.sy, 400, 'the user position is kept');
+  assert.equal(flow.checks.userScrollKept, true);
+  assert.equal(flow.checks.userDiffersFromOld, true);
+  assert.equal(flow.saved.sy, 893, 'the old offset is unchanged in evidence');
+});
+
+test('B5-2: a two-finger move that does not change the page refuses', async () => {
+  const { deps } = b5Device({ userY: 893 });
+  const flow = await lifecycle.runUserScrollWins(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'user-scroll-contract-failed');
+  assert.equal(flow.checks.scrollMoved, false);
   assert.ok(Array.isArray(flow.stages) && flow.stages.length > 0, 'stages are kept on a normal failure');
-  assert.ok(flow.expanded && flow.expanded.sy === 488, 'the expanded Y is recorded');
+});
+
+test('B5-2: Small window jumping back to the old offset fails even after a real user scroll', async () => {
+  const { deps } = b5Device({ userY: 400, smallToOld: true });
+  const flow = await lifecycle.runUserScrollWins(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'user-scroll-wins-failed');
+  assert.equal(flow.checks.userScrollKept, false);
+  assert.equal(flow.after.sy, 893);
+});
+
+test('B5-2: the document changing during the user scroll refuses the case', async () => {
+  const { deps } = b5Device({ userY: 400, timeOriginOnScroll: true });
+  const flow = await lifecycle.runUserScrollWins(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'user-scroll-contract-failed');
+  assert.equal(flow.checks.samePage, false);
 });
 
 // B5 target observation: read-only, diagnosis only. These tests pin three things: the metadata is passed through with
@@ -470,8 +546,8 @@ test('the Stage snapshot keeps the restoreTarget metadata, not only the surface 
   const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
   io.tapLabelRaw = async (label) => {
     dev.tapOrder.push(label);
-    if (label === 'Enlarge') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true, surface: { left: 0, top: 0, right: 1024, bottom: 800 } }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Clamped', actualX: 0, actualY: 488 }; return true; }
+    if (label === 'Full screen') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true, surface: { left: 0, top: 0, right: 1024, bottom: 800 } }); return true; }
+    if (label === 'Small window') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Clamped', actualX: 0, actualY: 488 }; return true; }
     return false;
   };
   const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
@@ -480,19 +556,20 @@ test('the Stage snapshot keeps the restoreTarget metadata, not only the surface 
   assert.equal(withTarget[0].last.restoreTarget.targetHeightPx, 252);
 });
 
-test('the target metadata never makes a Clamped restore pass: the real gate decides, not the observation', async () => {
-  // The producer's observation says the target matched, but the restore is Clamped (488 vs saved 893).
+test('the target metadata never replaces the real UI contract, even when it says accepted', async () => {
+  // The producer's observation says the target matched, but Full screen reports the same surface size.
   const { dev, io } = deviceFrom({ metrics: { sy: 893 }, producer: { restore: null, restoreTarget: { ...sampleTarget, sampleAccepted: true, nativeHeight: 252, targetHeightPx: 252 } } });
   const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
   io.tapLabelRaw = async (label) => {
     dev.tapOrder.push(label);
-    if (label === 'Enlarge') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Clamped', actualX: 0, actualY: 488 }; return true; }
+    if (label === 'Full screen') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true }); return true; }
+    if (label === 'Small window') { dev.ui = uiJson({ enlarged: false }); return true; }
     return false;
   };
   const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
-  assert.equal(flow.ok, false, 'a matching observation does not turn a Clamped restore into a pass');
-  assert.equal(flow.restore.kind, 'Clamped');
+  assert.equal(flow.ok, false, 'the real surface facts decide, not the observation');
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.surfaceChanged, false);
 });
 
 test('--lifecycle-case refuses an unknown case and accepts only a whitelisted name', () => {
@@ -614,7 +691,7 @@ function deviceFrom(initial = {}) {
       dev.counts.taps += 1;
       dev.tapOrder.push(label);
       // Core clears the previous restore result when a new window cycle starts (Enlarge). The fake models that.
-      if (label === 'Enlarge') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true }); }
+      if (label === 'Full screen') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true }); }
       return true;
     },
     enableMouseRaw: async () => { dev.counts.mouse = (dev.counts.mouse || 0) + 1; dev.tapOrder.push('mouse:on'); dev.producer.mouseMode = true; return true; },
@@ -743,86 +820,63 @@ test('prepareLifecycleCase (POST): the baseline comes from this submit, not a0',
   assert.equal(setup.baseline.beforeArrivals, 0);
 });
 
-test('B5-1 real flow over the real adapter: saved offset, fresh Restored, same document, no reload', async () => {
-  const { dev, io } = deviceFrom({ metrics: { sy: 893 }, producer: { restore: null } });
-  const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  // The device answers Enlarge with a live surface, and Restore with a fresh Restored result at the saved offset.
-  io.tapLabelRaw = async (label) => {
-    dev.tapOrder.push(label);
-    if (label === 'Enlarge') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true, surface: { left: 0, top: 0, right: 1024, bottom: 800 } }); return true; }
-    if (label === 'Restore') {
-      dev.ui = uiJson({ enlarged: false });
-      dev.producer.restore = { kind: 'Restored', actualX: 0, actualY: 893 };
-      return true;
-    }
-    return false;
-  };
-  const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
+test('B5-1 real flow over the real adapter: real surfaces, same document, fixed viewport and grant', async () => {
+  const { deps, dev } = b5Device();
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
   assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 500));
-  assert.deepEqual(dev.tapOrder, ['Enlarge', 'Restore'], 'Enlarge once, then Restore once');
-  assert.equal(flow.restore.kind, 'Restored');
-  assert.equal(flow.saved.sy, 893, 'saved offset is the real one at Enlarge');
+  assert.deepEqual(dev.taps, ['Full screen', 'Small window'], 'Full screen once, then Small window once');
+  assert.equal(flow.saved.sy, 893, 'saved offset is the real one at Full screen');
+  assert.equal(flow.after.sy, 893, 'the page is not reflowed or scrolled by the window cycle');
 });
 
-test('B5-1: a stale restore from the previous cycle is never taken as this cycle result', async () => {
-  const { dev, io } = deviceFrom({ metrics: { sy: 893 }, producer: { restore: { kind: 'Restored', actualX: 0, actualY: 893 } } });
-  const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  io.tapLabelRaw = async (label) => {
-    if (label === 'Enlarge') { dev.ui = uiJson({ enlarged: true }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); return true; } // producer still shows the old result
-    return false;
-  };
-  const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
+test('B5-1: a stale restore object is not required and cannot influence the UI contract', async () => {
+  const { deps } = b5Device({ surfaceChanges: false });
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
+  assert.equal(flow.ok, false, 'no real surface change fails, regardless of any restore object');
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+});
+
+test('B5-1: the window cycle is judged only by UI/page facts, never a restore kind', async () => {
+  const { deps } = b5Device({ fullScrollDelta: 5 });
+  const flow = await lifecycle.runEnlargeRestoreSameDoc(deps);
   assert.equal(flow.ok, false);
-  // The stale result is still present on the enlarged window: the clear never happened, so the case stops there.
-  assert.equal(flow.reason, 'restore-not-cleared-on-enlarge');
+  assert.equal(flow.reason, 'full-screen-contract-failed');
+  assert.equal(flow.checks.scrollHeld, false);
+  assert.equal('restore' in flow, false, 'the flow does not depend on a RestoreResult event');
 });
 
-test('B5-1: a Clamped restore never passes even when the offset is near', async () => {
-  const { dev, io } = deviceFrom({ metrics: { sy: 893 } });
-  const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  io.tapLabelRaw = async (label) => {
-    if (label === 'Enlarge') { dev.ui = uiJson({ enlarged: true }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Clamped', actualX: 0, actualY: 488 }; return true; }
-    return false;
-  };
-  const flow = await lifecycle.runEnlargeRestoreSameDoc({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs });
+test('B5-3 document change: explicit open during Full screen keeps its own scroll and identity', async () => {
+  const { deps, dev } = b5Device({ newSy: 0 });
+  const flow = await lifecycle.runDocumentChangeDiscards(deps);
+  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 700));
+  assert.equal(flow.reason, 'completed');
+  assert.equal(flow.newDoc.timeOrigin, 1700000999.25);
+  assert.equal(flow.after.timeOrigin, 1700000999.25);
+  assert.equal(flow.after.sy, 0);
+  assert.equal(flow.checks.oldScrollNotApplied, true);
+  assert.equal(dev.opens, 1, 'the document change is one explicit open');
+});
+
+test('B5-3: an unreadable identity is not a changed document and refuses the case', async () => {
+  const { deps } = b5Device({ unknownIdentityOnOpen: true });
+  const flow = await lifecycle.runDocumentChangeDiscards(deps);
   assert.equal(flow.ok, false);
-  assert.equal(flow.restore.kind, 'Clamped');
+  assert.equal(flow.reason, 'new-document-not-observed');
 });
 
-test('B5-3 document change: a different timeOrigin is a changed document, the result is Discarded, nothing applied', async () => {
-  const { dev, io } = deviceFrom({ metrics: { sy: 300 } });
-  const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  io.tapLabelRaw = async (label) => {
-    if (label === 'Enlarge') { dev.producer.restore = null; dev.ui = uiJson({ enlarged: true }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Discarded', reason: 'PAGE_CHANGED' }; return true; }
-    return false;
-  };
-  io.call = async (action, input) => {
-    dev.counts.opens += 1;
-    // The new document: a different timeOrigin and offset 0, same owner, a new tab.
-    dev.metrics = metricsJson({ sy: 0, timeOrigin: 1700000999.25 });
-    dev.producer.selectedTabId = 'tab-b';
-    return { ok: true, data: { tabId: 'tab-b', url: input.url } };
-  };
-  const flow = await lifecycle.runDocumentChangeDiscards({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs, openNewDocument: () => adapters.openNewDocument() });
-  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 500));
-  assert.equal(flow.restore.kind, 'Discarded');
-  assert.equal(flow.changedDoc, true);
+test('B5-3: applying the old scroll to the new document fails', async () => {
+  const { deps } = b5Device({ newSy: 893 });
+  const flow = await lifecycle.runDocumentChangeDiscards(deps);
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'document-change-failed');
+  assert.equal(flow.checks.oldScrollNotApplied, false);
 });
 
-test('B5-3: an unknown identity is not a changed document and never passes', async () => {
-  const { dev, io } = deviceFrom({ metrics: { sy: 300 } });
-  const adapters = harness.createLifecycleGateAdapters(io, harness.createCaseFence());
-  io.tapLabelRaw = async (label) => {
-    if (label === 'Enlarge') { dev.ui = uiJson({ enlarged: true }); return true; }
-    if (label === 'Restore') { dev.ui = uiJson({ enlarged: false }); dev.producer.restore = { kind: 'Discarded', reason: 'PAGE_CHANGED' }; return true; }
-    return false;
-  };
-  dev.metrics.timeOrigin = null;
-  const flow = await lifecycle.runDocumentChangeDiscards({ ...adapters, readLifecycle: adapters.readLifecycle, now: io.now, sleep: io.sleepMs, openNewDocument: () => adapters.openNewDocument() });
-  assert.equal(flow.ok, false, 'null timeOrigin is unknown, not a changed document');
+test('B5-3: an explicit open that already returns the small window needs no extra tap', async () => {
+  const { deps, dev } = b5Device({ openReturnsSmall: true });
+  const flow = await lifecycle.runDocumentChangeDiscards(deps);
+  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 700));
+  assert.deepEqual(dev.taps, ['Full screen'], 'Small window is not tapped when the open already returned it');
 });
 
 test('B3 mode: mobile to desktop, A->B->A keeps UA, clientWidth, handle, timeOrigin, loads, posts; no modeSeq claim', async () => {
@@ -933,4 +987,47 @@ test('focus values accept lifecycle-gate and reject unknown focus', () => {
   assert.throws(() => harness.parseArgs(['--serial', 'emulator-5580', '--out', '/tmp/out', '--focus', 'other']), /lifecycle-gate/);
   const parsed = harness.parseArgs(['--serial', 'emulator-5580', '--out', '/tmp/out', '--focus', 'lifecycle-gate', '--source', '/tmp/no-cli']);
   assert.equal(parsed.focus, 'lifecycle-gate');
+});
+
+test('lifecycle allow reads the default grant; a hand-back needs a proven takeover', async () => {
+  const state = { grant: true, mode: 'AGENT', agentOn: true, taps: 0, grantAfterTap: false };
+  let clock = 0;
+  const io = {
+    readLifecycleRaw: async () => ({ phase: 'lifecycle-diag', selectedTabId: 'tab-a', grantForSelected: state.grant, mode: state.mode, agentOn: state.agentOn }),
+    tapLabelRaw: async (label) => {
+      assert.equal(label, 'Resume agent');
+      state.taps += 1;
+      if (state.grantAfterTap) state.grant = true;
+      return true;
+    },
+    now: () => clock,
+    sleepMs: async (ms) => { clock += ms; },
+  };
+  const adapters = harness.createLifecycleGateAdapters(io);
+
+  const granted = await adapters.allow();
+  assert.equal(granted.ok, true);
+  assert.equal(granted.source, 'default-grant');
+  assert.equal(granted.tapped, false);
+  assert.equal(state.taps, 0, 'default control needs no tap');
+
+  // A manual page with no grant is not a proven takeover for a hand-back until the diag says so.
+  state.grant = false; state.mode = 'MANUAL'; state.agentOn = false; state.grantAfterTap = false; state.taps = 0;
+  const refused = await adapters.allow({ handback: true });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.detail, 'tapped-without-grant');
+  assert.equal(state.taps, 1, 'one hand-back tap, never retried');
+
+  state.grantAfterTap = true; state.taps = 0;
+  const handed = await adapters.allow({ handback: true });
+  assert.equal(handed.ok, true);
+  assert.equal(handed.source, 'manual-handback');
+  assert.equal(state.taps, 1, 'the tap alone never passes; the diag read after it does');
+
+  // Without the explicit takeover hand-back option a missing default grant is reported, not tapped.
+  state.grant = false; state.grantAfterTap = false; state.taps = 0;
+  const missing = await adapters.allow();
+  assert.equal(missing.ok, false);
+  assert.equal(missing.source, 'no-default-grant');
+  assert.equal(state.taps, 0);
 });

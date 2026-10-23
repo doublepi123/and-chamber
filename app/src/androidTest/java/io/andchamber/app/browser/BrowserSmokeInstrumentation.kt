@@ -351,7 +351,8 @@ class BrowserSmokeInstrumentation : Instrumentation() {
                 val raw = page.eval(BrowserDriverLogic.probeScript(), page.epoch()) ?: return@launch
                 if (current !== page || !page.owns(viewId, ticket)) return@launch
                 val allowed = page.displayUrl?.let { policy.checkSyntax(it) is UrlDecision.Allow } == true
-                when (val accepted = BrowserDriverLogic.acceptProbe(page.acceptedDocumentId, raw, allowed)) {
+                // Commit and finish callbacks can probe the same document, as in the presenter.
+                when (val accepted = BrowserDriverLogic.acceptProbe(page.acceptedDocumentId, raw, allowed, allowSameDocument = true)) {
                     is ProbeAcceptance.Accept -> page.acceptReady(ticket, accepted.documentId)
                     is ProbeAcceptance.Pending -> Unit
                     is ProbeAcceptance.Reject -> page.markUnknownNavigation()

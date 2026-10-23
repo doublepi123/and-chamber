@@ -28,6 +28,7 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import io.andchamber.app.ui.browser.BrowserViewportHost
 import io.andchamber.app.ui.web.ComposerLayoutSnapshot
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,6 +40,7 @@ import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 /** Main-thread, test-only structural readback. Never read text, tags, URLs or input values. */
 internal object NativeFixtureFocusDiagnostics {
@@ -351,6 +353,37 @@ internal class LocalProviderRegressionSession(
         if (!finished) fail("command-timeout")
     }
 
+    /**
+     * Test-only bounded IME close. It sends a real BACK only after proving the keyboard is shown
+     * and this app's Activity is resumed; it never sends a blind Back and waits for the real IME
+     * gone state before returning.
+     */
+    private fun imeHide(): JSONObject {
+        val current = activity ?: throw CommandFailure("no-activity", "no activity")
+        val decor = current.window?.decorView ?: throw CommandFailure("no-decor", "no decor")
+        val foreground = current.packageName == context.packageName && run.isActivityResumed(current)
+        val shownBefore = foreground && run.onMain {
+            ViewCompat.getRootWindowInsets(decor)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        }
+        if (!shownBefore) throw CommandFailure("ime-not-shown", "ime not shown or app not foreground")
+        instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        val deadline = SystemClock.elapsedRealtime() + 3_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val shown = run.onMain {
+                ViewCompat.getRootWindowInsets(decor)
+                    ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+            }
+            if (!shown) {
+                return JSONObject()
+                    .put("phase", "ime-hide")
+                    .put("shownBefore", true)
+                    .put("shownAfter", false)
+            }
+            SystemClock.sleep(100L)
+        }
+        throw CommandFailure("ime-hide-timeout", "ime still shown")
+    }
+
     private fun requireDevice() {
         if (android.os.Build.SUPPORTED_ABIS.firstOrNull() != "x86_64") fail("unsupported-abi")
         if (!androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.MULTI_PROFILE)) {
@@ -657,6 +690,7 @@ internal class LocalProviderRegressionSession(
             text == "profile-isolation" -> profileIsolation()
             text == "a11y-off:begin" -> Accessibility.begin(instrumentation, context)
             text == "a11y-off:end" -> Accessibility.end(instrumentation, context)
+            text == "ime:hide" -> imeHide()
             text == "native-blocked-input" -> nativeBlockedInput()
             text.startsWith("ui-target-chat:") -> uiTargetChat(text.removePrefix("ui-target-chat:"))
             text == "cookie-read" -> cookieRead()
@@ -816,21 +850,18 @@ internal class LocalProviderRegressionSession(
         val raw = run.eval(web, PAGE_RECT_SCRIPT) ?: throw CommandFailure("page-rect-eval-null", "eval null")
         val page = runCatching { JSONObject(raw) }.getOrNull()
             ?: throw CommandFailure("page-rect-not-json", "not json")
-        val frame = run.onMain {
-            val loc = IntArray(2)
-            web.getLocationOnScreen(loc)
-            JSONObject().put("x", loc[0]).put("y", loc[1])
-                .put("w", web.width).put("h", web.height)
-        }
+        val frame = run.onMain { pageDisplayFrame(web) }
         val state = presenter?.state?.value ?: throw CommandFailure("no-presenter", "no presenter")
         val pointer = state.pointerUi
         return JSONObject()
             .put("phase", "page-rect")
-            .put("x", frame.getInt("x")).put("y", frame.getInt("y"))
-            .put("w", frame.getInt("w")).put("h", frame.getInt("h"))
-            .put("physical", JSONObject()
-                .put("left", frame.getInt("x")).put("top", frame.getInt("y"))
-                .put("width", frame.getInt("w")).put("height", frame.getInt("h")))
+            .put("x", frame.display.getInt("left")).put("y", frame.display.getInt("top"))
+            .put("w", frame.display.getInt("width")).put("h", frame.display.getInt("height"))
+            .put("physical", frame.display)
+            .put("rawPhysical", frame.raw)
+            .put("viewWidth", frame.viewWidth)
+            .put("viewHeight", frame.viewHeight)
+            .put("displayScale", frame.scale.toDouble())
             .put("page", page)
             .put("viewHandle", state.viewHandle)
             .put("documentEpoch", state.documentEpoch)
@@ -959,9 +990,54 @@ internal class LocalProviderRegressionSession(
 
     private class NativeFixtureRead(val native: JSONObject, val outerIme: JSONObject)
 
+    /**
+     * The displayed page rectangle (window pixels, then screen pixels) and the raw WebView size.
+     * The production FixedViewportContainer scales the raw WebView; ADB/viewport evidence must use
+     * [display], while agent-local pointer values stay in raw view pixels. [scale] is display/raw.
+     */
+    private class PageDisplayFrame(
+        val display: JSONObject,
+        val raw: JSONObject,
+        val visible: JSONObject?,
+        val viewWidth: Int,
+        val viewHeight: Int,
+        val scale: Float,
+    )
+
+    private fun pageDisplayFrame(web: WebView): PageDisplayFrame {
+        val viewWidth = web.width
+        val viewHeight = web.height
+        val rawLoc = IntArray(2)
+        web.getLocationOnScreen(rawLoc)
+        val raw = JSONObject()
+            .put("left", rawLoc[0]).put("top", rawLoc[1])
+            .put("width", viewWidth).put("height", viewHeight)
+        val snapshot = (web.parent as? BrowserViewportHost)?.presentationSnapshot()
+        if (snapshot == null || snapshot.pageWidth <= 0f || snapshot.pageHeight <= 0f ||
+            viewWidth <= 0 || viewHeight <= 0 || !web.isAttachedToWindow
+        ) {
+            return PageDisplayFrame(raw, raw, null, viewWidth, viewHeight, 1f)
+        }
+        val windowLoc = IntArray(2)
+        web.rootView.getLocationOnScreen(windowLoc)
+        val display = JSONObject()
+            .put("left", (windowLoc[0] + snapshot.pageLeft).roundToInt())
+            .put("top", (windowLoc[1] + snapshot.pageTop).roundToInt())
+            .put("width", snapshot.pageWidth.roundToInt())
+            .put("height", snapshot.pageHeight.roundToInt())
+        val visible = snapshot.visible?.let { rect ->
+            JSONObject()
+                .put("left", windowLoc[0] + rect.left).put("top", windowLoc[1] + rect.top)
+                .put("right", windowLoc[0] + rect.right).put("bottom", windowLoc[1] + rect.bottom)
+                .put("visible", true)
+        }
+        return PageDisplayFrame(display, raw, visible, viewWidth, viewHeight, snapshot.scale)
+    }
+
     private fun nativeFixtureJson(web: WebView?): NativeFixtureRead = run.onMain {
         val state = presenter!!.state.value
         val selected = state.tabs.firstOrNull { it.id == state.selectedTabId }
+        val grant = presenter!!.registry.currentGrant()
         val native = JSONObject()
             .put("selectedTabId", state.selectedTabId ?: JSONObject.NULL)
             .put("owner", selected?.owner ?: JSONObject.NULL)
@@ -972,6 +1048,8 @@ internal class LocalProviderRegressionSession(
             .put("pageReady", state.pageReady)
             .put("mouseMode", state.mouseMode)
             .put("agentOn", state.agentOn)
+            .put("grantForSelected", grant != null && state.selectedTabId != null &&
+                grant.tabId == state.selectedTabId)
             .put("presentationBlocked", state.presentationBlocked)
             .put("mode", state.mode.name)
             .put("error", when (state.pageError) {
@@ -984,17 +1062,13 @@ internal class LocalProviderRegressionSession(
             native.put("hasWindowFocus", web.hasWindowFocus())
             native.put("isShown", web.isShown)
             native.put("windowTokenPresent", web.windowToken != null)
-            val visibleRect = Rect()
-            val visible = web.getGlobalVisibleRect(visibleRect)
-            native.put("screenVisibleRect", JSONObject()
-                .put("left", visibleRect.left).put("top", visibleRect.top)
-                .put("right", visibleRect.right).put("bottom", visibleRect.bottom)
-                .put("visible", visible))
-            val frame = IntArray(2)
-            web.getLocationOnScreen(frame)
-            native.put("physicalFrame", JSONObject()
-                .put("left", frame[0]).put("top", frame[1])
-                .put("width", web.width).put("height", web.height))
+            val frameInfo = pageDisplayFrame(web)
+            native.put("screenVisibleRect", frameInfo.visible ?: JSONObject.NULL)
+            native.put("physicalFrame", frameInfo.display)
+            native.put("rawPhysicalFrame", frameInfo.raw)
+            native.put("viewWidth", frameInfo.viewWidth)
+            native.put("viewHeight", frameInfo.viewHeight)
+            native.put("displayScale", frameInfo.scale.toDouble())
         } else {
             native.put("hasFocus", JSONObject.NULL)
             native.put("hasWindowFocus", JSONObject.NULL)
@@ -1002,6 +1076,10 @@ internal class LocalProviderRegressionSession(
             native.put("windowTokenPresent", JSONObject.NULL)
             native.put("screenVisibleRect", JSONObject.NULL)
             native.put("physicalFrame", JSONObject.NULL)
+            native.put("rawPhysicalFrame", JSONObject.NULL)
+            native.put("viewWidth", JSONObject.NULL)
+            native.put("viewHeight", JSONObject.NULL)
+            native.put("displayScale", JSONObject.NULL)
         }
         val decor = activity?.window?.decorView
         native.put("timeline", nativeTimeline.summary())
@@ -1009,15 +1087,28 @@ internal class LocalProviderRegressionSession(
             web, presenter?.currentView(), activity?.currentFocus, decor?.findFocus(),
         ))
         val insets = decor?.let { ViewCompat.getRootWindowInsets(it) }
-        val outerIme = if (insets == null) {
+        val outerIme = if (insets == null || decor == null) {
             JSONObject().put("shown", JSONObject.NULL)
                 .put("source", "unavailable")
                 .put("bottomPx", JSONObject.NULL)
+                .put("safeBottomPx", JSONObject.NULL)
+                .put("windowLeftPx", JSONObject.NULL)
+                .put("windowTopPx", JSONObject.NULL)
+                .put("windowRightPx", JSONObject.NULL)
+                .put("windowBottomPx", JSONObject.NULL)
         } else {
             val ime = WindowInsetsCompat.Type.ime()
+            val origin = IntArray(2)
+            decor.getLocationOnScreen(origin)
+            val imeBottom = insets.getInsets(ime).bottom
             JSONObject().put("shown", insets.isVisible(ime))
                 .put("source", "root-window-insets")
-                .put("bottomPx", insets.getInsets(ime).bottom)
+                .put("bottomPx", imeBottom)
+                .put("windowLeftPx", origin[0])
+                .put("windowTopPx", origin[1])
+                .put("windowRightPx", origin[0] + decor.width)
+                .put("windowBottomPx", origin[1] + decor.height)
+                .put("safeBottomPx", origin[1] + decor.height - imeBottom)
         }
         NativeFixtureRead(native, outerIme)
     }
@@ -1913,20 +2004,17 @@ internal class LocalProviderRegressionSession(
             return JSONObject().put("phase", "tap-label").put("sent", false)
                 .put("label", label).put("error", "not-login-url")
         }
-        val before = run.onMain {
-            val loc = IntArray(2)
-            web.getLocationOnScreen(loc)
-            JSONObject().put("x", loc[0]).put("y", loc[1]).put("width", web.width).put("height", web.height)
+        fun tapFrame() = run.onMain {
+            val frame = pageDisplayFrame(web).display
+            JSONObject().put("x", frame.getInt("left")).put("y", frame.getInt("top"))
+                .put("width", frame.getInt("width")).put("height", frame.getInt("height"))
         }
+        val before = tapFrame()
         val raw = run.eval(web, "(function(){${tapLabelAsset()};return JSON.stringify(tapLabelPoint(${JSONObject.quote(label)}))})()")
             ?: return JSONObject().put("phase", "tap-label").put("sent", false).put("error", "tap-eval-null")
         val decoded = runCatching { JSONObject(raw) }.getOrNull()
             ?: return JSONObject().put("phase", "tap-label").put("sent", false).put("error", "tap-eval-not-json")
-        val after = run.onMain {
-            val loc = IntArray(2)
-            web.getLocationOnScreen(loc)
-            JSONObject().put("x", loc[0]).put("y", loc[1]).put("width", web.width).put("height", web.height)
-        }
+        val after = tapFrame()
         val miss = JSONObject()
             .put("phase", "tap-label").put("label", label).put("sent", false)
             .put("beforeFrame", before).put("afterFrame", after)

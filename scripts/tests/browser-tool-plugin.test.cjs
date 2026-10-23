@@ -179,19 +179,27 @@ test('package.json and tool registration shape', () => {
     assert.equal(tool.input.properties[key].type, 'string', key);
   }
 
-  assert.match(tool.description, /Allow/);
+  assert.match(tool.description, /defaults to agent control/);
   assert.match(tool.description, /drivable:false/);
   assert.match(tool.description, /drivable:true/);
   assert.match(tool.description, /about a minute/);
+  assert.match(tool.description, /hand control back/i);
+  assert.match(tool.description, /never grants by itself/i);
+  assert.match(tool.description, /does not end control/i);
+  assert.match(tool.description, /not taken back by ordinary agent actions/i);
+  assert.match(tool.description, /wake a hidden window/i);
+  assert.doesNotMatch(tool.description, /touch/i);
   assert.match(tool.description, /latest snapshot/);
   assert.match(tool.description, /one action per call/i);
   assert.match(tool.description, /AUTHORIZATION_REQUIRED/);
   assert.match(tool.description, /REF_EXPIRED/);
   assert.match(tool.description, /BROWSER_PAGE_UNAVAILABLE/);
   assert.match(tool.description, /do not retry in a loop/i);
+  assert.doesNotMatch(tool.description, /must tap Allow/i);
+  assert.doesNotMatch(tool.description, /tap Allow/i);
 });
 
-test('only open asks the server to wait for Allow', async (t) => {
+test('only open asks the server to wait for the automatic default grant', async (t) => {
   const payload = {
     version: 1,
     ok: true,

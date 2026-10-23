@@ -86,7 +86,11 @@ async function runPrimaryDragLock(deps) {
   const start = await deps.readState();
   if (!start || start.pageReady !== true) return stop(trace, 'precondition-not-ready', { start });
   if (start.mousePressActive !== false) return stop(trace, 'precondition-press-already-active', { start });
-  // Human mouse input takes over the page: the grant is removed by production, so it is not required to stay.
+  if (start.grantForSelected === null || start.agentOn === null || start.mode === null) {
+    return stop(trace, 'precondition-authority-unreadable', { start: { grant: start.grantForSelected, agentOn: start.agentOn, mode: start.mode } });
+  }
+  // An ordinary drag on the page is not a takeover: control must stay exactly as it was. Only an
+  // explicit takeover, hide/close/background or an owner change may change it.
   const aim = await hoverTarget(deps,'box');
   const plan = dragPlan(aim);
   if (!aim || !plan) return stop(trace, 'box-hover-unproved');
@@ -126,9 +130,12 @@ async function runPrimaryDragLock(deps) {
   const clicksAfter = clicksOf(end && end.recorder && end.recorder.current);
   // Releases are counted from the page's own mouse pointerup counter, not inferred.
   const releases = page && isNum(page.releases) ? page.releases : null;
-  // Human input leaves the page MANUAL: the grant is absent and the page is not retired. One normal click at most.
+  // Ordinary page input does not revoke control: the grant, agent flag and mode stay exactly as
+  // they were at the start. The page is not retired, and at most one normal click may result.
+  const authorityKept = end && end.grantForSelected === start.grantForSelected &&
+    end.agentOn === start.agentOn && end.mode === start.mode;
   const pass = Boolean(end && end.pageRetired === false && end.recorderReady === true && releases - aim.page.releases === 1 &&
-    end.mode === 'MANUAL' && end.agentOn === false && end.grantForSelected === false &&
+    authorityKept === true &&
     sameRecord(aim.record,end.recorder.current) && clicksAfter != null && clicksAfter-aim.record.clicks >= 0 && clicksAfter-aim.record.clicks <= 1 &&
     page.buttons===0 && page.boxCaptured===false &&
     end.viewHandle === start.viewHandle);
@@ -136,8 +143,8 @@ async function runPrimaryDragLock(deps) {
     ok: pass,
     trace,
     reason: pass ? 'completed' : 'primary-drag-lock-failed',
-    start: { viewHandle: start.viewHandle, grant: start.grantForSelected },
-    end: { viewHandle: end && end.viewHandle, pageRetired: end && end.pageRetired, mousePressActive: end && end.mousePressActive, grant: end && end.grantForSelected },
+    start: { viewHandle: start.viewHandle, grant: start.grantForSelected, mode: start.mode, agentOn: start.agentOn },
+    end: { viewHandle: end && end.viewHandle, pageRetired: end && end.pageRetired, mousePressActive: end && end.mousePressActive, grant: end && end.grantForSelected, mode: end && end.mode, agentOn: end && end.agentOn, authorityKept },
     page: { boxCaptured: pageDuringDrag.boxCaptured, buttons: pageDuringDrag.buttons, releases, wheel: stillDrag.wheel },
     clicks: clicksAfter,
   };
@@ -174,6 +181,10 @@ async function runTrueCancelRetire(deps) {
   if (!moved.ok) return stop(trace, 'move-not-sent', { moved });
   const held = await waitState(deps, (s) => s && s.mousePressActive === true, trace, 'press-active');
   if (!held) return stop(trace, 'press-never-active');
+  // Safety: an interruption while a real mouse press is active retires the page. This is the
+  // hide/close/background path, not an ordinary scroll or drag; it must keep retiring, and the
+  // interrupted mutation keeps its unknown outcome rather than being relaxed to a success.
+  if (held.mousePressActive !== true) return stop(trace, 'press-not-active-at-interruption');
   const captured = await deps.readPage();
   if (!captured || !isNum(captured.pointerId) || captured.boxCaptured!==true || captured.buttons!==1 ||
       !captured.logTail?.some(e=>e.t==='pointerdown'&&e.p==='mouse'&&e.bs===1)) return stop(trace,'page-not-captured-during-drag',{captured});
@@ -187,30 +198,52 @@ async function runTrueCancelRetire(deps) {
   const refused = await deps.agentSnapshot();
   const grantGone = retired.grantForSelected === false;
   const agentOff = retired.agentOn === false;
+  const pressCleared = retired.mousePressActive === false;
   // AUTHORIZATION_REQUIRED is the only accepted refusal. NoProvider or a transport failure is not isolation.
   const snapshotRefused = Boolean(refused) && refused.code === 'AUTHORIZATION_REQUIRED';
   const allowMissing = await deps.allowAttempt();
   const allowRefused = Boolean(allowMissing) && allowMissing.granted === false;
-  const retireOk = clicksAdded === 0 && grantGone && agentOff && snapshotRefused && allowRefused;
+  const retireOk = clicksAdded === 0 && grantGone && agentOff && pressCleared && snapshotRefused && allowRefused;
   if (!retireOk) {
     return stop(trace, 'retirement-not-isolated', {
-      clicksAdded, grantGone, agentOff, snapshot: refused, allow: allowMissing,
+      clicksAdded, grantGone, agentOff, pressCleared, snapshot: refused, allow: allowMissing,
     });
   }
-  // Reopen only through the native Reopen CTA. No tool open, no grant. The cookie must survive; the view is new.
+  // Reopen only through the native Reopen CTA. It is an explicit user open: the new view starts
+  // retired-free, keeps the cookie, and gets its own fresh default grant once ready. The old grant
+  // must never be carried over.
   const reopened = await deps.tapReopen();
   if (!reopened.ok) return stop(trace, 'reopen-tap-failed', { reopened });
   const fresh = await waitState(deps, (s) => s && s.pageRetired === false && s.currentViewPresent === true &&
     s.pageReady === true && s.viewHandle != null && s.viewHandle !== retired.viewHandle, trace, 'fresh-view');
   if (!fresh) return stop(trace, 'fresh-view-not-observed', { oldHandle: retired.viewHandle });
+  // The fresh view must receive the new default grant from its own ready page (AGENT/agentOn true).
+  const freshGranted = await waitState(deps, (s) => s && s.viewHandle === fresh.viewHandle &&
+    s.grantForSelected === true && s.agentOn === true && s.mode === 'AGENT', trace, 'fresh-default-grant');
+  if (!freshGranted) {
+    return stop(trace, 'fresh-default-grant-not-observed', {
+      oldHandle: retired.viewHandle,
+      freshHandle: fresh.viewHandle,
+      grantForSelected: fresh.grantForSelected,
+      agentOn: fresh.agentOn,
+      mode: fresh.mode,
+    });
+  }
   const freshPage = await deps.readPage();
   const cookieAfter = await deps.readOldCookie();
   if (typeof cookieAfter !== 'string') return stop(trace, 'cookie-unreadable-after-reopen', { freshPage });
   const cookieKept = cookieAfter === cookieBefore;
-  // The fresh view must not carry the grant, and its own counters start at zero.
-  const freshGrantAbsent = fresh.grantForSelected === false;
-  const freshClicks = fresh.recorder && fresh.recorder.current ? fresh.recorder.current.clicks : null;
-  const pass = retireOk && cookieKept && freshGrantAbsent && freshClicks === 0 && freshPage && freshPage.clicks === 0;
+  // The new view and its document must be genuinely new, never the retired one with a grant patched on.
+  const oldTimeOrigin = aim.page && isNum(aim.page.timeOrigin) ? aim.page.timeOrigin : null;
+  const freshTimeOrigin = freshPage && isNum(freshPage.timeOrigin) ? freshPage.timeOrigin : null;
+  const freshDocument = oldTimeOrigin != null && freshTimeOrigin != null && freshTimeOrigin !== oldTimeOrigin;
+  const freshRecord = freshGranted.recorder && freshGranted.recorder.current;
+  const freshRecordChanged = Boolean(freshRecord && oldRecord && !sameRecord(oldRecord, freshRecord));
+  // The fresh view's own counters start at zero.
+  const freshGrantPresent = freshGranted.grantForSelected === true && freshGranted.agentOn === true && freshGranted.mode === 'AGENT';
+  const freshClicks = freshRecord ? freshRecord.clicks : null;
+  const pass = retireOk && cookieKept && freshGrantPresent && freshDocument && freshRecordChanged &&
+    freshClicks === 0 && freshPage && freshPage.clicks === 0;
   if (!pass) {
     return {
       ok: false,
@@ -219,11 +252,11 @@ async function runTrueCancelRetire(deps) {
       clicksAdded,
       snapshot: refused,
       allow: allowMissing,
-      reopen: { cookieKept, freshGrantAbsent, freshClicks, oldHandle: retired.viewHandle, freshHandle: fresh.viewHandle },
+      reopen: { cookieKept, freshGrantPresent, freshDocument, freshRecordChanged, freshClicks, oldHandle: retired.viewHandle, freshHandle: fresh.viewHandle },
     };
   }
   // Fresh-view continuation is part of the proof. It runs only after the reopen itself passed.
-  const continuation = await runFreshViewContinuation(deps, fresh, trace);
+  const continuation = await runFreshViewContinuation(deps, freshGranted, trace);
   return {
     ok: continuation.ok === true,
     trace,
@@ -231,21 +264,31 @@ async function runTrueCancelRetire(deps) {
     clicksAdded,
     snapshot: refused,
     allow: allowMissing,
-    reopen: { cookieKept, freshGrantAbsent, freshClicks, oldHandle: retired.viewHandle, freshHandle: fresh.viewHandle },
+    reopen: { cookieKept, freshGrantPresent, freshDocument, freshRecordChanged, freshClicks, oldHandle: retired.viewHandle, freshHandle: fresh.viewHandle },
     continuation,
   };
 }
 
 /**
- * Continuation on the fresh view, after explicit Reopen and a new production-menu Mouse enable, but
- * no grant is restored and no manual release, native CANCEL or JS synthetic event is used to rescue the old view.
- * Button-free enter/hover/exit/enter/hover/wheel first (capture false, buttons 0, counters 0), then the wheel
- * changes the page, the target is re-measured, and one normal click on the fixed next button is the only click.
+ * Continuation on the fresh view, after explicit Reopen and a new production-menu Mouse enable.
+ * The fresh default grant is kept through the mode switch, button-free hover/wheel and the one normal
+ * click; the old view's retirement record is never rescued or changed, and no synthetic input replays.
  */
 async function runFreshViewContinuation(deps, fresh, trace) {
   const enable=await deps.enableMouse();
   const enabled=await deps.readState();
-  if (!enable.ok || enabled?.mouseMode!==true || enabled?.grantForSelected!==false || enabled?.viewHandle!==fresh.viewHandle) return stop(trace,'fresh-mouse-not-enabled');
+  if (!enable.ok || enabled?.mouseMode!==true || enabled?.grantForSelected!==true || enabled?.agentOn!==true ||
+      enabled?.mode!=='AGENT' || enabled?.viewHandle!==fresh.viewHandle) {
+    return stop(trace,'fresh-mouse-not-enabled', {
+      enabled: enabled && {
+        mouseMode: enabled.mouseMode,
+        grantForSelected: enabled.grantForSelected,
+        agentOn: enabled.agentOn,
+        mode: enabled.mode,
+        viewHandle: enabled.viewHandle,
+      },
+    });
+  }
   const native = async (spec) => deps.nativeGate(spec);
   for (const spec of ['enter,40,40', 'hover,60,60', 'exit,60,60', 'enter,40,40', 'hover,70,70']) {
     const step = await native(spec);
@@ -261,12 +304,25 @@ async function runFreshViewContinuation(deps, fresh, trace) {
   if (!afterWheel || !isNum(afterWheel.wheel) || afterWheel.wheel < 1) {
     return stop(trace, 'wheel-not-observed', { page: afterWheel });
   }
+  // Hover/wheel are not takeover: the fresh grant must still be there after them.
+  const afterWheelState = await deps.readState();
+  if (!afterWheelState || afterWheelState.viewHandle !== fresh.viewHandle ||
+      afterWheelState.grantForSelected !== true || afterWheelState.agentOn !== true || afterWheelState.mode !== 'AGENT') {
+    return stop(trace, 'fresh-grant-lost-after-wheel', {
+      grantForSelected: afterWheelState && afterWheelState.grantForSelected,
+      agentOn: afterWheelState && afterWheelState.agentOn,
+      mode: afterWheelState && afterWheelState.mode,
+    });
+  }
   // Re-measure the fixed next button after the wheel: the target is never reused from before the scroll.
   const target = await hoverTarget(deps,'next');
   if (!target) return stop(trace, 'next-hover-unproved');
   const before = await deps.readState();
   const clicksBefore = clicksOf(before && before.recorder && before.recorder.current);
-  if (!before || before.viewHandle!==fresh.viewHandle || !sameRecord(before.recorder.current,target.record)) return stop(trace,'fresh-click-source-changed');
+  if (!before || before.viewHandle!==fresh.viewHandle || before.grantForSelected!==true ||
+      before.agentOn!==true || before.mode!=='AGENT' || !sameRecord(before.recorder.current,target.record)) {
+    return stop(trace,'fresh-click-source-changed');
+  }
   const pageClicksBefore = afterWheel.clicks;
   const click = await deps.atomicFinger({x:target.frame.width/2,y:target.frame.height/2,dx:0,dy:0,steps:1,viewHandle:target.viewHandle,origin:target.origin,frame:target.frame});
   if (!click.ok) return stop(trace,'atomic-click-not-sent');
@@ -277,8 +333,8 @@ async function runFreshViewContinuation(deps, fresh, trace) {
   const pageClicksDelta = page && isNum(page.clicks) ? page.clicks - pageClicksBefore : null;
   const nativeDelta = clicksAfter != null && clicksBefore != null ? clicksAfter - clicksBefore : null;
   const oldRecord=after?.recorder?.lastRetired, originalRetired=fresh.recorder?.lastRetired;
-  const ok = nativeDelta === 1 && pageClicksDelta === 1 && after && after.grantForSelected === false && after.agentOn===false &&
-    after.mode==='MANUAL' && sameRecord(before.recorder.current,after.recorder.current) &&
+  const ok = nativeDelta === 1 && pageClicksDelta === 1 && after && after.grantForSelected === true && after.agentOn===true &&
+    after.mode==='AGENT' && sameRecord(before.recorder.current,after.recorder.current) &&
     sameRecord(oldRecord,originalRetired) && oldRecord.clicks===originalRetired.clicks &&
     page.buttons===0 && page.boxCaptured!==true && page.nextClicks===1 && page.boxClicks===0 &&
     page.logTail?.filter(e=>e.t==='click'&&e.p==='mouse').length===1 &&

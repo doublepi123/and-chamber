@@ -170,6 +170,7 @@ internal class ChamberWebView(
         private set
     var browserBindGeneration by androidx.compose.runtime.mutableLongStateOf(0L)
         private set
+    private var trustedDocumentNoted = false
 
     fun acceptsBrowserHost(generation: Long): Boolean =
         generation == browserConsoleGeneration && mainTrusted && !gatewayLoginMode && !destroyed && browserHost != null
@@ -186,6 +187,10 @@ internal class ChamberWebView(
     fun noteTrustedDocument() {
         if (!mainTrusted || gatewayLoginMode || destroyed) return
         if (origin.isEmpty()) return
+        // Commit-visible and finished can report the same document. Rebinding twice would revoke
+        // a browser grant opened after the first callback. A real new load resets this below.
+        if (trustedDocumentNoted) return
+        trustedDocumentNoted = true
         composerMeasurement = null
         browserConsoleGeneration += 1
         browserBindGeneration = browserConsoleGeneration
@@ -570,6 +575,7 @@ internal class ChamberWebView(
             favicon: Bitmap?,
         ) {
             if (!isCurrent(view)) return
+            trustedDocumentNoted = false
             composerMeasurement = null
             if (gatewayHandoff.blocksDocuments) {
                 mainTrusted = false

@@ -58,13 +58,13 @@ test('emulator guard requires qemu and x86_64', () => {
   assert.throws(() => driver.emulatorProps({ 'ro.kernel.qemu': '1', 'ro.product.cpu.abi': 'arm64-v8a' }), /not x86_64/);
 });
 
-test('Allow agent is found by label and tapped at the real bounds centre', () => {
-  const xml = '<hierarchy><node text="Cancel" bounds="[0,0][10,10]" /><node class="android.widget.TextView" text="Allow agent" bounds="[100,200][300,280]" /></hierarchy>';
-  assert.deepEqual(driver.selectAllowNode(xml), {
-    label: 'Allow agent', left: 100, top: 200, right: 300, bottom: 280, x: 200, y: 240,
+test('a fixed label is found and tapped at the real bounds centre', () => {
+  const xml = '<hierarchy><node text="Cancel" bounds="[0,0][10,10]" /><node class="android.widget.TextView" text="Take over" bounds="[100,200][300,280]" /></hierarchy>';
+  assert.deepEqual(driver.selectAllowNode(xml, 'Take over'), {
+    label: 'Take over', left: 100, top: 200, right: 300, bottom: 280, x: 200, y: 240,
   });
   assert.equal(driver.selectAllowNode(xml, 'Always allow'), null);
-  assert.equal(driver.selectAllowNode('<node text="Allow agent" bounds="[10,10][10,10]" />'), null);
+  assert.equal(driver.selectAllowNode('<node text="Take over" bounds="[10,10][10,10]" />', 'Take over'), null);
 });
 
 test('instrumentation counts keep official result separate from adb exit', () => {
@@ -148,12 +148,12 @@ test('full pass needs runtime, artifact, auth, five once-actions, restart, cold,
     instrumentation: { pass: true, adbExit: 0 }, coldInstrumentation: { pass: true, adbExit: 0 }, health: { status: 'pass' },
     taps: {
       chatOpen: { label: 'Open', x: 1, y: 2 },
-      initialAllow: { label: 'Allow agent', x: 1, y: 2 },
       takeover: { label: 'Take over', x: 1, y: 2 },
-      fixtureAllow: { label: 'Allow agent', x: 1, y: 2 },
+      resumeAgent: { label: 'Resume agent', x: 1, y: 2 },
     }, pty: { ok: true },
   };
   assert.deepEqual(driver.verdict(evidence, host), { ok: true, reasons: [] });
+  assert.equal(driver.verdict(evidence, { ...host, taps: { takeover: host.taps.takeover } }).ok, false);
   assert.equal(driver.verdict(evidence, { ...host, pty: { ok: false } }).ok, false);
   assert.equal(driver.verdict({ ...evidence, actions: { ...evidence.actions, type: 2 } }, host).ok, false);
   assert.equal(driver.verdict(evidence, { ...host, instrumentation: { pass: false } }).ok, false);
@@ -325,7 +325,7 @@ test('failure collection reads only the package status/evidence and bounded PID 
     if (command.includes('pidof')) return { code: 0, stdout: '4242\n' };
     if (command[0] === 'logcat') return { code: 0, stdout: logs };
     if (command.some((part) => String(part).endsWith('status.json'))) {
-      return { code: 0, stdout: '{"phase":"await-allow-tap"}' };
+      return { code: 0, stdout: '{"phase":"await-takeover-tap"}' };
     }
     if (command.some((part) => String(part).endsWith('evidence.json'))) {
       return { code: 0, stdout: '{"phase":"failed","failure":"no-provider"}' };
@@ -333,7 +333,7 @@ test('failure collection reads only the package status/evidence and bounded PID 
     return { code: 0, stdout: '{}' };
   };
   const result = await driver.collectFailureEvidence(adbFn, 'io.andchamber.localprovider', ['secret-token']);
-  assert.equal(result.status.phase, 'await-allow-tap');
+  assert.equal(result.status.phase, 'await-takeover-tap');
   assert.equal(result.evidence.failure, 'no-provider');
   assert.deepEqual(result.pids, ['4242']);
   assert.equal(result.logcat.includes('secret-token'), false);
@@ -368,23 +368,23 @@ test('run ids are non-secret, valid, and stale status is ignored', async () => {
 test('UI labels used by the chat/takeover stages are found exactly', () => {
   const xml = '<hierarchy>' +
     '<node text="Open" bounds="[10,20][110,80]" />' +
-    '<node text="Allow agent" bounds="[10,100][210,160]" />' +
+    '<node text="Take over" bounds="[10,100][210,160]" />' +
     '<node text="Take over" bounds="[10,180][210,240]" />' +
     '</hierarchy>';
   assert.equal(driver.selectAllowNode(xml, 'Open').x, 60);
-  assert.equal(driver.selectAllowNode(xml, 'Allow agent').x, 110);
+  assert.equal(driver.selectAllowNode(xml, 'Take over').x, 110);
   assert.equal(driver.selectAllowNode(xml, 'Take over').x, 110);
   assert.equal(driver.selectAllowNode(xml, 'Close'), null);
 });
 
 test('exported target tap validates run/phase/package/freshness/area before one adb tap', async () => {
   const target = {
-    label: 'Allow agent', left: 10, top: 20, right: 110, bottom: 80, windowId: 7,
+    label: 'Take over', left: 10, top: 20, right: 110, bottom: 80, windowId: 7,
     observedAtMs: 1000, ownerPackage: 'io.andchamber.localprovider',
-    phase: 'await-allow-tap', runId: 'run-12345', enabled: true,
+    phase: 'await-takeover-tap', runId: 'run-12345', enabled: true,
   };
   const expected = {
-    runId: 'run-12345', phase: 'await-allow-tap', label: 'Allow agent',
+    runId: 'run-12345', phase: 'await-takeover-tap', label: 'Take over',
     package: 'io.andchamber.localprovider', now: 2000, nowProvider: () => 2000, screenWidth: 1080, screenHeight: 2400,
   };
   assert.equal(driver.validateExportedTarget(target, expected), null);
@@ -412,12 +412,12 @@ test('exported target tap validates run/phase/package/freshness/area before one 
 
 test('exported target rejects wrong run/phase/package/stale/disabled/noarea with zero taps', async () => {
   const base = {
-    label: 'Allow agent', left: 10, top: 20, right: 110, bottom: 80, windowId: 7,
+    label: 'Take over', left: 10, top: 20, right: 110, bottom: 80, windowId: 7,
     observedAtMs: 1000, ownerPackage: 'io.andchamber.localprovider',
-    phase: 'await-allow-tap', runId: 'run-12345', enabled: true,
+    phase: 'await-takeover-tap', runId: 'run-12345', enabled: true,
   };
   const expected = {
-    runId: 'run-12345', phase: 'await-allow-tap', label: 'Allow agent',
+    runId: 'run-12345', phase: 'await-takeover-tap', label: 'Take over',
     package: 'io.andchamber.localprovider', now: 2000, screenWidth: 1080, screenHeight: 2400,
   };
   const variants = [
@@ -542,6 +542,6 @@ test('official counts alone are never success without code -1, N>0, zero failure
     restarted: { status: 'pass' }, cold: { status: 'pass' },
   }, {
     instrumentation: { pass: true, adbExit: 1 }, coldInstrumentation: { pass: true, adbExit: 0 },
-    health: { status: 'pass' }, taps: { initialAllow: {}, takeover: {}, fixtureAllow: {} }, pty: { ok: true },
+    health: { status: 'pass' }, taps: { takeover: {}, resumeAgent: {} }, pty: { ok: true },
   }).ok, false);
 });

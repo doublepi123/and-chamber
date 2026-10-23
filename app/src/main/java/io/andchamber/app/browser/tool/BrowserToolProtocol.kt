@@ -20,7 +20,7 @@ data class ToolCall(
     val sessionId: String,
     val callId: String,
     val input: JsonObject,
-    /** Transport-only `open` wait, already range-checked. Never part of `input`. */
+    /** Transport-only `open` wait for the page's automatic default control. Never part of `input`. */
     val allowWaitMs: Int = 0,
 ) {
     val action: String get() = input.getValue("action").jsonPrimitive.content
@@ -38,7 +38,7 @@ object BrowserToolProtocol {
     const val MAX_CALL_ID_CHARS = 256
     const val OPEN_TIMEOUT_MS = 45_000L
     const val ACTION_TIMEOUT_MS = 20_000L
-    /** Upper bound for the transport-only `open` allow wait. The server timeout adds it on top. */
+    /** Upper bound for the transport-only `open` wait. The server timeout adds it on top. */
     const val MAX_ALLOW_WAIT_MS = 120_000
 
     /** Placeholder action for a request that failed before its action could be read. */
@@ -108,8 +108,8 @@ object BrowserToolProtocol {
             parameters = parameters,
             directory = "",
             sessionId = call.sessionId,
-            // The page load keeps its own budget; an open allow wait is added on top so a person's
-            // tap is never cut off by the load deadline.
+            // The page load keeps its own budget; an open's automatic-grant wait is added on top so
+            // the ready probe and the grant it triggers are never cut off by the load deadline.
             timeoutMs = if (call.action == "open") {
                 OPEN_TIMEOUT_MS + call.allowWaitMs.toLong()
             } else {
@@ -167,7 +167,7 @@ object BrowserToolProtocol {
     fun fixedMessage(code: String): String =
         when (code) {
             ProviderCodes.BROWSER_PAGE_UNAVAILABLE -> "Open the AndChamber chat screen on the phone."
-            ProviderCodes.AUTHORIZATION_REQUIRED -> "The page is not allowed. Tap Allow in the AndChamber browser window."
+            ProviderCodes.AUTHORIZATION_REQUIRED -> "The page is not under agent control. Hand control back with Resume agent in the AndChamber browser window."
             ProviderCodes.REF_EXPIRED -> "The element reference expired. Take a new snapshot."
             ProviderCodes.BUSY -> "The browser is busy with another action."
             ProviderCodes.DEADLINE -> "The action timed out."

@@ -301,24 +301,24 @@
 
     <!-- 独立浏览器，不是 OpenChamber 页面。 -->
     <string name="browser_entry_title">浏览器</string>
-    <string name="browser_status_on">代理控制已开启</string>
-    <string name="browser_turn_on">允许代理</string>
+    <string name="browser_status_on">代理正在操作</string>
+    <string name="browser_turn_on">交给代理</string>
     <string name="browser_take_over">接管</string>
-    <string name="browser_turn_off">关闭</string>
+    <string name="browser_turn_off">关闭页面</string>
     <string name="browser_unavailable_body">当前 WebView 无法把这个浏览器分开保存，因此没有加载任何页面。</string>
-    <string name="browser_enlarge">放大</string>
-    <string name="browser_restore">还原</string>
-    <string name="browser_float_status_manual">你正在自己浏览。登录完成后，需要再次允许代理。</string>
+    <string name="browser_enlarge">全屏</string>
+    <string name="browser_restore">小窗</string>
+    <string name="browser_float_status_manual">由你操作</string>
     <string name="browser_more">更多</string>
     <string name="browser_desktop_layout">电脑版</string>
     <string name="browser_phone_layout">手机版</string>
     <string name="browser_mouse_mode">鼠标</string>
     <string name="browser_touch_mode">触摸</string>
-    <string name="browser_keyboard_tight">键盘挡住了浏览器。可以放大，或关闭。</string>
+    <string name="browser_keyboard_tight">键盘已打开，页面已收起。</string>
     <string name="browser_mode_change_title">切换网页布局？</string>
-    <string name="browser_mode_change_body">切换可能刷新页面，未提交的内容可能丢失。之后需要再次允许代理控制。</string>
+    <string name="browser_mode_change_body">这会重新加载页面，未提交的内容可能丢失。</string>
     <string name="browser_resize_window">调整浏览器窗口大小</string>
-    <string name="browser_reopen_required">请重新打开此页面后再允许代理。</string>
+    <string name="browser_reopen_required">请重新打开此页面后再交给代理。</string>
     <string name="browser_mouse_unsupported">当前系统不支持模拟鼠标，可继续直接触摸。</string>
     <!-- 鼠标模式下开启了无障碍服务时的状态。请保持一行：中文折成两行可能超出状态栏预留的高度。 -->
     <string name="browser_mouse_hover_accessibility">开启无障碍时悬停无效，仍可点击、拖动和滚动。</string>
@@ -329,14 +329,14 @@
     <string name="browser_scroll_clamped">页面无法回到原来的滚动位置。</string>
     <string name="browser_scroll_not_restored">未恢复滚动位置。</string>
     <string name="browser_mouse_gesture_interrupted">拖动中断，页面已关闭。</string>
-    <string name="browser_retired_page_details">未提交的内容可能丢失；网站存储未被主动清除。重新打开后需再次允许代理。</string>
+    <string name="browser_retired_page_details">未提交的内容可能丢失；网站存储未被主动清除。</string>
     <string name="browser_reopen_page">重新打开</string>
     <string name="browser_finish_drag_first">请先结束页面中的拖动。</string>
     <string name="browser_reopen_failed">无法重新打开页面，请重试。</string>
 
     <!-- 在本对话的浏览器小窗中打开网页（边缘菜单项和对话框标题） -->
     <string name="browser_open_page">打开网页</string>
-    <string name="browser_open_page_hint">在本对话的浏览器小窗中打开。点“允许代理”后，代理才能操作它。</string>
+    <string name="browser_open_page_hint">在本对话的浏览器小窗中打开，代理可直接操作；点“接管”可自己操作。</string>
     <string name="browser_open_page_placeholder">example.com</string>
     <string name="browser_open_page_invalid">请输入网址。</string>
     <string name="browser_open_page_refused">小窗只能打开公网 https 页面。</string>
@@ -350,5 +350,11 @@
     <string name="browser_site_data_cleared_no_reload">网站数据已清除，页面未重新加载。</string>
     <string name="browser_site_data_partial">Cookie 和存储已清除，页面缓存未清除。</string>
     <string name="browser_site_data_failed">无法清除网站数据。</string>
-    <string name="browser_float_status_agent_waiting">代理打开了这个页面。点“允许代理”后，它才能操作。</string>
+    <string name="browser_float_status_agent_waiting">代理打开了此页面，加载完成后由代理操作。</string>
+    <string name="browser_hide">隐藏浏览器</string>
+    <string name="browser_show">显示浏览器</string>
+    <string name="browser_address">网址</string>
+    <string name="browser_address_go">前往</string>
+    <string name="browser_address_cancel">取消编辑</string>
+    <string name="browser_reload">重新加载页面</string>
 </resources>

@@ -295,6 +295,16 @@ function createProductIo({
     return data;
   }
 
+  /** Test-only bounded Back after a proven-shown IME; the producer verifies package/resume too. */
+  async function imeHide() {
+    if (!canSend()) return { ...fenced(), ok: false };
+    const data = await deviceData('ime:hide', 'ime-hide');
+    if (!data || data.phase !== 'ime-hide' || data.shownBefore !== true || data.shownAfter !== false) {
+      return { ok: false, reason: 'ime-hide-failed', data };
+    }
+    return { ok: true, data };
+  }
+
   async function tapFixtureField(field) {
     if (!canSend()) return { ok: false, code: 'FENCED', detail: 'case fenced after timeout' };
     const result = await client.sendDevice(`tap-label:${field}`);
@@ -489,6 +499,7 @@ function createProductIo({
     typeAddress,
     fixtureFieldTarget,
     tapFixtureField,
+    imeHide,
     siteState,
     profileIsolation,
     nativeBlockedInput,
@@ -554,6 +565,60 @@ function observeMetrics(presentation) {
 function requireGrant(io, presentation) {
   const current = fixtureNative(presentation) || {};
   return current.grantForSelected === true;
+}
+
+/** Raw WebView width for agent-local pointer pixels; display width is physical.width. */
+function frameRawWidth(frame, physical) {
+  return isNum(frame && frame.viewWidth) && frame.viewWidth > 0 ? frame.viewWidth : physical.width;
+}
+
+/** A raw WebView-local pointer in page CSS pixels. */
+function pointerCss(frame, pointer) {
+  const physical = frame && isObject(frame.physical) ? frame.physical : null;
+  const viewport = frame && isObject(frame.page) && isObject(frame.page.visualViewport)
+    ? frame.page.visualViewport : null;
+  if (!physical || !viewport || !isNum(viewport.width) || viewport.width <= 0) return null;
+  const rawToCss = frameRawWidth(frame, physical) / viewport.width;
+  return {
+    x: viewport.offsetLeft + pointer.pointerViewX / rawToCss,
+    y: viewport.offsetTop + pointer.pointerViewY / rawToCss,
+  };
+}
+
+/** A raw WebView-local pointer in the displayed (scaled) page rectangle, screen pixels. */
+function pointerScreen(frame, pointer) {
+  const physical = frame && isObject(frame.physical) ? frame.physical : null;
+  if (!physical) return null;
+  const rawToDisplay = physical.width / frameRawWidth(frame, physical);
+  return {
+    x: physical.left + pointer.pointerViewX * rawToDisplay,
+    y: physical.top + pointer.pointerViewY * rawToDisplay,
+  };
+}
+
+/**
+ * Touchpad gestures are relative: the finger need not start where the drawn pointer is. Start at
+ * least 8px inside the displayed page and leave the whole stroke inside it, so the DOWN reaches
+ * the page AndroidView instead of the window header/border. dx/dy remain the CSS-derived screen
+ * delta; the pointer position is still read from the real pointerUi.
+ */
+function gestureStart(frame, dx, dy) {
+  const physical = frame && isObject(frame.physical) ? frame.physical : null;
+  if (!physical || !isNum(dx) || !isNum(dy)) return null;
+  const margin = 8;
+  const minX = physical.left + margin;
+  const maxX = physical.left + physical.width - margin;
+  const minY = physical.top + margin;
+  const maxY = physical.top + physical.height - margin;
+  const lowX = minX + Math.max(0, -dx);
+  const highX = maxX - Math.max(0, dx);
+  const lowY = minY + Math.max(0, -dy);
+  const highY = maxY - Math.max(0, dy);
+  if (lowX > highX || lowY > highY) return null;
+  return {
+    x: Math.round((lowX + highX) / 2),
+    y: Math.round((lowY + highY) / 2),
+  };
 }
 
 function boundsOf(value) {
@@ -637,15 +702,18 @@ async function ensureProductTouch(io) {
   return ready.ok ? { ok: true, changed: true, value: ready.value } : { ok: false, reason: 'touch-not-enabled', ready };
 }
 
-function allowLabelReady(presentation, tabId, viewHandle) {
+// The agent-first baseline grants an explicit open once its page is ready. The real user-visible
+// proof is the enabled Take over control: if the presenter's allow verification had not run, the
+// grant would be absent and that control stays disabled.
+function grantLabelReady(presentation, tabId, viewHandle) {
   const native = fixtureNative(presentation);
   const ui = presentation && isObject(presentation.ui) ? presentation.ui : null;
   const labels = ui && isObject(ui.labels) ? ui.labels : null;
-  const allow = labels && isObject(labels['Allow agent']) ? labels['Allow agent'] : null;
+  const takeOver = labels && isObject(labels['Take over']) ? labels['Take over'] : null;
   if (!native || native.selectedTabId !== tabId || native.viewHandle !== viewHandle || native.pageReady !== true) return false;
-  if (!allow || allow.enabled !== true || allow.visible !== true) return false;
-  return [allow.left, allow.top, allow.right, allow.bottom, allow.windowId].every(isNum) &&
-    allow.right > allow.left && allow.bottom > allow.top;
+  if (!takeOver || takeOver.enabled !== true || takeOver.visible !== true) return false;
+  return [takeOver.left, takeOver.top, takeOver.right, takeOver.bottom, takeOver.windowId].every(isNum) &&
+    takeOver.right > takeOver.left && takeOver.bottom > takeOver.top;
 }
 
 async function waitProductReady(io, tabId) {
@@ -659,7 +727,7 @@ async function waitProductReady(io, tabId) {
     state.pointerUi.geometryReady === true && state.pointerUi.viewHandle === viewHandle), 'product-ready-geometry', 12000);
   if (!geometry.ok) return { ok: false, reason: 'product-ready-geometry-timeout', diag: diag.value, geometry };
   const ui = await waitFor(io, () => io.presentation(),
-    (p) => allowLabelReady(p, tabId, viewHandle), 'product-ready-ui', 15000);
+    (p) => grantLabelReady(p, tabId, viewHandle), 'product-ready-ui', 15000);
   if (!ui.ok) return { ok: false, reason: 'product-ready-ui-timeout', diag: diag.value, geometry: geometry.value, ui };
   const stable = await io.readDiag();
   if (!stable || stable.pageReady !== true || stable.selectedTabId !== tabId || stable.viewHandle !== viewHandle) {
@@ -674,13 +742,19 @@ async function baseOpen(io, url, viewport = 'mobile') {
   if (!opened.tabId) return { ok: false, reason: 'open-no-tab', opened };
   const ready = await waitProductReady(io, opened.tabId);
   if (!ready.ok) return { ok: false, reason: ready.reason, opened, ready };
-  return { ok: true, tabId: opened.tabId, opened, ready };
+  // The one-shot ready default grant still comes from the presenter's own allow verification.
+  // Read it from native state so every product case starts from a real grant, never from a flag.
+  const grant = await waitFor(io, () => io.readDiag(), (state) => Boolean(state &&
+    state.selectedTabId === opened.tabId && state.grantForSelected === true),
+  'open-default-grant', 15000);
+  if (!grant.ok) return { ok: false, reason: 'open-default-grant-timeout', opened, ready, grant };
+  return { ok: true, tabId: opened.tabId, opened, ready, grant: grant.value };
 }
 
 /**
  * Serial product state is explicit: a previous blocked case may leave WindowExpansion enlarged,
  * and a focused case leaves the IME shown. Read the actual UI/fixture state first, then perform at
- * most one real Restore or Turn off (closes the selected tab). No blind Back, no assumed fresh WindowExpansion memory, no retry.
+ * most one real Small window or Close page (the latter closes the selected tab). No blind Back or retry.
  */
 async function prepareProductCase(io) {
   const before = await io.presentation();
@@ -688,12 +762,16 @@ async function prepareProductCase(io) {
   const native = fixtureNative(before);
   const labels = before.ui && isObject(before.ui.labels) ? before.ui.labels : null;
   const ime = Boolean(before.fixture && isObject(before.fixture.outerime) && before.fixture.outerime.shown === true);
-  const enlarged = Boolean(labels && isObject(labels.Restore));
+  const enlarged = Boolean(labels && isObject(labels['Small window']));
   const actions = [];
   if (ime) {
-    // The float title bar's close control is labelled "Turn off" (presenter.close(selectedTabId)).
-    const close = await io.tapUi('Turn off');
-    actions.push({ action: 'Turn off', ok: close.ok === true, reason: close.reason || null, commandId: close.commandId || null });
+    // Close page now lives in the More menu; the old direct "Turn off" label is gone.
+    const more = await io.tapUi('More');
+    actions.push({ action: 'More', ok: more.ok === true, reason: more.reason || null, commandId: more.commandId || null });
+    if (!more.ok) return { ok: false, reason: 'case-prepare-more-failed', actions, before: before.raw };
+    if (typeof io.sleep === 'function') await io.sleep(600);
+    const close = await io.tapUi('Close page');
+    actions.push({ action: 'Close page', ok: close.ok === true, reason: close.reason || null, commandId: close.commandId || null });
     if (!close.ok) return { ok: false, reason: 'case-prepare-close-failed', actions, before: before.raw };
     const tabId = native && native.selectedTabId ? native.selectedTabId : null;
     const viewHandle = native && isNum(native.viewHandle) ? native.viewHandle : null;
@@ -705,11 +783,11 @@ async function prepareProductCase(io) {
       : { ok: false, reason: 'case-prepare-close-timeout', actions, before: before.raw, closed };
   }
   if (enlarged) {
-    const restore = await io.tapUi('Restore');
-    actions.push({ action: 'Restore', ok: restore.ok === true, reason: restore.reason || null, commandId: restore.commandId || null });
+    const restore = await io.tapUi('Small window');
+    actions.push({ action: 'Small window', ok: restore.ok === true, reason: restore.reason || null, commandId: restore.commandId || null });
     if (!restore.ok) return { ok: false, reason: 'case-prepare-restore-failed', actions, before: before.raw };
     const restored = await waitFor(io, () => io.presentation(), (p) => Boolean(p &&
-      p.ui && isObject(p.ui.labels) && isObject(p.ui.labels.Enlarge)), 'case-prepare-restore', 12000);
+      p.ui && isObject(p.ui.labels) && isObject(p.ui.labels['Full screen'])), 'case-prepare-restore', 12000);
     return restored.ok
       ? { ok: true, actions, state: 'window-restored', before: before.raw }
       : { ok: false, reason: 'case-prepare-restore-timeout', actions, before: before.raw, restored };
@@ -717,19 +795,10 @@ async function prepareProductCase(io) {
   return { ok: true, actions, state: 'clean', before: before.raw };
 }
 
-async function allowOnce(io) {
-  const tap = await io.tapUi('Allow agent');
-  if (!tap.ok) return { ok: false, reason: 'allow-tap-failed', tap };
-  const grant = await waitFor(io, () => io.readDiag(), (state) => Boolean(state && state.grantForSelected === true), 'allow-grant', 8000);
-  return grant.ok ? { ok: true, tap, grant } : { ok: false, reason: 'allow-grant-timeout', tap, grant };
-}
-
 function blockedCase(io, ctx) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'mobile');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const before = await io.presentation();
     if (!before) return { ok: false, reason: 'presentation-missing', missing: 'presentation-observe' };
     const saved = {
@@ -737,8 +806,32 @@ function blockedCase(io, ctx) {
       wm: await ctx.readWmSize(),
     };
     let blocked = null;
+    let autoFull = null;
     try {
-      const compact = await ctx.setCompactSize('1080x1000', io.canSend);
+      // A normal compact area is auto-full, not blocked: the page is still presented and keeps
+      // its grant. Auto-full hides both full/small controls because there is no small window.
+      const compactAuto = await ctx.setCompactSize('1080x1000', io.canSend);
+      if (compactAuto && compactAuto.ok === false) {
+        return { ok: false, reason: compactAuto.code === 'FENCED' ? 'wm-set-fenced' : 'wm-set-failed', saved, compact: compactAuto };
+      }
+      const autoFullReady = await waitFor(io, () => io.presentation(), (p) => {
+        const native = fixtureNative(p);
+        const labels = p && p.ui && isObject(p.ui.labels) ? p.ui.labels : null;
+        return Boolean(native && native.presentationBlocked === false &&
+          native.grantForSelected === true && labels &&
+          !labels['Full screen'] && !labels['Small window']);
+      }, 'auto-full-positive', 15000);
+      if (!autoFullReady.ok) {
+        return { ok: false, reason: 'auto-full-not-positive', saved, autoFull: autoFullReady };
+      }
+      autoFull = await io.readDiag();
+      if (!autoFull || autoFull.grantForSelected !== true || autoFull.agentOn !== true) {
+        return { ok: false, reason: 'auto-full-grant-not-retained', saved, autoFull };
+      }
+
+      // Only a safe area that cannot hold the 72dp minimum page folds to the bar. 1080x300 leaves
+      // less than that after system bars at phone densities.
+      const compact = await ctx.setCompactSize('1080x300', io.canSend);
       if (compact && compact.ok === false) {
         return { ok: false, reason: compact.code === 'FENCED' ? 'wm-set-fenced' : 'wm-set-failed', saved, compact };
       }
@@ -756,8 +849,9 @@ function blockedCase(io, ctx) {
         return { ok: false, reason: 'blocked-capture-code', saved, capture };
       }
       const blockedDiag = await io.readDiag();
-      if (!blockedDiag || blockedDiag.grantForSelected !== false || blockedDiag.agentOn !== false) {
-        return { ok: false, reason: 'blocked-grant-agent-not-off', saved, diag: blockedDiag };
+      // A temporary presentation block keeps the real grant; only agentOn/presentation is off.
+      if (!blockedDiag || blockedDiag.grantForSelected !== true || blockedDiag.agentOn !== false) {
+        return { ok: false, reason: 'blocked-grant-not-retained', saved, diag: blockedDiag };
       }
       const nativeInput = await io.nativeBlockedInput();
       const afterInput = nativeInput && isObject(nativeInput.after) ? nativeInput.after : null;
@@ -778,20 +872,18 @@ function blockedCase(io, ctx) {
       if (restore && restore.ok === false) {
         return { ok: false, reason: 'wm-restore-failed', saved, restore };
       }
-      const latched = await io.presentation();
-      const latchedNative = latched ? fixtureNative(latched) : null;
-      const latchedDiag = await io.readDiag();
-      if (!latchedNative || latchedNative.presentationBlocked !== true ||
-          !latchedDiag || latchedDiag.grantForSelected !== false || latchedDiag.agentOn !== false) {
-        return { ok: false, reason: 'blocked-latch-lost', saved, latched: latched && latched.raw, diag: latchedDiag };
-      }
-      const enlarged = await io.tapUi('Enlarge');
-      if (!enlarged.ok) return { ok: false, reason: 'enlarge-tap-failed', saved, enlarged };
+      // There is no latched "blocked until Enlarge" state: once the safe area fits the page again,
+      // the same grant and view return automatically. No Enlarge tap is involved.
       const recovered = await waitFor(io, () => io.presentation(), (p) => {
         const native = fixtureNative(p);
         return Boolean(native && native.presentationBlocked === false);
       }, 'presentation-recovered', 20000);
       if (!recovered.ok) return { ok: false, reason: 'presentation-not-recovered', saved, recovered };
+      const recoveredDiag = await waitFor(io, () => io.readDiag(), (state) => Boolean(state &&
+        state.grantForSelected === true && state.agentOn === true), 'blocked-grant-restored', 15000);
+      if (!recoveredDiag.ok) {
+        return { ok: false, reason: 'blocked-grant-not-restored', saved, recovered: recoveredDiag };
+      }
       const afterRecover = recovered.value;
       const beforePage = fixturePage(before) || {};
       const afterPage = fixturePage(afterRecover) || {};
@@ -803,10 +895,14 @@ function blockedCase(io, ctx) {
           beforePage.loads !== afterPage.loads ||
           beforePage.noteValue !== afterPage.noteValue ||
           afterNative.hasFocus !== false || afterNative.presentationBlocked !== false ||
-          !afterDiag || afterDiag.grantForSelected !== false || afterDiag.agentOn !== false) {
+          !afterDiag || afterDiag.grantForSelected !== true || afterDiag.agentOn !== true) {
         return { ok: false, reason: 'blocked-recovery-identity', saved, before: before.raw, after: afterRecover.raw, diag: afterDiag };
       }
-      return { ok: true, reason: 'completed', saved, snapshotCode: snap.code, captureCode: capture.code, nativeInput, recovered: afterRecover.raw };
+      return {
+        ok: true, reason: 'completed', saved,
+        snapshotCode: snap.code, captureCode: capture.code,
+        autoFull, nativeInput, recovered: afterRecover.raw,
+      };
     } finally {
       await ctx.restoreWmSize();
     }
@@ -817,16 +913,14 @@ function focusedCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'desktop');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const snap = await io.snapshot();
     const elements = snap.ok && snap.data && Array.isArray(snap.data.elements) ? snap.data.elements : [];
     const note = elements.find((item) => item && (item.name === 'note' || item.name === 'Note' || item.role === 'textbox'));
     if (!note || !note.selector) return { ok: false, reason: 'note-ref-missing', snap };
     const typed = await io.type(note.selector, 'product-sticky');
     if (!typed.ok) return { ok: false, reason: 'note-type-failed', typed };
-    const mouse = await ensureProductMouse(io);
-    if (!mouse.ok) return { ok: false, reason: mouse.reason, mouse };
+    // This case keeps touch mode so the focused grant/view evidence stays on one path; the mouse
+    // behavior has its own cases. setMouseMode is not a grant/revocation path here.
     const beforeScroll = await io.presentation();
     const beforeMetrics = observeMetrics(beforeScroll) || {};
     const beforeSy = isNum(beforeMetrics.metrics ? beforeMetrics.metrics.sy : beforeMetrics.sy)
@@ -860,41 +954,96 @@ function focusedCase(io) {
     const beforeNative = fixtureNative(before) || {};
     const beforeMetrics2 = observeMetrics(before) || {};
     const savedSy = beforeMetrics2.metrics ? beforeMetrics2.metrics.sy : beforeMetrics2.sy;
-    const composer = before.composer;
-    const composerFrame = acceptedComposerRect(composer);
-    const pageFrame = boundsOf(beforeNative.physicalFrame);
-    if (!composerFrame || !pageFrame) return { ok: false, reason: 'composer-measurement-missing', composer, before: before.raw };
-    if (intersects(composerFrame, pageFrame)) return { ok: false, reason: 'composer-overlaps-page', composer: composerFrame, page: pageFrame };
-    const enlarge = await io.tapUi('Enlarge');
-    if (!enlarge.ok) return { ok: false, reason: 'enlarge-failed', enlarge };
-    const expanded = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels.Restore), 'enlarged', 20000);
-    if (!expanded.ok) return { ok: false, reason: 'enlarge-not-observed', before: before.raw };
-    const restore = await io.tapUi('Restore');
-    if (!restore.ok) return { ok: false, reason: 'restore-failed', restore };
-    const restored = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels.Enlarge), 'restored', 20000);
-    if (!restored.ok) return { ok: false, reason: 'restore-not-observed', before: before.raw };
-    const after = restored.value;
-    const afterPage = fixturePage(after) || {};
-    const afterNative = fixtureNative(after) || {};
-    const afterMetrics = observeMetrics(after) || {};
-    const afterSy = afterMetrics.metrics ? afterMetrics.metrics.sy : afterMetrics.sy;
-    const imeAfter = after.fixture && isObject(after.fixture.outerime) ? after.fixture.outerime : null;
-    const afterComposerFrame = acceptedComposerRect(after.composer);
-    const afterPageFrame = boundsOf(afterNative.physicalFrame);
-    if (!afterComposerFrame || !afterPageFrame) return { ok: false, reason: 'composer-after-measurement-missing', composer: after.composer, after: after.raw };
-    if (intersects(afterComposerFrame, afterPageFrame)) return { ok: false, reason: 'composer-overlaps-page-after', composer: afterComposerFrame, page: afterPageFrame };
-    if (!isNum(afterSy) || Math.abs(afterSy - savedSy) > 1 ||
-        afterPage.noteValue !== 'product-sticky' || afterPage.noteFocused !== true ||
-        afterPage.noteEnabled !== true || afterPage.noteReadOnly !== false || afterPage.noteTag !== 'INPUT' ||
-        !isNum(afterPage.noteSelectionStart) || !isNum(afterPage.noteSelectionEnd) ||
-        afterPage.noteSelectionStart < 0 || afterPage.noteSelectionEnd < afterPage.noteSelectionStart ||
-        afterPage.documentHasFocus !== true ||
-        afterPage.timeOrigin !== beforePage.timeOrigin || afterPage.loads !== beforePage.loads ||
-        beforeNative.viewHandle !== afterNative.viewHandle || afterNative.hasFocus !== true ||
-        !imeAfter || imeAfter.shown !== true) {
-      return { ok: false, reason: 'focused-restore-identity', before: before.raw, after: after.raw, savedSy, afterSy };
+
+    // Contract for the focused page:
+    // - focus + IME is auto-full, the page stays inside the real IME-safe area (display rect),
+    //   and the chat composer may legitimately be underneath it (no composer-overlap check);
+    // - after a proven-shown IME is closed by real Back, the window auto-floats and the same
+    //   grant/view/document/scroll/value/focus/selection survive; only the float must avoid the
+    //   composer;
+    // - the later Full screen / Small window cycle also preserves that state.
+    async function verifyFocusedPresentation(presentation, label, options = {}) {
+      const autoFull = options.autoFull === true;
+      const float = options.float === true;
+      const imeShown = options.imeShown === true;
+      const page = fixturePage(presentation) || {};
+      const native = fixtureNative(presentation) || {};
+      const metrics = observeMetrics(presentation) || {};
+      const sy = metrics.metrics ? metrics.metrics.sy : metrics.sy;
+      const ime = presentation.fixture && isObject(presentation.fixture.outerime) ? presentation.fixture.outerime : null;
+      const labels = presentation.ui && isObject(presentation.ui.labels) ? presentation.ui.labels : null;
+      const frame = boundsOf(native.physicalFrame);
+      const composer = acceptedComposerRect(presentation.composer);
+      const diag = await io.readDiag();
+      const labelOk = autoFull
+        ? Boolean(labels && !labels['Full screen'] && !labels['Small window'])
+        : float
+          ? Boolean(labels && labels['Full screen'] && !labels['Small window'])
+          : Boolean(labels && labels['Small window'] && !labels['Full screen']);
+      if (!labelOk) return { ok: false, reason: `${label}-window-mode`, labels, presentation: presentation.raw };
+      if (!ime || ime.shown !== imeShown) return { ok: false, reason: `${label}-ime-state`, ime };
+      if (!isNum(sy) || Math.abs(sy - savedSy) > 1 ||
+          page.noteValue !== 'product-sticky' || page.noteFocused !== true ||
+          page.noteEnabled !== true || page.noteReadOnly !== false || page.noteTag !== 'INPUT' ||
+          !isNum(page.noteSelectionStart) || !isNum(page.noteSelectionEnd) ||
+          page.noteSelectionStart < 0 || page.noteSelectionEnd < page.noteSelectionStart ||
+          page.documentHasFocus !== true ||
+          page.timeOrigin !== beforePage.timeOrigin || page.loads !== beforePage.loads ||
+          beforeNative.viewHandle !== native.viewHandle || native.hasFocus !== true ||
+          native.presentationBlocked !== false) {
+        return { ok: false, reason: `${label}-identity`, page, native, sy, savedSy, presentation: presentation.raw };
+      }
+      if (!diag || diag.grantForSelected !== true) return { ok: false, reason: `${label}-grant-lost`, diag };
+      if (!frame) return { ok: false, reason: `${label}-display-frame-missing`, native };
+      if (imeShown) {
+        const safe = ['windowLeftPx', 'windowTopPx', 'windowRightPx', 'safeBottomPx'];
+        if (!safe.every((key) => isNum(ime[key]))) return { ok: false, reason: `${label}-ime-safe-missing`, ime };
+        if (frame.left < ime.windowLeftPx - 1 || frame.right > ime.windowRightPx + 1 ||
+            frame.top < ime.windowTopPx - 1 || frame.bottom > ime.safeBottomPx + 1) {
+          return { ok: false, reason: `${label}-page-outside-ime-safe`, frame, ime };
+        }
+      }
+      if (float) {
+        if (!composer || intersects(composer, frame)) {
+          return { ok: false, reason: `${label}-float-overlaps-composer`, frame, composer };
+        }
+      }
+      return { ok: true, page, native, sy, frame, composer, ime, labels };
     }
-    return { ok: true, reason: 'completed', before: before.raw, scrolled: scrolled.value.raw, after: after.raw, savedSy, afterSy };
+
+    const initial = await verifyFocusedPresentation(before, 'ime-autofull', { autoFull: true, imeShown: true });
+    if (!initial.ok) return initial;
+
+    const hidden = await io.imeHide();
+    if (!hidden.ok) return { ok: false, reason: 'ime-hide-failed', hidden };
+    const imeGone = await waitFor(io, () => io.presentation(), (p) => {
+      const ime = p.fixture && isObject(p.fixture.outerime) ? p.fixture.outerime : null;
+      const labels = p.ui && isObject(p.ui.labels) ? p.ui.labels : null;
+      return Boolean(ime && ime.shown === false && labels && labels['Full screen'] && !labels['Small window']);
+    }, 'ime-gone-autfloat', 15000);
+    if (!imeGone.ok) return { ok: false, reason: 'ime-gone-autfloat-timeout', imeGone };
+    const autoFloat = await verifyFocusedPresentation(imeGone.value, 'ime-gone-autfloat', { float: true, imeShown: false });
+    if (!autoFloat.ok) return autoFloat;
+
+    const enlarge = await io.tapUi('Full screen');
+    if (!enlarge.ok) return { ok: false, reason: 'enlarge-failed', enlarge };
+    const expanded = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels['Small window']), 'enlarged', 20000);
+    if (!expanded.ok) return { ok: false, reason: 'enlarge-not-observed', before: before.raw };
+    const full = await verifyFocusedPresentation(expanded.value, 'full-screen', { imeShown: false });
+    if (!full.ok) return full;
+
+    const restore = await io.tapUi('Small window');
+    if (!restore.ok) return { ok: false, reason: 'restore-failed', restore };
+    const restored = await waitFor(io, () => io.presentation(), (p) => isObject(p.ui) && isObject(p.ui.labels) && isObject(p.ui.labels['Full screen']), 'restored', 20000);
+    if (!restored.ok) return { ok: false, reason: 'restore-not-observed', before: before.raw };
+    const small = await verifyFocusedPresentation(restored.value, 'small-window', { float: true, imeShown: false });
+    if (!small.ok) return small;
+    return {
+      ok: true, reason: 'completed',
+      before: before.raw, scrolled: scrolled.value.raw, ime: hidden.data,
+      autoFloat: imeGone.value.raw, full: expanded.value.raw, after: restored.value.raw,
+      savedSy,
+    };
   })();
 }
 
@@ -902,8 +1051,6 @@ function desktopCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'desktop');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const presentation = await io.presentation();
     if (!presentation) return { ok: false, reason: 'presentation-missing' };
     const observe = observeMetrics(presentation) || {};
@@ -924,8 +1071,6 @@ function mouseMoveClickCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.mouseUrl, 'desktop');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const mouse = await ensureProductMouse(io);
     if (!mouse.ok) return { ok: false, reason: mouse.reason, mouse };
     const frameWait = await waitFor(io, () => io.pageRect(), (state) => Boolean(state && isObject(state.pointerUi) &&
@@ -940,17 +1085,20 @@ function mouseMoveClickCase(io) {
       return { ok: false, reason: 'mouse-geometry-missing', frame };
     }
     const scale = physical.width / viewport.width;
-    const pointerCssX = viewport.offsetLeft + pointer.pointerViewX / scale;
-    const pointerCssY = viewport.offsetTop + pointer.pointerViewY / scale;
+    const beforePointer = pointerCss(frame, pointer);
+    const pointerCssX = beforePointer.x;
+    const pointerCssY = beforePointer.y;
     const initial = await io.fixtureTarget('box', pointerCssX, pointerCssY);
     if (!initial || !isObject(initial.box)) return { ok: false, reason: 'mouse-box-missing', initial };
     const box = initial.box;
     const centerX = (box.left + box.right) / 2;
     const centerY = (box.top + box.bottom) / 2;
-    const startX = physical.left + pointer.pointerViewX;
-    const startY = physical.top + pointer.pointerViewY;
     const dx = Math.round((centerX - pointerCssX) * scale);
     const dy = Math.round((centerY - pointerCssY) * scale);
+    const start = gestureStart(frame, dx, dy);
+    if (!start) return { ok: false, reason: 'mouse-stroke-outside-page', physical, dx, dy };
+    const startX = start.x;
+    const startY = start.y;
     let moved = false;
     if (!(initial.hit === true) && Math.hypot(dx, dy) >= 1) {
       if (Math.hypot(dx, dy) <= 32) return { ok: false, reason: 'mouse-move-tiny', dx, dy, initial };
@@ -976,15 +1124,17 @@ function mouseMoveClickCase(io) {
       return { ok: false, reason: 'mouse-pointer-view-changed', before: pointer, after: movedPointer };
     }
     const afterScale = movedPhysical.width / movedViewport.width;
-    const currentCssX = movedViewport.offsetLeft + movedPointer.pointerViewX / afterScale;
-    const currentCssY = movedViewport.offsetTop + movedPointer.pointerViewY / afterScale;
+    const movedCss = pointerCss(afterMoveFrame, movedPointer);
+    const currentCssX = movedCss.x;
+    const currentCssY = movedCss.y;
     const hovered = await io.fixtureTarget('box', currentCssX, currentCssY);
     if (!hovered || hovered.hit !== true) return { ok: false, reason: 'mouse-not-hit', dx, dy, moved, pointer: { x: currentCssX, y: currentCssY }, hovered };
     const before = await io.presentation();
     const beforeLog = before && isObject(before.observe) && Array.isArray(before.observe.log) ? before.observe.log : null;
     if (!beforeLog) return { ok: false, reason: 'mouse-log-missing', before: before && before.raw };
-    const clickX = Math.round(movedPhysical.left + movedPointer.pointerViewX);
-    const clickY = Math.round(movedPhysical.top + movedPointer.pointerViewY);
+    const movedScreen = pointerScreen(afterMoveFrame, movedPointer);
+    const clickX = Math.round(movedScreen.x);
+    const clickY = Math.round(movedScreen.y);
     const click = await io.finger(`finger:${clickX},${clickY},0,0,0,1`);
     if (!click) return { ok: false, reason: 'mouse-click-not-sent' };
     const after = await io.presentation();
@@ -1058,8 +1208,6 @@ function mouseHoverA11yOffCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.mouseUrl, 'desktop');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const mouse = await ensureProductMouse(io);
     if (!mouse.ok) return { ok: false, reason: mouse.reason, mouse };
     const frameWait = await waitFor(io, () => io.pageRect(), (state) => Boolean(state && isObject(state.pointerUi) &&
@@ -1074,10 +1222,9 @@ function mouseHoverA11yOffCase(io) {
       return { ok: false, reason: 'hover-geometry-missing', frame };
     }
     const scale = physical.width / viewport.width;
-    const pointerCssX = viewport.offsetLeft + pointer.pointerViewX / scale;
-    const pointerCssY = viewport.offsetTop + pointer.pointerViewY / scale;
-    const startX = physical.left + pointer.pointerViewX;
-    const startY = physical.top + pointer.pointerViewY;
+    const beforePointer = pointerCss(frame, pointer);
+    const pointerCssX = beforePointer.x;
+    const pointerCssY = beforePointer.y;
     const aim = await io.fixtureTarget('box', pointerCssX, pointerCssY);
     if (!aim || !isObject(aim.box)) return { ok: false, reason: 'hover-box-missing', aim };
     const box = aim.box;
@@ -1099,6 +1246,8 @@ function mouseHoverA11yOffCase(io) {
     const dy = Math.round((target.y - pointerCssY) * scale);
     // Same sizing rule as move-click: a correction at or below 32px is a tap-sized move, not a hover.
     if (Math.hypot(dx, dy) <= 32) return { ok: false, reason: 'hover-move-tiny', dx, dy, target, aim };
+    const start = gestureStart(frame, dx, dy);
+    if (!start) return { ok: false, reason: 'hover-stroke-outside-page', physical, dx, dy };
     const before = await io.presentation();
     const beforeLog = before && isObject(before.observe) && Array.isArray(before.observe.log) ? before.observe.log : null;
     if (!beforeLog) return { ok: false, reason: 'hover-log-missing', before: before && before.raw };
@@ -1113,7 +1262,7 @@ function mouseHoverA11yOffCase(io) {
       if (!begin.ok) {
         failure = { ok: false, reason: 'a11y-off-begin-failed', begin };
       } else {
-        const gesture = await io.hoverFinger(`finger:${Math.round(startX)},${Math.round(startY)},${dx},${dy},0,4`);
+        const gesture = await io.hoverFinger(`finger:${start.x},${start.y},${dx},${dy},0,4`);
         if (!gesture.ok) {
           failure = { ok: false, reason: 'hover-move-not-sent', begin, gesture };
         } else if (!isObject(gesture.data) || gesture.data.a11yEnabledDuringGesture !== false) {
@@ -1182,8 +1331,6 @@ function mouseDragWheelCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.mouseUrl, 'desktop');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const mouse = await ensureProductMouse(io);
     if (!mouse.ok) return { ok: false, reason: mouse.reason, mouse };
     const frameWait = await waitFor(io, () => io.pageRect(), (state) => Boolean(state && isObject(state.pointerUi) &&
@@ -1196,19 +1343,20 @@ function mouseDragWheelCase(io) {
     if (!pointer || !physical || !viewport || pointer.geometryReady !== true || !isNum(pointer.pointerViewX) || !isNum(pointer.pointerViewY) ||
         !isNum(physical.width) || !isNum(viewport.width) || viewport.width <= 0) return { ok: false, reason: 'drag-geometry-missing', frame };
     const scale = physical.width / viewport.width;
-    const pointerCssX = viewport.offsetLeft + pointer.pointerViewX / scale;
-    const pointerCssY = viewport.offsetTop + pointer.pointerViewY / scale;
+    const beforePointer = pointerCss(frame, pointer);
+    const pointerCssX = beforePointer.x;
+    const pointerCssY = beforePointer.y;
     const aim = await io.fixtureTarget('box', pointerCssX, pointerCssY);
     if (!aim || !isObject(aim.box)) return { ok: false, reason: 'drag-box-missing', aim };
     const centerX = (aim.box.left + aim.box.right) / 2;
     const centerY = (aim.box.top + aim.box.bottom) / 2;
-    const startX = physical.left + pointer.pointerViewX;
-    const startY = physical.top + pointer.pointerViewY;
     const moveX = Math.round((centerX - pointerCssX) * scale);
     const moveY = Math.round((centerY - pointerCssY) * scale);
     if (aim.hit !== true) {
       if (Math.hypot(moveX, moveY) <= 32) return { ok: false, reason: 'drag-move-tiny', moveX, moveY };
-      if (!(await io.finger(`finger:${Math.round(startX)},${Math.round(startY)},${moveX},${moveY},0,4`))) return { ok: false, reason: 'drag-move-not-sent' };
+      const start = gestureStart(frame, moveX, moveY);
+      if (!start) return { ok: false, reason: 'drag-stroke-outside-page', physical, moveX, moveY };
+      if (!(await io.finger(`finger:${start.x},${start.y},${moveX},${moveY},0,4`))) return { ok: false, reason: 'drag-move-not-sent' };
     }
     const settledFrame = await waitFor(io, () => io.pageRect(), (state) => Boolean(state &&
       isObject(state.pointerUi) && state.pointerUi.geometryReady === true &&
@@ -1224,17 +1372,23 @@ function mouseDragWheelCase(io) {
       return { ok: false, reason: 'drag-after-geometry-missing', afterMoveFrame };
     }
     const afterScale = movedPhysical.width / movedViewport.width;
-    const currentCssX = movedViewport.offsetLeft + movedPointer.pointerViewX / afterScale;
-    const currentCssY = movedViewport.offsetTop + movedPointer.pointerViewY / afterScale;
+    const movedCss = pointerCss(afterMoveFrame, movedPointer);
+    const currentCssX = movedCss.x;
+    const currentCssY = movedCss.y;
     const hovered = await io.fixtureTarget('box', currentCssX, currentCssY);
     if (!hovered || hovered.hit !== true) return { ok: false, reason: 'drag-not-hit', pointer: { x: currentCssX, y: currentCssY }, hovered };
     const before = await io.presentation();
     const beforeBox = before && isObject(before.observe) && isObject(before.observe.report) && Array.isArray(before.observe.report.box) ? before.observe.report.box : null;
     if (!beforeBox) return { ok: false, reason: 'drag-box-report-missing', before: before && before.raw };
-    const dragStartX = Math.round(movedPhysical.left + movedPointer.pointerViewX);
-    const dragStartY = Math.round(movedPhysical.top + movedPointer.pointerViewY);
-    const dropX = Math.round(dragStartX + 40 * afterScale);
-    const dropY = Math.round(dragStartY + 20 * afterScale);
+    const movedScreen = pointerScreen(afterMoveFrame, movedPointer);
+    const dragDeltaX = Math.round(40 * afterScale);
+    const dragDeltaY = Math.round(20 * afterScale);
+    const dragStart = gestureStart(afterMoveFrame, dragDeltaX, dragDeltaY);
+    if (!dragStart) return { ok: false, reason: 'drag-stroke-outside-page', frame: afterMoveFrame, dragDeltaX, dragDeltaY };
+    const dragStartX = dragStart.x;
+    const dragStartY = dragStart.y;
+    const dropX = dragStartX + dragDeltaX;
+    const dropY = dragStartY + dragDeltaY;
     const drag = await io.finger(`finger:${dragStartX},${dragStartY},${dropX - dragStartX},${dropY - dragStartY},900,4`);
     if (!drag) return { ok: false, reason: 'drag-finger-not-sent' };
     const afterDrag = await io.presentation();
@@ -1270,8 +1424,6 @@ function pinchCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.mouseUrl, 'mobile');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const touch = await ensureProductTouch(io);
     if (!touch.ok) return { ok: false, reason: touch.reason, touch };
     const before = await io.presentation();
@@ -1305,8 +1457,6 @@ function sessionStorageCase(io) {
   return (async () => {
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'mobile');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const marker = require('node:crypto').randomBytes(16).toString('hex');
     const written = await io.siteState('write', marker);
     if (!written || written.set !== true) return { ok: false, reason: 'site-write-failed', written };
@@ -1336,10 +1486,13 @@ function sessionStorageCase(io) {
             afterRead.profileName !== beforeRead.profileName) {
           return { ok: false, reason: 'site-state-not-preserved', beforeRead, afterRead };
         }
-        const diag = await io.readDiag();
-        if (!diag || diag.grantForSelected !== false || diag.agentOn !== false) return { ok: false, reason: 'grant-inherited', diag };
-        const allowB = await allowOnce(io);
-        if (!allowB.ok) return { ok: false, reason: 'second-allow-failed', allowB };
+        // The new-session open grants its own selected tab. This is not inheritance: the old ref
+        // above was already refused, and this grant must bind the reopened tab after its ready
+        // one-shot verification.
+        const granted = await waitFor(io, () => io.readDiag(), (state) => Boolean(state &&
+          state.selectedTabId === reopened.tabId && state.grantForSelected === true),
+        'new-session-default-grant', 15000);
+        if (!granted.ok) return { ok: false, reason: 'new-session-default-grant-missing', reopened, granted };
         const fresh = await io.snapshot();
         if (!fresh.ok) return { ok: false, reason: 'fresh-snapshot-failed', fresh };
         return { ok: true, reason: 'completed', sessionId: created.data.sessionId, beforeRead, afterRead };
@@ -1356,12 +1509,11 @@ function sessionStorageCase(io) {
 
 function nativeEntryCase(io) {
   return (async () => {
-    // A is only the precondition target: one tool open, one human Allow. It gives us the old native
-    // tab/view to prove B and the final Open target do not reuse. No later tool.open is allowed.
+    // A is only the precondition target: one tool open with the default ready grant. It gives us
+    // the old native tab/view to prove B and the final Open target do not reuse. No later tool.open
+    // is allowed.
     const opened = await baseOpen(io, PRODUCT.focusUrl, 'mobile');
     if (!opened.ok) return opened;
-    const allow = await allowOnce(io);
-    if (!allow.ok) return allow;
     const before = await io.presentation();
     const beforeNative = fixtureNative(before);
     const beforeRect = await io.pageRect();
@@ -1440,10 +1592,13 @@ function nativeEntryCase(io) {
     const open = await io.tapChat('Open');
     if (!open.ok) return { ok: false, reason: 'dialog-open-tap-failed', open };
 
+    // The person's own Open is an explicit open too: its ready one-shot grant binds the new tab,
+    // while the old tab's authority stays gone. The new grant is real (grantForSelected/agentOn)
+    // and is not inherited because the selected tab and view below are different.
     const entered = await waitFor(io, () => io.readDiag(), (state) => Boolean(state &&
       isText(state.selectedTabId) && state.selectedTabId !== oldTab && state.selectedTabId !== draftDiag.selectedTabId &&
       state.selectedTabOwner === sessionB &&
-      state.grantForSelected === false && state.agentOn === false &&
+      state.grantForSelected === true &&
       Array.isArray(state.tabIds) && state.tabIds.includes(oldTab)), 'native-entry-open-tab', 20000);
     if (!entered.ok) return { ok: false, reason: 'native-entry-tab-not-created', oldTab, sessionB, entered };
     const afterRect = await waitFor(io, () => io.pageRect(), (state) => Boolean(state &&
@@ -1452,7 +1607,8 @@ function nativeEntryCase(io) {
     const afterView = afterRect.value.viewHandle;
     if (afterView === oldView) return { ok: false, reason: 'native-entry-same-view', beforeView: oldView, afterRect };
     const afterDiag = await io.readDiag();
-    if (!afterDiag || afterDiag.grantForSelected !== false || afterDiag.agentOn !== false ||
+    if (!afterDiag || afterDiag.selectedTabId !== entered.value.selectedTabId ||
+        afterDiag.grantForSelected !== true ||
         afterDiag.selectedTabOwner !== sessionB ||
         !Array.isArray(afterDiag.tabIds) || !afterDiag.tabIds.includes(oldTab)) {
       return { ok: false, reason: 'native-entry-after-identity', afterDiag };
@@ -1545,7 +1701,6 @@ module.exports = {
   PRODUCT_CASE_FUNCTIONS,
   prepareProductCase,
   baseOpen,
-  allowOnce,
   acceptedComposerRect,
   createCaseFence,
   waitFor,

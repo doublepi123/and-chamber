@@ -269,22 +269,52 @@ class BrowserDriverLogicTest {
 
     @Test
     fun `capture rejects a moved frame a changed document and a changed fingerprint`() = runBlocking {
-        val frame = NativeFrame(100, 80, 1, 2, 1, 2, 101, 82)
+        val presentation = capturePresentation()
         val probe = GeometryProbe("doc", 100, 80, 100, 80, 0f, 0f, 2f, 100f, 80f, 0f, 0f, 0f, 0f, 1f)
-        val stamp = CaptureStamp("view", "doc", 1L, 3L, frame, probe)
-        val moved = stamp.copy(frame = frame.copy(windowLeft = 9))
-        assertEquals(null, guardedCapture({ stamp }, { observation(moved) }, { CaptureBytes(byteArrayOf(1), 4, 5) }))
-        assertEquals(null, guardedCapture({ stamp }, { observation(stamp).copy(documentId = "other") }, { CaptureBytes(byteArrayOf(1), 4, 5) }))
-        assertEquals(null, guardedCapture({ stamp }, { observation(stamp) }, { CaptureBytes(byteArrayOf(1), 4, 5) }).let { nullStamp(probe) })
-        val stable = guardedCapture({ stamp }, { observation(stamp) }, { CaptureBytes(byteArrayOf(7), 9, 8) })
-        assertEquals(9, stable?.image?.width)
-        assertEquals(8, stable?.image?.height)
-        assertEquals(7, stable?.image?.payload?.single()?.toInt())
+        val stamp = CaptureStamp("view", "doc", 1L, 3L, presentation, probe)
+
+        val movedFrame = presentation.copy(
+            presentation = presentation.presentation.copy(pageLeft = 9f),
+            rect = CaptureRect(9, 2, 109, 82),
+        )
+        assertEquals(
+            CaptureOutcome.Refused(CaptureRefusal.PRESENTATION_CHANGED),
+            guardedCapture({ CaptureStampResult.Ready(stamp) }, { observation(stamp).copy(presentation = movedFrame) }, { CaptureBytes(byteArrayOf(1), 4, 5) }),
+        )
+        assertEquals(
+            CaptureOutcome.Refused(CaptureRefusal.IDENTITY_CHANGED),
+            guardedCapture({ CaptureStampResult.Ready(stamp) }, { observation(stamp).copy(documentId = "other") }, { CaptureBytes(byteArrayOf(1), 4, 5) }),
+        )
+        assertEquals(
+            CaptureOutcome.Refused(CaptureRefusal.PRESENTATION_CHANGED),
+            guardedCapture({ CaptureStampResult.Moved }, { observation(stamp) }, { CaptureBytes(byteArrayOf(1), 4, 5) }),
+        )
+        val stable = guardedCapture({ CaptureStampResult.Ready(stamp) }, { observation(stamp) }, { CaptureBytes(byteArrayOf(7), 9, 8) })
+        val copied = (stable as? CaptureOutcome.Captured)?.attempt?.image
+        assertEquals(9, copied?.width)
+        assertEquals(8, copied?.height)
+        assertEquals(7, copied?.payload?.single()?.toInt())
     }
 
-    private fun observation(stamp: CaptureStamp) = CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.frame)
+    private fun capturePresentation() = CaptureFrame(
+        presentation = BrowserPresentationGeometry(
+            revision = 1L,
+            viewportWidthPx = 100,
+            viewportHeightPx = 80,
+            scale = 1f,
+            pageLeft = 1f,
+            pageTop = 2f,
+            pageWidth = 100f,
+            pageHeight = 80f,
+            visible = CaptureRect(1, 2, 101, 82),
+        ),
+        rect = CaptureRect(1, 2, 101, 82),
+        windowWidth = 1024,
+        windowHeight = 768,
+    )
 
-    private fun nullStamp(probe: GeometryProbe): CaptureAttempt? = null
+    private fun observation(stamp: CaptureStamp) =
+        CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.presentation)
 
     @Test
     fun `desktop viewport script pins a late site meta and can stop`() {

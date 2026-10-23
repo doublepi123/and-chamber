@@ -27,7 +27,6 @@ const PRODUCTION_PACKAGE = 'io.andchamber.app';
 const HOST_PORT = 23000;
 const GUEST_PORT = 3000;
 const STATUS_DIR = 'files/local-provider-e2e/current';
-const ALLOW_LABEL = 'Allow agent';
 const HOST_RESPONSE_LIMIT = 1024 * 1024;
 
 const ENDPOINTS = Object.freeze({
@@ -281,7 +280,7 @@ function attributesOf(tag) {
   return values;
 }
 
-function selectAllowNode(xml, label = ALLOW_LABEL) {
+function selectAllowNode(xml, label) {
   for (const match of String(xml || '').matchAll(/<node\b[^>]*\/?>/g)) {
     const attributes = attributesOf(match[0]);
     if (attributes.text !== label) continue;
@@ -550,7 +549,7 @@ function normalizeEvidence(raw, { instrumentation, cold, host } = {}) {
     browser: {
       chain: !failed && actions.open === 1 && actions.type === 1 && actions.click === 1 &&
         actions.scroll === 1 && actions.capture === 1 ? 'pass' : 'fail',
-      reason: failed ? String(evidence.failure || 'test-failed') : !host || host.taps?.fixtureAllow ? '' : 'fixture-allow-tap-missing',
+      reason: failed ? String(evidence.failure || 'test-failed') : '',
     },
     actions: {
       open: Number(actions.open || 0),
@@ -596,7 +595,9 @@ function verdict(evidence, host = {}) {
     reasons.push('cold-instrumentation-not-pass');
   }
   if (host.health && host.health.status !== 'pass') reasons.push('host-health-not-pass');
-  if (!host.taps || !host.taps.initialAllow || !host.taps.takeover || !host.taps.fixtureAllow) {
+  // The initial open no longer waits for a human Allow tap: its ready grant is the production
+  // default. Take over and the explicit Resume agent handback remain required real UI taps.
+  if (!host.taps || !host.taps.takeover || !host.taps.resumeAgent) {
     reasons.push('required-real-ui-taps-missing');
   }
   if (!host.pty || host.pty.ok !== true) reasons.push('pty-not-pass');
@@ -805,10 +806,6 @@ async function tapLabel(adbFn, label, { attempts = 20 } = {}) {
   return null;
 }
 
-function tapAllow(adbFn, options) {
-  return tapLabel(adbFn, ALLOW_LABEL, options);
-}
-
 async function collectFailureEvidence(adbFn, pkg, secrets, runId) {
   const files = {};
   for (const name of ['status.json', 'evidence.json', 'cold-status.json', 'cold-evidence.json']) {
@@ -899,11 +896,12 @@ async function main() {
     );
     const size = parseWmSize((await adbFn(['shell', 'wm', 'size'])).stdout);
     if (!size) throw new Error('wm size unavailable');
+    // An explicit open gets the ready default grant; the remaining real human taps are Take over
+    // (revocation) and the manual fixture page's Allow (re-grant after that takeover).
     const tapPhaseLabels = {
       'await-chat-open': 'Open',
-      'await-allow-tap': ALLOW_LABEL,
       'await-takeover-tap': 'Take over',
-      'await-allow-fixture-tap': ALLOW_LABEL,
+      'await-resume-agent-tap': 'Resume agent',
     };
     const taps = {};
     const tapErrors = {};
@@ -928,7 +926,9 @@ async function main() {
           seen.add(status.phase);
           log(`test-phase ${status.phase}${status.detail ? ` (${status.detail})` : ''}\n`);
         }
-        if (!hostHealth && ['await-chat-open', 'runtime-ready', 'await-allow-tap', 'allow-active', 'actions-done', 'restart', 'done'].includes(status.phase)) {
+        if (!hostHealth && status.state !== 'stopped' &&
+          ['await-chat-open', 'runtime-ready', 'initial-open-granted', 'await-takeover-tap',
+            'await-resume-agent-tap', 'resume-agent-active', 'actions-done', 'restart', 'done'].includes(status.phase)) {
           uiPassword = await readPassword(adbFn, args.package);
           secrets.push(uiPassword);
           const endpointsNow = endpoints(HOST_PORT);
@@ -1103,15 +1103,13 @@ async function main() {
       health: hostHealth,
       taps: {
         chatOpen: taps['await-chat-open'] || null,
-        initialAllow: taps['await-allow-tap'] || null,
         takeover: taps['await-takeover-tap'] || null,
-        fixtureAllow: taps['await-allow-fixture-tap'] || null,
+        resumeAgent: taps['await-resume-agent-tap'] || null,
       },
       tapErrors: {
         chatOpen: tapErrors['await-chat-open'] || null,
-        initialAllow: tapErrors['await-allow-tap'] || null,
         takeover: tapErrors['await-takeover-tap'] || null,
-        fixtureAllow: tapErrors['await-allow-fixture-tap'] || null,
+        resumeAgent: tapErrors['await-resume-agent-tap'] || null,
       },
       pty,
       ptyExit: coldCoord.pty.code,

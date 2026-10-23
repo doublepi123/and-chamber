@@ -89,7 +89,9 @@ import io.andchamber.app.ui.findActivity
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.withSessionPath
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 
 private sealed interface SessionPhase {
@@ -495,12 +497,6 @@ internal fun WebScreen(
                         )
                     }
                 }
-                if (localTrusted && browserPresenter != null) {
-                    // Includes the actual multiline editor + footer. Missing/stale measurements use
-                    // a conservative fallback; focus itself never changes the agent grant.
-                    io.andchamber.app.ui.browser.BrowserFloatPage(browserPresenter, bottomClearance = composerClearance)
-                }
-
                 AnimatedVisibility(
                     visible = overlay == null && web.progress < 100,
                     enter = fadeIn(),
@@ -530,6 +526,19 @@ internal fun WebScreen(
                     )
                 }
 
+                if (localTrusted && browserPresenter != null) {
+                    // Drawn above the edge handle, so full screen covers the whole safe area and no
+                    // chat control sits on top of the browser's own buttons. The composer height is
+                    // measured (or a conservative fallback); focus never changes the agent grant.
+                    io.andchamber.app.ui.browser.BrowserFloatPage(
+                        browserPresenter,
+                        bottomClearance = composerClearance,
+                        // The address card is drawn in this window, over the page: keep it out of
+                        // any page capture while it is open.
+                        presentationOccluded = openUrlDialog,
+                    )
+                }
+
                 if (openUrlDialog) {
                     val presenter = browserPresenter
                     val session = consoleSession
@@ -537,8 +546,15 @@ internal fun WebScreen(
                         OpenBrowserUrlDialog(
                             onOpen = { url ->
                                 openUrlDialog = false
-                                // Opens in this chat's window; the person still has to Allow it.
-                                scope.launch { presenter.openUser(url, session) }
+                                // Opens in this chat's window; the agent may use it once it has loaded.
+                                scope.launch {
+                                    // The card occludes the page until recomposition clears its gate.
+                                    // Do not race the manual open against that same-frame teardown.
+                                    val exposed = withTimeoutOrNull(2_000L) {
+                                        presenter.state.first { !it.presentationBlocked }
+                                    }
+                                    if (exposed != null) presenter.openUser(url, session)
+                                }
                             },
                             onDismiss = { openUrlDialog = false },
                         )

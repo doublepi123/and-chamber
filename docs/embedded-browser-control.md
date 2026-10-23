@@ -14,7 +14,7 @@ One tool, one action per call:
 
 | Action | Purpose |
 |---|---|
-| `open` | Open one public `https` URL in the in-app window, then wait about a minute for the person's Allow |
+| `open` | Open one public `https` URL in the in-app window; a ready foreground page defaults to agent control |
 | `snapshot` | Read a text snapshot and element refs |
 | `click` | Activate a ref from the latest snapshot |
 | `type` | Type into a ref from the latest snapshot |
@@ -33,19 +33,37 @@ returns a plain "not available" text error. It never prints the token, and it do
    config overlay, or a log line.
 2. The tool server accepts only `POST /v1/tool` and `POST /v1/cancel` with the bearer token from the
    endpoint file, loopback peers, and no `Origin` header.
-3. The user asks in chat. A page opens unauthorized. The agent can open it, but snapshot, click,
-   type, scroll and capture are refused until the person taps **Allow agent** in the window.
-4. `open` does not return at once: after the page loads it waits up to about a minute for that tap.
-   When the person allows the page during the wait, `open` answers `drivable:true`; otherwise it
-   answers `drivable:false` with `reason:"authorization_required"` and the agent asks the person to
-   tap Allow. The wait never grants anything; it only observes the presenter. Until the person allows
-   it, the floating window says "The agent opened this page. Tap Allow agent to let it use the page."
-5. Control is revoked when the browser leaves the foreground, the activity pauses, the user touches
-   the page, the user takes over, the connection changes, or the runtime stops. A new grant is
-   required after every revoke. There is no silent re-enable.
+3. The browser is agent-first. An explicit open defaults to agent control once the page is ready in
+   the foreground. The presenter still verifies the current connection, chat owner, tab and document
+   before granting control; opening a page does not bypass these checks.
+4. A person can take over at any time. A page that is not ready or whose control was revoked remains
+   undrivable. `open` reports `drivable:false` with `reason:"authorization_required"` when no current
+   grant is available. A person's restore action alone does not restore a revoked grant. A later agent
+   action can surface a hidden page as a small window and request control again, but cannot override
+   an explicit takeover or bring the app forward from the background.
+5. Control is revoked when the browser leaves the foreground, the activity pauses, the user explicitly
+   takes over, the window is hidden, the connection changes, or the runtime stops. Scrolling the page,
+   dragging the window and resizing it do not themselves revoke control.
+   An explicit takeover cannot be overridden by agent opens or actions. The person can choose
+   **Resume agent** or explicitly open another page to request control again. Ordinary page callbacks
+   and foreground restoration never silently re-enable revoked control.
 
 Sign-in cookies can remain in the browser's own profile, `andchamber_browser_v1`. They are not copied
 from, or into, the OpenChamber page profile.
+
+## Phone window interaction
+
+- The window has a visible address bar, address editing and reload, full-screen/small-window switching,
+  a hide action, and an explicit takeover action. Closing a page is separate from hiding its window.
+- The page keeps a phone-sized layout viewport. Resizing the small window scales its presentation,
+  rather than repeatedly changing the website's responsive layout. Full screen uses the same page,
+  document, refs and scroll position; switching presentation does not pause agent work.
+- Ordinary scrolling, window dragging and resizing do not hand control away from the agent. Use the
+  explicit takeover action when the agent should stop. A foreground agent action can surface a hidden
+  window again, but cannot override that explicit takeover.
+- Native touch and agent coordinates are measured in the unscaled page; the window transform maps
+  them to its displayed page rectangle. Capture must validate that transformed rectangle rather than
+  copying an unscaled WebView-sized area of the chat window.
 
 ## Limits
 
@@ -58,11 +76,19 @@ from, or into, the OpenChamber page profile.
 - POST, unrecognized redirects and complex login flows are not supported in this controlled browser.
   They are not replayed as GET. Use an external browser for unsupported flows; its cookies are not
   imported here.
+- Use `open` for top-level document navigation under agent control. Choose **Take over** before
+  following site-driven links or forms by hand; ordinary touching and scrolling no longer switch the
+  page into manual-navigation mode. Unsupported POST/redirect documents are not made controllable
+  merely by restoring the window.
 - There is no production path that uses root or ADB. WebView remote debugging and CDP are not enabled.
 - The driver does not promise a trusted gesture, a solved CAPTCHA, an iframe DOM, arbitrary `eval`,
   cookie export, file upload, or unlimited background use.
 - Password and file fields are refused. Emulator checks confirmed viewport-sized PNG capture; video,
   WebGL and hardware-layer pixel fidelity have not been verified.
+- Capture requires confirmation that the page's current presentation has reached a committed hardware
+  frame. If that confirmation is unavailable (including Android versions without frame-commit
+  callbacks), capture fails explicitly; page browsing and agent control do not fall back to software
+  screenshots or copy a merely pre-drawn rectangle.
 - The endpoint file is private to the runtime home. The App never edits the user's persisted
   `opencode.json(c)`. If browser preparation fails, the main runtime still starts and no plugin entry
   is injected.
@@ -79,9 +105,10 @@ round, not a promise that it will be fixed.
 - **The endpoint token is readable inside the guest.** A process in the guest that can read the
   private runtime home can read `.local/state/andchamber/browser-tool.json`, including its bearer
   token. An agent command can read that file and call the loopback endpoint claiming any console
-  session id, then drive a page a person already allowed for this launch. A page nobody allowed stays
-  undrivable: the grant needs the person's tap in the window and is bound to the connection, session
-  and tab. Mitigations: a new token every launch, `127.0.0.1` only, and on stop the endpoint file is
+  session id, then drive a page granted for this launch. An explicit foreground open defaults to
+  requesting a grant after readiness checks; the person's tap is not an authentication boundary.
+  Grants remain bound to the connection, session and tab. Mitigations: a new token every launch,
+  `127.0.0.1` only, and on stop the endpoint file is
   deleted and the port closed, so a token from an earlier launch reaches nothing.
 - **The chat drawer has no entry for this browser.** The App does not change OpenChamber's workspace drawer
   and exposes no bridge for OpenChamber's `presentAndroidBrowserTab`, so its Browser pane cannot open
@@ -124,6 +151,23 @@ The offline gate-adapter tests can be run the same way:
 ```bash
 node --test scripts/tests/*.test.cjs
 ```
+
+The grant, fixed-viewport and site-data isolation regressions use the normal AndroidJUnitRunner
+(rebuild the test APK without the smoke-runner property if it was enabled):
+
+```bash
+./gradlew :app:assembleDebugAndroidTest
+adb -s "$SERIAL" install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s "$SERIAL" shell am instrument -w \
+  -e class io.andchamber.app.browser.NativeBrowserDefaultGrantInstrumentationTest,io.andchamber.app.browser.BrowserSiteDataIsolationInstrumentationTest \
+  io.andchamber.app.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+The emulator regression set also covers the ten product scenarios and the six lifecycle/two
+retirement scenarios in `scripts/verify_local_provider_product.cjs` and
+`scripts/verify_local_provider_matrix.cjs`. These require the dedicated local-provider test package
+and its installed runtime; they never install the runtime for a missing setup. POST scenarios make
+an explicit human takeover and run last, so later cases cannot silently reclaim that choice.
 
 Debug APK path, relative to the repository:
 

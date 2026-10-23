@@ -25,7 +25,7 @@ Key constraints:
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
 | `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); Sync task `syncNativeLicenseAssets` packages `third_party/native-runtime/` as `assets/licenses/native/` in every variant; env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
-| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.15 / 15); the release workflow checks them against the tag |
+| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.16 / 16); the release workflow checks them against the tag |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |
@@ -39,7 +39,7 @@ MainActivity ──► ui/ (Compose: home, web WebView, independent browser, lau
                    │  RemoteServerStore, WebSessionAuthenticator, WebSessionCookies)
                    │
                    │  Local chat ──► ui/browser (one public-https WebView, profile andchamber_browser_v1)
-                   │                     │ agent may act only after the user taps Allow agent
+                   │                     │ ready foreground opens default to agent control; takeover revokes
                    │                     ▼
                    │                  browser/ (driver contract, URL policy, provider registry and page adapter)
                    │                     ▲
@@ -81,7 +81,7 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 | `…/app/ui/` | Compose root: navigation (home, web, browser), launch decision and cover, notification deep links, system bars, permission requests | [View Map](app/src/main/java/io/andchamber/app/ui/codemap.md) |
 | `…/app/ui/home/` | Control-room home: local runtime card, shared-storage card, remote servers | [View Map](app/src/main/java/io/andchamber/app/ui/home/codemap.md) |
 | `…/app/ui/web/` | Profile-bound WebView pool, session/page loading, navigation and JS bridge, HTTP download handoff, visibility reporting and isolation/error overlays | [View Map](app/src/main/java/io/andchamber/app/ui/web/codemap.md) |
-| `…/app/ui/browser/` | Floating in-app browser window, its single WebView driver and the presenter that binds grants to the chat view. Agent control is off until the user enables it. | [View Map](app/src/main/java/io/andchamber/app/ui/browser/codemap.md) |
+| `…/app/ui/browser/` | Floating in-app browser window, its single WebView driver and the presenter that binds grants to the chat view. Ready foreground opens default to agent control; takeover and hiding revoke it. | [View Map](app/src/main/java/io/andchamber/app/ui/browser/codemap.md) |
 | `…/app/ui/components/` | Stateless shared Compose widgets | [View Map](app/src/main/java/io/andchamber/app/ui/components/codemap.md) |
 | `…/app/ui/theme/` | Material 3 color schemes, typography, shapes, extended `ChamberColors` | [View Map](app/src/main/java/io/andchamber/app/ui/theme/codemap.md) |
 | `app/src/main/assets/` | Runtime manifest pins, the Node preload shim, and the App-injected OpenCode browser-tool plugin | [View Map](app/src/main/assets/codemap.md) |

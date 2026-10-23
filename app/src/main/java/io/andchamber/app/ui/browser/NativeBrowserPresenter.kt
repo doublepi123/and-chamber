@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,6 +61,17 @@ class NativeBrowserPresenter(
         context?.let { BrowserSession.tryCreate(it, policy)?.let { page -> WebControlledPage(page) } }
     },
     private val clock: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    /**
+     * Bounded wait for the native page to be attached and shown again before a hidden-window wake
+     * asks allow() for default control. Production waits a short bounded interval; tests inject a
+     * deterministic seam. It never grants by itself.
+     */
+    private val awaitPageVisible: suspend (ControlledBrowserPage) -> Boolean = { page ->
+        withTimeoutOrNull(2_000L) {
+            while (!page.nativePresentationVisible()) delay(16)
+            true
+        } ?: false
+    },
 ) : ProviderExecutor {
     private val lock = Any()
     private val action = Mutex()
@@ -75,6 +87,21 @@ class NativeBrowserPresenter(
     private var pageCreated = false
     private var adapter: OpenChamberPageAdapter? = null
     private var paused = false
+    /**
+     * The person explicitly hid the window. A hidden page is kept mounted, but it is not presented
+     * and it is not admitted: no callback, probe, resume or state publish may show it again. Only
+     * [show]/[restore], an explicit open, or an agent action through [restoreForAgentAction] clears
+     * it. The latter is blocked by [explicitTakeover]. It never grants anything by itself.
+     */
+    private var hidden = false
+    /**
+     * A person explicitly took the page over. This is stronger than [hidden]: an agent action may
+     * bring back a merely hidden window, but it must never override an explicit takeover. A new
+     * explicit open or an explicit Allow clears it.
+     */
+    private var explicitTakeover = false
+    /** Monotonic one-shot request for the UI to present the small floating window. */
+    private var presentationRequestSerial = 0L
     private var consoleInvalidated = false
     /** The chat session the trusted console currently shows. An identity, never a grant. */
     private var consoleSessionId: String? = null
@@ -82,10 +109,27 @@ class NativeBrowserPresenter(
     private var presentationBlocked = false
     private val tabModes = linkedMapOf<String, Boolean>()
     /**
-     * Tabs an agent `open` created or selected that nobody has allowed, taken over or navigated by
-     * hand since. Presentation only, per tab: it never grants and never changes authority.
+     * Legacy presentation set from before default control. An explicit open no longer waits for an
+     * Allow tap, so nothing is added here; the field and its state output stay for binding
+     * compatibility (always false).
      */
     private val awaitingAllowTabs = linkedSetOf<String>()
+    /**
+     * One-shot default-control decision made by an explicit open (agent tool or the person's own
+     * entry). It is bound to that page, load ticket, tab and console generation; the next accepted
+     * ready probe consumes it and asks [allow] for the actual grant. It is never authority itself.
+     * Every revoke, takeover, hide, connection change, retirement, selection or close drops it, so
+     * a later probe, page-finished callback or restored window can never grant again on its own.
+     */
+    private var autoGrantIntent: AutoGrantIntent? = null
+    /** One bounded retry of a pending default-control intent; never a loop. */
+    private var autoGrantRetryActive = false
+    /**
+     * A hidden-window agent wake that could not complete because the kept page was not mounted yet
+     * or allow() failed. It is bound to the page, tab, owner session and original connection, and a
+     * later foreground action retries it. Connection/owner/takeover/hide/page changes clear it.
+     */
+    private var pendingWake: PendingWake? = null
     private var mouseMode = false
     private var pointerViewX = 0f
     private var pointerViewY = 0f
@@ -126,7 +170,7 @@ class NativeBrowserPresenter(
     private val _windowRestoreResult = MutableStateFlow<RestoreResult?>(null)
     internal val windowRestoreResult: StateFlow<RestoreResult?> = _windowRestoreResult.asStateFlow()
     private var activeRequestId: String? = null
-    /** True while a tool `open` is only watching for the person's Allow tap: nothing is in flight. */
+    /** True while a tool `open` is watching for control: nothing of its own is in flight. */
     private var allowWaitActive = false
     private var viewGeneration = 0L
     private var witnessForGrant: String? = null
@@ -137,17 +181,25 @@ class NativeBrowserPresenter(
         if (bound.retired) null else bound.page.view
     }
 
-    /** Trusted host is attached, the chat page is in the foreground, and the window presents the page. */
+    /**
+     * Trusted host is attached, the chat page is in the foreground, and the window presents the
+     * page. An explicitly hidden window is never foreground, even if it was hidden while paused
+     * and the pause later ends.
+     */
     val foreground: Boolean
-        get() = synchronized(lock) {
-            host != null && !paused && !consoleInvalidated && !presentationBlocked
-        }
+        get() = synchronized(lock) { presentableLocked() && !hidden }
+
+    /** Host and console admission, ignoring the person's hide choice. */
+    private fun presentableLocked(): Boolean =
+        host != null && !paused && !consoleInvalidated && !presentationBlocked
 
     /**
-     * The floating window's presentation gate for the current selection. It only changes admission:
-     * turning it on retires a possible press, revokes the grant and cancels the active action;
-     * turning it off does not grant, reload, reopen or create a page. Internal because only the
-     * in-app floating window (same module) calls it; it is not a page or host entry point.
+     * The floating window's temporary presentation gate. It changes admission only: while blocked,
+     * input, allow and page commands refuse, but the grant is kept. A transient UI block (keyboard,
+     * composer, window mode change) must not lose authority; real page/host failures revoke through
+     * their own paths. Turning it off does not grant, reload, reopen or create a page, and a press
+     * that may already have reached the page is still retired so it cannot complete later.
+     * Internal because only the in-app floating window (same module) calls it.
      */
     internal fun setPresentationBlocked(blocked: Boolean) {
         val changed = synchronized(lock) {
@@ -159,13 +211,13 @@ class NativeBrowserPresenter(
         if (blocked) {
             // Retire first: a press that may already have reached the page is never left for a later UP.
             retireActivePress("presentation-blocked")
-            revokeAll("presentation-blocked")
             // Close the raw-input fence too. A leftover MOVE/UP after the gate clears must not click,
             // and the next admitted touch waits for a fresh DOWN on the same still-mounted view.
             inputAdmission.bind(null)
             inputMemo.clear()
         }
         synchronized(lock) { publishLocked() }
+        if (!blocked) scheduleAutoGrantRetry()
     }
 
     /**
@@ -209,6 +261,11 @@ class NativeBrowserPresenter(
             // Another instance, or another Activity: nothing from the old host may survive.
             previous != null && (previous.instanceKey != instanceKey || previous.context !== context) -> {
                 revokeAll("host replaced")
+                // A different window starts visible-eligible; a hide belongs to the window it was made in.
+                synchronized(lock) {
+                    hidden = false
+                    explicitTakeover = false
+                }
                 // The console document may survive (pooled WebView) across an Activity change, and it
                 // would not re-report the same session. Its recorded session stays valid here.
                 synchronized(lock) { releasePageLocked() }
@@ -227,6 +284,11 @@ class NativeBrowserPresenter(
         }
         consoleInvalidated = false
         synchronized(lock) {
+            // A fresh window starts un-hidden; only a re-attach of the same window keeps the choice.
+            if (previous == null) {
+                hidden = false
+                explicitTakeover = false
+            }
             host = Host(context, instanceKey, consoleGeneration)
             publishLocked()
         }
@@ -280,7 +342,9 @@ class NativeBrowserPresenter(
         scrollMemory.observePage(scrollIdentity())
         if (!enabled) mouseMode = false
         pageNow?.setDesktopMode(enabled)
-        revokeAll("desktop mode", keepRequestId)
+        // A viewport change is presentation, not a takeover: the grant stays. Refs and geometry are
+        // dropped because the layout under the old snapshot is gone, and the controlled GET reloads
+        // the same URL for the new mode.
         invalidateGeometry("desktop mode", keepRequestId)
         if (pageNow?.controlledGetProvenance() == true) pageNow.reloadGet()
         synchronized(lock) { publishLocked() }
@@ -296,9 +360,20 @@ class NativeBrowserPresenter(
             return
         }
         mouseMode = enabled && (tabModes[selectedTabId] == true)
-        // Turning the mouse on or off is a person taking the page: the agent stops first.
-        if (mouseMode) takeover()
+        // Mouse mode is an input preference, not a takeover: enabling it, dragging or scrolling must
+        // not pause the agent. Only the explicit takeover entry revokes.
         synchronized(lock) { publishLocked() }
+    }
+
+    /**
+     * Independent presentation-only notification for float/full mode, dragging or resizing the
+     * window. Unlike [onGeometryChanged] it never clears snapshot refs or geometry, never cancels an
+     * action, never retires a mouse press and never changes authority. The UI must use this for
+     * window bounds and keep [onGeometryChanged] for a real native page-frame change.
+     */
+    fun onPresentationChanged() {
+        synchronized(lock) { publishLocked() }
+        scheduleAutoGrantRetry()
     }
 
     fun onGeometryChanged() = invalidateGeometry("geometry changed")
@@ -554,6 +629,7 @@ class NativeBrowserPresenter(
             source to identity
         }
         request.first.requestGeometryProbe(request.second)
+        scheduleAutoGrantRetry()
     }
 
     private fun invalidateGeometry(reason: String, keepRequestId: String? = null) {
@@ -597,8 +673,8 @@ class NativeBrowserPresenter(
     }
 
     /**
-     * UI forwards page-area touches here only while mouse mode is on. The first event takes over
-     * before any mouse event is delivered, so the agent cannot act on the same gesture.
+     * UI forwards page-area touches here only while mouse mode is on. A gesture is input, not
+     * authority: it does not take over or revoke the agent's grant.
      */
     /** True while the page is receiving the presenter's own injected mouse events. */
     fun isInjectingMouse(): Boolean = page?.isInjectingMouse() == true
@@ -670,10 +746,9 @@ class NativeBrowserPresenter(
     internal fun mouseInput(sample: PointerSample, viewWidthPx: Int, viewHeightPx: Int) {
         if (synchronized(lock) { presentationBlocked }) return
         if (pages[selectedTabId]?.retired == true || !mouseMode || page?.admitNativeInput() == false) return
-        if (sample.action == MouseInput.ACTION_DOWN || registry.currentGrant() != null) {
-            takeover()
-            page?.noteTakeover()
-        }
+        // Dragging or scrolling the page is a person's gesture, not a takeover. The grant, mode and
+        // manual-navigation flag stay as they are; only explicit takeover/hide/close/connection or
+        // owner changes revoke. The gesture still runs under the ordinary ref/geometry checks.
         val ready = geometry?.ready == true && geometry?.viewId == page?.viewId() && geometry?.tabId == page?.tabId &&
             geometry?.viewWidthPx == viewWidthPx && geometry?.viewHeightPx == viewHeightPx
         // A fresh DOWN starts a new gesture. If geometry settled before it arrived, do not discard
@@ -759,6 +834,8 @@ class NativeBrowserPresenter(
         synchronized(lock) {
             releasePageLocked()
             host = null
+            hidden = false
+            explicitTakeover = false
             consoleSessionId = null
             publishLocked()
         }
@@ -822,7 +899,7 @@ class NativeBrowserPresenter(
      * an `open` that is only waiting for the person's Allow tap: it holds no page command, so the
      * revoke lets it answer with its current payload and the wait ends on the new state.
      */
-    private fun revokeAll(reason: String, keepRequestId: String?) {
+    private fun revokeAll(reason: String, keepRequestId: String?, clearPendingWake: Boolean = true) {
         // Reasons are fixed internal strings; no page or request content is logged.
         android.util.Log.i("AndChamberProvider", "revoke reason=$reason")
         val job = synchronized(lock) {
@@ -830,6 +907,8 @@ class NativeBrowserPresenter(
             registry.revokeEpoch()
             grantEpoch = 0L
             witnessForGrant = null
+            autoGrantIntent = null
+            if (clearPendingWake) pendingWake = null
             mode = ProviderMode.MANUAL
             documentEpoch += 1
             inflightGeometry = null
@@ -869,7 +948,9 @@ class NativeBrowserPresenter(
         paused = true
         // Retire before the grant is revoked: an active press cannot be completed once the host leaves.
         retireActivePress("host-paused")
-        revokeAll("host paused")
+        // Keep a hidden-window wake bound to its page/connection/owner across the pause; the next
+        // foreground agent action may retry it. Nothing is shown while paused.
+        revokeAll("host paused", keepRequestId = null, clearPendingWake = false)
         synchronized(lock) { publishLocked(shown = false) }
     }
 
@@ -937,6 +1018,8 @@ class NativeBrowserPresenter(
             val entry = pages.entries.firstOrNull { it.value.page === target } ?: return
             val bound = entry.value
             if (bound.retired) return
+            if (autoGrantIntent?.page === target) autoGrantIntent = null
+            if (pendingWake?.page === target) pendingWake = null
             bound.retired = true
             bound.retireReason = reason
             wasSelected = selectedTabId == entry.key
@@ -987,18 +1070,62 @@ class NativeBrowserPresenter(
         }
     }
 
-    suspend fun openUser(url: String, ownerSessionId: String): ProviderResult {
+    /**
+     * The person's explicit navigation (address bar, reload of the current tab URL, or the console's
+     * "Open web page"). This is the manual open entry: it is not an agent grant and never waits for
+     * Allow. [openClaimed] revokes the grant and cancels an agent action first (takeover), checks the
+     * URL against the existing [BrowserUrlPolicy] syntax policy, and loads one fresh controlled GET.
+     * A refused URL changes nothing. A successful open clears an explicit hide and shows the page;
+     * once that page is ready it receives default control through [allow], without a tap. A
+     * takeover, hide, connection change or later navigation revokes it.
+     */
+    suspend fun openUser(url: String, ownerSessionId: String): ProviderResult =
+        navigateManual(url, ownerSessionId)
+
+    /**
+     * The address-bar navigation entry. It reuses the selected tab when that tab belongs to the
+     * same owner, so repeated navigation cannot grow an unbounded tab list; otherwise it opens one
+     * new tab. It takes over, applies the existing URL policy and loads exactly one controlled GET.
+     * A refused URL changes nothing and leaves the current page in place.
+     */
+    suspend fun navigateManual(url: String): ProviderResult {
+        val owner = synchronized(lock) {
+            // The address bar belongs to the shown page; fall back to the console identity only
+            // when no page exists yet.
+            registry.find(selectedTabId.orEmpty())?.ownerSessionId ?: consoleSessionId
+        } ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no owner")
+        return navigateManual(url, owner)
+    }
+
+    private suspend fun navigateManual(url: String, ownerSessionId: String): ProviderResult {
+        val target = synchronized(lock) {
+            selectedTabId?.let { id -> registry.find(id)?.takeIf { it.ownerSessionId == ownerSessionId } }
+        }
         val request = ProviderRequest(
             serverEpoch = "user",
             connectionId = connectionId.orEmpty(),
-            requestId = "user-open",
+            requestId = "user-navigate",
             action = "browser.open",
-            parameters = mapOf("url" to url),
-            directory = "/",
+            parameters = buildMap {
+                put("url", url)
+                target?.let { put("tabId", it.tabId) }
+            },
+            directory = target?.directory ?: "/",
             sessionId = ownerSessionId,
             timeoutMs = 1_000L,
         )
         return openClaimed(request, Long.MAX_VALUE)
+    }
+
+    /**
+     * The Reload entry: the currently displayed URL of the selected page, opened as a fresh
+     * controlled GET through [navigateManual]. A page with no known URL is refused.
+     */
+    suspend fun reloadManual(): ProviderResult {
+        val url = synchronized(lock) {
+            page?.currentUrl() ?: selectedTabId?.let { registry.find(it)?.url }
+        } ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no page")
+        return navigateManual(url)
     }
 
     /** Binding compatibility. Allow itself re-probes; this only records the requested tab. */
@@ -1133,7 +1260,11 @@ class NativeBrowserPresenter(
         // Closing a tab whose page is pressed destroys that page: retire the press first.
         if (pages[tabId]?.page?.mousePressActive() == true) retireBound(pages[tabId]?.page, "tab-closed")
         val removed = synchronized(lock) { registry.close(tabId) } ?: return false
-        synchronized(lock) { awaitingAllowTabs.remove(removed.tabId) }
+        synchronized(lock) {
+            awaitingAllowTabs.remove(removed.tabId)
+            if (autoGrantIntent?.tabId == removed.tabId) autoGrantIntent = null
+            if (pendingWake?.tabId == removed.tabId) pendingWake = null
+        }
         pages.remove(removed.tabId)?.page?.destroy()
         if (selectedTabId == removed.tabId) {
             synchronized(lock) {
@@ -1151,13 +1282,37 @@ class NativeBrowserPresenter(
         return true
     }
 
-    /** Moves the window off the agent path. A page that is no longer shown cannot be driven. */
-    fun background() {
+    /**
+     * Hides the window for the rest of this host's life. The selected page is kept mounted, but the
+     * grant is revoked and admission ends. No probe, state publish, pause/resume or host re-attach
+     * shows it again; [show] (or an explicit open) does. Kept as the compatibility name for hide.
+     */
+    fun background() = hide()
+
+    /** The person dismissing the window: keep the page, drop every grant and stop presenting it. */
+    fun hide() {
+        // Hidden is set first so the publications below cannot momentarily show the window again.
+        synchronized(lock) { hidden = true }
         // Hiding the window while a press is active is an unavoidable interruption of that press.
-        retireActivePress("background")
-        revokeAll("background")
-        synchronized(lock) { publishLocked(shown = false) }
+        retireActivePress("hidden")
+        revokeAll("hidden")
+        synchronized(lock) { publishLocked() }
     }
+
+    /**
+     * The person opening the window again. Presentation only: the page is not reloaded or created
+     * and no grant is restored. Returns whether a page is presented now.
+     */
+    fun show(): Boolean = synchronized(lock) {
+        if (hidden) {
+            hidden = false
+            publishLocked()
+        }
+        _state.value.shown
+    }
+
+    /** Explicit restore entry. Same as [show]; it never restores authority. */
+    fun restore(): Boolean = show()
 
     /**
      * Human takeover. Revokes and cancels before returning, then lets the page accept a normal
@@ -1165,6 +1320,7 @@ class NativeBrowserPresenter(
      */
     fun takeover() {
         synchronized(lock) {
+            explicitTakeover = true
             mode = ProviderMode.MANUAL
             page?.manualNavigation = true
             pages[selectedTabId]?.page?.manualNavigation = true
@@ -1177,8 +1333,45 @@ class NativeBrowserPresenter(
     /**
      * Re-probes the visible document, then grants only if the same view and epoch are still current.
      * A fresh observation is required. The witness id may stay the same only for that document.
+     * This automatic/user-Tap entry never clears an explicit takeover latch.
      */
-    suspend fun allow(): Boolean = withContext(main) {
+    suspend fun allow(): Boolean = allowInternal()
+
+    /**
+     * The person's explicit "resume agent control" entry (UI onResume). It clears the explicit
+     * takeover latch, then uses the same [allowInternal] verification. A takeover that lands during
+     * the probe sets the latch again and bumps the document epoch, so the late grant is refused.
+     */
+    suspend fun resumeAgent(): Boolean {
+        val hadLatch = synchronized(lock) {
+            val was = explicitTakeover
+            explicitTakeover = false
+            was
+        }
+        val granted = allowInternal()
+        if (!granted && hadLatch) {
+            // A resume of an existing takeover that did not verify must not silently hand control
+            // to an ordinary action: keep the explicit decision unless a grant already exists.
+            synchronized(lock) {
+                // A new explicit open (its intent is pending) owns the decision now; do not
+                // re-impose an old latch over it.
+                if (registry.currentGrant() == null && autoGrantIntent == null) explicitTakeover = true
+                publishLocked()
+            }
+        }
+        return granted
+    }
+
+    /**
+     * The one grant path. [expectedConnection] binds a caller that was created for an earlier
+     * connection (a pending open/wake) so a connection change during its wait can never grant on
+     * the new connection.
+     */
+    private suspend fun allowInternal(
+        expectedConnection: String? = null,
+        expectedPage: ControlledBrowserPage? = null,
+        expectedTabId: String? = null,
+    ): Boolean = withContext(main) {
         val snapshot = synchronized(lock) {
             val current = host
             val tabId = selectedTabId
@@ -1189,8 +1382,11 @@ class NativeBrowserPresenter(
                 current == null -> "no host"
                 tab == null -> "no tab"
                 connection == null -> "no connection"
+                expectedConnection != null && connection != expectedConnection -> "connection changed"
+                expectedTabId != null && tab.tabId != expectedTabId -> "tab changed"
                 tab.ownerSessionId.isBlank() -> "no owner"
                 bound == null -> "no page"
+                expectedPage != null && bound.page !== expectedPage -> "page changed"
                 bound.outcomeUnknown -> "outcome unknown"
                 bound.page.tabId != tab.tabId -> "page tab mismatch"
                 bound.retired -> "mouse-gesture-interrupted"
@@ -1233,23 +1429,44 @@ class NativeBrowserPresenter(
                 bound.generation == snapshot.generation &&
                 selectedTabId == snapshot.tab.tabId &&
                 connectionId == snapshot.connection &&
-                !presentationBlocked
+                (expectedPage == null || pageNow === expectedPage) &&
+                (expectedTabId == null || selectedTabId == expectedTabId) &&
+                !presentationBlocked && !hidden && !explicitTakeover
         }
         if (!granted) {
             android.util.Log.i("AndChamberProvider", "allow refused: changed during probe")
             return@withContext false
         }
-        synchronized(lock) {
-            val pageNow = page ?: return@synchronized
-            pageNow.manualNavigation = false
-            pageNow.syncWitness(probed.documentId)
-            witnessForGrant = probed.documentId
-            registry.grant(runtimeLaunchId, snapshot.connection, snapshot.tab.ownerSessionId, snapshot.tab.tabId)
-            grantEpoch = registry.currentGrant()?.grantEpoch ?: 0L
-            mode = ProviderMode.AGENT
-            awaitingAllowTabs.remove(snapshot.tab.tabId)
-            pages[snapshot.tab.tabId]?.modeNotice = null
-            publishLocked()
+        val applied = synchronized(lock) {
+            val pageNow = page ?: return@synchronized false
+            // Final fence between the verified probe and the grant: a takeover, a document/epoch
+            // move, a replaced page or a different connection invalidates the late grant.
+            if (explicitTakeover || documentEpoch != snapshot.epoch ||
+                connectionId != snapshot.connection || pageNow !== snapshot.page
+            ) {
+                false
+            } else {
+                pageNow.manualNavigation = false
+                pageNow.syncWitness(probed.documentId)
+                witnessForGrant = probed.documentId
+                registry.grant(runtimeLaunchId, snapshot.connection, snapshot.tab.ownerSessionId, snapshot.tab.tabId)
+                grantEpoch = registry.currentGrant()?.grantEpoch ?: 0L
+                mode = ProviderMode.AGENT
+                // Success consumes only the intent/wake that names this granted page. The explicit
+                // takeover latch is never cleared here; only resumeAgent() or a person's open does.
+                if (autoGrantIntent?.page === pageNow && autoGrantIntent?.tabId == snapshot.tab.tabId) {
+                    autoGrantIntent = null
+                }
+                if (pendingWake?.page === pageNow) pendingWake = null
+                awaitingAllowTabs.remove(snapshot.tab.tabId)
+                pages[snapshot.tab.tabId]?.modeNotice = null
+                publishLocked()
+                true
+            }
+        }
+        if (!applied) {
+            android.util.Log.i("AndChamberProvider", "allow refused: changed before grant")
+            return@withContext false
         }
         true
     }
@@ -1267,6 +1484,9 @@ class NativeBrowserPresenter(
         }
         val session = request.sessionId?.takeIf { it.isNotBlank() }
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
+        // An agent action may bring back a window the person merely hid. It never overrides an
+        // explicit takeover and never shows while the trusted host is not foreground.
+        restoreForAgentAction(request, session)
         val refused = synchronized(lock) { refusal(request, session) }
         if (refused != null) return refused
         if (request.action != "browser.open" && !registry.authorized(request, request.connectionId, synchronized(lock) { selectedTabId })) {
@@ -1323,7 +1543,9 @@ class NativeBrowserPresenter(
         deadlineElapsed: Long,
         now: () -> Long,
     ): ProviderResult {
-        if (!foreground) return unavailable()
+        // An explicit open may reveal a merely hidden window; its URL/console checks run in
+        // openClaimed and it only clears hidden on success. Every other action needs presentation.
+        if (!foreground && request.action != "browser.open") return unavailable()
         if (now() >= deadlineElapsed) return ProviderResult(false, errorCode = ProviderCodes.DEADLINE)
         val session = request.sessionId?.takeIf { it.isNotBlank() }
             ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
@@ -1402,7 +1624,9 @@ class NativeBrowserPresenter(
         deadlineElapsed: Long,
         now: () -> Long,
     ): ProviderResult = withContext(main) {
-        if (!foreground) return@withContext unavailable()
+        // An explicit open is one of the two ways to show a hidden window again. It still fails closed
+        // if the host or console cannot present; only the person's hide choice is overridden.
+        if (!synchronized(lock) { presentableLocked() }) return@withContext unavailable()
         if (now() >= deadlineElapsed) return@withContext ProviderResult(false, errorCode = ProviderCodes.DEADLINE)
         val prepared = synchronized(lock) {
             val currentHost = host
@@ -1433,7 +1657,8 @@ class NativeBrowserPresenter(
         // to show: it takes the selection from another owner's visible page. That page is kept, not
         // destroyed or reloaded, and this is still not a grant for anyone.
         val consoleSwitch = synchronized(lock) { consoleSessionId != null && consoleSessionId == session }
-        if (activeOwner != null && activeOwner != session && pages[selectedTabId] != null && !consoleSwitch) {
+        val visibleOwnerPage = synchronized(lock) { !hidden && pages[selectedTabId] != null }
+        if (activeOwner != null && activeOwner != session && visibleOwnerPage && !consoleSwitch) {
             // Keep the visible owner's page. The other owner gets a registry tab and no WebView.
             val parkedDesktop = viewport == "desktop" || (viewport != "mobile" && tabModes[selectedTabId] == true)
             val parked = OpenChamberPageAdapter(driver = UnavailableDriver, present = { true })
@@ -1447,7 +1672,7 @@ class NativeBrowserPresenter(
             }
             return@withContext parked.result
         }
-        if (!foreground) return@withContext unavailable()
+        if (!synchronized(lock) { presentableLocked() }) return@withContext unavailable()
         // Replacing the visible page while a press is active is deferred: refuse busy, change nothing.
         if (page?.mousePressActive() == true) return@withContext ProviderResult(false, errorCode = ProviderCodes.BUSY)
         val created = createPage(prepared.context) ?: return@withContext unavailable()
@@ -1474,8 +1699,12 @@ class NativeBrowserPresenter(
         val opened = pageAdapter.openClaimed(request, registry, session)
         android.util.Log.i("AndChamberProvider", "open step=load-done ok=${opened.result.ok}")
         val tabId = opened.tab?.tabId
+        var replacedPage: ControlledBrowserPage? = null
         synchronized(lock) {
             if (opened.result.ok && tabId != null) {
+                // A reused tab (manual navigation) replaces its old page in place. Keep the tab
+                // bounded and destroy the page nobody will show again.
+                replacedPage = pages[tabId]?.page?.takeIf { it !== created }
                 created.tabId = tabId
                 tabModes[tabId] = requestedDesktop
                 pages[tabId] = BoundPage(created, pageAdapter, viewGeneration + 1, desktop = requestedDesktop)
@@ -1485,16 +1714,41 @@ class NativeBrowserPresenter(
                 viewGeneration += 1
                 documentEpoch += 1
                 mode = ProviderMode.MANUAL
+                val revealed = hidden
+                hidden = false
+                // Only a person's own open replaces an explicit takeover decision. An agent open
+                // may show the window, but it cannot reclaim control after a takeover.
+                if (request.serverEpoch == "user") explicitTakeover = false
+                if (revealed) presentationRequestSerial += 1
                 created.manualNavigation = false
                 bind(created)
+                // Explicit open: default control is decided once this exact load becomes ready.
+                // pageAdapter.openClaimed has already run present() -> loadOnce(), which calls
+                // beginControlledGet() and fixes the ticket; viewId is fixed at page creation.
+                // The ready callback can only run after this main coroutine yields, so these
+                // identities are final here and the first probe cannot miss the intent.
+                autoGrantIntent = AutoGrantIntent(
+                    tabId = tabId,
+                    viewId = created.viewId(),
+                    ticket = created.ticket(),
+                    consoleGeneration = prepared.host.consoleGeneration,
+                    consoleSession = consoleSessionId,
+                    // Bind to the connection this open was admitted on, never a connection that
+                    // replaced it while the load was in flight.
+                    connection = request.connectionId.takeIf { it.isNotBlank() } ?: connectionId,
+                    page = created,
+                )
                 noteOpenedByAgent(request, tabId)
             } else {
                 created.destroy()
             }
+            if (replacedPage != null) scrollMemory.invalidateContext()
             publishLocked(shown = opened.result.ok)
         }
+        replacedPage?.destroy()
         if (!opened.result.ok || tabId == null || request.allowWaitMs <= 0) return@withContext opened.result
-        // Wait only for the person's own tap; this never grants. A tab that is not the visible page,
+        // Wait only for control, never granting it here: the ready-time default control (through
+        // allow) or the person's own Allow tap ends the wait. A tab that is not the visible page,
         // or whose page/connection changed, ends the wait at once.
         val budget = minOf(request.allowWaitMs.toLong(), (deadlineElapsed - now()).coerceAtLeast(0L))
         synchronized(lock) { allowWaitActive = true }
@@ -1507,16 +1761,22 @@ class NativeBrowserPresenter(
         ProviderResult(ok = true, data = drivableOpenPayload(opened.result.data))
     }
 
-    /** An agent `open` makes its tab await Allow; a person's own open (or reopen) never does. */
+    /**
+     * Compatibility no-op. Explicit opens no longer wait for an Allow tap: the one-shot
+     * [autoGrantIntent] grants default control after ready, through [allow]. Keeping the helper
+     * central lets a future opt-out clear any stale notice instead of adding one.
+     */
     private fun noteOpenedByAgent(request: ProviderRequest, tabId: String) {
-        if (request.serverEpoch == "user") awaitingAllowTabs.remove(tabId) else awaitingAllowTabs.add(tabId)
+        awaitingAllowTabs.remove(tabId)
     }
 
     private enum class OpenWait { WAITING, GRANTED, STOPPED }
 
     /**
-     * Watches the opened page until the person allows it. It observes only: the presenter's own
-     * grant is the success signal, and any other outcome leaves authority exactly as it was.
+     * Watches the opened page until control exists for it: either the default control granted when
+     * the explicit open becomes ready, or the person's own explicit Allow tap. It observes only:
+     * the presenter's own grant is the success signal, and any other outcome leaves authority
+     * exactly as it was.
      */
     private suspend fun awaitOpenGrant(
         session: String,
@@ -1580,7 +1840,7 @@ class NativeBrowserPresenter(
         synchronized(lock) {
             // Background, paused, invalidated-console or blocked callbacks are not submitted as ready.
             // This is the same foreground admission the ready request and command dispatch already use.
-            if (host == null || paused || consoleInvalidated || presentationBlocked) return
+            if (host == null || paused || hidden || consoleInvalidated || presentationBlocked) return
             val bound = pages[selectedTabId]
             if (page !== source || bound?.page !== source || bound.retired || bound.outcomeUnknown) return
             if (!source.nativePresentationVisible()) return
@@ -1605,6 +1865,9 @@ class NativeBrowserPresenter(
             }
             acceptGeometry(sample.probe, identity, frame.width, frame.height)
         }
+        // A mounted, visible page is the bounded retry point for an open that was blocked/not yet
+        // attached when its ready probe arrived.
+        scheduleAutoGrantRetry()
     }
 
     internal suspend fun acceptProbeForTest(source: ControlledBrowserPage, identity: ReadyProbeIdentity) {
@@ -1653,6 +1916,7 @@ class NativeBrowserPresenter(
         }
         val probed = raw.probe(identity)
         var geometryRequest: Pair<ControlledBrowserPage, ProbeIdentity>? = null
+        var autoGrantConnection: String? = null
         synchronized(lock) {
             if (page !== source || !source.matchesReady(identity) || probed == null) {
                 android.util.Log.i("AndChamberProvider", "probe discard ticket=${identity.ticket} epoch=${identity.sessionEpoch} reason=stale")
@@ -1666,6 +1930,7 @@ class NativeBrowserPresenter(
                         // The first layout/commit can reach geometry before this probe is accepted. The
                         // accepted witness now admits a probe, so request it once with this captured view.
                         geometryRequest = readyGeometryLocked(source, identity, probed.documentId)?.let { source to it }
+                        autoGrantConnection = pendingAutoGrantConnectionLocked(source, identity)
                     } else {
                         android.util.Log.i("AndChamberProvider", "probe reject ticket=${identity.ticket} epoch=${identity.sessionEpoch} reason=ready-refused")
                         onUnknown(source)
@@ -1684,7 +1949,105 @@ class NativeBrowserPresenter(
         }
         // Main, no suspension: use the source captured above, never a globally re-read page.
         geometryRequest?.let { (captured, request) -> captured.requestGeometryProbe(request) }
+        // Default control for this explicit open, once and through the same [allow] verification.
+        // Without an intent (a probe, a page-finished callback, a restored window) this is a no-op.
+        // A temporary block/visibility failure keeps the intent and schedules one bounded retry.
+        autoGrantConnection?.let { expected ->
+            if (!allowInternal(expected, source, source.tabId)) scheduleAutoGrantRetry()
+        }
         return null
+    }
+
+    /**
+     * Returns the expected connection when this accepted ready probe may complete the explicit
+     * open's default control. Identity failures clear the intent; a temporary presentation block or
+     * not-yet-visible page keeps it for the bounded retry. Runs under the lock.
+     */
+    private fun pendingAutoGrantConnectionLocked(source: ControlledBrowserPage, identity: ReadyProbeIdentity): String? {
+        val intent = autoGrantIntent ?: return null
+        // A probe for a different page must not touch another open's pending intent.
+        if (intent.page !== source) return null
+        val bound = pages[intent.tabId] ?: run {
+            autoGrantIntent = null
+            return null
+        }
+        val matches = intent.page === source && bound.page === source && !bound.retired &&
+            source.tabId == intent.tabId && selectedTabId == intent.tabId &&
+            source.ticket() == intent.ticket && source.viewId() == intent.viewId &&
+            identity.ticket == intent.ticket && identity.viewId == intent.viewId &&
+            host?.consoleGeneration == intent.consoleGeneration &&
+            // A session known at open time must still be the console's session. An unknown one at
+            // open time may become known; it must not silently become a different session later.
+            (intent.consoleSession == null || consoleSessionId == intent.consoleSession) &&
+            intent.connection != null && connectionId == intent.connection
+        if (!matches) {
+            autoGrantIntent = null
+            return null
+        }
+        // Temporary states keep the pending intent; the unblock/mount path retries it.
+        if (presentationBlocked || !source.ready) return null
+        if (hidden || paused || consoleInvalidated || explicitTakeover) {
+            autoGrantIntent = null
+            return null
+        }
+        return intent.connection
+    }
+
+    /**
+     * One bounded retry of a pending default-control intent after the page mounted or the
+     * presentation gate cleared. It never clears the intent on a temporary failure and never grants
+     * across a different connection/page/owner. A single retry runs at a time.
+     */
+    private fun scheduleAutoGrantRetry() {
+        val source = synchronized(lock) {
+            if (autoGrantRetryActive) return
+            val intent = autoGrantIntent ?: return
+            if (hidden || explicitTakeover || paused || consoleInvalidated || presentationBlocked) return
+            if (!presentableLocked()) return
+            val bound = pages[intent.tabId] ?: return
+            if (bound.retired || bound.page !== page || selectedTabId != intent.tabId) return
+            if (intent.connection == null || connectionId != intent.connection) return
+            autoGrantRetryActive = true
+            bound.page
+        }
+        scope.launch(main) {
+            try {
+                completePendingAutoGrant(source)
+            } finally {
+                synchronized(lock) { autoGrantRetryActive = false }
+            }
+        }
+    }
+
+    private suspend fun completePendingAutoGrant(source: ControlledBrowserPage) {
+        if (!withContext(main) { awaitPageVisible(source) }) return
+        val intent = synchronized(lock) {
+            val current = autoGrantIntent ?: return@synchronized null
+            // A retry captured for an older page must never clear a newer open's intent.
+            if (current.page !== source) return@synchronized null
+            val bound = pages[current.tabId] ?: run {
+                autoGrantIntent = null
+                return@synchronized null
+            }
+            val identity = current.page === source && bound.page === source && !bound.retired &&
+                page === source && selectedTabId == current.tabId &&
+                source.ticket() == current.ticket && source.viewId() == current.viewId &&
+                host?.consoleGeneration == current.consoleGeneration &&
+                (current.consoleSession == null || consoleSessionId == current.consoleSession) &&
+                current.connection != null && connectionId == current.connection
+            if (!identity) {
+                autoGrantIntent = null
+                return@synchronized null
+            }
+            // Keep it while the page is not ready or still presentation-blocked.
+            if (presentationBlocked || !source.ready) return@synchronized null
+            if (hidden || paused || consoleInvalidated || explicitTakeover) {
+                autoGrantIntent = null
+                return@synchronized null
+            }
+            current
+        } ?: return
+        allowInternal(intent.connection, intent.page, intent.tabId)
     }
 
     /**
@@ -1699,7 +2062,7 @@ class NativeBrowserPresenter(
     ): ProbeIdentity? {
         val bound = pages[selectedTabId] ?: return null
         if (page !== source || bound.page !== source || bound.retired || bound.outcomeUnknown) return null
-        if (host == null || paused || consoleInvalidated || presentationBlocked) return null
+        if (host == null || paused || hidden || consoleInvalidated || presentationBlocked) return null
         if (!source.matchesReady(identity)) return null
         if (source.acceptedDocument() != witness) return null
         val viewId = source.viewId()
@@ -1763,6 +2126,9 @@ class NativeBrowserPresenter(
     private fun onManualDocument(source: ControlledBrowserPage) {
         synchronized(lock) {
             if (page !== source || !source.manualNavigation) return
+            // A document started by hand is a new navigation: an open's default-control intent does
+            // not survive it.
+            autoGrantIntent = null
             source.tabId?.let { awaitingAllowTabs.remove(it) }
             source.clearAcceptedWitness()
             inflightGeometry = null
@@ -1773,8 +2139,90 @@ class NativeBrowserPresenter(
         }
     }
 
+    /**
+     * Presentation only for a user-hidden window, triggered by an agent action. It requires the
+     * same trusted foreground host, connection and tab owner. Explicit takeover blocks it; a
+     * paused/invalidated console or a blocked presentation blocks it too. After clearing [hidden]
+     * it waits (bounded) for the kept page to be mounted, then re-establishes default control only
+     * through [allowInternal]'s full verification and returns its real result. A failed wake stays
+     * pending for the next foreground action, bound to that page/owner/connection. A plain user
+     * [show]/[restore] never calls this, and an explicit open shows through [openClaimed].
+     */
+    private suspend fun restoreForAgentAction(request: ProviderRequest, session: String): Boolean {
+        if (request.action == "browser.open") return false
+        val wake = synchronized(lock) {
+            val pending = pendingWake
+            if (pending != null) {
+                // A different connection or owner invalidates the old wake; it must never call
+                // allow() for the new one.
+                if (pending.connectionId != request.connectionId || pending.ownerSessionId != session) {
+                    pendingWake = null
+                    return@synchronized null
+                }
+                if (explicitTakeover) {
+                    pendingWake = null
+                    return@synchronized null
+                }
+                // A temporary pause/block keeps the wake for the next foreground action. No new
+                // presentation request is made for a retry.
+                if (!presentableLocked()) return@synchronized null
+                val bound = pages[pending.tabId]
+                if (bound == null || bound.retired || bound.page !== pending.page ||
+                    page !== pending.page || selectedTabId != pending.tabId ||
+                    connectionId != pending.connectionId ||
+                    registry.find(pending.tabId)?.ownerSessionId != pending.ownerSessionId
+                ) {
+                    pendingWake = null
+                    return@synchronized null
+                }
+                pending
+            } else {
+                if (!hidden || explicitTakeover || !presentableLocked()) return@synchronized null
+                if (connectionId == null || connectionId != request.connectionId) return@synchronized null
+                // The window would present the selected page; the owner and page checks are the
+                // ones the following refusal/authorization will use.
+                val tab = selectedTabId?.let { registry.find(it) } ?: return@synchronized null
+                if (tab.ownerSessionId != session) return@synchronized null
+                val bound = pages[tab.tabId]
+                if (bound == null || bound.retired || bound.page !== page) return@synchronized null
+                val next = PendingWake(
+                    page = bound.page,
+                    tabId = tab.tabId,
+                    ownerSessionId = session,
+                    connectionId = connectionId ?: return@synchronized null,
+                )
+                hidden = false
+                presentationRequestSerial += 1
+                pendingWake = next
+                publishLocked()
+                next
+            }
+        } ?: return false
+        // The UI has to recompose and attach the kept page to the restored (small) window. A
+        // native page that is not shown yet would make allow() refuse, so wait on main. A failed
+        // wake stays pending for the next foreground action (same page/connection/owner).
+        if (!withContext(main) { awaitPageVisible(wake.page) }) return false
+        val stillCurrent = synchronized(lock) {
+            pendingWake === wake && page === wake.page && !hidden && !paused &&
+                !consoleInvalidated && !presentationBlocked && !explicitTakeover &&
+                pages[wake.tabId]?.page === wake.page && selectedTabId == wake.tabId &&
+                connectionId == wake.connectionId &&
+                registry.find(wake.tabId)?.ownerSessionId == wake.ownerSessionId
+        }
+        if (!stillCurrent) return false
+        val granted = allowInternal(wake.connectionId, wake.page, wake.tabId)
+        synchronized(lock) {
+            if (granted && pendingWake === wake) pendingWake = null
+        }
+        return granted
+    }
+
     private fun refusal(request: ProviderRequest, session: String): ProviderResult? {
         if (host == null) return unavailable()
+        // A hidden window is not a page to be driven or read: refuse before any claim. This is the
+        // person's explicit choice, so it is stronger than an ordinary absent foreground. An
+        // explicit open is the one exception: it may show the window again after its own checks.
+        if (hidden && request.action != "browser.open") return unavailable()
         // A blocked presentation is not a hidden page to be driven or read: refuse before any claim.
         if (presentationBlocked) return unavailable()
         if (connectionId == null || connectionId != request.connectionId) {
@@ -1834,6 +2282,8 @@ class NativeBrowserPresenter(
     private fun releasePageLocked() {
         retireActivePress("page-released")
         inflightGeometry = null
+        autoGrantIntent = null
+        pendingWake = null
         pages.values.forEach { it.page.destroy() }
         pages.clear()
         page?.destroy()
@@ -1852,8 +2302,10 @@ class NativeBrowserPresenter(
             bound?.outcomeUnknown == true -> "Re-open this page before allowing control"
             else -> bound?.modeNotice ?: error
         }
-        // A retired selection stays visible as its placeholder; it is not a hidden page.
+        // A retired selection stays visible as its placeholder; it is not a hidden page. A hidden
+        // window stays hidden across every publish until show/restore or an explicit open.
         val retiredSelected = bound?.retired == true
+        val visible = !hidden && (shown ?: (selectedTabId != null && (page != null || retiredSelected) && host != null))
         val tabs = registry.tabs().map { tab ->
             NativeBrowserTab(
                 id = tab.tabId,
@@ -1863,7 +2315,6 @@ class NativeBrowserPresenter(
                 active = tab.tabId == selectedTabId,
             )
         }
-        val visible = shown ?: (selectedTabId != null && (page != null || retiredSelected) && host != null)
         // Transport admission is independent of the page presentation gate. A blocked window keeps
         // the provider connection; only losing the trusted foreground/console revokes it.
         val transportEligible = host != null && !paused && !consoleInvalidated
@@ -1875,7 +2326,7 @@ class NativeBrowserPresenter(
             selectedTabId = selectedTabId,
             shown = visible,
             mode = mode,
-            agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null && !presentationBlocked,
+            agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null && !presentationBlocked && !hidden,
             pageError = if (pages[selectedTabId]?.retired == true) "mouse-gesture-interrupted" else forced,
             pageReady = pages[selectedTabId]?.retired != true && page?.ready == true,
             pageRetired = pages[selectedTabId]?.retired == true,
@@ -1885,9 +2336,12 @@ class NativeBrowserPresenter(
             hostAttached = host != null,
             documentEpoch = documentEpoch,
             paused = paused,
+            hidden = hidden,
+            presentationRequestSerial = presentationRequestSerial,
+            explicitTakeover = explicitTakeover,
             transportEligible = transportEligible,
             transportInvalidation = transportInvalidation,
-            eligible = transportEligible && !presentationBlocked,
+            eligible = transportEligible && !presentationBlocked && !hidden,
             presentationBlocked = presentationBlocked,
             desktopMode = tabModes[selectedTabId] == true,
             mouseMode = mouseMode,
@@ -1928,6 +2382,25 @@ class NativeBrowserPresenter(
     )
 
     private data class ReopenTarget(val tab: ProviderTab, val desktop: Boolean)
+
+    /** One explicit open's default-control decision, valid for one page and one navigation. */
+    private data class AutoGrantIntent(
+        val tabId: String,
+        val viewId: String,
+        val ticket: Long,
+        val consoleGeneration: Long,
+        val consoleSession: String?,
+        val connection: String?,
+        val page: ControlledBrowserPage,
+    )
+
+    /** A hidden-window wake bound to the identity it was created for. */
+    private data class PendingWake(
+        val page: ControlledBrowserPage,
+        val tabId: String,
+        val ownerSessionId: String,
+        val connectionId: String,
+    )
 
     private data class ConnectionOwner(
         val launchId: Long,
@@ -1983,6 +2456,8 @@ interface ControlledBrowserPage {
     suspend fun currentFields(): Map<String, PageField>?
     suspend fun currentField(ref: String): PageField? = currentFields()?.get(ref)
     fun acceptedDocument(): String? = null
+    /** The live top-level URL the page is showing, when the implementation knows it. */
+    fun currentUrl(): String? = null
     fun setDesktopMode(enabled: Boolean) = Unit
     fun desktopConfigured(): Boolean = false
     fun applyMouseButton(plan: MouseEventPlan): Boolean = true
@@ -2113,6 +2588,7 @@ internal class WebControlledPage(
         session.acceptedDocumentId = documentId
     }
     override fun acceptedDocument(): String? = session.acceptedDocumentId
+    override fun currentUrl(): String? = session.displayUrl
     override fun setDesktopMode(enabled: Boolean) = session.configureDesktop(enabled)
     override fun desktopConfigured(): Boolean = session.desktopConfigured
     override fun applyMouseButton(plan: MouseEventPlan): Boolean = true

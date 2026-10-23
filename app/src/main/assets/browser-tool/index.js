@@ -11,8 +11,9 @@ const ENDPOINT_ENV = "ANDCHAMBER_BROWSER_TOOL_FILE";
 const MAX_ENDPOINT_BYTES = 8192;
 const MAX_TOKEN_LENGTH = 512;
 const CANCEL_TIMEOUT_MS = 2000;
-// "open" may wait this long for the person's Allow tap after the page has loaded. It is a
-// transport field, not part of the tool's input schema.
+// "open" may wait this long for the page to become ready and for the presenter's default agent
+// control to be granted for it. It is a transport field, not part of the tool's input schema. The
+// wait is for automatic readiness, never for a person's per-action tap.
 const OPEN_ALLOW_WAIT_MS = 60000;
 
 const UNAVAILABLE =
@@ -20,11 +21,13 @@ const UNAVAILABLE =
 
 const DESCRIPTION = [
   "Drive the in-app browser window on the user's Android phone.",
-  'A page opened with "open" is not under agent control yet: the person must tap Allow in that window. "open" waits about a minute for that tap and then reports drivable:true; if it still reports drivable:false, ask the person to tap Allow and continue.',
+  'An explicit foreground "open" defaults to agent control once that exact page is ready: it still passes the presenter\'s existing grant checks, and "open" reports drivable:true.',
+  '"open" waits about a minute for that automatic grant; if it reports drivable:false, ask the person to hand control back with Resume agent in the window. Opening again does not override an explicit takeover.',
+  "Control ends only when the person takes over explicitly, hides or closes the window, the app leaves the foreground, or the chat owner changes; scrolling the page, dragging the window, resizing it or using full screen does not end control. A foreground agent action may wake a hidden window and ask for control again, but an explicit takeover is not taken back by ordinary agent actions. Restoring the window or opening it manually never grants by itself; the person can hand control back explicitly.",
   "Take one action per call.",
   'Take "snapshot" first and use refs from the latest snapshot; navigation or DOM changes invalidate old refs, so snapshot again instead of guessing.',
-  '"click", "type", "scroll", "capture" and "resize" may be refused with AUTHORIZATION_REQUIRED (the person has not allowed this page or the grant expired), REF_EXPIRED (take a new snapshot) or BROWSER_PAGE_UNAVAILABLE (the AndChamber chat screen is not open).',
-  "When that happens, ask the person to tap Allow in the window or reopen the page; do not retry in a loop.",
+  '"click", "type", "scroll", "capture" and "resize" may be refused with AUTHORIZATION_REQUIRED (agent control is absent, was taken over or revoked, or the window is not in front), REF_EXPIRED (take a new snapshot) or BROWSER_PAGE_UNAVAILABLE (the AndChamber chat screen is not open).',
+  "When that happens, ask the person to hand control back with Resume agent in the window; do not expect a tap before every action, and do not retry in a loop.",
 ].join(" ");
 
 // Reading the endpoint file:
@@ -225,7 +228,8 @@ export default {
                 callID,
                 messageID: context?.messageID,
                 agent: context?.agent,
-                // Only "open" waits for Allow; every other action keeps its immediate answer.
+                // Only "open" waits for the page's automatic default control; every other action
+                // keeps its immediate answer.
                 ...(args.action === "open" ? { allowWaitMs: OPEN_ALLOW_WAIT_MS } : {}),
                 input: args,
               }),

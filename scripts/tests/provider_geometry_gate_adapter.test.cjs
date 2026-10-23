@@ -60,7 +60,8 @@ function makeDevice(opts = {}) {
       await new Promise((r) => setImmediate(r));
       if (action === 'browser.open') {
         // An explicit fresh open replaces the page: the unknown outcome belongs to the old document.
-        dev.grant = false; dev.agentOn = false; dev.mode = 'MANUAL'; dev.outcomeUnknown = false;
+        // The presenter grants default agent control once the page is ready; model that here.
+        dev.grant = true; dev.agentOn = true; dev.mode = 'AGENT'; dev.outcomeUnknown = false;
         return { ok: true, data: { tabId: 'tab-a', url: input.url } };
       }
       if (action === 'browser.capture') {
@@ -93,6 +94,7 @@ function makeDevice(opts = {}) {
       return { ok: true, data: {} };
     },
     tapAllow: async () => {
+      dev.tapAllows = (dev.tapAllows || 0) + 1;
       await new Promise((r) => setImmediate(r));
       if (!dev.tapOk) return false;
       // An isolated page (outcome unknown) refuses a grant even though the tap landed.
@@ -155,9 +157,11 @@ test('adapter awaits the tool reply: normalised, never a Promise', async () => {
 });
 
 test('an unauthorized reply stays ok:false with its raw AUTHORIZATION_REQUIRED code', async () => {
-  const { io } = makeDevice();
+  const { io, dev } = makeDevice();
   const { adapters } = harness.createGeometryGateAdapters(io);
   await adapters.openFresh(FIXTURE_URL);
+  // An explicit takeover removes control; the next tool call is refused, not re-granted.
+  dev.grant = false; dev.agentOn = false; dev.mode = 'MANUAL';
   const refused = await adapters.snapshotOnce();
   assert.equal(refused.ok, false);
   assert.equal(refused.code, 'AUTHORIZATION_REQUIRED');
@@ -171,15 +175,42 @@ test('NO_PROVIDER is a setup failure, not an authorization refusal', () => {
   assert.equal(probe.noProvider(noProvider), true);
 });
 
-test('allow requires the real registry grant: a tap without a grant is not allow', async () => {
+test('allow reads the default grant without a tap; a tap can never be the proof', async () => {
   const { io, dev } = makeDevice({ grantOnTap: false });
+  // Model a default open that never produced its grant: allow() must report that, not tap.
+  const open = io.call;
+  io.call = async (action, input) => {
+    const reply = await open(action, input);
+    if (action === 'browser.open') dev.grant = false;
+    return reply;
+  };
   const { adapters } = harness.createGeometryGateAdapters(io);
   await adapters.openFresh(FIXTURE_URL);
   const allowed = await adapters.allow();
-  assert.equal(allowed.tapped, true);
-  assert.equal(allowed.grantPresent, false);
   assert.equal(allowed.ok, false);
+  assert.equal(allowed.source, 'no-default-grant');
+  assert.equal(allowed.tapped, false);
+  assert.equal(allowed.grantPresent, false);
   assert.equal(dev.grant, false);
+  assert.equal(dev.tapAllows || 0, 0, 'no UI tap without an explicit manual-takeover hand-back');
+});
+
+test('an explicit hand-back is opt-in and still needs the registry read', async () => {
+  const { io, dev } = makeDevice({ grantOnTap: false });
+  const open = io.call;
+  io.call = async (action, input) => {
+    const reply = await open(action, input);
+    if (action === 'browser.open') { dev.grant = false; dev.agentOn = false; dev.mode = 'MANUAL'; }
+    return reply;
+  };
+  const { adapters } = harness.createGeometryGateAdapters(io);
+  await adapters.openFresh(FIXTURE_URL);
+  const tapped = await adapters.allow({ handback: true });
+  assert.equal(tapped.ok, false);
+  assert.equal(tapped.source, 'manual-handback');
+  assert.equal(tapped.tapped, true);
+  assert.equal(tapped.grantPresent, false);
+  assert.equal(dev.tapAllows, 1, 'one hand-back tap, never retried');
 });
 
 test('each case reruns open, real Allow and a snapshot that yields a real note ref', async () => {

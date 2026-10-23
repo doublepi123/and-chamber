@@ -3,7 +3,8 @@
 ## Responsibility
 
 The in-app floating browser over the local chat. One public-https page the user can browse, and that
-an agent may use only after the user taps **Allow agent**. It is not the OpenChamber page, not the
+an agent may use by default after a foreground open passes the current grant checks. Takeover or hiding
+revokes control; restoring the window does not restore a grant. It is not the OpenChamber page, not the
 WebView pool, and not a `WebSessionProfiles` profile.
 
 Files:
@@ -21,6 +22,9 @@ Files:
   WebView.
 - Support: `BrowserGeometry.kt`, `BrowserTouchFocus.kt`, `MouseInput.kt`, `ScrollMemory.kt`,
   `WindowRestoreTargetGate.kt`, `PixelCopyBridge.kt`, `BrowserRetiredPage.kt`.
+- `FixedBrowserViewportLayout.kt`: a fixed phone-sized child viewport and native presentation transform;
+  dragging, resizing and full-screen switching change the display rectangle, not the page layout.
+  `NativeFrameCommitGate` reports a presentation only after the platform commits its frame (API 29+).
 
 ## Design
 
@@ -49,13 +53,18 @@ Files:
   not treated as verified. Caller values are inserted once as one JSON argument. Type uses the native
   input value setter. Password and file fields are refused. Forms and pages that navigate themselves
   need the user to take over.
-- Capture uses `PixelCopy.request(window, webViewRect, ...)`. The rectangle must be exactly the WebView
-  and fully inside the window; otherwise capture is refused, so the rest of the app is not copied.
-- Agent control is off by default. A grant binds one runtime launch, connection id, console session
+- Capture samples the native viewport wrapper's presentation (`BrowserViewportHost.presentationSnapshot()`),
+  maps the drawn page to whole window pixels, and requires the complete page to be inside the window and
+  unclipped; otherwise capture is refused, so the rest of the app is not copied. The live tuple must also
+  equal the one the platform confirmed with a real frame commit (`registerFrameCommitCallback`, API 29+);
+  a new revision or pre-draw alone is not proof that the window buffer changed. On older APIs or software
+  windows capture fails closed. A presentation move only discards that attempt (bounded retry); it never
+  clears refs or revokes a grant.
+- Explicit foreground opens default to agent control once ready. A grant binds one runtime launch, connection id, console session
   and visible tab. The plugin tool server connects only while the presenter reports
   `transportEligible`; losing eligibility (background, console change, detach) clears the connection
-  and revokes the grant. A reconnect never restores a grant. A touch on the page, Take over, or the
-  window closing revokes as before.
+  and revokes the grant. A reconnect never restores a grant. Explicit Take over or the
+  window closing revokes control. Page scrolling and window dragging/resizing do not revoke it.
 - Test entry points (`attachHostForTest`, `installPageDecorator`, `beginForTest`,
   `acceptProbeForTest`) refuse to run outside a debug build.
 
@@ -65,9 +74,10 @@ Files:
    change. The console page also offers "Open web page" for a public `https` URL.
 2. The agent calls the plugin tool `andchamber_web`; the App tool server maps it to a
    `ProviderRequest` and the presenter executes it.
-3. A page opens unauthorized. Snapshot, click, type, scroll, capture and resize are refused until the
-   user taps **Allow agent** in the window.
-4. Take over / Turn off: revoke. Leaving the local chat revokes through transport eligibility.
+3. A ready foreground open requests a grant using the same connection, owner and document checks as
+   the person's control action. Snapshot, click, type, scroll, capture and resize still require it.
+4. Take over / hide / close revoke. Leaving the local chat revokes through transport eligibility.
+   Restoring presentation alone does not restore control.
 
 ## Integration
 

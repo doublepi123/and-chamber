@@ -63,7 +63,9 @@ function deviceReady(opts = {}) {
       dev.reads += 1;
       if (opts.diagFor) return opts.diagFor(dev.reads);
       const ready = dev.reads >= (opts.readyAfter == null ? 1 : opts.readyAfter) && !opts.neverReady;
-      return readyDiag({ pageReady: ready, selectedTabId: opts.selected === undefined ? TAB : opts.selected, registryGrantPresent: dev.grant, agentOn: dev.grant });
+      // The presenter grants default agent control once the page is ready; model that here.
+      if (ready) dev.grant = true;
+      return readyDiag({ pageReady: ready, selectedTabId: opts.selected === undefined ? TAB : opts.selected, registryGrantPresent: dev.grant, agentOn: dev.grant, mode: dev.grant ? 'AGENT' : 'MANUAL' });
     },
     deviceCmd: async () => true,
     readStatus: async () => null,
@@ -81,12 +83,12 @@ function deviceReady(opts = {}) {
   return { dev, io, clock: c };
 }
 
-test('ready wait: a pending page is not tapped until it is ready, then exactly one Allow', async () => {
+test('ready wait: a pending page gains default control only when ready, with no tap', async () => {
   const { dev, io } = deviceReady({ readyAfter: 3 });
   const { adapters } = harness.createGeometryGateAdapters(io);
   const setup = await harness.prepareGeometryCaseForTest(adapters, 'https://example.com/openchamber-provider', { expectedSessionId: SESSION, now: io.now, sleepMs: io.sleepMs });
   assert.equal(setup.ok, true, JSON.stringify(setup));
-  assert.equal(dev.taps, 1, 'exactly one tap after readiness');
+  assert.equal(dev.taps, 0, 'the open default grant needs no tap');
   assert.ok(dev.reads >= 3, 'waited for readiness with read-only diag');
   assert.match(setup.selector, /^\[data-andchamber-ref=/);
 });
@@ -174,10 +176,11 @@ test('timeout fences the case: a resumed old probe sends no new mutation, no ope
     await new Promise((r) => setTimeout(r, 120));
     release();
     const flows = await run.catch((error) => ({ aborted: error.name, detail: error.message }));
-    // Setup for case 1 is one open and one Allow tap. The resumed probe's type/open/allow/drag were fenced.
+    // Setup for case 1 is one open and its read-only default grant. The resumed probe's
+    // type/open/allow/drag were fenced.
     assert.equal(counts.opens, 1, 'only the setup open; the resumed probe never opened');
     assert.equal(counts.mutating, 0, 'no type/click reached the device after the fence');
-    assert.equal(counts.taps, 1, 'only the setup Allow tap; the probe allow was fenced');
+    assert.equal(counts.taps, 0, 'the setup never taps; the probe allow was fenced');
     assert.equal(counts.drags, 0, 'no drag after the fence');
     // Only this case's own hold is cleared, once. No other hold name appears in the marker traffic.
     const clears = counts.markers.filter((item) => item.startsWith('marker-clear:'));

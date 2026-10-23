@@ -23,6 +23,31 @@ const COOKIE_HEX = '0123456789abcdef0123456789abcdef';
 const MOUSE_URL = matrix.FIXTURES.mouse;
 const RETIRE_URL = matrix.FIXTURES.retire;
 
+test('retirement plans stay in raw pixels and scale both screen position and delta once', async () => {
+  const physical = { left: 100, top: 200, width: 500, height: 500 };
+  const frame = { physical, viewWidth: 1000, viewHeight: 1000, viewHandle: 7, documentEpoch: 1,
+    page: { visualViewport: { width: 1000, height: 1000, offsetLeft: 0, offsetTop: 0 } },
+    pointerUi: { geometryReady: true, viewHandle: 7, pointerViewX: 600, pointerViewY: 200 } };
+  const identity = { currentIdentity: 7, selectedTabId: 'tab', recorderViewId: 1, viewHandle: 7,
+    recorderReady: true, recordedDocuments: { 1: [{ origin: 42, clicks: 0, current: true, installed: true }] } };
+  let sent;
+  const io = harness.createRetirementPointerIO({
+    identity: async () => identity, frame: async () => frame,
+    dom: async (_id, point) => {
+      assert.deepEqual(point, { x: 600, y: 200 });
+      return { timeOrigin: 42, box: { left: 400, top: 150, right: 520, bottom: 230 }, hit: false, page: {} };
+    },
+    atomic: async (point) => { sent = point; return true; },
+  });
+  const aim = await io.readTargetRaw('box');
+  assert.deepEqual(aim.target, { x: 460, y: 190, scale: 1 });
+  assert.deepEqual(aim.pointer, { x: 600, y: 200 });
+  assert.equal(aim.frame.width, 1000);
+  assert.equal(await io.atomicFingerRaw({ x: 500, y: 500, dx: -140, dy: -10, steps: 4,
+    viewHandle: 7, origin: 42, frame: aim.frame }), true);
+  assert.deepEqual([sent.x, sent.y, sent.dx, sent.dy], [350, 450, -70, -5]);
+});
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -139,6 +164,7 @@ function lifecycleDevice({ omitSy = false } = {}) {
       postArrivals: 0,
     },
     uiSurface: { left: 100, top: 150, right: 1000, bottom: 700 },
+    fullSurface: { left: 50, top: 100, right: 1030, bottom: 750 },
     uiPending: null,
     frame: {
       physical: { left: 100, top: 200, width: 900, height: 600 },
@@ -168,8 +194,10 @@ function lifecycleDevice({ omitSy = false } = {}) {
       };
     }
     if (text === 'ui-state') {
-      const labels = dev.enlarged ? { Restore: { bounds: [] }, BrowserFloatSurface: dev.uiSurface } : { Enlarge: { bounds: [] }, BrowserFloatSurface: dev.uiSurface };
-      return { ok: true, data: { phase: 'ui-state', labels, surface: dev.uiSurface } };
+      const surface = dev.enlarged ? dev.fullSurface : dev.uiSurface;
+      const labels = dev.enlarged ? { 'Small window': { bounds: [] }, BrowserFloatSurface: surface } : { 'Full screen': { bounds: [] }, BrowserFloatSurface: surface };
+      labels.More = { enabled: true, visible: true };
+      return { ok: true, data: { phase: 'ui-state', labels, surface } };
     }
     if (text === 'page-rect') return { ok: true, data: dev.frame };
     if (text === 'two-finger-scroll:0,0,-240' || text.startsWith('two-finger-scroll:')) return { ok: true, data: { sent: true } };
@@ -191,12 +219,12 @@ function lifecycleDevice({ omitSy = false } = {}) {
         runId: RUN_ID,
       } };
     }
-    if (text === 'tap-label:Enlarge') {
+    if (text === 'tap-label:Full screen') {
       dev.enlarged = true;
       dev.restore = null;
       return { ok: true, data: { sent: true } };
     }
-    if (text === 'tap-label:Restore') {
+    if (text === 'tap-label:Small window') {
       dev.enlarged = false;
       dev.restore = { kind: 'Restored', actualX: 0, actualY: 300 };
       return { ok: true, data: { sent: true } };
@@ -232,11 +260,6 @@ function retirementDevice() {
     uiPending: null,
   };
   const scale = dev.frame.width / 1024;
-  function manual() {
-    dev.diag.mode = 'MANUAL';
-    dev.diag.grantForSelected = false;
-    dev.diag.agentOn = false;
-  }
   function hit(id, pointer = dev.pointer) {
     const r = dev[id];
     return pointer.x / scale >= r.left && pointer.x / scale < r.right && pointer.y / scale >= r.top && pointer.y / scale < r.bottom;
@@ -257,9 +280,9 @@ function retirementDevice() {
       currentIdentity: 9,
       recorderViewId: 2,
       recordedDocuments: { 2: [{ origin: '1700000111.5', installed: true, clicks: 0, current: true }] },
-      grantForSelected: false,
-      agentOn: false,
-      mode: 'MANUAL',
+      grantForSelected: true,
+      agentOn: true,
+      mode: 'AGENT',
       mouseMode: false,
       lastRetired: retired,
     });
@@ -287,6 +310,9 @@ function retirementDevice() {
     if (text === 'lifecycle-diag') return { ok: true, data: JSON.parse(JSON.stringify(dev.diag)) };
     if (text === 'observe') {
       return { ok: true, data: { url: RETIRE_URL, metrics: { ua: 'desktop', clientWidth: 1024, media1000: true, sy: dev.page.wheel * 120, loads: 1, timeOrigin: dev.page.timeOrigin }, page: JSON.parse(JSON.stringify(dev.page)) } };
+    }
+    if (text === 'ui-state') {
+      return { ok: true, data: { labels: { More: { enabled: true, visible: true } }, surface: dev.frame } };
     }
     if (text === 'page-rect') {
       return { ok: true, data: {
@@ -320,8 +346,8 @@ function retirementDevice() {
     if (text.startsWith('ui-target:')) {
       const label = text.slice('ui-target:'.length);
       if (!matrix.UI_LABELS.has(label)) return { ok: false, error: { code: 'unknown-device-command', message: text } };
-      if (label === 'Allow agent' && (dev.diag.pageRetired || dev.diag.grantForSelected === false)) {
-        return { ok: false, error: { code: 'missing-target', message: 'no visible Allow agent' } };
+      if (label === 'Resume agent' && (dev.diag.pageRetired || dev.diag.grantForSelected === false)) {
+        return { ok: false, error: { code: 'missing-target', message: 'no visible Resume agent' } };
       }
       dev.uiPending = label;
       return { ok: true, data: {
@@ -349,8 +375,8 @@ function retirementDevice() {
       const x = Number(xText);
       const y = Number(yText);
       if (action === 'down') {
+        // Ordinary page input is not a takeover: control stays as it was.
         dev.finger = { x, y };
-        manual();
       } else if (action === 'move' && dev.finger) {
         if (!dev.diag.mousePressActive) {
           dev.diag.mousePressActive = true;
@@ -411,7 +437,6 @@ function retirementDevice() {
     if (label === 'Mouse') {
       dev.mouseTaps += 1;
       dev.diag.mouseMode = true;
-      manual();
     }
     return true;
   };
@@ -557,42 +582,113 @@ test('a failed tool envelope and NoProvider are failures, never a pass', async (
   assert.equal(matrix.normalizeResult({ runId: RUN_ID, id: 'a', ok: true, data: {} }, { runId: RUN_ID, id: 'other' }), null);
 });
 
-test('a tap on Allow agent is not a grant; only the registry read can pass', async () => {
-  const dev = { grant: false, taps: 0 };
-  const client = {
-    async sendDevice(text) {
-      if (text === 'ui-target:Allow agent') {
-        return { ok: true, data: {
-          label: 'Allow agent',
-          ownerPackage: 'io.andchamber.localprovider',
-          windowId: 1,
-          enabled: true,
-          observedAtMs: Date.now(),
-          left: 10,
-          top: 20,
-          right: 110,
-          bottom: 120,
-          phase: 'ui-target',
-          runId: RUN_ID,
-        } };
-      }
-      if (text === 'lifecycle-diag') return { ok: true, data: { phase: 'lifecycle-diag', grantForSelected: dev.grant } };
-      return { ok: false, data: null, code: 'unknown-device-command', detail: text };
-    },
-    async sendTool() { return { ok: false, data: null, code: 'not-used', detail: '' }; },
-    async readStatus() { return null; },
+test('the diag grant is the only control evidence; a hand-back tap alone never passes', async () => {
+  const make = ({ granted = false, mode = 'MANUAL', agentOn = false, grantAfterTap = false, omitGrant = false } = {}) => {
+    const state = { taps: 0, uiTargets: 0, grant: granted };
+    let clock = Date.now();
+    const client = {
+      async sendDevice(text) {
+        if (text === 'ui-target:Resume agent') {
+          state.uiTargets += 1;
+          return { ok: true, data: {
+            label: 'Resume agent',
+            ownerPackage: 'io.andchamber.localprovider',
+            windowId: 1,
+            enabled: true,
+            observedAtMs: Date.now(),
+            left: 10,
+            top: 20,
+            right: 110,
+            bottom: 120,
+            phase: 'ui-target',
+            runId: RUN_ID,
+          } };
+        }
+        if (text === 'lifecycle-diag') {
+          const data = {
+            phase: 'lifecycle-diag',
+            selectedTabId: 'tab-a',
+            pageRetired: false,
+            pageReady: true,
+            grantForSelected: state.grant,
+            mode,
+            agentOn,
+          };
+          if (omitGrant) delete data.grantForSelected;
+          return { ok: true, data };
+        }
+        return { ok: false, data: null, code: 'unknown-device-command', detail: text };
+      },
+      async sendTool() { return { ok: false, data: null, code: 'not-used', detail: '' }; },
+      async readStatus() { return null; },
+    };
+    const guest = matrix.createGuestGateIo({
+      client,
+      runId: RUN_ID,
+      screen: { width: 1080, height: 1920 },
+      now: () => clock,
+      sleep: async (ms) => { clock += ms; },
+      tapScreen: async () => { state.taps += 1; if (grantAfterTap) state.grant = true; return true; },
+    });
+    return { state, guest };
   };
-  const guest = matrix.createGuestGateIo({
-    client,
-    runId: RUN_ID,
-    screen: { width: 1080, height: 1920 },
-    tapScreen: async () => { dev.taps += 1; return true; },
-  });
-  const result = await guest.tapAllowAndVerify({ budgetMs: 100 });
-  assert.equal(result.tapped, true);
-  assert.equal(result.grantPresent, false);
-  assert.equal(result.ok, false);
-  assert.equal(dev.taps, 1);
+
+  // The explicit-open default grant is read from the diag; it needs no tap at all.
+  const granted = make({ granted: true });
+  const defaultGrant = await granted.guest.ensureAgentControl({ budgetMs: 1000 });
+  assert.equal(defaultGrant.ok, true);
+  assert.equal(defaultGrant.source, 'default-grant');
+  assert.equal(defaultGrant.grantPresent, true);
+  assert.equal(defaultGrant.tapped, false);
+  assert.equal(granted.state.taps, 0);
+  assert.equal(granted.state.uiTargets, 0);
+
+  // A tap that does not change the diag grant is not evidence. Only an explicit manual-takeover
+  // test may ask for the hand-back; the diag read after it still decides.
+  const tappedOnly = make({ granted: false, grantAfterTap: false });
+  const tapped = await tappedOnly.guest.ensureAgentControl({ budgetMs: 1000, allowManualHandback: true });
+  assert.equal(tapped.ok, false);
+  assert.equal(tapped.source, 'manual-handback');
+  assert.equal(tapped.tapped, true);
+  assert.equal(tapped.grantPresent, false);
+  assert.equal(tapped.detail, 'tapped-without-grant');
+  assert.equal(tappedOnly.state.taps, 1);
+
+  // After a genuine manual takeover the person's explicit hand-back may grant, and the read after it
+  // is the evidence.
+  const handback = make({ granted: false, grantAfterTap: true });
+  const handed = await handback.guest.ensureAgentControl({ budgetMs: 1000, allowManualHandback: true });
+  assert.equal(handed.ok, true);
+  assert.equal(handed.source, 'manual-handback');
+  assert.equal(handed.tapped, true);
+  assert.equal(handed.grantPresent, true);
+  assert.equal(handed.detail, 'manual-handback-granted');
+  assert.equal(handback.state.taps, 1);
+
+  // MANUAL + agent off can also mean the default grant never happened. Without an explicit
+  // takeover test the harness must not tap and must report the missing default grant.
+  const defect = make({ granted: false, mode: 'MANUAL', agentOn: false });
+  const missingDefault = await defect.guest.ensureAgentControl({ budgetMs: 1000 });
+  assert.equal(missingDefault.ok, false);
+  assert.equal(missingDefault.source, 'no-default-grant');
+  assert.equal(missingDefault.detail, 'no-default-grant');
+  assert.equal(missingDefault.tapped, false);
+  assert.equal(defect.state.taps, 0);
+  assert.equal(defect.state.uiTargets, 0);
+
+  // A hand-back is refused unless the takeover is actually proven.
+  const notTakenOver = make({ granted: false, mode: 'AGENT', agentOn: true });
+  const notProven = await notTakenOver.guest.ensureAgentControl({ budgetMs: 1000, allowManualHandback: true });
+  assert.equal(notProven.ok, false);
+  assert.equal(notProven.source, 'manual-takeover-not-proven');
+  assert.equal(notTakenOver.state.taps, 0);
+
+  const unreadable = make({ granted: false, omitGrant: true });
+  const unknown = await unreadable.guest.ensureAgentControl({ budgetMs: 100 });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.source, 'grant-unreadable');
+  assert.equal(unreadable.state.taps, 0);
+  assert.equal(unreadable.guest.missingReport().field, 'grantForSelected');
 });
 
 test('B5 same-document flow runs the real typed adapter and pure probe over the protocol', async () => {
@@ -605,16 +701,17 @@ test('B5 same-document flow runs the real typed adapter and pure probe over the 
       runId: RUN_ID,
       screen: { width: 1080, height: 1920 },
       tapScreen: async () => {
-        if (dev.uiPending === 'Enlarge') { dev.enlarged = true; dev.restore = null; }
-        if (dev.uiPending === 'Restore') { dev.enlarged = false; dev.restore = { kind: 'Restored', actualX: 0, actualY: 300 }; }
+        if (dev.uiPending === 'Full screen') { dev.enlarged = true; dev.restore = null; }
+        if (dev.uiPending === 'Small window') { dev.enlarged = false; dev.restore = { kind: 'Restored', actualX: 0, actualY: 300 }; }
         return true;
       },
     });
     const adapters = harness.createLifecycleGateAdapters(guest, harness.createCaseFence());
     const flow = await lifecycleProbe.runEnlargeRestoreSameDoc({ ...adapters, now: guest.now, sleep: guest.sleepMs });
     assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 800));
-    assert.equal(flow.restore.kind, 'Restored');
+    assert.equal(flow.checks.surfaceChangedFromFull, true);
     assert.equal(flow.after.sy, 300);
+    assert.equal(flow.expanded.surface.width, 980, 'Full screen reports its real surface');
     assert.equal(dev.enlarged, false);
     assert.deepEqual(guest.missingReport().reader, null);
   } finally {
@@ -963,6 +1060,9 @@ test('retirement B: cookie, CANCEL retirement, explicit Reopen and one fresh cli
     assert.equal(flow.clicksAdded, 0);
     assert.equal(flow.snapshot.code, 'AUTHORIZATION_REQUIRED');
     assert.equal(flow.reopen.cookieKept, true);
+    assert.equal(flow.reopen.freshGrantPresent, true, 'the reopened view gets its own default grant');
+    assert.equal(flow.reopen.freshDocument, true);
+    assert.equal(flow.reopen.freshRecordChanged, true);
     assert.equal(flow.reopen.freshClicks, 0);
     assert.equal(dev.page.nextClicks, 1);
     assert.equal(dev.page.boxClicks, 0);
@@ -973,18 +1073,24 @@ test('retirement B: cookie, CANCEL retirement, explicit Reopen and one fresh cli
 });
 
 
-test('retirement orchestrator preflights writeCookieRaw and never calls a writeTestCookie stub', async () => {
-  const make = ({ writeCookieResult = true, missingCookie = false } = {}) => {
+test('retirement orchestrator reads the diag grant before UI and preflights writeCookieRaw', async () => {
+  const make = ({ writeCookieResult = true, missingCookie = false, control = null, missingControlReader = false } = {}) => {
     const calls = { open: 0, allow: 0, mouse: 0, frame: 0, target: 0, writes: 0 };
     const guest = {
       async call(action) { calls.open += 1; return { ok: true, data: { tabId: 'tab-retire', url: matrix.FIXTURES.retire } }; },
       async readLifecycleRaw() { return { selectedTabId: 'tab-retire', pageReady: true, mouseMode: true, viewHandle: 7, documentEpoch: 3 }; },
       async sleepMs() {},
-      async tapAllowAndVerify() { calls.allow += 1; return { ok: true, tapped: true, grantPresent: true }; },
+      async ensureAgentControl(options = {}) {
+        calls.allow += 1;
+        calls.controlOptions = { ...options };
+        return control || { ok: true, source: 'default-grant', tapped: false, grantPresent: true, detail: 'default-grant', state: null };
+      },
+      async readGrantRaw() { return { grantForSelected: true, mode: 'AGENT', agentOn: true, pageRetired: false, pageReady: true, selectedTabId: 'tab-retire' }; },
       async enableMouseRaw() { calls.mouse += 1; return true; },
       missingReport: () => ({}),
       readFailures: () => [],
     };
+    if (missingControlReader) delete guest.ensureAgentControl;
     const retirement = {
       call: guest.call,
       readLifecycleRaw: guest.readLifecycleRaw,
@@ -1023,6 +1129,8 @@ test('retirement orchestrator preflights writeCookieRaw and never calls a writeT
   const badResult = await runner.runRetirementCase({ item, guest: badCookie.guest, retirement: badCookie.retirement, save, log: () => {} });
   assert.equal(badResult.ok, false);
   assert.equal(badResult.reason, 'prepare:test-cookie-not-written');
+  assert.equal(badCookie.calls.allow, 1, 'the grant came from the diag read, not a UI tap');
+  assert.notEqual(badCookie.calls.controlOptions.allowManualHandback, true, 'a default-open case never asks for a hand-back');
   assert.equal(badCookie.calls.writes, 1);
   assert.equal(badCookie.calls.frame, 0, 'bad/no readback cookie stops before geometry/flow');
 
@@ -1030,8 +1138,24 @@ test('retirement orchestrator preflights writeCookieRaw and never calls a writeT
   const goodResult = await runner.runRetirementCase({ item, guest: goodCookie.guest, retirement: goodCookie.retirement, save, log: () => {} });
   assert.equal(goodResult.ok, false);
   assert.equal(goodResult.reason, 'prepare:retirement-geometry-reader-missing');
+  assert.equal(goodCookie.calls.allow, 1);
   assert.equal(goodCookie.calls.writes, 1, 'literal writeCookieRaw boolean contract was called once');
   assert.equal(goodCookie.calls.frame, 1);
+
+  const denied = make({ control: { ok: false, source: 'no-default-grant', tapped: false, grantPresent: false, detail: 'no-default-grant', state: null } });
+  const deniedResult = await runner.runRetirementCase({ item, guest: denied.guest, retirement: denied.retirement, save, log: () => {} });
+  assert.equal(deniedResult.ok, false);
+  assert.equal(deniedResult.reason, 'prepare:default-agent-control-not-granted');
+  assert.equal(deniedResult.setup.control.source, 'no-default-grant');
+  assert.equal(denied.calls.mouse, 0, 'no mouse/UI work without the grant');
+  assert.equal(denied.calls.writes, 0);
+
+  const noReader = make({ missingControlReader: true });
+  const noReaderResult = await runner.runRetirementCase({ item, guest: noReader.guest, retirement: noReader.retirement, save, log: () => {} });
+  assert.equal(noReaderResult.ok, false);
+  assert.equal(noReaderResult.reason, 'prepare:matrix-agent-control-reader-missing');
+  assert.equal(noReader.calls.open, 1, 'precondition page open happened before the reader check');
+  assert.equal(noReader.calls.writes, 0);
 
   const throwing = make({ writeCookieResult: true });
   throwing.retirement.writeCookieRaw = async () => { throwing.calls.writes += 1; throw new Error('cookie boom'); };
@@ -1332,8 +1456,10 @@ test('the instrumentation wire carries only -e cases, runId and class', () => {
 
 test('ui-state accepts a Surface from labels, a top-level surface or a fixed Tight node', () => {
   const bounds = { left: 10, top: 20, right: 110, bottom: 220 };
-  assert.deepEqual(matrix.normalizeUi({ labels: { Restore: {}, BrowserFloatSurface: bounds } }), { enlarged: true, surface: { left: 10, top: 20, width: 100, height: 200, right: 110, bottom: 220 } });
-  assert.equal(matrix.normalizeUi({ labels: { Enlarge: {} }, surface: bounds }).enlarged, false);
+  assert.deepEqual(matrix.normalizeUi({ labels: { 'Small window': {}, BrowserFloatSurface: bounds } }), { enlarged: true, surface: { left: 10, top: 20, width: 100, height: 200, right: 110, bottom: 220 } });
+  assert.equal(matrix.normalizeUi({ labels: { 'Full screen': {} }, surface: bounds }).enlarged, false);
+  // Legacy fixtures still report the old labels; they stay readable but never win over the new ones.
+  assert.equal(matrix.normalizeUi({ labels: { Restore: {}, 'Full screen': {} } }).enlarged, true);
   assert.equal(matrix.normalizeUi({ labels: {}, tightNodes: [{ desc: 'BrowserFloatSurface', ...bounds }] }).surface.width, 100);
   assert.equal(matrix.normalizeUi({ labels: {} }).enlarged, null);
 });
@@ -1574,6 +1700,7 @@ test('POST setup resolves fixture targets and uses real host input, never a tool
     typed: 0,
     focused: false,
     inputValue: '',
+    manual: false,
   };
   const handler = async (command) => {
     if (command.kind === 'tool') {
@@ -1581,7 +1708,22 @@ test('POST setup resolves fixture targets and uses real host input, never a tool
       return { ok: true, data: {} };
     }
     if (command.text === 'lifecycle-diag') {
-      return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: false, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+      return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: !state.manual, mode: state.manual ? 'MANUAL' : 'AGENT', agentOn: !state.manual, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+    }
+    if (command.text === 'ui-target:Take over') {
+      return { ok: true, data: {
+        label: 'Take over',
+        ownerPackage: 'io.andchamber.localprovider',
+        windowId: 1,
+        enabled: true,
+        observedAtMs: Date.now(),
+        left: 10,
+        top: 100,
+        right: 200,
+        bottom: 160,
+        phase: 'ui-target',
+        runId: RUN_ID,
+      } };
     }
     if (command.text === 'fixture-state') {
       return { ok: true, data: loginFixtureState(state) };
@@ -1619,6 +1761,7 @@ test('POST setup resolves fixture targets and uses real host input, never a tool
       client,
       runId: RUN_ID,
       screen: { width: 1080, height: 1920 },
+      tapScreen: async () => { state.manual = true; return true; },
       humanType: async (text) => { state.typed += 1; state.inputValue = text; return { exitCode: 0, startedAtMs: 1, finishedAtMs: 2 }; },
     });
     const result = await guest.submitLoginFresh();
@@ -1626,6 +1769,9 @@ test('POST setup resolves fixture targets and uses real host input, never a tool
     assert.equal(result.beforePosts, 0);
     assert.equal(result.beforeArrivals, 0);
     assert.equal(state.typed, 1);
+    assert.equal(state.manual, true, 'the real Take over control entered MANUAL');
+    assert.equal(result.phases.defaultGrant && result.phases.defaultGrant.mode, 'AGENT');
+    assert.equal(result.phases.takeover && result.phases.takeover.mode, 'MANUAL');
     assert.deepEqual(state.labels, ['login-user', 'Sign in']);
     const toolActions = device.written.filter((item) => item.kind === 'tool').map((item) => item.action);
     assert.deepEqual(toolActions, ['browser.open'], 'no browser.type or browser.click fake form POST');
@@ -1649,14 +1795,29 @@ test('literal producer tap-label JSON: sent/hit/pointVisible/source identity gat
     focusFlip = false,
     fixtureErrorAfterTap = false,
   } = {}) => {
-    const state = { posts: 0, arrivals: 0, labels: [], typed: 0, focused: false, inputValue: '', fixtureReads: 0, pressBack: 0, humanTypeAtReads: null, imeShown };
+    const state = { posts: 0, arrivals: 0, labels: [], typed: 0, focused: false, inputValue: '', fixtureReads: 0, pressBack: 0, humanTypeAtReads: null, imeShown, manual: false };
     const handler = async (command) => {
       if (command.kind === 'tool') {
         if (command.action === 'browser.open') return { ok: true, data: { tabId: 'tab-login', url: matrix.FIXTURES.login } };
         return { ok: true, data: {} };
       }
       if (command.text === 'lifecycle-diag') {
-        return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: false, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+        return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: !state.manual, mode: state.manual ? 'MANUAL' : 'AGENT', agentOn: !state.manual, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+      }
+      if (command.text === 'ui-target:Take over') {
+        return { ok: true, data: {
+          label: 'Take over',
+          ownerPackage: 'io.andchamber.localprovider',
+          windowId: 1,
+          enabled: true,
+          observedAtMs: clock,
+          left: 10,
+          top: 100,
+          right: 200,
+          bottom: 160,
+          phase: 'ui-target',
+          runId: RUN_ID,
+        } };
       }
       if (command.text === 'fixture-state') {
         state.fixtureReads += 1;
@@ -1708,6 +1869,7 @@ test('literal producer tap-label JSON: sent/hit/pointVisible/source identity gat
       screen: { width: 1080, height: 1920 },
       now: () => clock,
       sleep: async (ms) => { clock += ms; },
+      tapScreen: async () => { state.manual = true; return true; },
       humanType: async (text) => {
         state.typed += 1;
         state.humanTypeAtReads = state.fixtureReads;
@@ -1728,6 +1890,9 @@ test('literal producer tap-label JSON: sent/hit/pointVisible/source identity gat
 
   const success = await runPost();
   assert.equal(success.result.ok, true, JSON.stringify(success.result));
+  assert.equal(success.state.manual, true, 'POST enters MANUAL through the real Take over control');
+  assert.equal(success.result.phases.defaultGrant.mode, 'AGENT');
+  assert.equal(success.result.phases.takeover.mode, 'MANUAL');
   assert.deepEqual(success.state.labels, ['login-user', 'Sign in']);
   assert.equal(success.state.typed, 1);
   assert.equal(success.result.taps.input.pointVisible, undefined, 'literal pointVisible is normalized out of the gate object');
@@ -1872,7 +2037,7 @@ test('literal producer tap-label JSON: sent/hit/pointVisible/source identity gat
 
 
 test('a command timeout/fence after the input tap never reaches humanType or Sign in', async () => {
-  const state = { posts: 0, arrivals: 0, labels: [], typed: 0, focused: false, inputValue: '' };
+  const state = { posts: 0, arrivals: 0, labels: [], typed: 0, focused: false, inputValue: '', manual: false };
   let fenced = false;
   const client = {
     async sendTool(action) {
@@ -1881,7 +2046,22 @@ test('a command timeout/fence after the input tap never reaches humanType or Sig
     },
     async sendDevice(text) {
       if (fenced) return { ok: false, data: null, code: 'FENCED', detail: 'case fenced after timeout' };
-      if (text === 'lifecycle-diag') return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: false, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+      if (text === 'lifecycle-diag') return { ok: true, data: { phase: 'lifecycle-diag', selectedTabId: 'tab-login', pageReady: true, grantForSelected: !state.manual, mode: state.manual ? 'MANUAL' : 'AGENT', agentOn: !state.manual, mouseMode: true, desktopMode: false, viewHandle: 7, documentEpoch: 3 } };
+      if (text === 'ui-target:Take over') {
+        return { ok: true, data: {
+          label: 'Take over',
+          ownerPackage: 'io.andchamber.localprovider',
+          windowId: 1,
+          enabled: true,
+          observedAtMs: Date.now(),
+          left: 10,
+          top: 100,
+          right: 200,
+          bottom: 160,
+          phase: 'ui-target',
+          runId: RUN_ID,
+        } };
+      }
       if (text === 'fixture-state') return { ok: true, data: loginFixtureState(state) };
       if (text.startsWith('fixture-field:')) {
         const field = text.slice('fixture-field:'.length);
@@ -1901,6 +2081,7 @@ test('a command timeout/fence after the input tap never reaches humanType or Sig
     client,
     runId: RUN_ID,
     screen: { width: 1080, height: 1920 },
+    tapScreen: async () => { state.manual = true; return true; },
     humanType: async (text) => { state.typed += 1; state.inputValue = text; return { exitCode: 0, startedAtMs: 1, finishedAtMs: 2 }; },
     pressBack: async () => true,
   });

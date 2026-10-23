@@ -1,16 +1,32 @@
 package io.andchamber.app.ui.web
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,13 +35,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.paneTitle
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -37,7 +56,6 @@ import io.andchamber.app.browser.BrowserUrlPolicy
 import io.andchamber.app.browser.UrlDecision
 import io.andchamber.app.ui.theme.ChamberTextStyles
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import java.net.URI
 import java.util.Locale
 
@@ -48,8 +66,8 @@ private const val MESSAGE_DELAY_MS = 700L
  * Asks for a web address to open in this chat's browser window. Open stays off until
  * [checkBrowserUrl] finds an address the window will open; the field then previews it exactly, so
  * an added `https://` is visible. Go on the keyboard does the same as Open. [onOpen] gets the
- * address once per edit, and the caller closes the dialog. Opening is not a grant: the person
- * still taps "Allow agent" in the window before the agent can use the page.
+ * address once per edit, and the caller closes the dialog. Opening is not a grant by itself: the
+ * presenter decides control once the page has loaded, and Take over in the window stops it.
  */
 @Composable
 internal fun OpenBrowserUrlDialog(
@@ -94,81 +112,158 @@ internal fun OpenBrowserUrlDialog(
         onOpen(url)
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        title = { Text(stringResource(R.string.browser_open_page), style = MaterialTheme.typography.titleLarge) },
-        text = {
-            // Read here, inside the dialog: its window has its own focus and keyboard controller.
-            val window = LocalWindowInfo.current
-            val keyboard = LocalSoftwareKeyboardController.current
-            LaunchedEffect(window) {
-                // Focus once the dialog window has it, so the keyboard comes up with the field.
-                snapshotFlow { window.isWindowFocused }.first { it }
-                runCatching { focus.requestFocus() }
-                keyboard?.show()
-            }
-            // Scrolls when the keyboard leaves little room, as in landscape.
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+    // Drawn in the Activity window, not a separate dialog window. Compose 1.7's Dialog sizes its
+    // own window to the content and, on API 31+, sets no soft-input mode, so the keyboard insets
+    // that window receives are not reliable and the keyboard covered Open. The caller (WebScreen)
+    // places this inside its content box, which already stops above the system bars and the
+    // keyboard (imeAnimationTarget, the same inset the chat composer uses). The safeDrawing padding
+    // below only applies to insets nobody above consumed, so it never counts the keyboard twice.
+    // The address field and the Open/Cancel row are outside the scrolling part; the title shrinks
+    // and the hint scrolls, or is left out, when space is short.
+    BackHandler(onBack = onDismiss)
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        // Same window as the page: it already has window focus, so focus the field right away.
+        runCatching { focus.requestFocus() }
+        keyboard?.show()
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
+            // Outside the card: a tap dismisses, as with any dialog, and nothing reaches the page.
+            .pointerInput(Unit) { detectTapGestures { onDismiss() } },
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            val title = stringResource(R.string.browser_open_page)
+            val fontScale = LocalDensity.current.fontScale
+            val compact = openUrlDialogCompact(maxHeight.value, fontScale)
+            // Very little room (landscape with the keyboard, large fonts): the hint is left out and
+            // the whole card scrolls, so the field and the buttons are never pushed off.
+            val minimal = openUrlDialogMinimal(maxHeight.value, fontScale)
+            val inner = if (compact) 16.dp else 24.dp
+            Surface(
+                // Taps inside the card stay in the card.
+                modifier = Modifier.widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maxHeight)
+                    .pointerInput(Unit) { detectTapGestures { } }
+                    .semantics { paneTitle = title },
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                tonalElevation = 6.dp,
             ) {
-                Text(stringResource(R.string.browser_open_page_hint), style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = {
-                        text = it
-                        attempted = false
-                        sent = false
-                    },
-                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
-                    label = { Text(stringResource(R.string.field_address)) },
-                    placeholder = {
-                        Text(stringResource(R.string.browser_open_page_placeholder), style = ChamberTextStyles.code)
-                    },
-                    textStyle = ChamberTextStyles.code.copy(color = MaterialTheme.colorScheme.onSurface),
-                    singleLine = true,
-                    isError = message != null,
-                    supportingText = {
-                        when {
-                            message != null -> Text(message, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            // One line: a long address is cut at the end and its host stays readable.
-                            ready != null ->
-                                Text(
-                                    stringResource(R.string.browser_open_page_preview, ready),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            // Keeps the line, so the buttons don't jump when a message comes or goes.
-                            else -> Text("")
+                Column(
+                    Modifier
+                        .then(if (minimal) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                        .padding(start = inner, end = inner, top = inner, bottom = 8.dp),
+                ) {
+                    Text(
+                        title,
+                        style = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+                        maxLines = if (compact) 1 else 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!minimal) {
+                        // The only part that gives way: it takes what is left and scrolls.
+                        Column(
+                            modifier = Modifier.weight(1f, fill = false)
+                                .padding(top = if (compact) 4.dp else 12.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            Text(
+                                stringResource(R.string.browser_open_page_hint),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                    },
-                    keyboardOptions =
-                        KeyboardOptions(
-                            keyboardType = KeyboardType.Uri,
-                            imeAction = ImeAction.Go,
-                            autoCorrectEnabled = false,
-                            capitalization = KeyboardCapitalization.None,
-                        ),
-                    keyboardActions = KeyboardActions(onGo = { submit() }),
-                )
+                    }
+                    Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = {
+                            text = it
+                            attempted = false
+                            sent = false
+                        },
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                        label = { Text(stringResource(R.string.field_address), maxLines = 1) },
+                        placeholder = {
+                            Text(stringResource(R.string.browser_open_page_placeholder), style = ChamberTextStyles.code, maxLines = 1)
+                        },
+                        textStyle = ChamberTextStyles.code.copy(color = MaterialTheme.colorScheme.onSurface),
+                        singleLine = true,
+                        isError = message != null,
+                        supportingText = {
+                            when {
+                                message != null -> Text(message, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
+                                // One line: a long address is cut at the end and its host stays readable.
+                                ready != null ->
+                                    Text(
+                                        stringResource(R.string.browser_open_page_preview, ready),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                // Keeps the line, so the buttons don't jump when a message comes or goes.
+                                else -> Text("")
+                            }
+                        },
+                        keyboardOptions =
+                            KeyboardOptions(
+                                keyboardType = KeyboardType.Uri,
+                                imeAction = ImeAction.Go,
+                                autoCorrectEnabled = false,
+                                capitalization = KeyboardCapitalization.None,
+                            ),
+                        keyboardActions = KeyboardActions(onGo = { submit() }),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                        ) {
+                            Text(stringResource(R.string.cancel), maxLines = 1)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(
+                            onClick = { submit() },
+                            enabled = ready != null && !sent,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) {
+                            Text(stringResource(R.string.open), fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { submit() }, enabled = ready != null && !sent) {
-                Text(stringResource(R.string.open), fontWeight = FontWeight.SemiBold)
-            }
-        },
-        dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
-            ) {
-                Text(stringResource(R.string.cancel))
-            }
-        },
-    )
+        }
+    }
 }
+
+/**
+ * Whether the dialog uses its compact form (one-line smaller title, tighter padding) in
+ * [availableHeightDp] of keyboard-free space. Larger fonts need more room before the regular form
+ * fits, so the threshold grows with [fontScale].
+ */
+internal fun openUrlDialogCompact(availableHeightDp: Float, fontScale: Float): Boolean =
+    availableHeightDp < OPEN_URL_DIALOG_REGULAR_MIN_HEIGHT * fontScale.coerceAtLeast(1f)
+
+/** Height (dp at font scale 1) below which the dialog switches to its compact form. */
+internal const val OPEN_URL_DIALOG_REGULAR_MIN_HEIGHT = 300f
+
+/**
+ * Whether there is too little room for even a line of hint next to the title, field and buttons
+ * (about 200dp at font scale 1). The dialog then leaves the hint out and scrolls as a whole.
+ */
+internal fun openUrlDialogMinimal(availableHeightDp: Float, fontScale: Float): Boolean =
+    availableHeightDp < OPEN_URL_DIALOG_MINIMAL_HEIGHT * fontScale.coerceAtLeast(1f)
+
+internal const val OPEN_URL_DIALOG_MINIMAL_HEIGHT = 220f
 
 /** What the dialog makes of the typed text. */
 internal sealed interface BrowserUrlCheck {

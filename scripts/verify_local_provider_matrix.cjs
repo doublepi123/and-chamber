@@ -382,8 +382,15 @@ async function prepareRetirement({ guest, retirement, item }) {
   if (!state || state.selectedTabId !== tabId || state.pageReady !== true) {
     return { ok: false, reason: 'retire-page-not-ready', tabId, state: state && { selectedTabId: state.selectedTabId, pageReady: state.pageReady } };
   }
-  const allow = await guest.tapAllowAndVerify({ budgetMs: 3000 });
-  if (!allow.ok) return { ok: false, reason: 'allow-not-granted', allow };
+  if (typeof guest.ensureAgentControl !== 'function') {
+    return { ok: false, reason: 'matrix-agent-control-reader-missing' };
+  }
+  // An explicit foreground open already granted default control once the page became ready. This
+  // case proves that default path: require the diag default grant itself, never a UI hand-back.
+  const control = await guest.ensureAgentControl({ budgetMs: 5000 });
+  if (!control.ok || control.source !== 'default-grant') {
+    return { ok: false, reason: 'default-agent-control-not-granted', control };
+  }
   const mouse = await guest.enableMouseRaw();
   const afterMouse = await guest.readLifecycleRaw();
   if (!mouse || !afterMouse || afterMouse.mouseMode !== true) {
@@ -413,7 +420,14 @@ async function prepareRetirement({ guest, retirement, item }) {
       frame: frame ? { viewHandle: frame.viewHandle } : null,
     };
   }
-  return { ok: true, tabId, selectedTabId: tabId, frame: true, aim: { hit: aim.hit, viewHandle: aim.viewHandle } };
+  return {
+    ok: true,
+    tabId,
+    selectedTabId: tabId,
+    frame: true,
+    aim: { hit: aim.hit, viewHandle: aim.viewHandle },
+    control: { source: control.source, tapped: control.tapped, detail: control.detail },
+  };
 }
 
 /**
@@ -835,8 +849,12 @@ async function main() {
     const retirement = createGuestRetirementIo(guest, { client, now: guest.now, sleep: guest.sleepMs });
     let stopCases = false;
 
-    for (let index = 0; index < required.length; index += 1) {
-      const name = required[index];
+    // The POST scenario deliberately ends with the person's takeover still latched. Keep it last:
+    // a later agent open must not silently undo that choice just to prepare another test case.
+    const postCase = 'lifecycle-b3-post-roundtrip';
+    const execution = [...required.filter((name) => name !== postCase), ...required.filter((name) => name === postCase)];
+    for (let index = 0; index < execution.length; index += 1) {
+      const name = execution[index];
       if (instrument.child.exitCode !== null) {
         throw new Error(`instrumentation exited before case ${name} with code ${instrument.child.exitCode}`);
       }

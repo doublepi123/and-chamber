@@ -256,4 +256,19 @@ class OpenBrowserUrlDialogTest {
         listOf("javascript:alert(1)", "file:///etc/hosts", "data:text/html,x", "example .com", "https:///x", "https//example.com")
             .forEach { assertEquals(it, BrowserUrlCheck.Invalid, checkBrowserUrl(it)) }
     }
+
+    @Test
+    fun `the dialog gets compact, then minimal, as the keyboard leaves less room`() {
+        // 320dp phone, font scale 1.3: about 230dp above the keyboard.
+        assertTrue(openUrlDialogCompact(230f, 1.3f))
+        assertTrue(openUrlDialogMinimal(230f, 1.3f))
+        // A tall phone with the keyboard at normal font keeps the regular form.
+        assertEquals(false, openUrlDialogCompact(420f, 1f))
+        assertEquals(false, openUrlDialogMinimal(420f, 1f))
+        // Larger fonts switch earlier than font scale 1 at the same height.
+        assertEquals(false, openUrlDialogMinimal(250f, 1f))
+        assertTrue(openUrlDialogMinimal(250f, 1.3f))
+        // Font scales below 1 never make the threshold smaller than the regular one.
+        assertEquals(openUrlDialogCompact(290f, 1f), openUrlDialogCompact(290f, 0.85f))
+    }
 }

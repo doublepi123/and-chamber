@@ -119,6 +119,60 @@ function createCaseFence() {
   };
 }
 
+/**
+ * Waits read-only for the default agent control an explicit foreground open produces once its page
+ * is ready. The producer's registry read is the only evidence; a tap is not, and a missing read is
+ * never a pass. `diag` returns the producer grant fields, or null when unreadable.
+ */
+async function awaitDefaultGrant(io, diag, { budgetMs = 3000, pollMs = 200 } = {}) {
+  const started = io.now();
+  let state = null;
+  while (io.now() - started < budgetMs) {
+    state = await diag();
+    if (state && state.registryGrantPresent === true) {
+      return { ok: true, source: 'default-grant', tapped: false, grantPresent: true, detail: 'default-grant', state };
+    }
+    await io.sleepMs(pollMs);
+  }
+  if (!state || typeof state.registryGrantPresent !== 'boolean') {
+    return { ok: false, source: 'grant-unreadable', tapped: false, grantPresent: null, detail: 'grant-unreadable', state };
+  }
+  return { ok: false, source: 'no-default-grant', tapped: false, grantPresent: false, detail: 'no-default-grant', state };
+}
+
+/**
+ * The person's explicit hand-back, only after a real manual takeover. The tap is sent at most once
+ * and the registry read afterwards is still the only proof. A page that never got default control
+ * is not a takeover, so this refuses instead of papering over that defect.
+ */
+async function handBackAfterTakeover(io, diag, state, tap, { budgetMs = 3000, pollMs = 200 } = {}) {
+  if (!state || state.mode !== 'MANUAL' || state.agentOn === true) {
+    return { ok: false, source: 'manual-takeover-not-proven', tapped: false, grantPresent: false, detail: 'manual-takeover-not-proven', state };
+  }
+  let tapped = false;
+  try {
+    tapped = (await tap()) === true;
+  } catch (_error) {
+    tapped = false;
+  }
+  const deadline = io.now() + budgetMs;
+  let after = null;
+  while (io.now() < deadline) {
+    after = await diag();
+    if (after && after.registryGrantPresent === true) break;
+    await io.sleepMs(pollMs);
+  }
+  const granted = Boolean(after && after.registryGrantPresent === true);
+  return {
+    ok: granted,
+    source: tapped ? 'manual-handback' : 'manual-handback-missing',
+    tapped,
+    grantPresent: granted,
+    detail: granted ? 'manual-handback-granted' : tapped ? 'tapped-without-grant' : 'handback-control-missing',
+    state: after || state,
+  };
+}
+
 function createGeometryGateAdapters(io, fence = null) {
   const last = { capture: null };
   // Mutating actions go through the fence when one is present. Reads never do.
@@ -140,25 +194,13 @@ function createGeometryGateAdapters(io, fence = null) {
     snapshotOnce: () => toolCall('browser.snapshot', {}),
     snapshotFresh: () => toolCall('browser.snapshot', {}),
     useOldRef: (selector) => toolMut('browser.click', { selector }),
-    allow: () => mut(async () => {
-      // A tap is not a grant: after the tap, read-only poll the registry grant (bounded).
-      const tapped = (await io.tapAllow()) === true;
-      const started = io.now();
-      let state = null;
-      let grantPresent = false;
-      while (io.now() - started < 3000) {
-        state = await diag();
-        grantPresent = Boolean(state && state.registryGrantPresent === true);
-        if (grantPresent) break;
-        await io.sleepMs(200);
-      }
-      return {
-        ok: tapped && grantPresent,
-        tapped,
-        grantPresent,
-        detail: !tapped ? 'allow-missed' : grantPresent ? 'granted' : 'tapped-without-grant',
-      };
-    }, { ok: false, tapped: false, grantPresent: false, detail: FENCED.code }),
+    // Default control is read from the registry; a tap is never the proof. The explicit hand-back
+    // (person's own control action) is opt-in and only after a real manual takeover.
+    allow: (options = {}) => mut(async () => {
+      const granted = await awaitDefaultGrant(io, diag, options);
+      if (granted.ok || options.handback !== true) return granted;
+      return handBackAfterTakeover(io, diag, granted.state, () => io.tapAllow(), options);
+    }, { ok: false, source: 'fenced', tapped: false, grantPresent: false, detail: FENCED.code }),
     openFresh: (url) => toolMut('browser.open', { url }),
     readInput: async () => {
       const value = await io.pageEvalRaw('JSON.stringify(document.querySelector("input,textarea")&&document.querySelector("input,textarea").value)');
@@ -268,7 +310,7 @@ function realOr(value, type) {
 /**
  * Merges the real sources into one lifecycle view. The producer (lifecycle-diag) supplies state, restore and
  * events. fixture-state supplies the page's own posts/loads/url and the native frame. window.__report() supplies
- * the JS metrics. Enlarged comes from the live UI (the Restore button is shown only while enlarged).
+ * the JS metrics. Enlarged comes from the live UI (the Small window button is shown only while enlarged).
  * No source is invented: a missing source leaves its fields null, and a null field can never pass a case.
  */
 function lifecycleNormalise(raw, { fixture = null, metrics = null, uiEnlarged = null, surface = null } = {}) {
@@ -300,7 +342,7 @@ function lifecycleNormalise(raw, { fixture = null, metrics = null, uiEnlarged = 
     loads: page ? realOr(page.loads, 'number') : null,
     posts: page ? realOr(page.posts, 'number') : null,
     postArrivals: fixture ? realOr(fixture.postArrivals, 'number') : null,
-    // Enlarged is read from the live UI: the Restore button is visible only while the window is enlarged.
+    // Enlarged is read from the live UI: the Small window button is visible only while the window is enlarged.
     enlarged: uiEnlarged,
     surface: surface && typeof surface === 'object' ? surface : null,
     frame: native && native.physicalFrame ? native.physicalFrame : null,
@@ -359,8 +401,8 @@ function createLifecycleGateAdapters(io, fence = null) {
 
     scrollWheel: ({ dy }) => mut(async () => ({ ok: (await io.wheelRaw(dy)) === true }), { ok: false, code: FENCED.code }),
     twoFingerScroll: ({ dy }) => mut(async () => ({ ok: (await io.twoFingerRaw(dy)) === true }), { ok: false, code: FENCED.code }),
-    tapEnlarge: () => mut(async () => ({ ok: (await io.tapLabelRaw('Enlarge')) === true }), { ok: false, code: FENCED.code }),
-    tapRestore: () => mut(async () => ({ ok: (await io.tapLabelRaw('Restore')) === true }), { ok: false, code: FENCED.code }),
+    tapEnlarge: () => mut(async () => ({ ok: (await io.tapLabelRaw('Full screen')) === true }), { ok: false, code: FENCED.code }),
+    tapRestore: () => mut(async () => ({ ok: (await io.tapLabelRaw('Small window')) === true }), { ok: false, code: FENCED.code }),
     switchMode: (target) => mut(async () => ({ ok: (await io.switchModeRaw(target)) === true }), { ok: false, code: FENCED.code }),
     // The reply's tabId lives under data; the probe reads a top-level tabId, so it is lifted here once.
     // A fresh open of a fixture (setup). It is a real browser.open, fenced like any other mutation.
@@ -379,6 +421,23 @@ function createLifecycleGateAdapters(io, fence = null) {
       const opened = await toolMut('browser.open', { url: io.newDocumentUrl });
       return { ...opened, tabId: opened.data && opened.data.tabId ? opened.data.tabId : null };
     },
+    // Lifecycle grant read: the same registry fact, taken from the lifecycle diag field. A UI tap is
+    // never the proof; the explicit hand-back is opt-in and only after a proven manual takeover.
+    allow: (options = {}) => mut(async () => {
+      const readGrant = async () => {
+        const raw = await io.readLifecycleRaw();
+        if (!raw || typeof raw !== 'object') return null;
+        return {
+          phase: raw.phase,
+          mode: realOr(raw.mode, 'string'),
+          agentOn: realOr(raw.agentOn, 'boolean'),
+          registryGrantPresent: realOr(raw.grantForSelected, 'boolean'),
+        };
+      };
+      const granted = await awaitDefaultGrant(io, readGrant, options);
+      if (granted.ok || options.handback !== true) return granted;
+      return handBackAfterTakeover(io, readGrant, granted.state, () => io.tapLabelRaw('Resume agent'), options);
+    }, { ok: false, source: 'fenced', tapped: false, grantPresent: false, detail: FENCED.code }),
     selectTab: (tabId) => mut(async () => ({ ok: (await io.selectRaw(tabId)) === true }), { ok: false, code: FENCED.code }),
     submitLoginPost: () => mut(async () => ({ ok: (await io.submitLoginRaw()) === true }), { ok: false, code: FENCED.code }),
     // Cleanup release and status reads are never fenced.
@@ -401,7 +460,7 @@ function createRetirementGateAdapters(io, fence = null) {
     const record = raw && currentRecordOf(raw);
     const frame = await io.readFrameRaw();
     return raw?.viewHandle === measuredSource.viewHandle && record &&
-      frame?.viewHandle === measuredSource.viewHandle && JSON.stringify(frame.physical) === JSON.stringify(measuredSource.frame) &&
+      frame?.viewHandle === measuredSource.viewHandle && JSON.stringify(frame.physical) === JSON.stringify(measuredSource.frame.display || measuredSource.frame) &&
       record.viewId === measuredSource.record.viewId && String(record.origin) === String(measuredSource.origin);
   };
   // Reads are sequential: the device commands share one command/status file, so parallel reads overwrite each other.
@@ -515,9 +574,13 @@ function createRetirementPointerIO(transport) {
       const f = rect?.physical, v = rect?.page?.visualViewport, p = rect?.pointerUi;
       if (!f || ![f.left, f.top, f.width, f.height].every(isNum) || f.width <= 1 || f.height <= 1 ||
           !v || ![v.width, v.height, v.offsetLeft, v.offsetTop].every(isNum) || v.width <= 0 || v.height <= 0 ||
-          !p || p.geometryReady !== true || p.viewHandle !== rect.viewHandle || !inside({ x:p.pointerViewX, y:p.pointerViewY }, f)) return null;
-      const s = f.width / v.width;
-      const dom = await transport.dom(id, { x:v.offsetLeft + p.pointerViewX / s, y:v.offsetTop + p.pointerViewY / s });
+          !p || p.geometryReady !== true || p.viewHandle !== rect.viewHandle) return null;
+      // physical is the scaled display rectangle. Agent pointer coordinates stay in raw WebView px.
+      const rawWidth = isNum(rect.viewWidth) && rect.viewWidth > 0 ? rect.viewWidth : f.width;
+      const rawHeight = isNum(rect.viewHeight) && rect.viewHeight > 0 ? rect.viewHeight : f.height;
+      if (!inside({ x:p.pointerViewX, y:p.pointerViewY }, { left:0, top:0, width:rawWidth, height:rawHeight })) return null;
+      const rawToCss = rawWidth / v.width;
+      const dom = await transport.dom(id, { x:v.offsetLeft + p.pointerViewX / rawToCss, y:v.offsetTop + p.pointerViewY / rawToCss });
       const afterFrame = await transport.frame();
       const after = await transport.identity();
       const record = currentRecordOf(after);
@@ -528,9 +591,11 @@ function createRetirementPointerIO(transport) {
       const left = Math.max(v.offsetLeft, dom.box.left), right = Math.min(v.offsetLeft + v.width, dom.box.right);
       const top = Math.max(v.offsetTop, dom.box.top), bottom = Math.min(v.offsetTop + v.height, dom.box.bottom);
       if (right <= left || bottom <= top) return null;
-      const target = cssClientToScreen(0, 0, f.width, v.width, (left+right)/2, (top+bottom)/2, v.offsetLeft, v.offsetTop);
-      if (!inside(target, f)) return null;
-      return { target, frame:f, pointer:{x:p.pointerViewX,y:p.pointerViewY}, hit:dom.hit,
+      const target = cssClientToScreen(0, 0, rawWidth, v.width, (left+right)/2, (top+bottom)/2, v.offsetLeft, v.offsetTop);
+      const frame = rawWidth === f.width && rawHeight === f.height ? f
+        : { left:0, top:0, width:rawWidth, height:rawHeight, display:f };
+      if (!inside(target, frame)) return null;
+      return { target, frame, pointer:{x:p.pointerViewX,y:p.pointerViewY}, hit:dom.hit,
         viewHandle:rect.viewHandle, origin:dom.timeOrigin, record, page:dom.page };
     },
     atomicFingerRaw: async (spec, canSend = () => true) => {
@@ -539,11 +604,19 @@ function createRetirementPointerIO(transport) {
       const rect = await transport.frame(), f = rect?.physical;
       if (!f || rect.viewHandle !== spec.viewHandle || !isNum(spec.dx) || !isNum(spec.dy) ||
           identity?.currentIdentity !== spec.viewHandle || !record || String(record.origin) !== String(spec.origin) ||
-          JSON.stringify(f) !== JSON.stringify(spec.frame) || !Number.isInteger(spec.steps) || spec.steps < 1 || spec.steps > 4 ||
-          !inside(spec, f) || !inside({x:spec.x+spec.dx,y:spec.y+spec.dy}, f)) return false;
+          JSON.stringify(f) !== JSON.stringify(spec.frame?.display || spec.frame) || !Number.isInteger(spec.steps) || spec.steps < 1 || spec.steps > 4) return false;
+      // spec.x/spec.y are raw WebView-local pixels; the frame is the displayed, scaled rectangle.
+      const rawWidth = isNum(rect.viewWidth) && rect.viewWidth > 0 ? rect.viewWidth : f.width;
+      const rawHeight = isNum(rect.viewHeight) && rect.viewHeight > 0 ? rect.viewHeight : f.height;
+      const raw = { left:0, top:0, width:rawWidth, height:rawHeight };
+      if (!inside(spec, raw) || !inside({x:spec.x+spec.dx,y:spec.y+spec.dy}, raw)) return false;
+      const displayX = f.width / rawWidth;
+      const displayY = f.height / rawHeight;
       // The ONLY screen conversion. gate-finger/native use local coordinates unchanged.
       if (!canSend()) return false;
-      return transport.atomic({ ...spec, x:Math.round(f.left+spec.x), y:Math.round(f.top+spec.y) });
+      return transport.atomic({ ...spec, frame:f,
+        x:Math.round(f.left+spec.x*displayX), y:Math.round(f.top+spec.y*displayY),
+        dx:Math.round(spec.dx*displayX), dy:Math.round(spec.dy*displayY) });
     },
   };
 }

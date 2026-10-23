@@ -70,7 +70,8 @@ function device(opts = {}) {
       assert.ok(spec.x>=0&&spec.x<dev.frame.width&&spec.y>=0&&spec.y<dev.frame.height,'gate-finger must be view-local');
       if(opts.fingerOk===false)return false;
       // Actual relative touchpad: DOWN records the finger, never teleports the virtual cursor.
-      if(spec.action==='down') { dev.finger={x:spec.x,y:spec.y,at:dev.clock}; manual(); }
+      // Ordinary page input is not a takeover, so control is not changed here.
+      if(spec.action==='down') { dev.finger={x:spec.x,y:spec.y,at:dev.clock}; }
       if(spec.action==='move'&&dev.finger){
         if(!dev.producer.mousePressActive&&dev.clock-dev.finger.at>=500){
           dev.producer.mousePressActive=true;dev.page.buttons=1;
@@ -121,9 +122,10 @@ function device(opts = {}) {
       if (label === 'Reopen') {
         dev.reopenTapped = true;
         dev.counts.taps += 1;
-        // The real Reopen CTA opens a new view with a fresh handle, not granted, and keeps the cookie.
+        // The real Reopen CTA is an explicit user open: a new view/document with its own default
+        // grant once ready, and the cookie is kept.
         const retired=dev.producer.lastRetired;
-        dev.producer = producer({ viewHandle: 9, currentIdentity:9, mode:'MANUAL',mouseMode:false, pageRetired: false, grantForSelected: false, agentOn: false, mousePressActive: false, recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', installed: true, clicks: 0, lastTarget: null, current: true }] },lastRetired:retired });
+        dev.producer = producer({ viewHandle: 9, currentIdentity:9, mode:'AGENT',mouseMode:false, pageRetired: false, grantForSelected: true, agentOn: true, mousePressActive: false, recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', installed: true, clicks: 0, lastTarget: null, current: true }] },lastRetired:retired });
         dev.ui.currentViewPresent = true;
         dev.page = { ...dev.page, clicks: 0, nextClicks:0,boxClicks:0,wheel:0,logTail:[], timeOrigin: 1700000111.5, boxCaptured: false, buttons: 0, releases: 0, cookie: dev.cookieValue };
         dev.pointer={x:0,y:0};dev.finger=null;
@@ -134,7 +136,6 @@ function device(opts = {}) {
     readCookieAfter: null,
     sleep: null,
   };
-  function manual(){dev.producer.mode='MANUAL';dev.producer.grantForSelected=false;dev.producer.agentOn=false;}
   function hit(id,p){const r=dev[id],s=dev.frame.width/1024;return p.x/s>=r.left&&p.x/s<r.right&&p.y/s>=r.top&&p.y/s<r.bottom;}
   function click(){
     dev.page.clicks++;if(hit('next',dev.pointer))dev.page.nextClicks++;if(hit('box',dev.pointer))dev.page.boxClicks++;
@@ -142,7 +143,7 @@ function device(opts = {}) {
     dev.page.logTail.push({t:'pointerdown',p:'mouse',bs:1},{t:'pointerup',p:'mouse',bs:0},{t:'click',p:'mouse',bs:0});
     dev.page.releases++;
   }
-  io.enableMouseRaw=async()=>{dev.counts.mouseEnable=(dev.counts.mouseEnable||0)+1;dev.producer.mouseMode=true;manual();return true;};
+  io.enableMouseRaw=async()=>{dev.counts.mouseEnable=(dev.counts.mouseEnable||0)+1;dev.producer.mouseMode=true;return true;};
   Object.assign(io,harness.createRetirementPointerIO({
     identity: async()=>JSON.parse(JSON.stringify(dev.producer)),
     frame: async()=>opts.noFrame?null:{physical:{...dev.frame},viewHandle:dev.producer.viewHandle,documentEpoch:dev.producer.documentEpoch,
@@ -154,7 +155,6 @@ function device(opts = {}) {
       assert.ok(p.x>=dev.frame.left&&p.x<dev.frame.left+dev.frame.width,'atomic gets screen origin exactly once');
       assert.ok(p.y>=dev.frame.top&&p.y<dev.frame.top+dev.frame.height);
       if(!dev.producer.mouseMode)return false;
-      manual();
       if(p.dx===0&&p.dy===0){click();return true;}
       // Four MOVE events over < long-press; relative movement, never source finger-point assignment.
       dev.pointer.x+=p.dx;dev.pointer.y+=p.dy;dev.page.logTail.push({t:'pointermove',p:'mouse',bs:0});return true;
@@ -224,7 +224,9 @@ test('CANCEL retirement: no grant, no agent, snapshot refused as AUTHORIZATION_R
   assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 600));
   assert.equal(flow.snapshot.code, 'AUTHORIZATION_REQUIRED');
   assert.equal(dev.reopenTapped, true, 'reopen happened through the explicit CTA');
-  assert.equal(flow.reopen.freshGrantAbsent, true);
+  assert.equal(flow.reopen.freshGrantPresent, true, 'the new view gets its own default grant');
+  assert.equal(flow.reopen.freshDocument, true);
+  assert.equal(flow.reopen.freshRecordChanged, true);
   assert.equal(flow.reopen.cookieKept, true);
 });
 
@@ -237,22 +239,21 @@ test('snapshot refusal with NoProvider is not isolation: the case does not pass'
   assert.equal(flow.reason, 'retirement-not-isolated');
 });
 
-test('a fresh view that reports grant true fails the reopen check', async () => {
+test('a fresh view without its own default grant fails the reopen check', async () => {
   const { dev, io } = device({ grantAfterAllow: false });
   const adapters = harness.createRetirementGateAdapters(io, harness.createCaseFence());
   await adapters.writeTestCookie('token-D');
-  // Override the reopen to leave a grant on the fresh view: the case must fail.
+  // Override the reopen to miss the new default grant: the old grant must not be carried over.
   io.tapLabelRaw = async (label) => {
     if (label !== 'Reopen') return false;
-    dev.producer = producer({ viewHandle: 9, pageRetired: false, grantForSelected: true, agentOn: true, recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', clicks: 0, current: true }] } });
+    dev.producer = producer({ viewHandle: 9, pageRetired: false, grantForSelected: false, agentOn: false, mode: 'MANUAL', recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', clicks: 0, current: true }] } });
     dev.ui.currentViewPresent = true;
     dev.page = { ...dev.page, clicks: 0, cookie: dev.cookieValue };
     return true;
   };
   const flow = await retire.runTrueCancelRetire({ ...adapters, readState: adapters.readState, now: io.now, sleep: io.sleepMs, readOldCookie: async () => dev.cookieValue, readPage: adapters.readPage, tapReopen: () => adapters.tapReopen(), agentSnapshot: adapters.agentSnapshot, allowAttempt: adapters.allowAttempt });
   assert.equal(flow.ok, false);
-  assert.equal(flow.reason, 'retire-reopen-failed');
-  assert.equal(flow.reopen.freshGrantAbsent, false);
+  assert.equal(flow.reason, 'fresh-default-grant-not-observed');
 });
 
 test('a phantom click on the fresh view fails the case (freshClicks must be exactly zero)', async () => {
@@ -261,7 +262,7 @@ test('a phantom click on the fresh view fails the case (freshClicks must be exac
   await adapters.writeTestCookie('token-E');
   io.tapLabelRaw = async (label) => {
     if (label !== 'Reopen') return false;
-    dev.producer = producer({ viewHandle: 9, grantForSelected: false, agentOn: false, recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', clicks: 1, current: true }] } });
+    dev.producer = producer({ viewHandle: 9, grantForSelected: true, agentOn: true, recorderViewId: 2, recordedDocuments: { 2: [{ origin: '1700000111.5', clicks: 1, current: true }] } });
     dev.ui.currentViewPresent = true;
     dev.page = { ...dev.page, clicks: 1, cookie: dev.cookieValue };
     return true;
@@ -319,6 +320,42 @@ test('case A: a full drag lock with one normal release passes; the second pointe
   assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 600));
   assert.equal(flow.page.releases, 1, 'exactly one normal release');
   assert.deepEqual(dev.counts.fingers.slice(0, 3), ['down', 'move', 'secondary-down'].slice(0, 3));
+  assert.equal(flow.end.grant, true, 'an ordinary drag does not revoke the default grant');
+  assert.equal(flow.end.mode, 'AGENT');
+  assert.equal(flow.end.authorityKept, true);
+});
+
+test('case A: an explicit takeover stays in place through an ordinary drag', async () => {
+  const { io } = device({ producer: { grantForSelected: false, agentOn: false, mode: 'MANUAL' } });
+  const adapters = harness.createRetirementGateAdapters(io, harness.createCaseFence());
+  const flow = await retire.runPrimaryDragLock({ ...adapters, readState: adapters.readState, now: io.now, sleep: io.sleepMs });
+  assert.equal(flow.ok, true, JSON.stringify(flow).slice(0, 600));
+  assert.equal(flow.end.grant, false);
+  assert.equal(flow.end.mode, 'MANUAL');
+  assert.equal(flow.end.authorityKept, true, 'a normal drag neither grants nor revokes');
+});
+
+test('an active mouse press interrupted while retiring must retire; ignoring it fails closed', async () => {
+  const { dev, io } = device();
+  const original = io.fingerRaw;
+  io.fingerRaw = async (spec) => {
+    const ok = await original(spec);
+    if (spec.action === 'cancel') {
+      // Simulate an interruption that fails to retire: the case must not pass.
+      dev.producer.mousePressActive = true;
+      dev.producer.pageRetired = false;
+      dev.producer.currentIdentity = 7;
+      dev.producer.grantForSelected = true;
+      dev.producer.agentOn = true;
+      dev.producer.mode = 'AGENT';
+    }
+    return ok;
+  };
+  const adapters = harness.createRetirementGateAdapters(io, harness.createCaseFence());
+  await adapters.writeTestCookie('unique');
+  const flow = await retire.runTrueCancelRetire({ ...adapters, readState: adapters.readState, now: io.now, sleep: io.sleepMs, readOldCookie: async () => dev.cookieValue, readPage: adapters.readPage, tapReopen: () => adapters.tapReopen(), agentSnapshot: adapters.agentSnapshot, allowAttempt: adapters.allowAttempt });
+  assert.equal(flow.ok, false);
+  assert.equal(flow.reason, 'retire-not-observed');
 });
 
 test('case A: a wheel from the second pointer fails the drag lock', async () => {
@@ -416,8 +453,8 @@ test('fresh continuation enables Mouse explicitly and uses exactly one atomic cl
   assert.equal(dev.counts.mouseEnable,1);
   assert.equal(dev.counts.atomic.filter(p=>p.dx===0&&p.dy===0).length,1);
   assert.equal(dev.page.nextClicks,1);assert.equal(dev.page.boxClicks,0);
-  assert.equal(dev.producer.grantForSelected,false);assert.equal(dev.producer.mode,'MANUAL');
-  // Reopen switched mouse OFF; ignoring the explicit enable causes the receiver to refuse the atomic click.
+  assert.equal(dev.producer.grantForSelected,true);assert.equal(dev.producer.mode,'AGENT');
+  // Reopen switched mouse OFF; the explicit enable keeps the fresh default grant and is required for the atomic click.
 });
 
 test('fresh Mouse enable failure cannot fall through to fake cursor success', async () => {

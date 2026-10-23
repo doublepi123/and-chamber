@@ -92,11 +92,12 @@ class StringResourcesTest {
 
     @Test
     fun `the number of translated strings is what the brief committed to`() {
-        // 298 unique keys on both sides: upstream launch/update copy and uptime units, the plugin
+        // 304 unique keys on both sides: upstream launch/update copy and uptime units, the plugin
         // transport's browser strings (floating window, modes and status, including the agent-open
         // wait), the "Open web page" entry and dialog, and the floating window's "Clear site data"
-        // action with its partial result. One entry per key, as the loader keeps them.
-        assertEquals(298, english.size)
+        // action with its partial result, address editing and window presentation controls.
+        // One entry per key, as the loader keeps them.
+        assertEquals(304, english.size)
     }
 
     private companion object {

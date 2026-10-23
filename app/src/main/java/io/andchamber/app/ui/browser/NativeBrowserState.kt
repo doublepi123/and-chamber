@@ -20,8 +20,30 @@ data class NativeBrowserState(
     val documentEpoch: Long = 0L,
     val paused: Boolean = false,
     /**
-     * The floating window currently refuses to present this page for input. The page may stay
-     * mounted; admission, allow and page commands refuse until the UI clears the gate.
+     * The person explicitly hid the window. The selected page is kept, but it is not presented and
+     * it is not admitted. The UI's explicit show/restore, a new open, or an agent action that
+     * restores the small window (never after an explicit takeover) clears this; a pause ending, a
+     * probe or any other state publish never does.
+     */
+    val hidden: Boolean = false,
+    /**
+     * Monotonic one-shot request for the UI to present the small floating browser window. It
+     * advances when an agent action or an explicit agent open brings back a window the person had
+     * hidden. The UI should switch to its small (floating) presentation once per new value; it
+     * never implies authority. Ordinary snapshots while the window is already shown do not advance
+     * it, so a person's full-screen view is not reset on every action.
+     */
+    val presentationRequestSerial: Long = 0L,
+    /**
+     * The person explicitly took the page over. This is stronger than [hidden]: an agent action
+     * may bring back a merely hidden window, but it never overrides this. A new explicit open or
+     * an explicit Allow clears it. Presentation/authority only; it is not a grant.
+     */
+    val explicitTakeover: Boolean = false,
+    /**
+     * The floating window temporarily refuses to present this page for input. The page stays
+     * mounted and the grant is kept; admission, allow and page commands refuse until the UI clears
+     * the gate, then control resumes. This is not a hide and not a revoke.
      */
     val presentationBlocked: Boolean = false,
     /** Trusted console transport admission. It stays true while only presentation is blocked. */
@@ -30,8 +52,8 @@ data class NativeBrowserState(
     internal val transportInvalidation: Long = 0L,
     val eligible: Boolean = false,
     /**
-     * The selected tab was opened by an agent `open` and the person has not allowed, taken over or
-     * navigated it by hand since. Presentation only: it is not authority and grants nothing.
+     * Legacy Allow-tap notice. Default control is granted after an explicit open becomes ready, so
+     * this stays false; the field remains for binding compatibility only.
      */
     val awaitingAllow: Boolean = false,
     /** A provider connection is live. Only a flag: the connection id itself is not exposed. */

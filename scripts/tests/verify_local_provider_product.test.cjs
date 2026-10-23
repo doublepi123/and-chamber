@@ -39,7 +39,11 @@ function pathRepo() {
 
 const READY_ALLOW = Object.freeze({ enabled: true, visible: true, clickable: true, left: 100, top: 100, right: 300, bottom: 200, windowId: 1 });
 function readyUi(labels = {}) {
-  return { labels: { 'Allow agent': { ...READY_ALLOW }, ...labels }, surface: {} };
+  // An explicit open reaches the default grant on readiness: Take over is the enabled control.
+  // The floating window's full-screen control is "Full screen" unless the enlarged label is given.
+  const base = { 'Take over': { ...READY_ALLOW }, ...labels };
+  if (!('Small window' in labels)) base['Full screen'] = { ...READY_ALLOW };
+  return { labels: base, surface: {} };
 }
 function readyNative(tabId, viewHandle = 7, extra = {}) {
   return { selectedTabId: tabId, pageReady: true, viewHandle, grantForSelected: false, agentOn: false, presentationBlocked: false, ...extra };
@@ -53,23 +57,24 @@ test('blocked-tight case uses compact WM, exact snapshot code, native input and 
     timeOrigin: 100,
     loads: 1,
     inputValue: '',
+    autoFull: false,
     wmSet: 0,
     wmRestore: 0,
-    enlarge: 0,
   };
   const presentation = () => ({
     fixture: {
       page: { timeOrigin: state.timeOrigin, loads: state.loads, noteValue: state.inputValue, noteFocused: true },
-      native: { ...readyNative('tab-focus', state.viewHandle), presentationBlocked: state.blocked, grantForSelected: state.blocked ? false : state.enlarge > 0 ? false : true, hasFocus: false },
+      native: { ...readyNative('tab-focus', state.viewHandle), presentationBlocked: state.blocked, grantForSelected: state.grant, agentOn: !state.blocked && state.grant, hasFocus: false },
     },
     observe: { metrics: { sy: state.blocked ? 0 : 10 } },
-    ui: readyUi({ Enlarge: {} }),
+    ui: state.autoFull || state.blocked
+      ? { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} }
+      : readyUi(),
     composer: { valid: true },
   });
   const io = {
     async open() { return { ok: true, tabId: 'tab-focus' }; },
-    async tapUi(label) { if (label === 'Enlarge') { state.enlarge += 1; state.blocked = false; } return { ok: true }; },
-    async readDiag() { return { ...readyNative('tab-focus', state.viewHandle), grantForSelected: state.blocked || state.enlarge > 0 ? false : state.grant }; },
+    async readDiag() { return { ...readyNative('tab-focus', state.viewHandle), grantForSelected: state.grant, agentOn: !state.blocked && state.grant }; },
     async pageRect() { return { viewHandle: state.viewHandle, pointerUi: { viewHandle: state.viewHandle, geometryReady: true } }; },
     async presentation() { return presentation(); },
     async snapshot() { return { ok: false, code: 'BROWSER_PAGE_UNAVAILABLE' }; },
@@ -78,30 +83,42 @@ test('blocked-tight case uses compact WM, exact snapshot code, native input and 
   };
   const ctx = {
     async readWmSize() { return { raw: 'Physical size: 1080x2280' }; },
-    async setCompactSize() { state.wmSet += 1; state.blocked = true; return { raw: 'Override size: 1080x1000' }; },
-    async restoreWmSize() { state.wmRestore += 1; return { raw: 'Physical size: 1080x2280' }; },
+    async setCompactSize(spec) {
+      state.wmSet += 1;
+      state.autoFull = spec === '1080x1000';
+      state.blocked = spec === '1080x300';
+      return { raw: `Override size: ${spec}` };
+    },
+    async restoreWmSize() { state.wmRestore += 1; state.blocked = false; state.autoFull = false; return { raw: 'Physical size: 1080x2280' }; },
   };
   const result = await product.PRODUCT_CASE_FUNCTIONS['product-blocked-tight'](io, ctx);
   assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(state.wmSet, 1);
+  assert.equal(result.autoFull.agentOn, true, '1080x1000 is auto-full and keeps the grant');
+  assert.equal(state.wmSet, 2, '1080x1000 positive then 1080x300 blocked');
   assert.equal(state.wmRestore, 2, 'case finally and recovery path restore');
-  assert.equal(state.enlarge, 1);
 });
 
 test('blocked-tight refuses a wrong capture code, non-nested handled, changed hashes or deltas', async () => {
   const make = (overrides = {}) => {
-    const state = { blocked: false, grant: true, viewHandle: 7, timeOrigin: 100, loads: 1, inputValue: '', wmSet: 0, wmRestore: 0, enlarge: 0 };
+    const state = { blocked: false, autoFull: false, grant: true, viewHandle: 7, timeOrigin: 100, loads: 1, inputValue: '', wmSet: 0, wmRestore: 0 };
     const io = {
       async open() { return { ok: true, tabId: 'tab-focus' }; },
-      async tapUi(label) { if (label === 'Enlarge') { state.enlarge += 1; state.blocked = false; } return { ok: true }; },
-      async readDiag() { return { ...readyNative('tab-focus', state.viewHandle), grantForSelected: state.blocked || state.enlarge > 0 ? false : state.grant }; },
+      async readDiag() { return { ...readyNative('tab-focus', state.viewHandle), grantForSelected: state.grant, agentOn: !state.blocked && state.grant }; },
       async pageRect() { return { viewHandle: state.viewHandle, pointerUi: { viewHandle: state.viewHandle, geometryReady: true } }; },
-      async presentation() { return { fixture: { page: { timeOrigin: state.timeOrigin, loads: state.loads, noteValue: state.inputValue, noteFocused: true }, native: { ...readyNative('tab-focus', state.viewHandle), presentationBlocked: state.blocked, grantForSelected: false, hasFocus: false } }, observe: { metrics: { sy: state.blocked ? 0 : 10 } }, ui: readyUi(), composer: { valid: true } }; },
+      async presentation() { return { fixture: { page: { timeOrigin: state.timeOrigin, loads: state.loads, noteValue: state.inputValue, noteFocused: true }, native: { ...readyNative('tab-focus', state.viewHandle), presentationBlocked: state.blocked, grantForSelected: state.grant, agentOn: !state.blocked && state.grant, hasFocus: false } }, observe: { metrics: { sy: state.blocked ? 0 : 10 } }, ui: state.autoFull || state.blocked ? { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} } : readyUi(), composer: { valid: true } }; },
       async snapshot() { return { ok: false, code: 'BROWSER_PAGE_UNAVAILABLE' }; },
       async capture() { return { ok: false, code: overrides.captureCode || 'BROWSER_PAGE_UNAVAILABLE' }; },
       async nativeBlockedInput() { return { handled: overrides.handled !== undefined ? overrides.handled : { touch: [true, true], generic: [true, true], key: [true, true] }, before: { keys: 1, clicks: 0, applies: 0, inputHash: overrides.beforeHash || 'a'.repeat(64) }, after: { keys: 1, clicks: 0, applies: 0, inputHash: overrides.afterHash || 'a'.repeat(64) }, delta: overrides.delta || { keys: 0, clicks: 0, applies: 0 }, inputChanged: overrides.inputChanged === true }; },
     };
-    const ctx = { async readWmSize() { return { raw: 'Physical size: 1080x2280' }; }, async setCompactSize() { state.wmSet += 1; state.blocked = true; }, async restoreWmSize() { state.wmRestore += 1; } };
+    const ctx = {
+      async readWmSize() { return { raw: 'Physical size: 1080x2280' }; },
+      async setCompactSize(spec) {
+        state.wmSet += 1;
+        state.autoFull = spec === '1080x1000';
+        state.blocked = spec === '1080x300';
+      },
+      async restoreWmSize() { state.wmRestore += 1; state.blocked = false; state.autoFull = false; },
+    };
     return { io, ctx };
   };
   const wrongCaptureIo = make({ captureCode: 'NO_PROVIDER' });
@@ -127,17 +144,28 @@ test('blocked-tight refuses a wrong capture code, non-nested handled, changed ha
 });
 
 test('blocked-tight refuses NoProvider-style/wrong snapshot code and native input nonzero', async () => {
+  const state = { blocked: false, autoFull: false };
   const io = {
     async open() { return { ok: true, tabId: 'tab' }; },
-    async tapUi() { return { ok: true }; },
-    async readDiag() { return { ...readyNative('tab', 7), grantForSelected: true }; },
+    async readDiag() { return { ...readyNative('tab', 7), grantForSelected: true, agentOn: !state.blocked }; },
     async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
-    async presentation() { return { fixture: { page: {}, native: { ...readyNative('tab', 7), presentationBlocked: true, grantForSelected: true } }, observe: {}, ui: readyUi(), composer: {} }; },
+    async presentation() {
+      return {
+        fixture: { page: {}, native: { ...readyNative('tab', 7), presentationBlocked: state.blocked, grantForSelected: true, agentOn: !state.blocked } },
+        observe: {},
+        ui: state.autoFull || state.blocked ? { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} } : readyUi(),
+        composer: {},
+      };
+    },
     async snapshot() { return { ok: false, code: 'NO_PROVIDER' }; },
     async capture() { return { ok: false, code: 'NO_PROVIDER' }; },
     async nativeBlockedInput() { return { handled: { touch: [true, true], generic: [true, true], key: [true, true] }, before: { keys: 1, clicks: 0, applies: 0, inputHash: 'a'.repeat(64) }, after: { keys: 1, clicks: 0, applies: 0, inputHash: 'a'.repeat(64) }, delta: { keys: 0, clicks: 0, applies: 0 }, inputChanged: false }; },
   };
-  const ctx = { async readWmSize() { return {}; }, async setCompactSize() {}, async restoreWmSize() {} };
+  const ctx = {
+    async readWmSize() { return {}; },
+    async setCompactSize(spec) { state.autoFull = spec === '1080x1000'; state.blocked = spec === '1080x300'; return {}; },
+    async restoreWmSize() { state.blocked = false; state.autoFull = false; },
+  };
   const result = await product.PRODUCT_CASE_FUNCTIONS['product-blocked-tight'](io, ctx);
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'blocked-snapshot-code');
@@ -168,9 +196,9 @@ test('console profile isolation requires supported/distinct/checks/cleaned true'
     now: () => 0,
     sleep: async () => {},
     async open() { return { ok: true, tabId: 'tab' }; },
-    async readDiag() { return readyNative('tab', 7); },
+    async readDiag() { return { ...readyNative('tab', 7), grantForSelected: true }; },
     async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
-    async presentation() { return { fixture: { native: { ...readyNative('tab', 7) } }, observe: {}, ui: readyUi(), composer: {} }; },
+    async presentation() { return { fixture: { native: { ...readyNative('tab', 7), grantForSelected: true } }, observe: {}, ui: readyUi(), composer: {} }; },
     async profileIsolation() { return { supported: true, profiles: { browser: 'profile-browser', console: 'profile-console', other: 'profile-other' }, cookieStoresDistinct: true, checks: [{ writer: 'browser', ownPresent: true, otherWriters: ['console', 'other'], otherPresent: [false, false] }, { writer: 'console', ownPresent: true, otherWriters: ['browser', 'other'], otherPresent: [false, false] }, { writer: 'other', ownPresent: true, otherWriters: ['browser', 'console'], otherPresent: [false, false] }], cleaned: true, ...overrides }; },
   });
   assert.equal((await product.PRODUCT_CASE_FUNCTIONS['product-console-profile-isolation'](make(), {})).ok, true);
@@ -208,7 +236,7 @@ function clocked() {
   return { now: () => clock, sleep: async (ms) => { clock += ms; } };
 }
 
-function focusIo({ focusable = true, ime = true, overlap = false } = {}) {
+function focusIo({ focusable = true, ime = true, overlap = false, unsafe = false } = {}) {
   const clock = clocked();
   const state = { mouse: false, grant: true, note: '', noteFocused: false, docFocus: false, nativeFocus: false, ime: false, sy: 0, enlarged: false };
   return {
@@ -216,26 +244,41 @@ function focusIo({ focusable = true, ime = true, overlap = false } = {}) {
     sleep: clock.sleep,
     async open() { return { ok: true, tabId: 'tab-focus' }; },
     async tapUi(label) {
-      if (label === 'Allow agent') state.grant = true;
+      if (label === 'Resume agent') state.grant = true;
       if (label === 'Mouse') state.mouse = true;
       if (label === 'Touch') state.mouse = false;
-      if (label === 'Enlarge') state.enlarged = true;
-      if (label === 'Restore') state.enlarged = false;
+      if (label === 'Full screen') state.enlarged = true;
+      if (label === 'Small window') state.enlarged = false;
       return { ok: true };
+    },
+    async imeHide() {
+      if (!state.ime) return { ok: false, reason: 'ime-not-shown' };
+      state.ime = false;
+      return { ok: true, data: { phase: 'ime-hide', shownBefore: true, shownAfter: false } };
     },
     async readDiag() { return { ...readyNative('tab-focus', 7), grantForSelected: state.grant, mouseMode: state.mouse }; },
     async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
     async presentation() {
       const editorTop = overlap ? 400 : 550;
       const editorBottom = overlap ? 500 : 600;
+      const frame = state.ime
+        ? { left: 0, top: 0, width: 1000, height: unsafe ? 500 : 400 }
+        : state.enlarged
+          ? { left: 0, top: 0, width: 1000, height: 600 }
+          : { left: 0, top: 0, width: 600, height: 500 };
+      const ui = state.ime
+        ? { labels: { 'Take over': { ...READY_ALLOW } }, surface: {} }
+        : state.enlarged
+          ? readyUi({ 'Small window': {} })
+          : readyUi();
       return {
         fixture: {
-          native: { ...readyNative('tab-focus', 7), grantForSelected: state.grant, hasFocus: state.nativeFocus, physicalFrame: { left: 0, top: 0, width: 1000, height: 500 } },
+          native: { ...readyNative('tab-focus', 7), grantForSelected: state.grant, hasFocus: state.nativeFocus, physicalFrame: frame },
           page: { noteValue: state.note, noteFocused: state.noteFocused, noteEnabled: true, noteReadOnly: false, noteTag: 'INPUT', noteSelectionStart: state.noteFocused ? state.note.length : null, noteSelectionEnd: state.noteFocused ? state.note.length : null, documentHasFocus: state.docFocus, timeOrigin: 100, loads: 1 },
-          outerime: { shown: state.ime },
+          outerime: { shown: state.ime, windowLeftPx: 0, windowTopPx: 0, windowRightPx: 1000, safeBottomPx: 400 },
         },
         observe: { sy: state.sy },
-        ui: readyUi(state.enlarged ? { Restore: {} } : { Enlarge: {} }),
+        ui,
         composer: {
           mainWebView: { x: 0, y: 0, width: 1000, height: 600 },
           measurement: { consoleGeneration: 1, nativeGeneration: 1, nativeWidth: 1000, nativeHeight: 600, top: editorTop, bottom: editorBottom, viewportWidth: 1000, viewportHeight: 600, visible: true },
@@ -257,7 +300,7 @@ function focusIo({ focusable = true, ime = true, overlap = false } = {}) {
   };
 }
 
-test('focused product flow uses desktop mouse wheel, then Touch note focus and exact restore', async () => {
+test('focused product flow: IME autoFull, real Back autoFloat, then full/small cycle', async () => {
   const ok = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo(), {});
   assert.equal(ok.ok, true, JSON.stringify(ok));
   const noFocus = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ focusable: false }), {});
@@ -267,19 +310,22 @@ test('focused product flow uses desktop mouse wheel, then Touch note focus and e
   assert.equal(noFocusDoc.ok, false);
   const overlap = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ overlap: true }), {});
   assert.equal(overlap.ok, false);
-  assert.equal(overlap.reason, 'composer-overlaps-page');
+  assert.equal(overlap.reason, 'ime-gone-autfloat-float-overlaps-composer');
+  const unsafe = await product.PRODUCT_CASE_FUNCTIONS['product-focused-restore'](focusIo({ unsafe: true }), {});
+  assert.equal(unsafe.ok, false);
+  assert.equal(unsafe.reason, 'ime-autofull-page-outside-ime-safe');
 });
 
 function mouseIo({ logClick = true, logMove = false, clickOffset = 0 } = {}) {
   const clock = clocked();
-  const state = { mouse: false, grant: false, logs: [], pointer: { x: 0, y: 0 }, clicks: 0 };
+  const state = { mouse: false, grant: true, logs: [], pointer: { x: 0, y: 0 }, clicks: 0 };
   const box = { left: 400, top: 150, right: 520, bottom: 230 };
   return {
     now: clock.now,
     sleep: clock.sleep,
     async open() { return { ok: true, tabId: 'tab-mouse' }; },
     async tapUi(label) {
-      if (label === 'Allow agent') state.grant = true;
+      if (label === 'Resume agent') state.grant = true;
       if (label === 'Mouse') state.mouse = true;
       if (label === 'Touch') state.mouse = false;
       return { ok: true };
@@ -295,12 +341,13 @@ function mouseIo({ logClick = true, logMove = false, clickOffset = 0 } = {}) {
       const values = text.replace('finger:', '').split(',').map(Number);
       const [sx, sy, dx, dy] = values;
       if (dx !== 0 || dy !== 0) {
-        state.pointer = { x: sx + dx, y: sy + dy };
-        if (logMove) state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0, x: sx + dx, y: sy + dy });
+        // Touchpad semantics: the finger start is irrelevant; the pointer moves by the delta.
+        state.pointer = { x: state.pointer.x + dx, y: state.pointer.y + dy };
+        if (logMove) state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0, x: state.pointer.x, y: state.pointer.y });
       } else if (logClick) {
         state.clicks += 1;
-        state.logs.push({ t: 'pointerdown', p: 'mouse', b: 0, bs: 1, x: sx, y: sy });
-        state.logs.push({ t: 'click', p: 'mouse', b: 0, bs: 0, x: sx + clickOffset, y: sy + clickOffset });
+        state.logs.push({ t: 'pointerdown', p: 'mouse', b: 0, bs: 1, x: state.pointer.x, y: state.pointer.y });
+        state.logs.push({ t: 'click', p: 'mouse', b: 0, bs: 0, x: state.pointer.x + clickOffset, y: state.pointer.y + clickOffset });
       }
       return true;
     },
@@ -339,7 +386,7 @@ test('mouse move-click enables Mouse, uses measured pointer hit and counts the r
 
 function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuringGesture = false, beginCode = null, endOk = true } = {}) {
   const clock = clocked();
-  const state = { mouse: false, grant: false, logs: [], pointer: { x: 0, y: 0 }, began: 0, ended: 0 };
+  const state = { mouse: false, grant: true, logs: [], pointer: { x: 0, y: 0 }, began: 0, ended: 0 };
   const box = { left: 400, top: 150, right: 520, bottom: 230 };
   return {
     now: clock.now,
@@ -348,7 +395,7 @@ function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuri
     ended: () => state.ended,
     async open() { return { ok: true, tabId: 'tab-hover' }; },
     async tapUi(label) {
-      if (label === 'Allow agent') state.grant = true;
+      if (label === 'Resume agent') state.grant = true;
       if (label === 'Mouse') state.mouse = true;
       if (label === 'Touch') state.mouse = false;
       return { ok: true };
@@ -385,13 +432,13 @@ function hoverA11yIo({ move = true, moveOffset = 0, extraClick = false, a11yDuri
       const values = text.replace('finger:', '').split(',').map(Number);
       const [sx, sy, dx, dy, hold, steps] = values;
       if (hold !== 0 || steps < 1) return { ok: false, data: null, code: 'bad-finger', detail: 'bad-finger', commandId: 'cmd-finger' };
-      state.pointer = { x: sx + dx, y: sy + dy };
+      state.pointer = { x: state.pointer.x + dx, y: state.pointer.y + dy };
       if (move) {
-        state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0, x: Math.round(sx + dx + moveOffset), y: Math.round(sy + dy + moveOffset) });
+        state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0, x: Math.round(state.pointer.x + moveOffset), y: Math.round(state.pointer.y + moveOffset) });
       }
       if (extraClick) {
-        state.logs.push({ t: 'pointerdown', p: 'mouse', b: 0, bs: 1, x: sx, y: sy });
-        state.logs.push({ t: 'click', p: 'mouse', b: 0, bs: 0, x: sx, y: sy });
+        state.logs.push({ t: 'pointerdown', p: 'mouse', b: 0, bs: 1, x: state.pointer.x, y: state.pointer.y });
+        state.logs.push({ t: 'click', p: 'mouse', b: 0, bs: 0, x: state.pointer.x, y: state.pointer.y });
       }
       return { ok: true, data: { phase: 'finger', sent: true, a11yEnabledDuringGesture: a11yDuringGesture }, code: '', detail: '', commandId: 'cmd-finger' };
     },
@@ -442,7 +489,7 @@ test('mouse hover a11y-off fails typed on a missing move, an extra click, an off
 
 function dragIo({ moveBox = true } = {}) {
   const clock = clocked();
-  const state = { mouse: false, grant: false, logs: [], pointer: { x: 0, y: 0 }, box: { left: 400, top: 150, right: 520, bottom: 230 }, sy: 0 };
+  const state = { mouse: false, grant: true, logs: [], pointer: { x: 0, y: 0 }, box: { left: 400, top: 150, right: 520, bottom: 230 }, sy: 0 };
   const presentation = () => ({
     observe: {
       sy: state.sy,
@@ -455,7 +502,7 @@ function dragIo({ moveBox = true } = {}) {
     sleep: clock.sleep,
     async open() { return { ok: true, tabId: 'tab-drag' }; },
     async tapUi(label) {
-      if (label === 'Allow agent') state.grant = true;
+      if (label === 'Resume agent') state.grant = true;
       if (label === 'Mouse') state.mouse = true;
       if (label === 'Touch') state.mouse = false;
       return { ok: true };
@@ -474,13 +521,13 @@ function dragIo({ moveBox = true } = {}) {
         state.logs.push({ t: 'pointerdown', p: 'mouse', b: 0, bs: 1 });
         state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 1 });
         state.logs.push({ t: 'pointerup', p: 'mouse', b: 0, bs: 0 });
-        state.pointer = { x: sx + dx, y: sy + dy };
+        state.pointer = { x: state.pointer.x + dx, y: state.pointer.y + dy };
         if (moveBox) {
           state.box.left += dx;
           state.box.top += dy;
         }
       } else if (dx !== 0 || dy !== 0) {
-        state.pointer = { x: sx + dx, y: sy + dy };
+        state.pointer = { x: state.pointer.x + dx, y: state.pointer.y + dy };
         state.logs.push({ t: 'pointermove', p: 'mouse', b: -1, bs: 0 });
       }
       return true;
@@ -513,12 +560,12 @@ test('mouse drag uses one held press and a measured DOM drop, then a real wheel'
 
 function pinchIo({ changes = true } = {}) {
   const clock = clocked();
-  const state = { mouse: false, grant: false, scale: 1, width: 800 };
+  const state = { mouse: false, grant: true, scale: 1, width: 800 };
   return {
     now: clock.now,
     sleep: clock.sleep,
     async open() { return { ok: true, tabId: 'tab-pinch' }; },
-    async tapUi(label) { if (label === 'Allow agent') state.grant = true; return { ok: true }; },
+    async tapUi(label) { if (label === 'Resume agent') state.grant = true; return { ok: true }; },
     async readDiag() { return { ...readyNative('tab-pinch', 7), grantForSelected: state.grant, mouseMode: state.mouse }; },
     async presentation() {
       return { fixture: { native: { ...readyNative('tab-pinch', 7) } }, observe: { timeOrigin: 100, loads: 1, visualViewport: { scale: state.scale, width: state.width } }, ui: readyUi(), composer: {} };
@@ -543,8 +590,8 @@ function sessionIo({ corrupt = false } = {}) {
   return {
     now: clock.now,
     sleep: clock.sleep,
-    async open() { state.opens += 1; state.tabId = `tab-${state.opens}`; return { ok: true, tabId: state.tabId }; },
-    async tapUi(label) { if (label === 'Allow agent') state.grant = true; return { ok: true }; },
+    async open() { state.opens += 1; state.tabId = `tab-${state.opens}`; state.grant = true; return { ok: true, tabId: state.tabId }; },
+    async tapUi(label) { if (label === 'Resume agent') state.grant = true; return { ok: true }; },
     async readDiag() { return { ...readyNative(state.tabId, 7), grantForSelected: state.grant }; },
     async pageRect() { return { viewHandle: 7, pointerUi: { viewHandle: 7, geometryReady: true } }; },
     async presentation() { return { fixture: { native: { ...readyNative(state.tabId, 7) } }, observe: {}, ui: readyUi(), composer: {} }; },
@@ -596,7 +643,7 @@ function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, dr
     now: clock.now,
     sleep: clock.sleep,
     async open() { return { ok: true, tabId: 'tab-old' }; },
-    async tapUi(label) { if (label === 'Allow agent') state.grant = true; return { ok: true, commandId: `ui-${label}` }; },
+    async tapUi(label) { if (label === 'Resume agent') state.grant = true; return { ok: true, commandId: `ui-${label}` }; },
     async presentation() {
       return {
         fixture: { native: { ...readyNative(state.selectedTab, state.viewHandle), owner: 'ses-a', grantForSelected: state.grant }, outer: { shown: false } },
@@ -637,7 +684,8 @@ function nativeEntryIo({ skipOpen = false, typeOk = true, wrongValue = false, dr
         state.selectedOwner = 'ses-product-b';
         state.viewHandle = 8;
         state.tabIds.push('tab-new');
-        state.grant = false;
+        // The person's explicit Open reaches the default ready grant.
+        state.grant = true;
       }
       return { ok: true, commandId: `chat-${label}` };
     },
@@ -845,7 +893,7 @@ test('delayed UI target read is fenced before any ADB tap', async () => {
   const client = {
     async sendDevice() {
       fence.stop();
-      return { ok: true, data: { runId: 'product-target', phase: 'ui-target', label: 'Enlarge' } };
+      return { ok: true, data: { runId: 'product-target', phase: 'ui-target', label: 'Full screen' } };
     },
   };
   const io = product.createProductIo({
@@ -855,7 +903,7 @@ test('delayed UI target read is fenced before any ADB tap', async () => {
     tapScreen: async () => { taps += 1; },
     fence,
   });
-  const result = await io.tapUi('Enlarge');
+  const result = await io.tapUi('Full screen');
   assert.equal(result.ok, false);
   assert.equal(result.code, 'FENCED');
   assert.equal(taps, 0);
@@ -982,7 +1030,7 @@ test('composer overlap uses the accepted measurement sub-rect, not the whole cha
   assert.equal(intersects, false, 'accepted composer editor does not overlap');
 });
 
-test('case preparation reads actual serial state and performs one Restore or Close only', async () => {
+test('case preparation reads actual serial state and performs one Small window or Close page only', async () => {
   const make = ({ enlarged = false, ime = false, restoreOk = true, closeOk = true } = {}) => {
     const clock = clocked();
     const state = { enlarged, ime, tapCount: 0, selectedTab: 'tab-focus' };
@@ -993,13 +1041,13 @@ test('case preparation reads actual serial state and performs one Restore or Clo
         return {
           fixture: { native: { selectedTabId: state.selectedTab, viewHandle: 7, pageReady: true, presentationBlocked: false }, outerime: { shown: state.ime } },
           observe: {}, composer: {},
-          ui: { labels: state.enlarged ? { Restore: {} } : { Enlarge: {} } },
+          ui: { labels: state.enlarged ? { 'Small window': {} } : { 'Full screen': {} } },
         };
       },
       async tapUi(label) {
         state.tapCount += 1;
-        if (label === 'Restore') { if (!restoreOk) return { ok: false, reason: 'restore-failed' }; state.enlarged = false; }
-        if (label === 'Turn off') { if (!closeOk) return { ok: false, reason: 'close-failed' }; state.ime = false; state.selectedTab = 'chat'; }
+        if (label === 'Small window') { if (!restoreOk) return { ok: false, reason: 'restore-failed' }; state.enlarged = false; }
+        if (label === 'Close page') { if (!closeOk) return { ok: false, reason: 'close-failed' }; state.ime = false; state.selectedTab = 'chat'; }
         return { ok: true };
       },
       async readDiag() { return { selectedTabId: state.selectedTab, pageReady: state.selectedTab !== 'chat' }; },
@@ -1009,13 +1057,13 @@ test('case preparation reads actual serial state and performs one Restore or Clo
   const enlarged = make({ enlarged: true });
   const restored = await product.prepareProductCase(enlarged);
   assert.equal(restored.ok, true, JSON.stringify(restored));
-  assert.deepEqual(restored.actions.map((action) => action.action), ['Restore']);
+  assert.deepEqual(restored.actions.map((action) => action.action), ['Small window']);
   assert.equal(enlarged.state.tapCount, 1);
   const ime = make({ ime: true });
   const closed = await product.prepareProductCase(ime);
   assert.equal(closed.ok, true, JSON.stringify(closed));
-  assert.deepEqual(closed.actions.map((action) => action.action), ['Turn off']);
-  assert.equal(ime.state.tapCount, 1);
+  assert.deepEqual(closed.actions.map((action) => action.action), ['More', 'Close page']);
+  assert.equal(ime.state.tapCount, 2);
   const failed = make({ enlarged: true, restoreOk: false });
   const failedPrep = await product.prepareProductCase(failed);
   assert.equal(failedPrep.ok, false);
@@ -1023,7 +1071,7 @@ test('case preparation reads actual serial state and performs one Restore or Clo
   assert.equal(failed.state.tapCount, 1, 'no retry of a failed prepare action');
 });
 
-test('baseOpen reads ready/source/geometry/UI before exactly one Allow tap', async () => {
+test('baseOpen reads ready/source/geometry/UI and the default grant without tapping', async () => {
   const clock = clocked();
   const state = { ready: false, grant: false, taps: 0 };
   const io = {
@@ -1038,23 +1086,21 @@ test('baseOpen reads ready/source/geometry/UI before exactly one Allow tap', asy
       return {
         fixture: { native: { selectedTabId: 'tab-ready', pageReady: state.ready, viewHandle: 7, presentationBlocked: false }, outerime: { shown: false } },
         observe: {},
-        ui: state.ready ? readyUi() : { labels: { 'Allow agent': { ...READY_ALLOW, enabled: false } }, surface: {} },
+        ui: state.ready ? readyUi() : { labels: { 'Resume agent': { ...READY_ALLOW, enabled: false } }, surface: {} },
         composer: {},
       };
     },
-    async tapUi(label) { state.taps += 1; if (label === 'Allow agent') state.grant = true; return { ok: true }; },
+    async tapUi(label) { state.taps += 1; if (label === 'Resume agent') state.grant = true; return { ok: true }; },
   };
   const notReady = await product.baseOpen(io, 'https://example.com/open-provider-focused', 'mobile');
   assert.equal(notReady.ok, false);
   assert.equal(notReady.reason, 'product-ready-diag-timeout');
-  assert.equal(state.taps, 0, 'no Allow tap before actual readiness');
+  assert.equal(state.taps, 0, 'no UI tap before actual readiness');
   state.ready = true;
+  state.grant = true;
   const ready = await product.baseOpen(io, 'https://example.com/open-provider-focused', 'mobile');
   assert.equal(ready.ok, true, JSON.stringify(ready));
-  assert.equal(state.taps, 0, 'baseOpen itself never taps');
-  const allow = await product.allowOnce(io);
-  assert.equal(allow.ok, true, JSON.stringify(allow));
-  assert.equal(state.taps, 1, 'the case performs one actual Allow tap after readiness');
+  assert.equal(state.taps, 0, 'the default grant is read from diag, never from a Resume tap');
 });
 
 function nativeEntryStateData(overrides = {}) {

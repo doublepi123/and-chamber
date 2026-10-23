@@ -3,12 +3,10 @@ package io.andchamber.app.ui.browser
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Rect
 import android.net.Uri
 import android.net.http.SslError
 import android.view.MotionEvent
-import android.view.PixelCopy
 import android.view.ViewGroup
 import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
@@ -31,6 +29,7 @@ import io.andchamber.app.ui.findActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
 
@@ -295,6 +294,10 @@ internal class BrowserSession private constructor(
     }
     private var geometrySerial = 0L
 
+    /** Commit gate for the unwrapped harness, where no [BrowserViewportHost] exists. */
+    private var unwrappedCommitGate: NativeFrameCommitGate<BrowserPresentationGeometry>? = null
+    private var unwrappedCommitted: BrowserPresentationGeometry? = null
+
     fun fail(message: String) {
         if (destroyed) return
         pageError = message
@@ -316,6 +319,9 @@ internal class BrowserSession private constructor(
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        unwrappedCommitGate?.cancel()
+        unwrappedCommitGate = null
+        unwrappedCommitted = null
         // Destroy always closes native input admission, even when no press was active.
         inputGateClosed = true
         (view as? FencedWebView)?.gate?.close()
@@ -566,46 +572,197 @@ internal class BrowserSession private constructor(
     }
 
     /**
-     * Current WebView viewport only. Copies the WebView rectangle from the activity window, and
-     * refuses a rectangle that is not fully inside that window, so the rest of the app is not in
-     * the image. Refuses a view with no size, or one that is detached or not shown. A software draw
-     * fallback can miss GPU layers.
+     * Current page only, as drawn by the native viewport wrapper. The wrapper keeps the WebView at a
+     * fixed unscaled size and only scales the display, so the copied rectangle is the drawn page in
+     * window pixels. It is refused unless the complete page is inside the window and unclipped, so
+     * the rest of the app is never in the image. There is no software-draw fallback: hardware layers
+     * are not readable that way, and a blank image must surface as a failure.
+     *
+     * Only a presentation the platform actually committed to the compositor is captured. A new
+     * layout, translation or pre-draw revision is not proof that the window buffer changed; copying
+     * a new rectangle over an old buffer could include the chat behind the page.
+     *
+     * A presentation move during the copy discards only this attempt. Capture has a small bounded
+     * retry and never touches refs, grants or other agent work.
      */
     suspend fun captureViewport(): CaptureImage? {
-        if (destroyed || view.width <= 1 || view.height <= 1 || !view.isAttachedToWindow || !view.isShown) return null
-        val attempt = guardedCapture(
-            sample = { freshCaptureStamp() },
-            current = { captureObservation() },
-            copy = { stamp -> copyForStamp(stamp) },
-        ) ?: return null
-        val encoded = android.util.Base64.encodeToString(attempt.image.payload, android.util.Base64.NO_WRAP)
-        if (encoded.length > BrowserDriverLogic.MAX_CAPTURE_CHARS) return null
-        return CaptureImage(encoded, attempt.image.width, attempt.image.height, attempt.stamp.probe, attempt.stamp)
+        if (!capturable()) return null
+        var attempts = 0
+        while (true) {
+            val outcome = guardedCapture(
+                sample = { freshCaptureStamp() },
+                current = { captureObservation() },
+                copy = { stamp -> copyForStamp(stamp) },
+            )
+            attempts += 1
+            val captured = outcome as? CaptureOutcome.Captured
+            if (captured != null) {
+                val image = captured.attempt.image
+                val encoded = android.util.Base64.encodeToString(image.payload, android.util.Base64.NO_WRAP)
+                if (encoded.length > BrowserDriverLogic.MAX_CAPTURE_CHARS) return null
+                return CaptureImage(encoded, image.width, image.height, captured.attempt.stamp.probe, captured.attempt.stamp)
+            }
+            if (!CaptureRetry.shouldRetry(outcome, attempts)) return null
+        }
     }
 
-    private suspend fun freshCaptureStamp(): CaptureStamp? {
-        val before = captureObservation()
-        val raw = eval(BrowserDriverLogic.geometryScript(), before.refEpoch) ?: return null
-        val after = captureObservation()
-        if (before != after) return null
-        val probe = BrowserDriverLogic.parseGeometry(raw) ?: return null
-        if (probe.documentId != acceptedDocumentId) return null
-        return CaptureStamp(viewId, acceptedDocumentId, ticket, epoch, currentFrame(), probe)
+    private fun capturable(): Boolean =
+        !destroyed && view.isAttachedToWindow && view.isShown && view.width > 1 && view.height > 1
+
+    /** One commit-confirmed observation, or why it is unavailable. */
+    private sealed interface CommittedSample {
+        class Ready(val observation: CaptureObservation) : CommittedSample
+        data object Unavailable : CommittedSample
+        data object NotCommitted : CommittedSample
     }
 
-    private fun captureObservation() = CaptureObservation(viewId, acceptedDocumentId, ticket, epoch, currentFrame())
+    private suspend fun freshCaptureStamp(): CaptureStampResult {
+        if (!capturable()) return CaptureStampResult.Unavailable
+        val before = when (val sample = committedCaptureObservation()) {
+            is CommittedSample.Ready -> sample.observation
+            CommittedSample.Unavailable -> return CaptureStampResult.Unavailable
+            CommittedSample.NotCommitted -> return CaptureStampResult.Moved
+        }
+        val raw = eval(BrowserDriverLogic.geometryScript(), before.refEpoch) ?: return CaptureStampResult.Unavailable
+        val after = when (val sample = committedCaptureObservation()) {
+            is CommittedSample.Ready -> sample.observation
+            CommittedSample.Unavailable -> return CaptureStampResult.Unavailable
+            CommittedSample.NotCommitted -> return CaptureStampResult.Moved
+        }
+        if (before != after) return CaptureStampResult.Moved
+        val probe = BrowserDriverLogic.parseGeometry(raw) ?: return CaptureStampResult.Unavailable
+        if (probe.documentId == null || probe.documentId != acceptedDocumentId) return CaptureStampResult.Unavailable
+        return CaptureStampResult.Ready(
+            CaptureStamp(viewId, acceptedDocumentId, ticket, epoch, before.presentation, probe),
+        )
+    }
+
+    /**
+     * Live presentation only if it equals a frame-committed one. A host tracks its own committed
+     * presentation; an unwrapped harness uses this session's native gate. Each wait asks the
+     * platform for a fresh commit and schedules a draw; there is no fixed delay.
+     */
+    private suspend fun committedCaptureObservation(): CommittedSample {
+        if (!capturable()) return CommittedSample.Unavailable
+        val root = view.rootView ?: return CommittedSample.Unavailable
+        val host = view.parent as? BrowserViewportHost
+        var attempts = 0
+        while (true) {
+            val live = presentationGeometry() ?: return CommittedSample.Unavailable
+            val committed = if (host != null) {
+                host.committedPresentationSnapshot()?.toPresentationGeometry()
+            } else {
+                unwrappedCommitted
+            }
+            val frame = BrowserCaptureGeometry.captureCommittedFrame(committed, live, root.width, root.height)
+            if (frame != null) {
+                return CommittedSample.Ready(CaptureObservation(viewId, acceptedDocumentId, ticket, epoch, frame))
+            }
+            // A live page that is itself uncopyable (clipped, off-window) will not be repaired by
+            // waiting for another commit.
+            if (BrowserCaptureGeometry.captureFrame(live, root.width, root.height) == null) {
+                return CommittedSample.Unavailable
+            }
+            attempts += 1
+            if (attempts > COMMIT_ATTEMPTS) return CommittedSample.NotCommitted
+            val next = if (host != null) {
+                awaitHostCommit(host)?.toPresentationGeometry()
+            } else {
+                awaitUnwrappedCommit()
+            } ?: return CommittedSample.NotCommitted
+            if (host == null) unwrappedCommitted = next
+        }
+    }
+
+    private suspend fun awaitHostCommit(host: BrowserViewportHost): BrowserPresentationSnapshot? =
+        withTimeoutOrNull(COMMIT_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val accepted = try {
+                    host.requestPresentationCommit { snapshot ->
+                        if (continuation.isActive) continuation.resume(snapshot)
+                    }
+                } catch (_: RuntimeException) {
+                    false
+                }
+                if (!accepted && continuation.isActive) continuation.resume(null)
+            }
+        }
+
+    private suspend fun awaitUnwrappedCommit(): BrowserPresentationGeometry? =
+        withTimeoutOrNull(COMMIT_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val gate = unwrappedCommitGate ?: NativeFrameCommitGate<BrowserPresentationGeometry>(view) {
+                    presentationGeometry()
+                }.also { unwrappedCommitGate = it }
+                val accepted = gate.request { geometry ->
+                    if (continuation.isActive) continuation.resume(geometry)
+                }
+                if (!accepted && continuation.isActive) continuation.resume(null)
+            }
+        }
+
+    private fun captureObservation(): CaptureObservation? {
+        val frame = captureFrame() ?: return null
+        return CaptureObservation(viewId, acceptedDocumentId, ticket, epoch, frame)
+    }
+
+    /** The presentation sampled from the WebView's native wrapper, resolved to a copyable rect. */
+    private fun captureFrame(): CaptureFrame? {
+        if (!capturable()) return null
+        val root = view.rootView ?: return null
+        val presentation = presentationGeometry() ?: return null
+        return BrowserCaptureGeometry.captureFrame(presentation, root.width, root.height)
+    }
+
+    private fun presentationGeometry(): BrowserPresentationGeometry? {
+        val host = view.parent as? BrowserViewportHost
+        if (host != null) {
+            // The snapshot describes the wrapper's first child; it must be this WebView.
+            if (host is ViewGroup && host.childCount > 0 && host.getChildAt(0) !== view) return null
+            val snapshot = host.presentationSnapshot() ?: return null
+            // A stale snapshot for another child or an unmeasured view is not this page.
+            if (snapshot.viewportWidthPx != view.width || snapshot.viewportHeightPx != view.height) return null
+            return snapshot.toPresentationGeometry()
+        }
+        return unwrappedPresentationGeometry()
+    }
+
+    /**
+     * Unwrapped smoke only: no native wrapper means no scale is allowed. A transformed WebView is
+     * refused rather than copied at the wrong rectangle.
+     */
+    private fun unwrappedPresentationGeometry(): BrowserPresentationGeometry? {
+        if (view.scaleX != 1f || view.scaleY != 1f || view.rotation != 0f) return null
+        if (view.translationX != 0f || view.translationY != 0f) return null
+        val location = IntArray(2)
+        view.getLocationInWindow(location)
+        val visible = Rect()
+        if (!view.getGlobalVisibleRect(visible)) return null
+        // A partly clipped view reports a smaller visible rect than the view itself.
+        if (visible.width() < view.width || visible.height() < view.height) return null
+        val page = CaptureRect(location[0], location[1], location[0] + view.width, location[1] + view.height)
+        return BrowserPresentationGeometry(
+            revision = 0L,
+            viewportWidthPx = view.width,
+            viewportHeightPx = view.height,
+            scale = 1f,
+            pageLeft = location[0].toFloat(),
+            pageTop = location[1].toFloat(),
+            pageWidth = view.width.toFloat(),
+            pageHeight = view.height.toFloat(),
+            visible = page,
+        )
+    }
 
     private suspend fun copyForStamp(stamp: CaptureStamp): CaptureBytes? {
         if (captureObservation() != observationOf(stamp)) return null
-        val bitmap = pixelCopy(stamp) ?: softwareDraw(stamp) ?: return null
+        val bitmap = pixelCopy(stamp) ?: return null
         return try {
             if (captureObservation() != observationOf(stamp)) null else encode(bitmap)
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
         }
     }
-
-    private fun observationOf(stamp: CaptureStamp) = CaptureObservation(stamp.viewId, stamp.documentId, stamp.ticket, stamp.refEpoch, stamp.frame)
 
     private fun encode(bitmap: Bitmap): CaptureBytes? {
         val bytes = ByteArrayOutputStream()
@@ -614,42 +771,19 @@ internal class BrowserSession private constructor(
     }
 
     private suspend fun pixelCopy(stamp: CaptureStamp): Bitmap? {
-        if (!view.isAttachedToWindow || view.width <= 1 || view.height <= 1) return null
+        if (!capturable()) return null
         val handler = view.handler ?: return null
         val window = view.context.findActivity()?.window ?: return null
-        val rect = webViewRectInWindow() ?: return null
-        if (view.rootView !== window.decorView.rootView) return null
-        return copyBridge.copy(window, rect, stamp.frame.width, stamp.frame.height, handler) {
-            view.isAttachedToWindow && view.isShown && captureObservation() == observationOf(stamp) &&
+        val root = view.rootView ?: return null
+        if (root !== window.decorView.rootView) return null
+        val frame = stamp.presentation
+        // The sampled copy rectangle is in these window's coordinates; a resized window invalidates it.
+        if (root.width != frame.windowWidth || root.height != frame.windowHeight) return null
+        val rect = Rect(frame.rect.left, frame.rect.top, frame.rect.right, frame.rect.bottom)
+        return copyBridge.copy(window, rect, frame.rect.width, frame.rect.height, handler) {
+            view.isAttachedToWindow && view.isShown &&
+                captureObservation() == observationOf(stamp) &&
                 view.rootView === window.decorView.rootView
-        }
-    }
-
-    /** The page rectangle only. Null when it would include anything outside the WebView. */
-    private fun webViewRectInWindow(): Rect? {
-        val location = IntArray(2)
-        view.getLocationInWindow(location)
-        val rect = Rect(location[0], location[1], location[0] + view.width, location[1] + view.height)
-        val window = view.rootView ?: return null
-        if (rect.left < 0 || rect.top < 0 || rect.right > window.width || rect.bottom > window.height) return null
-        if (rect.width() != view.width || rect.height() != view.height) return null
-        return rect
-    }
-
-    /**
-     * Software fallback. Hardware-accelerated WebView contents are often blank here. Callers must
-     * not treat a successful encode as proof the pixels match the screen.
-     */
-    private fun softwareDraw(stamp: CaptureStamp): Bitmap? {
-        if (captureObservation() != observationOf(stamp)) return null
-        if (view.width <= 1 || view.height <= 1) return null
-        return try {
-            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            view.draw(canvas)
-            bitmap
-        } catch (_: Exception) {
-            null
         }
     }
 
@@ -831,6 +965,12 @@ internal class BrowserSession private constructor(
 
     companion object {
         private const val ABOUT_BLANK = "about:blank"
+
+        /** Bounded wait for a real frame commit; never a fixed delay used as evidence. */
+        private const val COMMIT_TIMEOUT_MS = 200L
+
+        /** Bounded commit requests per observation before this capture attempt is refused. */
+        private const val COMMIT_ATTEMPTS = 2
 
         /**
          * Main thread. Returns null when the profile cannot be bound. The caller must not load anything.

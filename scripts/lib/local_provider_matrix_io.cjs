@@ -86,7 +86,7 @@ const FIXTURE_URLS = Object.freeze(Object.values(FIXTURES));
 // sendPointerSync inside the app; it is never a JavaScript click or a presenter grant.
 const UI_LABELS = Object.freeze(new Set([
   'More', 'Computer layout', 'Phone layout', 'Confirm', 'Mouse', 'Touch',
-  'Enlarge', 'Restore', 'Allow agent', 'Take over', 'Reopen', 'Open', 'Close', 'Turn off',
+  'Full screen', 'Small window', 'Resume agent', 'Take over', 'Reopen', 'Open', 'Close page', 'Turn off', 'Close',
 ]));
 
 /**
@@ -103,7 +103,7 @@ const REQUIRED_PRODUCER_READERS = Object.freeze({
     'fixture-state old shape: page.url/page.loads/page.posts, native.physicalFrame, postArrivals',
     'observe: exact fixture URL + generic metrics (ua/clientWidth/media1000/sy/timeOrigin/loads)',
     'page-rect: physical + page.visualViewport + pointerUi',
-    'ui-state: fixed controls (Restore/Enlarge/...) + Surface/Tight nodes',
+    'ui-state: fixed controls (Small window/Full screen/...) + Surface/Tight nodes',
     'ui-target:<UI label> -> full LocalTapTarget for host ADB tap (tap-label UI controls are refused by design)',
   ],
   post: [
@@ -598,6 +598,9 @@ function frameProjection(raw) {
       : isObject(raw.frame) && raw.frame.left !== undefined ? raw.frame
         : raw);
   if (!physical) return reject('physical-missing', ['physical']);
+  const viewWidth = isNum(raw.viewWidth) ? raw.viewWidth : physical.width;
+  const viewHeight = isNum(raw.viewHeight) ? raw.viewHeight : physical.height;
+  if (!(viewWidth > 0) || !(viewHeight > 0)) return reject('view-size-missing', ['viewWidth', 'viewHeight']);
   const visual = isObject(raw.page) && isObject(raw.page.visualViewport) ? raw.page.visualViewport
     : isObject(raw.visualViewport) ? raw.visualViewport : null;
   if (!isObject(visual)) return reject('viewport-missing', ['page.visualViewport']);
@@ -615,6 +618,10 @@ function frameProjection(raw) {
   return {
     frame: {
       physical,
+      // Raw WebView size; agent-local pointer pixels keep this space. physical is the scaled
+      // displayed screen rectangle.
+      viewWidth,
+      viewHeight,
       page: { visualViewport: {
         width: visual.width,
         height: visual.height,
@@ -650,14 +657,15 @@ function physicalCenter(raw) {
   };
 }
 
-/** ui-state: fixed controls and the floating Surface bounds. Enlarged is presence of Restore/Enlarge. */
+/** ui-state: fixed controls and the floating Surface bounds. Enlarged is presence of Small window/Full screen. */
 function normalizeUi(raw) {
   if (!isObject(raw) || raw.error) return null;
   const labels = isObject(raw.labels) ? raw.labels : {};
   const nodes = Array.isArray(raw.tightNodes) ? raw.tightNodes : Array.isArray(raw.nodes) ? raw.nodes : [];
   const has = (label) => isObject(labels[label]) ||
     nodes.some((node) => isObject(node) && (node.text === label || node.desc === label || node.label === label));
-  const enlarged = has('Restore') ? true : has('Enlarge') ? false : null;
+  const enlarged = has('Small window') || has('Restore') ? true
+    : has('Full screen') || has('Enlarge') ? false : null;
   const nodeSurface = nodes.find((node) => isObject(node) &&
     (node.desc === 'BrowserFloatSurface' || node.label === 'BrowserFloatSurface' || node.id === 'BrowserFloatSurface'));
   const surfaceCandidate = isObject(raw.surface) ? raw.surface
@@ -1027,6 +1035,107 @@ function createGuestGateIo({
       return null;
     }
     return data;
+  }
+
+  /**
+   * The registry grant for the selected page, exactly as the producer reports it. An explicit
+   * foreground open grants default control after the page is ready; this read is the only evidence
+   * of it. A UI control tap is never evidence. Missing fields stay null.
+   */
+  async function readGrantRaw() {
+    const state = await rawLifecycle();
+    if (!state) return null;
+    return {
+      grantForSelected: isBool(state.grantForSelected) ? state.grantForSelected : null,
+      mode: isText(state.mode) ? state.mode : null,
+      agentOn: isBool(state.agentOn) ? state.agentOn : null,
+      pageRetired: isBool(state.pageRetired) ? state.pageRetired : null,
+      pageReady: isBool(state.pageReady) ? state.pageReady : null,
+      selectedTabId: isText(state.selectedTabId) ? state.selectedTabId : null,
+    };
+  }
+
+  /**
+   * Waits for the default grant an explicit open produces once its page is ready. This is the only
+   * accepted evidence for a default open: the diag read. A UI hand-back is opt-in (`allowManualHandback`)
+   * and only for a real manual takeover test; it can never stand in for a missing default grant.
+   */
+  async function ensureAgentControl({ budgetMs = 5000, pollMs = 200, allowManualHandback = false } = {}) {
+    const started = now();
+    let last = null;
+    // Keep polling after a transient false: the ready probe and the grant it triggers are async,
+    // so one early false read is not proof that the open never grants.
+    while (now() - started < budgetMs) {
+      last = await readGrantRaw();
+      if (last && last.grantForSelected === true) {
+        return {
+          ok: true,
+          source: 'default-grant',
+          tapped: false,
+          grantPresent: true,
+          detail: 'default-grant',
+          state: last,
+        };
+      }
+      await sleep(pollMs);
+    }
+    if (!last || !isBool(last.grantForSelected)) {
+      remember('lifecycle-diag', 'grantForSelected');
+      return {
+        ok: false,
+        source: 'grant-unreadable',
+        tapped: false,
+        grantPresent: null,
+        detail: 'grant-unreadable',
+        state: last,
+      };
+    }
+    // Default control was not granted (or was revoked). Only an explicit manual-takeover test may
+    // ask for a hand-back; otherwise this is a default-open defect and must be reported as such.
+    if (allowManualHandback !== true) {
+      return {
+        ok: false,
+        source: 'no-default-grant',
+        tapped: false,
+        grantPresent: false,
+        detail: 'no-default-grant',
+        state: last,
+      };
+    }
+    if (last.pageRetired === true || last.mode !== 'MANUAL' || last.agentOn === true) {
+      return {
+        ok: false,
+        source: 'manual-takeover-not-proven',
+        tapped: false,
+        grantPresent: false,
+        detail: 'manual-takeover-not-proven',
+        state: last,
+      };
+    }
+    let tapped = false;
+    try {
+      tapped = await io.tapLabelRaw('Resume agent');
+    } catch (_error) {
+      tapped = false;
+    }
+    const handbackDeadline = now() + Math.min(budgetMs, 3000);
+    let after = null;
+    while (now() < handbackDeadline) {
+      after = await readGrantRaw();
+      if (after && after.grantForSelected === true) break;
+      await sleep(pollMs);
+    }
+    const granted = Boolean(after && after.grantForSelected === true);
+    return {
+      ok: granted,
+      source: tapped ? 'manual-handback' : 'manual-handback-missing',
+      tapped,
+      grantPresent: granted,
+      detail: granted
+        ? 'manual-handback-granted'
+        : tapped ? 'tapped-without-grant' : 'handback-control-missing',
+      state: after || last,
+    };
   }
 
   async function rawObserve() {
@@ -1536,6 +1645,15 @@ function createGuestGateIo({
         return false;
       }
       if (before.mouseMode === true) return true;
+      // A fast fixture can be ready before Compose exposes its chrome to accessibility.
+      const uiDeadline = now() + 5000;
+      let menuReady = false;
+      while (now() < uiDeadline) {
+        const ui = await deviceData('ui-state', 'mouse-ui-ready');
+        if (isObject(ui?.labels?.More)) { menuReady = true; break; }
+        await sleep(100);
+      }
+      if (!menuReady) return false;
       if (!(await io.tapLabelRaw('More'))) return false;
       await sleep(800);
       if (!(await io.tapLabelRaw('Mouse'))) return false;
@@ -1550,31 +1668,9 @@ function createGuestGateIo({
 
     releaseOwnedRaw: async () => true,
 
-    // One real accessibility tap; the registry grant is read afterwards. A tap is never a grant.
-    tapAllowAndVerify: async ({ budgetMs = 3000 } = {}) => {
-      let tapped = false;
-      try {
-        tapped = await io.tapLabelRaw('Allow agent');
-      } catch (_error) {
-        tapped = false;
-      }
-      const started = now();
-      let present = null;
-      while (now() - started < budgetMs) {
-        const state = await rawLifecycle();
-        if (state && isBool(state.grantForSelected)) {
-          present = state.grantForSelected;
-          if (present) break;
-        }
-        await sleep(200);
-      }
-      return {
-        ok: tapped && present === true,
-        tapped,
-        grantPresent: present,
-        detail: !tapped ? 'allow-tap-not-sent' : present === true ? 'granted' : present === false ? 'tapped-without-grant' : 'grant-unreadable',
-      };
-    },
+    // Explicit hand-back after a real manual takeover; the diag grant read is the only evidence.
+    ensureAgentControl,
+    readGrantRaw,
 
     submitLoginFresh: async () => {
       if (typeof humanType !== 'function') {
@@ -1687,6 +1783,88 @@ function createGuestGateIo({
         await sleep(250);
       }
       if (!ready) return { ok: false, reason: 'login-page-not-ready', tabId };
+      // An explicit controlled open grants default agent control once the page is ready. POST needs
+      // the person's MANUAL mode, and page touch no longer revokes, so this flow must first confirm
+      // the real default grant and then use the real Take over control. The diag read after it is the
+      // only proof; no grant is written by the harness.
+      const grantDeadline = now() + 5000;
+      let defaultGrant = null;
+      let lastGrantState = ready;
+      while (now() < grantDeadline) {
+        const state = await rawLifecycle();
+        if (state) {
+          lastGrantState = state;
+          if (state.selectedTabId === tabId && state.pageReady === true &&
+              state.grantForSelected === true && state.mode === 'AGENT' && state.agentOn === true) {
+            defaultGrant = state;
+            break;
+          }
+        }
+        await sleep(200);
+      }
+      if (!defaultGrant) {
+        phases.defaultGrant = lastGrantState && isObject(lastGrantState) ? {
+          selectedTabId: lastGrantState.selectedTabId == null ? null : lastGrantState.selectedTabId,
+          pageReady: lastGrantState.pageReady == null ? null : lastGrantState.pageReady,
+          grantForSelected: isBool(lastGrantState.grantForSelected) ? lastGrantState.grantForSelected : null,
+          mode: isText(lastGrantState.mode) ? lastGrantState.mode : null,
+          agentOn: isBool(lastGrantState.agentOn) ? lastGrantState.agentOn : null,
+        } : null;
+        return fail('takeover', 'login-default-grant-not-confirmed', ['grantForSelected', 'mode', 'agentOn'], { takeover: { tapped: false, defaultGrant: false, state: phases.defaultGrant } });
+      }
+      phases.defaultGrant = {
+        grantForSelected: defaultGrant.grantForSelected,
+        mode: defaultGrant.mode,
+        agentOn: defaultGrant.agentOn,
+        viewHandle: isNum(defaultGrant.viewHandle) ? defaultGrant.viewHandle : null,
+        documentEpoch: isNum(defaultGrant.documentEpoch) ? defaultGrant.documentEpoch : null,
+      };
+      let takeoverTapped = false;
+      try {
+        takeoverTapped = await io.tapLabelRaw('Take over');
+      } catch (_error) {
+        takeoverTapped = false;
+      }
+      const takeoverDeadline = now() + 5000;
+      let manual = null;
+      while (takeoverTapped && now() < takeoverDeadline) {
+        const state = await rawLifecycle();
+        if (state && state.selectedTabId === tabId && state.pageReady === true &&
+            state.grantForSelected === false && state.mode === 'MANUAL' && state.agentOn === false) {
+          manual = state;
+          break;
+        }
+        await sleep(200);
+      }
+      if (!manual) {
+        return fail('takeover', takeoverTapped ? 'login-takeover-not-observed' : 'login-takeover-tap-failed',
+          ['tap-label:Take over', 'grantForSelected=false', 'mode=MANUAL', 'agentOn=false'], {
+            takeover: {
+              tapped: takeoverTapped,
+              defaultGrant: phases.defaultGrant,
+              state: lastGrantState && isObject(lastGrantState) ? {
+                selectedTabId: lastGrantState.selectedTabId == null ? null : lastGrantState.selectedTabId,
+                grantForSelected: isBool(lastGrantState.grantForSelected) ? lastGrantState.grantForSelected : null,
+                mode: isText(lastGrantState.mode) ? lastGrantState.mode : null,
+                agentOn: isBool(lastGrantState.agentOn) ? lastGrantState.agentOn : null,
+              } : null,
+            },
+          });
+      }
+      // A takeover is UI only: the same view must still be behind the form.
+      if (isNum(defaultGrant.viewHandle) && isNum(manual.viewHandle) && manual.viewHandle !== defaultGrant.viewHandle) {
+        return fail('takeover', 'login-takeover-changed-view', ['viewHandle'], {
+          takeover: { tapped: true, viewHandleBefore: defaultGrant.viewHandle, viewHandleAfter: manual.viewHandle },
+        });
+      }
+      phases.takeover = {
+        tapped: true,
+        grantForSelected: manual.grantForSelected,
+        mode: manual.mode,
+        agentOn: manual.agentOn,
+        viewHandle: isNum(manual.viewHandle) ? manual.viewHandle : null,
+        documentEpoch: isNum(manual.documentEpoch) ? manual.documentEpoch : null,
+      };
       const before = await io.readFixtureRaw();
       if (!capture('beforeTap', before)) return fail('beforeTap', 'fixture-state-missing', ['fixture-state']);
       const beforePosts = before.page ? before.page.posts : null;
@@ -2161,9 +2339,14 @@ function createGuestRetirementIo(guest, { client, now, sleep } = {}) {
       const result = await client.sendTool('browser.snapshot');
       return { ok: result.ok, code: result.code || '', detail: result.detail || '', data: result.data, providerMissing: result.providerMissing };
     },
+    // Grant-absence read for the retirement probe. It is a diag read, never a UI tap: after a
+    // retirement there is no hand-back control, and a tap could not prove anything anyway.
     allowAttemptRaw: async () => {
-      const attempt = await guest.tapAllowAndVerify({ budgetMs: 3000 });
-      return { tapped: attempt.tapped, granted: attempt.grantPresent };
+      const grant = await guest.readGrantRaw();
+      return {
+        tapped: false,
+        granted: grant && isBool(grant.grantForSelected) ? grant.grantForSelected === true : null,
+      };
     },
     fingerRaw: async (spec) => {
       if (!isObject(spec) || !isNum(spec.x) || !isNum(spec.y)) return false;
