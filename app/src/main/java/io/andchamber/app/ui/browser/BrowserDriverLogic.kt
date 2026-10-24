@@ -125,6 +125,10 @@ internal object BrowserDriverLogic {
     /** A caller budget is bounded; the submit armed window is never permanent. */
     const val SUBMIT_ARM_CAP_MS = 60_000L
     const val RESULT_ENTER_DISPATCHED = "enterDispatched"
+    const val RESULT_CLICK_DISPATCHED = "clickDispatched"
+    const val RESULT_NAVIGATION_EXPECTED = "navigationExpected"
+    const val RESULT_EXPECTED_URL = "expectedUrl"
+    const val RESULT_NAVIGATION_TOKEN = "navigationToken"
     const val RESULT_SNAPSHOT = "snapshot"
     const val RESULT_PHASE = "phase"
     const val RESULT_URL = "url"
@@ -380,6 +384,80 @@ internal object BrowserDriverLogic {
         return minOf(remaining, capMs.coerceAtLeast(1L))
     }
 
+    /**
+     * A same-view controlled reload is allowed only with a previously validated document and only
+     * when no earlier reload of this same load ticket is still waiting for its new document. Once
+     * the new document is accepted, a later mode change may start another reload from that new
+     * witness; a late probe for the older ticket is discarded by ticket identity before this point.
+     */
+    fun canStartControlledReload(
+        controlledGet: Boolean,
+        ticket: Long,
+        acceptedDocumentId: String?,
+        previousDocumentId: String?,
+        pendingTicket: Long,
+        pendingOldDocumentId: String?,
+    ): Boolean {
+        if (!controlledGet || previousDocumentId.isNullOrBlank()) return false
+        if (acceptedDocumentId != previousDocumentId) return false
+        // The pending barrier for this exact ticket still names the accepted document: the reload
+        // has not produced and accepted its new witness yet, so a second reload must not overlap it.
+        if (pendingTicket == ticket && pendingOldDocumentId == acceptedDocumentId) return false
+        return true
+    }
+
+    /**
+     * A no-witness probe before the first main-frame start is the initial about:blank
+     * commit/finished callback of a controlled GET, not a failed target document. It is Pending
+     * only while all of these remain true: this is the current ticket/epoch, the first main-frame
+     * document has not started, no document is accepted, the page has no error, the session is a
+     * controlled GET that still admits automation, and manual navigation is not in effect. After
+     * the first start, with an accepted document, on a failed page, a ticket mismatch or a
+     * non-controlled/manual page, a no-witness probe stays a strict rejection.
+     */
+    fun isInitialNoWitnessProbeState(
+        ticketCurrent: Boolean,
+        epochCurrent: Boolean,
+        mainStarts: Int,
+        acceptedDocumentId: String?,
+        pageError: String?,
+        controlledGet: Boolean,
+        automationAllowed: Boolean,
+        manualNavigation: Boolean,
+    ): Boolean =
+        ticketCurrent && epochCurrent && mainStarts == 0 &&
+            acceptedDocumentId == null && pageError == null &&
+            controlledGet && automationAllowed && !manualNavigation
+
+    /**
+     * The initial about:blank callback has no display URL yet. Its controlled target URL was vetted
+     * when the GET started, so it is the only URL this pending classification may use. If a display
+     * URL exists it must also be allowed; a denied display URL is never masked by the controlled
+     * URL. This is separate from the normal probe's `policyAllowsUrl` and never widens acceptance.
+     */
+    fun initialControlledUrlAllowed(
+        controlledUrl: String?,
+        displayUrl: String?,
+        policy: BrowserUrlPolicy,
+    ): Boolean {
+        val controlled = controlledUrl ?: return false
+        if (policy.checkSyntax(controlled) !is UrlDecision.Allow) return false
+        val display = displayUrl ?: return true
+        return policy.checkSyntax(display) is UrlDecision.Allow
+    }
+
+    /** Exact initial about:blank finished/commit may be ignored before the target's first start. */
+    fun shouldIgnoreInitialBlankFinished(url: String?, initialAllowed: Boolean): Boolean =
+        url == "about:blank" && initialAllowed
+
+    /**
+     * A probe sampled before the first main-frame start but resolved after it is a stale blank
+     * sample, not evidence of a target document missing its witness. Only this transition sample is
+     * discarded; a probe sampled after the start keeps its strict handling.
+     */
+    fun isStaleInitialProbeSample(sampledMainStarts: Int, currentMainStarts: Int): Boolean =
+        sampledMainStarts == 0 && currentMainStarts > 0
+
     /** Replaces the single marker. The inserted JSON is never scanned for further markers. */
     fun fillOnce(template: String, json: String): String {
         val at = template.indexOf(ARG_TOKEN)
@@ -629,6 +707,38 @@ internal object BrowserDriverLogic {
             var t = ((value || "") + "").toLowerCase();
             return t === "" || t === "_self" || t === "_top" || t === "_parent";
           }
+          // The effective target of an element, including a document <base target> when the
+          // element has no own target. Only same-tab targets may become click navigation evidence.
+          function sameTabTarget(el){
+            var raw = el.getAttribute("target");
+            if (raw === null) {
+              var base = document.querySelector("base[target]");
+              raw = base ? base.getAttribute("target") : "";
+            }
+            return selfTarget(raw);
+          }
+          // Narrow click classification. Only an ordinary same-tab https <a href> that would load a
+          // different document is navigationExpected. The resolved URL is returned for comparison
+          // with the engine's native GET receipt; it is not itself evidence of navigation.
+          function clickTarget(el){
+            var tag = (el.tagName || "").toLowerCase();
+            if (tag !== "a") return null;
+            if (!el.hasAttribute("href")) return null;
+            if (el.hasAttribute("download")) return null;
+            if (!sameTabTarget(el)) return null;
+            var href = (el.getAttribute("href") || "").trim();
+            if (!href) return null;
+            try {
+              var resolved = new URL(href, document.baseURI);
+              if (resolved.protocol !== "https:") return null;
+              var targetUrl = resolved.href.split("#")[0];
+              var here = new URL(String(location.href || "")).href.split("#")[0];
+              if (targetUrl === here) return null;
+              return targetUrl;
+            } catch (e) {
+              return null;
+            }
+          }
           // The first submit button in tree order that belongs to this form, as implicit Enter uses.
           function defaultSubmitter(form){
             var list = document.querySelectorAll("button,input");
@@ -736,8 +846,13 @@ internal object BrowserDriverLogic {
                 if (refused(el)) return {ok:false, error:"refused field"};
               }
               if (action === "click"){
-                nodes.get(ref).click();
-                return {ok:true, action:"click", synthetic:true};
+                var target = nodes.get(ref);
+                var expected = clickTarget(target);
+                // Exactly one synthetic click. The classification above is read-only and already
+                // final for this node, so no second evaluation or click is needed.
+                target.click();
+                return {ok:true, action:"click", synthetic:true, clickDispatched:true,
+                  navigationExpected: !!expected, expectedUrl: expected || null};
               }
               if (action === "type"){
                 var field = nodes.get(ref);
@@ -830,15 +945,33 @@ internal object BrowserDriverLogic {
         raw: String?,
         policyAllowsUrl: Boolean,
         allowSameDocument: Boolean = false,
+        pendingOldDocumentId: String? = null,
+        initialNoWitnessAllowed: Boolean = false,
+        initialControlledUrlAllowed: Boolean = false,
     ): ProbeAcceptance {
         val parsed = parseScriptResult(raw)
         if (parsed is ScriptResult.Failed) {
-            return if (parsed.message == "loading") ProbeAcceptance.Pending else ProbeAcceptance.Reject(parsed.message)
+            if (parsed.message == "loading") return ProbeAcceptance.Pending
+            // The initial about:blank callback can run before the target document starts. It is
+            // pending only under the strict initial-load state and separately verified controlled
+            // URL; any started/accepted/failed/foreign case keeps the old hard rejection. The
+            // normal `policyAllowsUrl` is not reused here, so it cannot widen a first witness.
+            if (parsed.message == "no witness" &&
+                initialNoWitnessAllowed &&
+                initialControlledUrlAllowed
+            ) {
+                return ProbeAcceptance.Pending
+            }
+            return ProbeAcceptance.Reject(parsed.message)
         }
         val json = (parsed as ScriptResult.Ok).json
         val id = json["documentId"]?.jsonPrimitive?.contentOrNull
         val state = json["readyState"]?.jsonPrimitive?.contentOrNull
         if (id.isNullOrBlank() || !id.isHex()) return ProbeAcceptance.Reject("no witness")
+        // A same-view reload must not accept the still-displayed previous document as the new one.
+        // This remains active after the new witness is accepted, so a late probe from the old
+        // document is ignored rather than rejecting (and revoking) the new page.
+        if (pendingOldDocumentId != null && id == pendingOldDocumentId) return ProbeAcceptance.Pending
         if (acceptedDocumentId != null && id != acceptedDocumentId) return ProbeAcceptance.Reject("document changed")
         if (acceptedDocumentId != null && id == acceptedDocumentId && !allowSameDocument) {
             return ProbeAcceptance.Reject("witness already used")
@@ -1019,7 +1152,9 @@ sealed class ProbeAcceptance {
 /**
  * Agent mode accepts only a controlled top-level GET. Manual mode lets a person navigate, submit
  * a form, or follow a redirect. Both still go through the public-https and TLS checks elsewhere.
- * A redirect or a non-GET in agent mode is unsupported and must not be saved by a later finish.
+ * A redirect or a non-GET in agent mode is unsupported and must not be saved by a later finish,
+ * except for the first HTTP redirect of the session's own fresh controlled GET, which continues
+ * the same load in place instead of starting a second one.
  */
 internal object MainFrameGate {
     fun isPlainGet(method: String?, isRedirect: Boolean): Boolean =
@@ -1031,6 +1166,41 @@ internal object MainFrameGate {
     /** True when this main-frame request may proceed under the current interaction mode. */
     fun allows(method: String?, isRedirect: Boolean, manual: Boolean): Boolean =
         !isUnsupported(method, isRedirect, manual)
+
+    /**
+     * A redirect that continues the one controlled GET this session already started. The initial
+     * `loadUrl` does not call `shouldOverrideUrlLoading`, but an HTTP redirect from that load does.
+     * Letting the WebView follow it keeps the same load ticket, epoch and document-start witness;
+     * the caller must not start a second `loadUrl`.
+     *
+     * Only a fresh, current, agent-mode GET qualifies. A document that already started or was
+     * accepted (including a submit under an armed Enter), a stale ticket, a POST, a manual
+     * navigation and an unknown navigation all stay on the default refusal path. An armed submit
+     * cannot reach this branch: arming it requires an accepted document id, while this requires
+     * none. `shouldInterceptRequest` therefore does not call the submit-intent accessor (which also
+     * clears stale intents) from its background callback thread. The redirect target has already
+     * passed [io.andchamber.app.browser.BrowserUrlPolicy.checkSyntax]; this does not widen
+     * [isPlainGet]. The epoch is deliberately not compared: it tracks refs, and a geometry
+     * invalidation may legitimately bump it while this same load is still in flight. The ticket
+     * names this one controlled GET, and the final witness/ready probe still checks the
+     * then-current epoch before the page is accepted.
+     */
+    fun allowsControlledInitialRedirect(
+        method: String?,
+        isRedirect: Boolean,
+        manual: Boolean,
+        controlled: Boolean,
+        controlledTicket: Long,
+        ticket: Long,
+        mainStarts: Int,
+        documentAccepted: Boolean,
+        unknownNavigation: Boolean,
+    ): Boolean =
+        !manual && !unknownNavigation && !documentAccepted &&
+            isRedirect && method.equals("GET", ignoreCase = true) &&
+            controlled && controlledTicket > 0L &&
+            controlledTicket == ticket &&
+            mainStarts == 0
 }
 
 /**

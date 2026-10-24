@@ -203,7 +203,7 @@ internal fun BrowserFloatPage(
         clearingSiteData = clearingSiteData,
         bottomClearance = bottomClearance,
         desktopViewport = if (state.desktopMode) IntSize(state.desktopWidth, state.desktopHeight) else null,
-    ) { layoutBlocked, viewportPx ->
+    ) { layoutBlocked, viewportPx, keyboardReferencePx ->
         val presentationBlocked = layoutBlocked || presentationOccluded
         // A real phone-screen change (rotation, split screen) in phone layout resizes the page; that
         // one is a layout change. Window presentation changes never reach here, and a computer-layout
@@ -239,6 +239,7 @@ internal fun BrowserFloatPage(
                             presenter = presenter,
                             view = page,
                             viewportPx = viewportPx,
+                            keyboardReferencePx = keyboardReferencePx,
                             presentationBlocked = presentationBlocked,
                             onTransform = { transform = it },
                         )
@@ -258,6 +259,7 @@ private fun BrowserPageMount(
     presenter: NativeBrowserPresenter,
     view: View,
     viewportPx: IntSize,
+    keyboardReferencePx: IntSize?,
     presentationBlocked: Boolean,
     onTransform: (ViewportTransform) -> Unit,
 ) {
@@ -268,6 +270,7 @@ private fun BrowserPageMount(
             view.setOnTouchListener { touched, event -> routePageTouch(presenter, view, touched, event) }
             BrowserPageContainer(context).also { container ->
                 container.setViewport(viewportPx.width, viewportPx.height)
+                container.setKeyboard(keyboardReferencePx?.let { it.width to it.height })
                 container.onPresentationChanged = {
                     onTransform(container.transform)
                     // The drawn page moved or changed scale; the page itself did not change. Only a
@@ -282,6 +285,8 @@ private fun BrowserPageMount(
         },
         update = { container ->
             container.setViewport(viewportPx.width, viewportPx.height)
+            // Keyboard open: same scale as with it closed, cut instead of shrunk. Presentation only.
+            container.setKeyboard(keyboardReferencePx?.let { it.width to it.height })
             // Synchronous main-thread ordering: the core gate first, then the native hide.
             applyBrowserPresentation(
                 blocked = presentationBlocked,

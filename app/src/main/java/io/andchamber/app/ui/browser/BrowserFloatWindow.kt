@@ -164,8 +164,12 @@ internal fun BrowserFloatWindow(
      * screen, small window and the window's place stay as they are.
      */
     desktopViewport: IntSize? = null,
-    /** The page area. [blocked]: not presented (folded). [viewportPx]: the fixed page size. */
-    content: @Composable (blocked: Boolean, viewportPx: IntSize) -> Unit,
+    /**
+     * The page area. [blocked]: not presented (folded). [viewportPx]: the fixed page size.
+     * [keyboardReferencePx]: while the keyboard is open, the page area this window has with the
+     * keyboard closed (the page keeps that presentation's scale); null while it is closed.
+     */
+    content: @Composable (blocked: Boolean, viewportPx: IntSize, keyboardReferencePx: IntSize?) -> Unit,
 ) {
     val density = LocalDensity.current
     val context = LocalContext.current
@@ -206,6 +210,22 @@ internal fun BrowserFloatWindow(
         )
         val latestLayout by rememberUpdatedState(layout)
         val blocked = layout.blocked
+        // The keyboard only covers part of the window for a while: the page keeps the scale of the
+        // same presentation with the keyboard closed (a full screen the keyboard forced is compared
+        // with a keyboard-closed full screen, not the small window it replaced). Taken from the
+        // keyboard-closed safe area and the keyboard's target state, so it is stable through the
+        // keyboard animation and already known when the page is first shown with it open.
+        val keyboardReferencePx = if (layout.imeOpen && !blocked) {
+            val closed = browserWindowLayout(
+                safeWidth, safeHeight, 0f, bottomClearance.value, vpW, vpH,
+                fullRequested = layout.presentation == BrowserPresentation.Full, placement = ui.placement,
+            )
+            browserPageAreaDp(closed)?.let { (w, h) ->
+                with(density) { IntSize(w.dp.roundToPx(), h.dp.roundToPx()) }
+            }
+        } else {
+            null
+        }
         SideEffect { onPresentationBlocked(blocked) }
         val full = layout.presentation == BrowserPresentation.Full
         val float = layout.presentation == BrowserPresentation.Float
@@ -354,7 +374,7 @@ internal fun BrowserFloatWindow(
                         .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                         .then(if (blocked) Modifier.clearAndSetSemantics {} else Modifier),
                 ) {
-                    content(blocked, viewportPx)
+                    content(blocked, viewportPx, keyboardReferencePx)
                     if (loading && !blocked) {
                         LinearProgressIndicator(
                             modifier = Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopCenter),
@@ -696,6 +716,18 @@ private fun ResizeGrip() {
                 end = androidx.compose.ui.geometry.Offset(d, w), strokeWidth = stroke)
         }
     }
+}
+
+/**
+ * The page area of a window layout in dp: the window minus its top bar and, when shown, its bottom
+ * bar. Null when the page is not presented or there is no room.
+ */
+internal fun browserPageAreaDp(layout: BrowserWindowLayout): Pair<Float, Float>? {
+    if (layout.blocked) return null
+    val bars = BROWSER_BAR_HEIGHT * if (layout.showBottomBar) 2 else 1
+    val width = layout.window.width
+    val height = layout.window.height - bars
+    return if (width > 0f && height > 0f) width to height else null
 }
 
 /**

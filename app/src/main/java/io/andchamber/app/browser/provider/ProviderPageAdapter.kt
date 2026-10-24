@@ -80,7 +80,7 @@ class OpenChamberPageAdapter(
         if (refused != null) return refused
         return when (request.action) {
             "browser.snapshot" -> snapshot(registry, session, request.parameters["tabId"])
-            "browser.click" -> click(request)
+            "browser.click" -> click(request, deadlineElapsed)
             "browser.type" -> type(request, deadlineElapsed)
             "browser.scroll" -> scroll(request)
             "browser.capture" -> capture()
@@ -230,7 +230,7 @@ class OpenChamberPageAdapter(
         )
     }
 
-    private suspend fun click(request: ProviderRequest): ProviderResult {
+    private suspend fun click(request: ProviderRequest, deadlineElapsed: Long): ProviderResult {
         val stamp = authority?.invoke() ?: AuthorityStamp(1L, "document", "tab", true)
         val ref = resolveClick(request) ?: return refRefusal(request.parameters["selector"])
         val field = currentField(ref)
@@ -242,12 +242,17 @@ class OpenChamberPageAdapter(
             return ProviderResult(false, errorCode = ProviderCodes.UNSUPPORTED_PARAMETER, message = "form submission refused")
         }
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
+        // A click may continue as a same-tab GET. It lives inside the caller's work budget too, so
+        // a navigation receipt can never reopen a fresh timeout after the budget is gone.
+        val remaining = deadlineElapsed - clock()
+        if (remaining <= 0L) return ProviderResult(false, errorCode = ProviderCodes.DEADLINE, message = "click deadline")
         val reply = dispatched {
             driver.execute(
             BrowserRequest(
                 id = request.requestId,
                 method = BrowserMethod.CLICK,
                 params = mapOf(BrowserDriverLogic.PARAM_REF to ref),
+                timeoutMs = remaining,
             ),
         )
         }
@@ -257,7 +262,23 @@ class OpenChamberPageAdapter(
         // A reply arrived, so the outcome is known; the grant is gone, so the result is not handed out.
         if (!sameAuthority(stamp)) return revokedBeforeDispatch()
         if (!reply.ok) return fromDriver(reply)
-        return ProviderResult(ok = true, data = buildJsonObject { put("clicked", refSelector(ref)) })
+        val navigationExpected = reply.result[BrowserDriverLogic.RESULT_NAVIGATION_EXPECTED] == "true"
+        // The ACK is the only success claim here. Navigation, if expected, is confirmed separately
+        // by the presenter from the engine's native GET receipt; it must not invalidate this
+        // document before that receipt arrives.
+        return ProviderResult(ok = true, data = buildJsonObject {
+            put("clicked", refSelector(ref))
+            put(BrowserDriverLogic.RESULT_CLICK_DISPATCHED, true)
+            put(BrowserDriverLogic.RESULT_NAVIGATION_EXPECTED, navigationExpected)
+            reply.result[BrowserDriverLogic.RESULT_NAVIGATION_TOKEN]?.let {
+                put(BrowserDriverLogic.RESULT_NAVIGATION_TOKEN, it)
+            }
+            if (navigationExpected) {
+                reply.result[BrowserDriverLogic.RESULT_EXPECTED_URL]?.let {
+                    put(BrowserDriverLogic.RESULT_EXPECTED_URL, it)
+                }
+            }
+        })
     }
 
     private suspend fun type(request: ProviderRequest, deadlineElapsed: Long): ProviderResult {
@@ -310,6 +331,9 @@ class OpenChamberPageAdapter(
             return ProviderResult(ok = true, data = buildJsonObject {
                 put("typed", refSelector(ref))
                 put("enterDispatched", true)
+                reply.result[BrowserDriverLogic.RESULT_NAVIGATION_TOKEN]?.let {
+                    put(BrowserDriverLogic.RESULT_NAVIGATION_TOKEN, it)
+                }
             })
         }
         return ProviderResult(ok = true, data = buildJsonObject { put("typed", refSelector(ref)) })

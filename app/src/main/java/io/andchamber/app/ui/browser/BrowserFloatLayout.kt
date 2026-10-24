@@ -56,7 +56,10 @@ internal enum class BrowserPresentation {
     /** A small window that can be moved and resized. The page is scaled down, not reflowed. */
     Float,
 
-    /** Fills the safe area of the screen. The page is drawn 1:1 when the keyboard is closed. */
+    /**
+     * Fills the safe area of the screen. With the keyboard closed the whole page is fitted into it;
+     * with the keyboard open the page keeps that scale and only the part above the keyboard shows.
+     */
     Full,
 
     /** Only the top bar: there is not enough room to show the page. The page is not presented. */
@@ -174,8 +177,10 @@ internal fun movedFloatPlacement(layout: BrowserWindowLayout, placement: FloatPl
  * A small window when one fits above the composer. Otherwise (landscape, short screens, the
  * keyboard open) full screen with a compact toolbar: the bottom bar is dropped while the keyboard
  * is open, so the page keeps as much room as possible. The keyboard is never a reason to stop
- * showing the page. Only when not even a [MIN_FULL_PAGE_HEIGHT] page fits under the top bar does
- * the window fold to its bar ([BrowserWindowLayout.blocked]).
+ * showing the page, nor to shrink it: the page area gets shorter, but the page keeps the scale of
+ * the keyboard-closed presentation and is cut instead (see [keyboardViewportTransform]). Only when
+ * not even a [MIN_FULL_PAGE_HEIGHT] page fits under the top bar does the window fold to its bar
+ * ([BrowserWindowLayout.blocked]).
  */
 internal fun browserWindowLayout(
     safeWidth: Float,

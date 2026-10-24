@@ -16,7 +16,7 @@ One tool, one action per call:
 |---|---|
 | `open` | Open one public `https` URL in the in-app window; a ready foreground page defaults to agent control |
 | `snapshot` | Read a text snapshot and element refs |
-| `click` | Activate a ref from the latest snapshot |
+| `click` | Activate a ref from the latest snapshot; an ordinary same-tab public-https link is confirmed as one controlled GET, other controls only acknowledge the click |
 | `type` | Type into a snapshot ref; optional `submit:true` sends one native Enter and confirms a supported GET or same-document URL navigation |
 | `scroll` | Scroll `up` or `down` |
 | `capture` | Capture the browser view as PNG |
@@ -59,6 +59,10 @@ from, or into, the OpenChamber page profile.
   to **1920 × 1080 CSS pixels**. Resizing the small window scales its presentation,
   rather than repeatedly changing the website's responsive layout. Full screen uses the same page,
   document, refs and scroll position; switching presentation does not pause agent work.
+- A desktop canvas is uniformly enlarged or reduced to fit the window without stretching. With the
+  keyboard open, a full-screen page keeps its keyboard-closed scale and pans toward the tapped input;
+  only the visible part is shown. Capture refuses a clipped page and becomes available again once
+  the keyboard closes. Keyboard Next and script-driven focus changes are not covered by tap panning.
 - Ordinary scrolling, window dragging and resizing do not hand control away from the agent. Use the
   explicit takeover action when the agent should stop. A foreground agent action can surface a hidden
   window again, but cannot override that explicit takeover.
@@ -84,11 +88,17 @@ and invalidates old refs; take a new snapshot. Configuration responses marked `g
 are not DOM measurements. Snapshots expose the measured layout and visual viewports; the app does not
 spoof device pixel ratio or `screen`. Desktop's minimum page scale is the configured baseline so wide
 overflow content cannot expand its fixed viewport; pinch can zoom in but not out below that baseline.
-WebView's density conversion can introduce about two CSS pixels of rounding; snapshots report the
+WebView's density conversion can introduce a few CSS pixels of rounding; snapshots report the
 actual measurements rather than replacing them with the requested values. A captured PNG is still
 the displayed page rectangle, not a claim to an unscaled 1920 × 1080 screenshot.
 
-### Type and Enter submission
+A same-view layout reload reserves its new load identity before changing UA or viewport settings.
+Probes carrying the previous document witness stay pending or are discarded, including late probes
+after the new witness is accepted; an unrelated third witness is still refused. A second layout
+change cannot replace an outstanding reload, and an unapplied agent resize reports `BUSY` rather
+than claiming the requested configuration was applied.
+
+### Type, Enter submission and ordinary link clicks
 
 `submit` absent or `false` keeps ordinary typing. For `submit:true`, the target must be an editable,
 non-sensitive single-line input. Known POST forms, credential/file-bearing forms, unsupported default
@@ -96,23 +106,45 @@ submitter overrides and non-current-tab targets are refused before typing. The a
 rechecks the same input and focus, then sends exactly one native Enter DOWN/UP pair without forcing
 the software keyboard open.
 
-The input/Enter acknowledgement alone is not success. The original request recognizes two navigation
-paths:
+The input/Enter or link-click acknowledgement alone is not success. The original request recognizes
+two navigation paths:
 
-- A supported same-tab main-frame GET is URL/DNS-preflighted off the main thread, loaded in a new view
-  in the same tab, and confirmed with the new document witness and grant.
+- A supported same-tab main-frame GET (from an accepted Enter or from an ordinary same-tab
+  public-https link click) is URL/DNS-preflighted off the main thread, loaded in a new view in the
+  same tab, and confirmed with the new document witness and grant.
 - A same-origin URL change within the existing document can be confirmed without a reload. The native
   history callback is only a candidate: the current native URL, a fresh page URL/witness probe, the
   exact Enter intent and the original authority must agree. The URL baseline is recorded after typing
   and immediately before Enter, so typing-triggered changes alone cannot count. The existing view,
   document and grant remain; this does not invent a new GET or grant.
 
+A `click` may continue a navigation only for an ordinary link. In the same evaluation that dispatches
+its single `.click()`, the page script requires an anchor with an `href`, no `download` attribute, a
+same-tab effective target (its own `target`, or the document's `<base target>`, empty, `_self`,
+`_top` or `_parent`) and a resolved https target that differs from the current document. The
+resolved URL only narrows the wait and is never navigation evidence. The click reply reports
+`clicked`, `clickDispatched` and `navigationExpected`; only a native main-frame GET receipt whose URL
+matches that resolved target (ignoring the fragment) is DNS-preflighted and loaded in a new view in
+the same tab, then confirmed with its witness and grant. A confirmed navigation returns `clicked`,
+`finalURL`, `tabId`, `drivable:true` and `requiresSnapshot:true`.
+
+A click on a DOM control (for example a button), a `target="_blank"` or downloaded link, a
+fragment-only link or a non-https target is acknowledged and releases the action without waiting for
+a load; the ordinary URL policy and window handlers still refuse an unsupported load. Such a reply
+does not claim that the site's business action completed. A click that is expected to navigate but
+whose navigation becomes a POST or redirect, stays an unsupported SPA route without a native
+document GET, or yields a missing, late, refused or differently targeted native receipt returns
+`OUTCOME_UNKNOWN` and is never replayed. POST, `target="_blank"`, downloads, fragment/SPA routing and
+arbitrary JavaScript navigation are not widened into controlled navigation. The page may then be
+observation-only, as described below.
+
 Old refs expire after either confirmed navigation; take a fresh snapshot. A `navigation-observed`
 reply for a same-document route change does not assert that SPA data finished loading or that a
 business operation succeeded. A DOM-only change with no URL navigation is still unconfirmed. POST and
 redirect loads are not replayed as GET. Timeout, cancellation and an uncertain outcome never cause an
-automatic second Enter. Submit work stops before the transport's hard deadline, reserving bounded
-time to report an unconfirmed dispatched action rather than losing its result to the outer timeout.
+automatic second Enter or a second click. Submit and click work stops before the transport's hard
+deadline, reserving bounded time to report an unconfirmed dispatched action rather than losing its
+result to the outer timeout.
 
 ### Recovering from an unconfirmed action
 
@@ -149,10 +181,12 @@ confirmed URL navigation, remains unconfirmed; a changed page alone is not proof
 - POST, unrecognized redirects and complex login flows are not supported in this controlled browser.
   They are not replayed as GET. Use an external browser for unsupported flows; its cookies are not
   imported here.
-- Use `open` or a supported `type(submit:true)` for top-level document navigation under agent control.
-  Choose **Take over** before following other site-driven links or forms by hand; ordinary touching and scrolling no longer switch the
-  page into manual-navigation mode. Unsupported POST/redirect documents are not made controllable
-  merely by restoring the window.
+- Use `open`, a supported `type(submit:true)`, or an agent `click` on an ordinary same-tab
+  public-https link for top-level document navigation under agent control. POST, redirects,
+  `target="_blank"` or downloaded links, fragment/SPA routing and arbitrary JavaScript navigation are
+  not continued by the agent path; choose **Take over** before following those by hand. Ordinary
+  touching and scrolling still do not switch the page into manual-navigation mode. Unsupported
+  POST/redirect documents are not made controllable merely by restoring the window.
 - There is no production path that uses root or ADB. WebView remote debugging and CDP are not enabled.
 - The driver does not promise a trusted gesture, a solved CAPTCHA, an iframe DOM, arbitrary `eval`,
   cookie export, file upload, or unlimited background use.

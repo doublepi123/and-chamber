@@ -43,7 +43,7 @@ internal class BrowserPageDriver(
         return when (request.method) {
             BrowserMethod.NAVIGATE -> navigate(page, request)
             BrowserMethod.SNAPSHOT -> snapshot(page)
-            BrowserMethod.CLICK -> act(page, "click", request)
+            BrowserMethod.CLICK -> click(page, request)
             BrowserMethod.TYPE -> if (request.params[BrowserDriverLogic.PARAM_SUBMIT] == "true") {
                 typeSubmit(page, request)
             } else {
@@ -96,6 +96,111 @@ internal class BrowserPageDriver(
                 val witnessed = parsed.json["documentId"]?.jsonPrimitive?.contentOrNull
                 if (doc != nonce || witnessed != documentId || page.epoch() != epoch) stale()
                 else BrowserReply(ok = true, result = BrowserDriverLogic.snapshotMap(parsed.json))
+            }
+        }
+    }
+
+    /**
+     * The one synthetic click. The page script returns the internal click ACK in the same
+     * evaluation that dispatches the single `.click()`: [BrowserDriverLogic.RESULT_CLICK_DISPATCHED]
+     * and, for an ordinary same-tab https `<a href>`, `navigationExpected` plus the resolved target.
+     * The href only narrows the wait; it is never evidence of a navigation.
+     *
+     * The session arm is installed immediately before that evaluation and stays armed only when a
+     * navigation is expected. A DOM control (button, foreign target, download, fragment) is
+     * acknowledged, disarmed, and never waits for a page load. The presenter owns any continuation.
+     */
+    private suspend fun click(page: BrowserSession, request: BrowserRequest): BrowserReply {
+        val startedAt = android.os.SystemClock.uptimeMillis()
+        val deadline = BrowserDriverLogic.actionExpiresAt(startedAt, request.timeoutMs)
+        if (deadline != null && android.os.SystemClock.uptimeMillis() >= deadline) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.TIMEOUT, "click deadline")
+        }
+        val documentId = page.acceptedDocumentId
+        if (!page.committed || documentId == null || page.unknownNavigation) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "the page is still loading")
+        }
+        val epoch = page.epoch()
+        val nonce = page.documentNonce
+        val viewId = page.viewId
+        val ticket = page.ticket
+        if (page.installedNonce != nonce || page.epoch() != epoch) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "refs expired")
+        }
+        val ref = request.params[BrowserDriverLogic.PARAM_REF].orEmpty()
+        if (!ref.startsWith(nonce.take(8))) {
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "ref expired")
+        }
+        val armDeadline = deadline ?: (startedAt + BrowserDriverLogic.SUBMIT_ARM_CAP_MS)
+        // Arm before the evaluation, because the page's own click can start the navigation before
+        // the script result callback runs. It is still one shot and bound to this request id.
+        val token = page.armClickNavigation(request.id, armDeadline)
+            ?: return if (deadline != null && android.os.SystemClock.uptimeMillis() >= deadline) {
+                BrowserDriverLogic.requestError(BrowserErrorCode.TIMEOUT, "click deadline")
+            } else {
+                stale()
+            }
+        val script = BrowserDriverLogic.actionScript(
+            documentNonce = nonce,
+            documentId = documentId,
+            action = "click",
+            ref = ref,
+            text = "",
+            direction = "down",
+        )
+        val raw = try {
+            page.eval(script, epoch)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            page.finishSubmitNavigation()
+            throw cancelled
+        } catch (_: RuntimeException) {
+            page.finishSubmitNavigation()
+            return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "click dispatch failed")
+        }
+        if (raw == null ||
+            page.epoch() != epoch || !page.owns(viewId, ticket) || page.acceptedDocumentId != documentId
+        ) {
+            page.finishSubmitNavigation()
+            return stale()
+        }
+        return when (val parsed = BrowserDriverLogic.parseScriptResult(raw)) {
+            is ScriptResult.Failed -> {
+                page.finishSubmitNavigation()
+                BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, parsed.message)
+            }
+            is ScriptResult.Ok -> {
+                val json = parsed.json
+                if (json["documentId"]?.jsonPrimitive?.contentOrNull != documentId) {
+                    page.finishSubmitNavigation()
+                    return stale()
+                }
+                val dispatched = json[BrowserDriverLogic.RESULT_CLICK_DISPATCHED]?.jsonPrimitive?.contentOrNull == "true"
+                if (!dispatched) {
+                    page.finishSubmitNavigation()
+                    return BrowserDriverLogic.requestError(BrowserErrorCode.DRIVER, "click was not dispatched")
+                }
+                val navigationExpected =
+                    json[BrowserDriverLogic.RESULT_NAVIGATION_EXPECTED]?.jsonPrimitive?.contentOrNull == "true"
+                val expectedUrl = json[BrowserDriverLogic.RESULT_EXPECTED_URL]?.jsonPrimitive?.contentOrNull
+                if (!navigationExpected) {
+                    // A DOM control was acknowledged. No load is owed, and a later unarmed load stays
+                    // blocked instead of being attributed to this click.
+                    page.finishSubmitNavigation()
+                }
+                onChanged()
+                BrowserReply(
+                    ok = true,
+                    result = buildMap {
+                        put("action", "click")
+                        put("synthetic", "true")
+                        put(BrowserDriverLogic.RESULT_CLICK_DISPATCHED, "true")
+                        put(BrowserDriverLogic.RESULT_NAVIGATION_EXPECTED, navigationExpected.toString())
+                        put(BrowserDriverLogic.RESULT_NAVIGATION_TOKEN, token)
+                        if (navigationExpected && !expectedUrl.isNullOrBlank()) {
+                            put(BrowserDriverLogic.RESULT_EXPECTED_URL, expectedUrl)
+                        }
+                    },
+                )
             }
         }
     }
@@ -180,12 +285,13 @@ internal class BrowserPageDriver(
         onChanged()
         // Enter is native and exactly one DOWN/UP. A false return from the platform is not treated
         // as completion; the real navigation receipt is the presenter's separate confirmation.
-        return when (val press = page.pressEnter(ref, epoch, deadline)) {
-            EnterPress.Dispatched -> BrowserReply(
+        return when (val press = page.pressEnter(ref, epoch, deadline, request.id)) {
+            is EnterPress.Dispatched -> BrowserReply(
                 ok = true,
                 result = mapOf(
                     "action" to "type",
                     BrowserDriverLogic.RESULT_ENTER_DISPATCHED to "true",
+                    BrowserDriverLogic.RESULT_NAVIGATION_TOKEN to press.token,
                 ),
             )
             EnterPress.Stale -> stale()

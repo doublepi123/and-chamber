@@ -1,0 +1,8 @@
+0.0.20
+
+Fixed:
+- Tablet full screen fits the page when the keyboard is closed, without stretching.
+- The keyboard no longer shrinks the page; closing it restores the layout.
+- Full-page capture no longer fails at fractional scale boundaries; clipped pages stay refused.
+- Agent clicks follow ordinary same-tab HTTPS links once the new page is confirmed.
+- Mode reloads ignore the previous document and late callbacks from older actions.

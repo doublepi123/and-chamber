@@ -2,6 +2,8 @@ package io.andchamber.app.ui.browser
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -158,7 +160,7 @@ class BrowserWindowLayoutTest {
         assertEquals(BrowserPresentation.Float, l.presentation)
     }
 
-    @Test fun `fixed viewport is drawn 1 to 1 at full size and scaled down otherwise`() {
+    @Test fun `fixed viewport is drawn 1 to 1 at full size and fitted up or down otherwise`() {
         assertEquals(ViewportTransform(1f, 0f, 0f), fixedViewportTransform(1080, 1932, 1080, 1932))
         // A pixel short is scaled to fit, never cropped: the whole page stays visible.
         val short = fixedViewportTransform(1080, 1931, 1080, 1932)
@@ -171,9 +173,276 @@ class BrowserWindowLayoutTest {
         val wide = fixedViewportTransform(700, 966, 1080, 1932)
         assertEquals(0.5f, wide.scale, 0.0001f)
         assertEquals((700 - 540) / 2f, wide.offsetX, 0.01f)
-        assertTrue(fixedViewportTransform(4000, 4000, 1080, 1932).scale <= 1f)
+        // A larger container enlarges the page until one side touches, still whole and centred.
+        val large = fixedViewportTransform(4000, 4000, 1080, 1932)
+        assertEquals(4000f / 1932f, large.scale, 0.0001f)
+        assertEquals(0f, large.offsetY, 0.01f)
+        assertEquals((4000 - 1080 * large.scale) / 2f, large.offsetX, 0.01f)
+        assertDrawnInside(large, 4000, 4000, 1080, 1932)
         // Page point -> container point uses offset + scale * local.
         assertEquals(80f + 0.5f * 100f, wide.toContainerX(100f), 0.001f)
+    }
+
+    /** The drawn page is fully inside the container (never cropped) and never stretched. */
+    private fun assertDrawnInside(t: ViewportTransform, cw: Int, ch: Int, vw: Int, vh: Int) {
+        assertTrue("left ${t.offsetX}", t.offsetX >= 0f)
+        assertTrue("top ${t.offsetY}", t.offsetY >= 0f)
+        // Strict, in the same Float arithmetic the container uses: not even a fraction past the edge.
+        assertTrue("right ${t.offsetX + vw * t.scale} > $cw", t.offsetX + vw * t.scale <= cw)
+        assertTrue("bottom ${t.offsetY + vh * t.scale} > $ch", t.offsetY + vh * t.scale <= ch)
+        // One side touches: no spare room on both axes at once.
+        assertTrue("not fitted: ${t.offsetX}, ${t.offsetY}", t.offsetX < 0.51f || t.offsetY < 0.51f)
+    }
+
+    @Test fun `computer layout page is enlarged to fit a landscape tablet's full screen`() {
+        // 1920 x 1080 page in a 3200 x 1738 px landscape tablet full-screen page area.
+        val t = fixedViewportTransform(3200, 1738, 1920, 1080)
+        assertEquals(1738f / 1080f, t.scale, 0.0001f)
+        assertTrue("scale ${t.scale}", t.scale > 1.6f && t.scale < 1.62f)
+        // Height fills; only the aspect difference is left as two even, narrow side bands.
+        assertEquals(0f, t.offsetY, 0.01f)
+        assertEquals((3200 - 1920 * t.scale) / 2f, t.offsetX, 0.01f)
+        assertTrue("side band ${t.offsetX}", t.offsetX < 60f)
+        assertDrawnInside(t, 3200, 1738, 1920, 1080)
+    }
+
+    @Test fun `computer layout page in a portrait tablet is bound by the width`() {
+        // 2136 x 2803 px portrait tablet full-screen page area: width is the tighter side.
+        val t = fixedViewportTransform(2136, 2803, 1920, 1080)
+        assertEquals(2136f / 1920f, t.scale, 0.0001f)
+        assertTrue(t.scale > 1f)
+        assertEquals(0f, t.offsetX, 0.01f)
+        assertEquals((2803 - 1080 * t.scale) / 2f, t.offsetY, 0.01f)
+        assertDrawnInside(t, 2136, 2803, 1920, 1080)
+    }
+
+    @Test fun `phone layout page equal to the full screen area stays 1 to 1`() {
+        // Phone layout's page is the full-screen page area itself: no enlarging, no bands.
+        assertEquals(ViewportTransform(1f, 0f, 0f), fixedViewportTransform(2560, 1504, 2560, 1504))
+        assertEquals(ViewportTransform(1f, 0f, 0f), fixedViewportTransform(945, 1690, 945, 1690))
+    }
+
+    @Test fun `enlarged and reduced transforms map page points back without drift`() {
+        val cases = listOf(
+            fixedViewportTransform(3200, 1738, 1920, 1080),
+            fixedViewportTransform(2136, 2803, 1920, 1080),
+            fixedViewportTransform(945, 1690, 1920, 1080),
+            fixedViewportTransform(700, 966, 1080, 1932),
+        )
+        val points = listOf(0f to 0f, 960f to 540f, 1919f to 1079f, 123.5f to 77.25f)
+        for (t in cases) {
+            for ((x, y) in points) {
+                // The platform's inverse of child scale + translation: (container - offset) / scale.
+                assertEquals("$t x=$x", x, (t.toContainerX(x) - t.offsetX) / t.scale, 0.01f)
+                assertEquals("$t y=$y", y, (t.toContainerY(y) - t.offsetY) / t.scale, 0.01f)
+            }
+        }
+        // Centre of the page is the centre of the container on the banded axis.
+        val pad = fixedViewportTransform(3200, 1738, 1920, 1080)
+        assertEquals(1600f, pad.toContainerX(960f), 0.01f)
+        assertEquals(869f, pad.toContainerY(540f), 0.01f)
+    }
+
+    // ---- Fitted scale never rounds the page past its container ---------------------------------------
+
+    /**
+     * The window rectangles the container reports, built the way FixedViewportContainer.buildSnapshot
+     * does (Float page position and size; visible = the container's own rect cut to the page's outward
+     * whole-pixel bounds), then resolved by the production capture check.
+     */
+    private fun captureFrameFor(
+        t: ViewportTransform, locX: Int, locY: Int, cw: Int, ch: Int, vw: Int, vh: Int, rootW: Int, rootH: Int,
+    ): CaptureFrame? {
+        val pageLeft = locX + t.offsetX
+        val pageTop = locY + t.offsetY
+        val pageWidth = vw * t.scale
+        val pageHeight = vh * t.scale
+        val visible = CaptureRect(
+            maxOf(locX, kotlin.math.floor(pageLeft).toInt()),
+            maxOf(locY, kotlin.math.floor(pageTop).toInt()),
+            minOf(locX + cw, kotlin.math.ceil(pageLeft + pageWidth).toInt()),
+            minOf(locY + ch, kotlin.math.ceil(pageTop + pageHeight).toInt()),
+        )
+        val presentation = BrowserPresentationGeometry(1L, vw, vh, t.scale, pageLeft, pageTop, pageWidth, pageHeight, visible)
+        return BrowserCaptureGeometry.captureFrame(presentation, rootW, rootH)
+    }
+
+    @Test fun `1718 px high full screen fits a 1920 x 1080 page without rounding past it`() {
+        // The emulator's keyboard-closed full screen: page area 3200 x 1718 at window y 198.
+        val t = fixedViewportTransform(3200, 1718, 1920, 1080)
+        // Plain Float division rounds up: 1080 x (1718f / 1080) = 1718.0001.
+        assertTrue(1080 * (1718f / 1080) > 1718f)
+        assertTrue("scale ${t.scale}", 1080 * t.scale <= 1718f)
+        assertEquals(1718f / 1080, t.scale, 1e-6f)
+        assertEquals(Math.nextDown(1718f / 1080), t.scale, 0f)
+        // Only the sub-pixel remainder is split, no padding.
+        assertTrue("offsetY ${t.offsetY}", t.offsetY >= 0f && t.offsetY < 0.001f)
+        assertDrawnInside(t, 3200, 1718, 1920, 1080)
+        // The page's outward whole-pixel bounds are exactly the container's visible rect
+        // (72..3128 x 198..1916), not one row past it: capture is allowed.
+        val pageTop = 198 + t.offsetY
+        assertEquals(198, kotlin.math.floor(pageTop).toInt())
+        assertEquals(1916, kotlin.math.ceil(pageTop + 1080 * t.scale).toInt())
+        assertEquals(72, kotlin.math.floor(t.offsetX).toInt())
+        assertEquals(3128, kotlin.math.ceil(t.offsetX + 1920 * t.scale).toInt())
+        val frame = captureFrameFor(t, 0, 198, 3200, 1718, 1920, 1080, 3200, 2136)
+        assertNotNull("capture must accept the fitted full-screen page", frame)
+        frame!!
+        assertTrue("captured rect ${frame.rect}", frame.rect.top >= 198 && frame.rect.bottom <= 1916)
+        assertTrue(frame.rect.left >= 72 && frame.rect.right <= 3128)
+        // The old plain-division scale gives the probe's refused geometry (bottom 1917).
+        val old = 1718f / 1080
+        assertEquals(1917, kotlin.math.ceil(198 + 1080 * old).toInt())
+        assertNull(captureFrameFor(ViewportTransform(old, (3200 - 1920 * old) / 2f, 0f), 0, 198, 3200, 1718, 1920, 1080, 3200, 2136))
+    }
+
+    @Test fun `fit scale stays inside its container on every axis size`() {
+        for (viewport in listOf(1080, 1920, 768, 1366, 3840, 2160, 945, 1690)) {
+            for (container in 1..4200) {
+                val s = fitAxisScale(container, viewport)
+                assertTrue("$container / $viewport -> $s", s > 0f && viewport * s <= container)
+                // The largest such Float: one step up would cross the edge (exact product, as checked).
+                val up = Math.nextUp(s)
+                assertTrue("$container / $viewport not tight: $s", up.toDouble() * viewport > container)
+            }
+        }
+    }
+
+    @Test fun `fitted full screens are always capturable, centred band or not`() {
+        for ((vw, vh) in listOf(1920 to 1080, 1366 to 768, 945 to 1690)) {
+            for (ch in 300..2200 step 7) {
+                for (cw in listOf(482, 964, 1080, 2136, 2560, 3200)) {
+                    val t = fixedViewportTransform(cw, ch, vw, vh)
+                    assertDrawnInside(t, cw, ch, vw, vh)
+                    assertNotNull("$cw x $ch for $vw x $vh: $t",
+                        captureFrameFor(t, 0, 198, cw, ch, vw, vh, cw, ch + 400))
+                }
+            }
+        }
+    }
+
+    @Test fun `keyboard width fit uses the same exact bound`() {
+        // Narrower window while the keyboard is open: the width bound may not round past it either.
+        for (cw in listOf(482, 486, 964, 965, 2400)) {
+            val t = keyboardViewportTransform(cw, 880, 1920, 1080, 3200, 1738, 300f)
+            assertTrue("$cw: ${1920 * t.scale}", 1920 * t.scale <= cw)
+            assertEquals(fitAxisScale(cw, 1920), t.scale, 0f)
+        }
+        // The keyboard-closed scale it keeps is the exact fitted one.
+        assertEquals(fixedViewportTransform(3200, 1718, 1920, 1080).scale,
+            keyboardViewportTransform(3200, 600, 1920, 1080, 3200, 1718, null).scale, 0f)
+    }
+
+    // ---- Keyboard open: same scale, cut and moved instead of shrunk --------------------------------
+
+    @Test fun `keyboard keeps the landscape tablet computer layout scale instead of shrinking`() {
+        val closed = fixedViewportTransform(3200, 1738, 1920, 1080)
+        // Keyboard leaves about 880 px of page area; the old fit would draw it at 880 / 1080 = 0.815.
+        val open = keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, anchorPageY = 300f)
+        assertEquals(closed.scale, open.scale, 0f)
+        assertTrue("scale ${open.scale}", open.scale > 1.6f)
+        assertEquals(closed.offsetX, open.offsetX, 0.01f)
+        // The tapped point sits in the middle of what is left above the keyboard.
+        assertEquals(440f, open.toContainerY(300f), 0.01f)
+        assertTrue(open.offsetY <= 0f)
+    }
+
+    @Test fun `keyboard anchor never moves an edge of the page inside the visible part`() {
+        val spare = 880 - 1080 * (1738f / 1080f)
+        // Near the top: the page's top stays at the top.
+        assertEquals(0f, keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, 10f).offsetY, 0.01f)
+        // Near the bottom: the page's bottom stays at the bottom, no empty band under it.
+        val bottom = keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, 1075f)
+        assertEquals(spare, bottom.offsetY, 0.01f)
+        assertEquals(880f, bottom.toContainerY(1080f), 0.01f)
+        // Out-of-page or unusable anchors are clamped or ignored, never NaN.
+        assertEquals(spare, keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, 99_999f).offsetY, 0.01f)
+        assertEquals(0f, keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, Float.NaN).offsetY, 0f)
+    }
+
+    @Test fun `keyboard without a tap shows the top of the page at the same scale`() {
+        val open = keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, anchorPageY = null)
+        assertEquals(1738f / 1080f, open.scale, 0.0001f)
+        assertEquals(0f, open.offsetY, 0f)
+    }
+
+    @Test fun `keyboard height never changes the scale, through every animation height`() {
+        val scales = (1738 downTo 300 step 37).map {
+            keyboardViewportTransform(3200, it, 1920, 1080, 3200, 1738, 540f).scale
+        }.toSet()
+        assertEquals(setOf(1738f / 1080f), scales)
+    }
+
+    @Test fun `a page that still fits above the keyboard is centred, not moved`() {
+        // Portrait tablet: width-bound 1.1125 scale, 1201 px page, 1500 px left above the keyboard.
+        val open = keyboardViewportTransform(2136, 1500, 1920, 1080, 2136, 2803, anchorPageY = 1000f)
+        assertEquals(2136f / 1920f, open.scale, 0.0001f)
+        assertEquals((1500 - 1080 * open.scale) / 2f, open.offsetY, 0.01f)
+        assertDrawnInside(open, 2136, 1500, 1920, 1080)
+    }
+
+    @Test fun `only a real width change can lower the keyboard scale, to fit the width`() {
+        // Window became narrower than the drawn page: fit the width, never wider than the window.
+        val open = keyboardViewportTransform(2400, 880, 1920, 1080, 3200, 1738, 300f)
+        assertEquals(2400f / 1920f, open.scale, 0.0001f)
+        assertEquals(0f, open.offsetX, 0.01f)
+        assertTrue(open.toContainerX(1920f) <= 2400.01f)
+    }
+
+    @Test fun `phone layout keeps 1 to 1 with the keyboard open`() {
+        // 360 x 740 dp phone at 2.625: page area 945 x 1690 px, keyboard leaves 976 px.
+        val open = keyboardViewportTransform(945, 976, 945, 1690, 945, 1690, anchorPageY = 1000f)
+        assertEquals(1f, open.scale, 0f)
+        assertEquals(0f, open.offsetX, 0f)
+        assertEquals(488f, open.toContainerY(1000f), 0.01f)
+        assertEquals(976 - 1690f, keyboardViewportTransform(945, 976, 945, 1690, 945, 1690, 1690f).offsetY, 0.01f)
+    }
+
+    @Test fun `keyboard transform without a usable reference falls back to the fitted page`() {
+        for ((rw, rh) in listOf(0 to 1738, 3200 to 0, -1 to -1)) {
+            assertEquals(fixedViewportTransform(3200, 880, 1920, 1080),
+                keyboardViewportTransform(3200, 880, 1920, 1080, rw, rh, 300f))
+        }
+        // Unknown page size or a zero container: same safe values as the fitted page, never NaN.
+        assertEquals(fixedViewportTransform(3200, 880, 0, 0), keyboardViewportTransform(3200, 880, 0, 0, 3200, 1738, 1f))
+        assertEquals(fixedViewportTransform(0, 0, 1920, 1080), keyboardViewportTransform(0, 0, 1920, 1080, 3200, 1738, 1f))
+    }
+
+    @Test fun `keyboard closed again gives back exactly the fitted presentation`() {
+        // Reference equal to the container (keyboard closed) and a page that fits: same as the fit.
+        for ((cw, ch) in listOf(3200 to 1738, 2136 to 2803, 945 to 1690)) {
+            val (vw, vh) = if (cw == 945) 945 to 1690 else 1920 to 1080
+            assertEquals(fixedViewportTransform(cw, ch, vw, vh), keyboardViewportTransform(cw, ch, vw, vh, cw, ch, 10f))
+        }
+    }
+
+    @Test fun `keyboard transforms map page points back without drift`() {
+        val cases = listOf(
+            keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, 300f),
+            keyboardViewportTransform(3200, 880, 1920, 1080, 3200, 1738, 1075f),
+            keyboardViewportTransform(945, 976, 945, 1690, 945, 1690, 1400f),
+            keyboardViewportTransform(2400, 880, 1920, 1080, 3200, 1738, 300f),
+        )
+        for (t in cases) {
+            for ((x, y) in listOf(0f to 0f, 471.5f to 299.25f, 944f to 1079f)) {
+                assertEquals("$t x=$x", x, (t.toContainerX(x) - t.offsetX) / t.scale, 0.01f)
+                assertEquals("$t y=$y", y, (t.toContainerY(y) - t.offsetY) / t.scale, 0.01f)
+            }
+        }
+    }
+
+    @Test fun `keyboard reference is the keyboard-closed page area of the same presentation`() {
+        // Landscape tablet, full screen: closed area is the window minus both bars.
+        val w = 1155f
+        val h = 770f
+        val (vw, vh) = browserLayoutViewportDp(browserViewportDp(w, h), true, 1920, 1080)
+        val closed = browserWindowLayout(w, h, 0f, 72f, vw, vh, fullRequested = true)
+        assertEquals(w to h - 2 * BROWSER_BAR_HEIGHT, browserPageAreaDp(closed))
+        // Keyboard open: compact bar only, so the open area is shorter than the closed reference.
+        val open = browserWindowLayout(w, h, 330f, 72f, vw, vh, fullRequested = true)
+        assertEquals(w to h - 330f - BROWSER_BAR_HEIGHT, browserPageAreaDp(open))
+        // Folded or empty layouts have no page area.
+        assertEquals(null, browserPageAreaDp(browserWindowLayout(360f, 110f, 0f, 72f, 360f, 644f, true)))
     }
 
     @Test fun `trusted address is the shown page and never a refused one`() {

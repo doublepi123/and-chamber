@@ -30,6 +30,11 @@ Files:
   `WindowRestoreTargetGate.kt`, `PixelCopyBridge.kt`, `BrowserRetiredPage.kt`.
 - `FixedBrowserViewportLayout.kt`: a fixed phone-sized or configured desktop child viewport and native presentation transform;
   dragging, resizing and full-screen switching change the display rectangle, not the page layout.
+  The page is fitted with one uniform scale, up or down (never cropped or stretched), so a desktop
+  canvas smaller than a tablet's full screen is enlarged and only the aspect difference is banded.
+  With the keyboard open the page keeps the keyboard-closed scale (`keyboardViewportTransform`,
+  reference area from the window layout): it is cut by the container and moved so the tapped point
+  is above the keyboard, never shrunk. Capture then refuses, because the whole page is not visible.
   `NativeFrameCommitGate` reports a presentation only after the platform commits its frame (API 29+).
 
 ## Design

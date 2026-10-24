@@ -88,18 +88,23 @@ internal class BrowserSession private constructor(
 
     private var destroyed = false
     var onFatal: (() -> Unit)? = null
+    /** No receiver: an ordinary link GET without an armed action is still blocked. */
     var onMainGet: ((String) -> Unit)? = null
-    /** One-shot submit receipt for a main-frame GET or a verified same-document URL navigation. */
+    /** One-shot action receipt for a main-frame GET or a verified same-document URL navigation. */
     var onSubmitNavigation: ((BrowserSubmitNavigation) -> Unit)? = null
     var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
 
     /**
-     * The single Enter this session dispatched for a submit. It is one-shot, identity-bound and
-     * expires quickly; an ordinary link navigation never creates it.
+     * The single native action (Enter or click) this session dispatched. It is one-shot,
+     * identity-bound, carries an opaque arm token, and expires quickly; an ordinary link
+     * navigation never creates it. [requestId] names the action the driver armed it for.
      */
-    private data class SubmitIntent(
+    private data class NavigationIntent(
+        val kind: BrowserActionKind,
+        val requestId: String,
+        val token: String,
         val viewId: String,
         val ticket: Long,
         val epoch: Long,
@@ -108,8 +113,9 @@ internal class BrowserSession private constructor(
         val expiresAt: Long,
     )
 
-    private var submitIntent: SubmitIntent? = null
-    private val submitIntentTimeout = Runnable { submitIntent = null }
+    @Volatile
+    private var navigationIntent: NavigationIntent? = null
+    private val navigationIntentTimeout = Runnable { navigationIntent = null }
 
     /**
      * Human interaction mode. When true, a person may start a normal top-level navigation, submit
@@ -126,7 +132,7 @@ internal class BrowserSession private constructor(
      * start a navigation, so the committed page stays committed.
      */
     fun invalidateRefs() {
-        clearSubmitIntent()
+        clearNavigationIntent()
         epoch += 1
         documentNonce = BrowserDriverLogic.newNonce()
         installedNonce = null
@@ -147,6 +153,7 @@ internal class BrowserSession private constructor(
         acceptedDocumentId = null
         mainStarts = 0
         unknownNavigation = false
+        pendingReload = null
         beginDocument()
         return ticket
     }
@@ -181,7 +188,7 @@ internal class BrowserSession private constructor(
             "unknown source=$source ticket=$ticket epoch=$epoch starts=$mainStarts thread=${if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) "Main" else "IO"}",
         )
         clearControlledGet()
-        clearSubmitIntent()
+        clearNavigationIntent()
         unknownNavigation = true
         committed = false
         installedNonce = null
@@ -197,6 +204,9 @@ internal class BrowserSession private constructor(
 
     fun acceptReady(openTicket: Long, witnessedId: String): Boolean {
         if (!owns(viewId, openTicket) || unknownNavigation || fatal || automationBlocked) return false
+        // The previous document's witness is never the new controlled reload's document. This is
+        // the final accept door; the ready-probe path already turns it into Pending.
+        if (isPendingReloadWitness(openTicket, witnessedId)) return false
         if (acceptedDocumentId == null) acceptedDocumentId = witnessedId
         if (acceptedDocumentId != witnessedId) {
             markUnknownNavigation("ready-witness-mismatch")
@@ -341,7 +351,8 @@ internal class BrowserSession private constructor(
     fun destroy() {
         if (destroyed) return
         destroyed = true
-        clearSubmitIntent()
+        clearNavigationIntent()
+        pendingReload = null
         unwrappedCommitGate?.cancel()
         unwrappedCommitGate = null
         unwrappedCommitted = null
@@ -429,6 +440,17 @@ internal class BrowserSession private constructor(
         private set
     var controlledGetDocument: String? = null
         private set
+
+    /**
+     * The one same-view controlled reload currently waiting for its new document. [oldDocumentId]
+     * is the witness that was validated before the reload cleared it. The barrier lasts for this
+     * whole load ticket: before the new witness arrives it suppresses that old document, and after
+     * the new witness is accepted it still ignores late probes from the old document. A new load
+     * ticket, a manual document or teardown replaces/clears it.
+     */
+    private data class PendingReload(val ticket: Long, val oldDocumentId: String)
+
+    private var pendingReload: PendingReload? = null
     var desktopConfigured = false
         private set
 
@@ -594,7 +616,115 @@ internal class BrowserSession private constructor(
         controlledGetUrl = null
         controlledGetTicket = 0L
         controlledGetDocument = null
+        pendingReload = null
     }
+
+    /** The previous witness still excluded for this load ticket, or null. */
+    fun pendingReloadOldDocument(ticket: Long): String? =
+        pendingReload?.takeIf { it.ticket == ticket }?.oldDocumentId
+
+    /** True while [documentId] is the previous document excluded from this load ticket. */
+    fun isPendingReloadWitness(ticket: Long, documentId: String): Boolean =
+        pendingReload?.let { it.ticket == ticket && it.oldDocumentId == documentId } == true
+
+    /**
+     * The strict state gate for the initial no-witness probe. It never grants or marks unknown; the
+     * driver's pure classifier additionally requires the failed probe message to be exactly
+     * `no witness` and the controlled URL policy to allow the document.
+     */
+    fun initialNoWitnessProbeAllowed(ticket: Long, epoch: Long): Boolean =
+        BrowserDriverLogic.isInitialNoWitnessProbeState(
+            ticketCurrent = ticket == this.ticket,
+            epochCurrent = epoch == this.epoch,
+            mainStarts = mainStarts,
+            acceptedDocumentId = acceptedDocumentId,
+            pageError = pageError,
+            controlledGet = controlledGet,
+            automationAllowed = !destroyed && !fatal && !unknownNavigation && !automationBlocked,
+            manualNavigation = manualNavigation,
+        )
+
+    /**
+     * A same-view controlled reload needs a previously validated witness and must not overlap an
+     * earlier reload of this ticket that has not accepted its new document yet.
+     */
+    fun canStartControlledReload(previousDocumentId: String?): Boolean =
+        !destroyed && !fatal && !unknownNavigation &&
+            BrowserDriverLogic.canStartControlledReload(
+                controlledGet = controlledGet,
+                ticket = ticket,
+                acceptedDocumentId = acceptedDocumentId,
+                previousDocumentId = previousDocumentId,
+                pendingTicket = pendingReload?.ticket ?: 0L,
+                pendingOldDocumentId = pendingReload?.oldDocumentId,
+            )
+
+    /**
+     * Reserves and installs the pending barrier for a same-view controlled reload **before** any
+     * UA/meta/viewport configuration runs. [configure] executes after the new ticket and the
+     * previous-document barrier exist, but before [commitControlledReload] actually loads. Returns
+     * false before any state change when there is no validated previous witness or a reload of this
+     * ticket is still pending.
+     */
+    fun prepareControlledReload(
+        url: String?,
+        previousDocumentId: String?,
+        configure: () -> Unit = {},
+    ): Boolean {
+        if (url.isNullOrBlank() || !canStartControlledReload(previousDocumentId)) return false
+        val previous = previousDocumentId ?: return false
+        val next = beginControlledGet()
+        pendingReload = PendingReload(next, previous)
+        markControlledGet(url)
+        // Configuration may change the UA/meta/viewport. It must run only after the barrier exists.
+        configure()
+        return true
+    }
+
+    /**
+     * Loads the controlled URL prepared above. Only [prepareControlledReload] can install the
+     * barrier; this step is deterministic and has no user-visible reject path after configuration.
+     */
+    private fun commitControlledReload() {
+        val pending = pendingReload ?: return
+        if (pending.ticket != ticket) return
+        val url = controlledGetUrl ?: return
+        load(url, epoch)
+    }
+
+    /**
+     * Starts one same-view controlled reload and installs the previous-document barrier for the
+     * new ticket before [configure] and before the load. Returns false without touching the page
+     * when there is no validated previous witness or a reload of this ticket is still pending.
+     */
+    fun beginControlledReload(
+        url: String?,
+        previousDocumentId: String?,
+        configure: () -> Unit = {},
+    ): Boolean {
+        if (!prepareControlledReload(url, previousDocumentId, configure)) return false
+        commitControlledReload()
+        return true
+    }
+
+    /**
+     * The URL was already policy-allowed. This proves the request is the first redirect of the
+     * controlled GET this session loaded, before any document started or witness was accepted.
+     * An already accepted page (including an armed submit document), a stale ticket and
+     * manual/unknown navigation all fail this check.
+     */
+    private fun continuesControlledInitialRedirect(request: WebResourceRequest, manual: Boolean): Boolean =
+        !destroyed && !fatal && MainFrameGate.allowsControlledInitialRedirect(
+            method = request.method,
+            isRedirect = request.isRedirect,
+            manual = manual,
+            controlled = controlledGet,
+            controlledTicket = controlledGetTicket,
+            ticket = ticket,
+            mainStarts = mainStarts,
+            documentAccepted = acceptedDocumentId != null,
+            unknownNavigation = unknownNavigation,
+        )
 
     fun applyActionButton(event: MotionEvent, button: Int): MouseSupport =
         NativeMouseSupport().applyActionButton(event, button)
@@ -624,12 +754,17 @@ internal class BrowserSession private constructor(
      * one native Enter DOWN/UP. No JS submit, no JS KeyboardEvent, no IME call and no second press.
      * A platform return value is not completion; the presenter waits for a verified navigation.
      */
-    suspend fun pressEnter(ref: String, requestEpoch: Long, expiresAt: Long? = null): EnterPress {
+    suspend fun pressEnter(
+        ref: String,
+        requestEpoch: Long,
+        expiresAt: Long? = null,
+        requestId: String,
+    ): EnterPress {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return EnterPress.Failed
         // The fallback is fixed on entry; focus/probe time counts against it, never a fresh budget.
         val fallbackDeadline = android.os.SystemClock.uptimeMillis() + SUBMIT_INTENT_MS
-        // A new submit replaces any previous one-shot receipt; a failed press must not leave it.
-        clearSubmitIntent()
+        // A new action replaces any previous one-shot receipt; a failed press must not leave it.
+        clearNavigationIntent()
         if (destroyed || fatal || unknownNavigation) return EnterPress.Stale
         if (requestEpoch != epoch) return EnterPress.Stale
         if (!view.isAttachedToWindow || !view.isShown) return EnterPress.NotVisible
@@ -662,17 +797,43 @@ internal class BrowserSession private constructor(
         val deadline = expiresAt ?: fallbackDeadline
         val now = android.os.SystemClock.uptimeMillis()
         if (now >= deadline) return EnterPress.Expired
-        // Only this one native navigation may complete the submit receipt.
+        // Only this one native navigation may complete the action receipt.
         currentCoroutineContext().ensureActive()
-        if (!armSubmitIntent(documentId, baselineUrl, deadline)) return EnterPress.Expired
+        val token = armNavigationIntent(
+            kind = BrowserActionKind.ENTER,
+            requestId = requestId,
+            documentId = documentId,
+            baselineUrl = baselineUrl,
+            expiresAt = deadline,
+        ) ?: return EnterPress.Expired
         return try {
             view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_DOWN))
             view.dispatchKeyEvent(enterKey(now, android.view.KeyEvent.ACTION_UP))
-            EnterPress.Dispatched
+            EnterPress.Dispatched(token)
         } catch (_: RuntimeException) {
-            clearSubmitIntent()
+            clearNavigationIntent()
             EnterPress.Failed
         }
+    }
+
+    /**
+     * Arms the one-shot receipt for a synthetic click immediately before its script dispatches the
+     * single `.click()`. The driver only widens navigation for an ordinary same-tab https `<a href>`;
+     * this arm is still needed for the engine's native GET to be attributed to the click at all.
+     * Returns the opaque token the presenter binds to its receipt, or null when the page moved.
+     */
+    fun armClickNavigation(requestId: String, expiresAt: Long): String? {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return null
+        if (destroyed || fatal || unknownNavigation || manualNavigation) return null
+        val documentId = acceptedDocumentId ?: return null
+        val baseline = displayUrl ?: view?.url?.takeIf { it.isNotBlank() } ?: return null
+        return armNavigationIntent(
+            kind = BrowserActionKind.CLICK,
+            requestId = requestId,
+            documentId = documentId,
+            baselineUrl = baseline,
+            expiresAt = expiresAt,
+        )
     }
 
     private fun enterKey(now: Long, action: Int): android.view.KeyEvent = android.view.KeyEvent(
@@ -691,18 +852,28 @@ internal class BrowserSession private constructor(
     private fun keyInputAdmitted(): Boolean =
         !destroyed && !inputGateClosed && (view as? FencedWebView)?.gate?.admit() != false
 
-    private fun clearSubmitIntent() {
-        submitIntent = null
+    private fun clearNavigationIntent() {
+        navigationIntent = null
         // Unit tests construct a session without a WebView; a real one is always present here.
         val target: WebView? = view
-        target?.removeCallbacks(submitIntentTimeout)
+        target?.removeCallbacks(navigationIntentTimeout)
     }
 
-    private fun armSubmitIntent(documentId: String, baselineUrl: String, expiresAt: Long): Boolean {
-        clearSubmitIntent()
+    private fun armNavigationIntent(
+        kind: BrowserActionKind,
+        requestId: String,
+        documentId: String,
+        baselineUrl: String,
+        expiresAt: Long,
+    ): String? {
+        clearNavigationIntent()
         val now = android.os.SystemClock.uptimeMillis()
-        val budget = BrowserDriverLogic.submitArmRemaining(expiresAt, now) ?: return false
-        submitIntent = SubmitIntent(
+        val budget = BrowserDriverLogic.submitArmRemaining(expiresAt, now) ?: return null
+        val token = BrowserDriverLogic.newNonce()
+        navigationIntent = NavigationIntent(
+            kind = kind,
+            requestId = requestId,
+            token = token,
             viewId = viewId,
             ticket = ticket,
             epoch = epoch,
@@ -710,55 +881,70 @@ internal class BrowserSession private constructor(
             baselineUrl = baselineUrl,
             expiresAt = now + budget,
         )
-        view.postDelayed(submitIntentTimeout, budget)
-        return true
+        view.postDelayed(navigationIntentTimeout, budget)
+        return token
     }
 
-    /** The one-shot Enter intent for the current page/load/document, or null and cleared. */
-    private fun activeSubmitIntent(): SubmitIntent? {
-        val intent = submitIntent ?: return null
-        val current = !destroyed && !unknownNavigation && !manualNavigation &&
-            intent.viewId == viewId && intent.ticket == ticket && intent.epoch == epoch &&
-            intent.documentId == acceptedDocumentId &&
-            android.os.SystemClock.uptimeMillis() <= intent.expiresAt
-        if (!current) {
-            clearSubmitIntent()
+    /** The one-shot action intent for the current page/load/document, or null and cleared. */
+    private fun activeNavigationIntent(): NavigationIntent? {
+        val intent = navigationIntent ?: return null
+        if (!isCurrentNavigationIntent(intent)) {
+            clearNavigationIntent()
             return null
         }
         return intent
     }
 
-    private fun emitSubmitNavigation(event: BrowserSubmitNavigation) {
-        clearSubmitIntent()
+    /**
+     * Checks that this exact intent object still owns the session's one slot, and that the
+     * page/load/document it was armed for is still current. The network callback captures the
+     * object off-main; object identity is what stops a disarmed, consumed or replaced action from
+     * being mistaken for a newer one.
+     */
+    private fun isCurrentNavigationIntent(intent: NavigationIntent?): Boolean =
+        intent != null && navigationIntent === intent &&
+            !destroyed && !unknownNavigation && !manualNavigation &&
+            intent.viewId == viewId && intent.ticket == ticket && intent.epoch == epoch &&
+            intent.documentId == acceptedDocumentId &&
+            android.os.SystemClock.uptimeMillis() <= intent.expiresAt
+
+    /**
+     * Emits only for the intent that still owns the slot. A late callback for a disarmed, consumed
+     * or replaced action is dropped rather than delivered to the presenter's current receipt.
+     */
+    private fun emitNavigation(event: BrowserSubmitNavigation, intent: NavigationIntent): Boolean {
+        if (navigationIntent !== intent) return false
+        clearNavigationIntent()
         onSubmitNavigation?.invoke(event)
+        return true
     }
 
     /**
-     * Main-thread disarm used by the presenter after the original submit action ends. Off-main is
-     * a no-op instead of posting a late clear that could erase a newer armed submit. The caller
-     * still re-checks the exact page and request under its lock; this method only drops this
-     * session's current one-shot receipt.
+     * Main-thread disarm used by the presenter after the original action ends. Off-main is a no-op
+     * instead of posting a late clear that could erase a newer armed action. The caller still
+     * re-checks the exact page and request under its lock; this method only drops this session's
+     * current one-shot receipt.
      */
     fun finishSubmitNavigation() {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return
-        clearSubmitIntent()
+        clearNavigationIntent()
     }
 
     /**
-     * A history update is only a navigation fact. It becomes a submit receipt only while the exact
-     * armed intent is current, the candidate is a different same-origin policy-allowed https URL,
-     * and a fresh read-only probe confirms the same document, URL and native view URL. The old
-     * intent object reference is what stops a late probe from matching a newer armed submit.
+     * A history update is only a navigation fact. It becomes a receipt only while the exact armed
+     * Enter is current, the candidate is a different same-origin policy-allowed https URL, and a
+     * fresh read-only probe confirms the same document, URL and native view URL. The old intent
+     * object reference is what stops a late probe from matching a newer armed action.
      */
-    private fun probeSameDocument(intent: SubmitIntent, candidateUrl: String) {
-        if (destroyed || manualNavigation) return
+    private fun probeSameDocument(intent: NavigationIntent, candidateUrl: String) {
+        if (destroyed || manualNavigation || intent.kind != BrowserActionKind.ENTER) return
         view.evaluateJavascript(BrowserDriverLogic.sameDocumentProbeScript()) { raw ->
-            if (submitIntent !== intent) return@evaluateJavascript
+            if (navigationIntent !== intent) return@evaluateJavascript
             if (destroyed || manualNavigation || unknownNavigation) return@evaluateJavascript
             if (epoch != intent.epoch || ticket != intent.ticket || viewId != intent.viewId) return@evaluateJavascript
             if (acceptedDocumentId != intent.documentId) return@evaluateJavascript
             if (android.os.SystemClock.uptimeMillis() >= intent.expiresAt) {
-                clearSubmitIntent()
+                clearNavigationIntent()
                 return@evaluateJavascript
             }
             val probe = BrowserDriverLogic.parseSameDocumentProbe(raw) ?: return@evaluateJavascript
@@ -773,8 +959,14 @@ internal class BrowserSession private constructor(
             // The real candidate is visible to a later snapshot/probe. It is not a controlled GET:
             // do not mark controlledGet or claim new-load provenance for a same-document route.
             displayUrl = candidateUrl
-            emitSubmitNavigation(
-                BrowserSubmitNavigation.SameDocument(candidateUrl, intent.documentId),
+            emitNavigation(
+                BrowserSubmitNavigation.SameDocument(
+                    url = candidateUrl,
+                    documentId = intent.documentId,
+                    token = intent.token,
+                    kind = intent.kind,
+                ),
+                intent,
             )
         }
     }
@@ -1026,22 +1218,25 @@ internal class BrowserSession private constructor(
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             if (!request.isForMainFrame) return false
             val raw = request.url?.toString().orEmpty()
-            // Only an Enter this session just dispatched may produce a submit receipt. Ordinary
-            // link GETs keep the old intercept-and-wait behavior.
-            val submit = if (manualNavigation) {
-                clearSubmitIntent()
+            // Only the one native action this session just armed may produce a navigation receipt.
+            // An ordinary link GET keeps the old block-without-continuation behavior.
+            val action = if (manualNavigation) {
+                clearNavigationIntent()
                 null
             } else {
-                activeSubmitIntent()
+                activeNavigationIntent()
             }
             val decision = policyProvider().checkSyntax(raw)
             if (decision !is io.andchamber.app.browser.UrlDecision.Allow) {
-                if (submit != null) {
-                    // The armed submit's deterministic refusal: block this one load and report it.
+                if (action != null) {
+                    // The armed action's deterministic refusal: block this one load and report it.
                     // Do not change the session document/witness/epoch here; the coordinator's
                     // awaited receipt marks the exact page unknown and revokes after it resumes.
-                    emitSubmitNavigation(BrowserSubmitNavigation.Rejected(SUBMIT_REASON_POLICY))
-                    logNav("override-submit-rejected", request.method, request.isRedirect, manualNavigation)
+                    emitNavigation(
+                        BrowserSubmitNavigation.Rejected(SUBMIT_REASON_POLICY, action.token, action.kind),
+                        action,
+                    )
+                    logNav("override-action-rejected", request.method, request.isRedirect, manualNavigation)
                     return true
                 }
                 denyNavigation(
@@ -1053,13 +1248,23 @@ internal class BrowserSession private constructor(
                 return true
             }
             val manualAtDecision = manualNavigation
+            if (action == null && continuesControlledInitialRedirect(request, manualAtDecision)) {
+                // The initial controlled loadUrl does not call this callback; its first HTTP
+                // redirect does. Let this same load continue. No second loadUrl and no new ticket:
+                // the document-start witness and the ready probe still decide the final page.
+                logNav("override-controlled-redirect", request.method, request.isRedirect, manualAtDecision)
+                return false
+            }
             if (!MainFrameGate.allows(request.method, request.isRedirect, manualAtDecision)) {
-                if (submit != null) {
-                    // A known submit POST/redirect is a definite rejection. Report it and leave the
+                if (action != null) {
+                    // A known action POST/redirect is a definite rejection. Report it and leave the
                     // page/action alone so the original request can return OUTCOME_UNKNOWN; do not
                     // trigger onUnknown here, which would revoke and cancel the waiting job.
-                    emitSubmitNavigation(BrowserSubmitNavigation.Rejected(submitRejectionReason(request)))
-                    logNav("override-submit-rejected", request.method, request.isRedirect, manualAtDecision)
+                    emitNavigation(
+                        BrowserSubmitNavigation.Rejected(submitRejectionReason(request), action.token, action.kind),
+                        action,
+                    )
+                    logNav("override-action-rejected", request.method, request.isRedirect, manualAtDecision)
                     return true
                 }
                 logNav("override-unsupported", request.method, request.isRedirect, manualAtDecision)
@@ -1069,40 +1274,64 @@ internal class BrowserSession private constructor(
             }
             // Manual mode is a person navigating. Do not rewrite the request or start a controlled GET.
             if (manualNavigation) return false
-            if (submit != null) {
-                // The real GET is the only submit receipt. The page's own load is blocked; the
+            if (action != null) {
+                // The real GET is the only action receipt. The page's own load is blocked; the
                 // presenter policy-checks and opens it once in the same tab.
-                emitSubmitNavigation(BrowserSubmitNavigation.Get(raw))
+                emitNavigation(
+                    BrowserSubmitNavigation.Get(raw, action.token, action.kind),
+                    action,
+                )
                 return true
             }
+            // No armed action: an ordinary main-frame GET is still not continued here.
             onMainGet?.invoke(raw)
             return true
         }
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
             val manualAtDecision = manualNavigation
-            if (request.isForMainFrame && MainFrameGate.isUnsupported(request.method, request.isRedirect, manualAtDecision)) {
-                val captured = ticket
+            // A redirect of the initial controlled GET may continue only when its target also passes
+            // the same syntax policy the override path applied before this network callback.
+            val controlledRedirect = request.isForMainFrame &&
+                (request.url?.toString()?.let { policyProvider().checkSyntax(it) } is io.andchamber.app.browser.UrlDecision.Allow) &&
+                continuesControlledInitialRedirect(request, manualAtDecision)
+            if (request.isForMainFrame &&
+                !controlledRedirect &&
+                MainFrameGate.isUnsupported(request.method, request.isRedirect, manualAtDecision)
+            ) {
+                val capturedTicket = ticket
                 val reason = submitRejectionReason(request)
+                // Capture this exact intent object off-main. The posted Main decision must only
+                // attribute the rejection to the object that still owns the one slot; a disarmed,
+                // consumed or replaced action is dropped, never turned into a page-wide unknown.
+                val capturedIntent = if (manualAtDecision) null else navigationIntent
                 logNav("intercept-unsupported", request.method, request.isRedirect, manualAtDecision)
                 view.post {
-                    logNav("intercept-posted", request.method, request.isRedirect, manualNavigation, captured)
-                    val submit = if (manualNavigation) {
-                        clearSubmitIntent()
-                        null
-                    } else {
-                        activeSubmitIntent()
-                    }
-                    if (submit != null) {
-                        // A blocked POST/redirect is still no GET. Report the one fixed rejection
-                        // for this armed Enter, but keep the original request alive so the
-                        // coordinator can return real OUTCOME_UNKNOWN rather than a cancellation.
-                        emitSubmitNavigation(BrowserSubmitNavigation.Rejected(reason))
-                    } else {
-                        // Ordinary unsupported navigation keeps the existing fail-closed path.
-                        markUnknownNavigation("intercept-unsupported")
-                        onUnknown?.invoke()
-                    }
+                    logNav("intercept-posted", request.method, request.isRedirect, manualNavigation, capturedTicket)
+                    val armed = capturedIntent
+                    NavigationSlotGate.postedUnsupported(
+                        captured = armed,
+                        current = navigationIntent,
+                        capturedValid = armed != null && isCurrentNavigationIntent(armed),
+                        reject = {
+                            val intent = armed ?: return@postedUnsupported
+                            // A blocked POST/redirect is still no GET. Report the one fixed
+                            // rejection for this still-current action, but keep the original
+                            // request alive so the coordinator can return real OUTCOME_UNKNOWN
+                            // rather than a cancellation.
+                            emitNavigation(
+                                BrowserSubmitNavigation.Rejected(reason, intent.token, intent.kind),
+                                intent,
+                            )
+                        },
+                        unsupported = {
+                            // No action was armed when this request was captured, and none owns the
+                            // slot now: an ordinary unsupported navigation keeps the existing
+                            // fail-closed path.
+                            markUnknownNavigation("intercept-unsupported")
+                            onUnknown?.invoke()
+                        },
+                    )
                 }
                 return emptyBlocked()
             }
@@ -1117,8 +1346,8 @@ internal class BrowserSession private constructor(
 
         override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
             if (destroyed || isReload || url.isNullOrBlank()) return
-            val intent = if (manualNavigation) null else activeSubmitIntent()
-            if (intent != null && url != intent.baselineUrl &&
+            val intent = if (manualNavigation) null else activeNavigationIntent()
+            if (intent != null && intent.kind == BrowserActionKind.ENTER && url != intent.baselineUrl &&
                 BrowserDriverLogic.sameHttpsOrigin(intent.baselineUrl, url) &&
                 policyProvider().checkSyntax(url) is io.andchamber.app.browser.UrlDecision.Allow
             ) {
@@ -1157,6 +1386,7 @@ internal class BrowserSession private constructor(
 
         override fun onPageCommitVisible(view: WebView, url: String?) {
             if (destroyed || unknownNavigation) return
+            if (ignoreInitialBlank(url, "commit")) return
             noteMainFrame(url)
             requestProbe()
             onGeometryRequested?.invoke()
@@ -1164,8 +1394,28 @@ internal class BrowserSession private constructor(
 
         override fun onPageFinished(view: WebView, url: String?) {
             if (destroyed || unknownNavigation) return
+            if (ignoreInitialBlank(url, "finished")) return
             noteMainFrame(url)
             requestProbe()
+        }
+
+        /**
+         * The exact initial about:blank commit/finished can arrive before the target's first
+         * main-frame start. Ignoring it prevents a probe whose eval would later cross that start
+         * from being mistaken for a target document missing its witness. It never accepts, never
+         * grants and never changes the document; after the first start the strict handling remains.
+         */
+        private fun ignoreInitialBlank(url: String?, source: String): Boolean {
+            val ignore = BrowserDriverLogic.shouldIgnoreInitialBlankFinished(
+                url = url,
+                initialAllowed = initialNoWitnessProbeAllowed(ticket, epoch),
+            )
+            if (!ignore) return false
+            android.util.Log.i(
+                "AndChamberProvider",
+                "initial blank callback ignored source=$source ticket=$ticket epoch=$epoch",
+            )
+            return true
         }
 
         override fun onReceivedError(
@@ -1383,9 +1633,9 @@ internal sealed interface MouseDelivery {
     data class RetireRequired(val identity: MouseDocumentIdentity, val reason: String) : MouseDelivery
 }
 
-/** Outcome of the one native Enter a submit may dispatch. Success means pressed once, not navigated. */
+/** Outcome of the one native action a submit or click may dispatch. Success means dispatched once. */
 internal sealed interface EnterPress {
-    data object Dispatched : EnterPress
+    data class Dispatched(val token: String) : EnterPress
     data object Stale : EnterPress
     data object NotVisible : EnterPress
     data object Expired : EnterPress
@@ -1422,6 +1672,41 @@ data class GeometrySample(
     val frame: NativeFrame,
     val probe: GeometryProbe,
 )
+
+/**
+ * The pure decision for a `shouldInterceptRequest` failure that captured its action intent on the
+ * IO thread and acts on Main.
+ *
+ * The session owns exactly one action slot. A captured intent may be disarmed, consumed or replaced
+ * by a newer action before the posted callback runs. In that case this callback must neither emit a
+ * receipt into the newer action's deferred nor use the generic page-unknown path, which would clear
+ * the newer intent and revoke the page.
+ *
+ * - [captured] is null: the request was ordinary unsupported navigation with no armed action. Only
+ *   when no action owns the slot now does the existing fail-closed page-unknown path run.
+ * - [captured] is not [current]: a disarmed, consumed or replaced action. Drop it.
+ * - [captured] is [current] but [capturedValid] is false (expired or its page/document identity
+ *   moved): drop it. The action's own budget decides its outcome; this old page fact is not a
+ *   reason to reject a later action or to mark the page unknown.
+ * - [captured] is [current] and valid: reject only that action through its own receipt.
+ */
+internal object NavigationSlotGate {
+    fun postedUnsupported(
+        captured: Any?,
+        current: Any?,
+        capturedValid: Boolean,
+        reject: () -> Unit,
+        unsupported: () -> Unit,
+    ) {
+        if (captured == null) {
+            if (current == null) unsupported()
+            return
+        }
+        if (captured !== current) return
+        if (!capturedValid) return
+        reject()
+    }
+}
 
 /** The Enter receipt falls back to this when a caller supplies no absolute deadline. */
 private const val SUBMIT_INTENT_MS = 2_000L

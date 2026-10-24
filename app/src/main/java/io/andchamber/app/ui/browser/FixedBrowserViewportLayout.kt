@@ -26,11 +26,32 @@ internal data class ViewportTransform(val scale: Float, val offsetX: Float, val 
 }
 
 /**
- * Fits a [viewportWidth] x [viewportHeight] page into a [containerWidth] x [containerHeight] box:
- * the whole page always stays visible (never cropped), it is never enlarged past 1:1, and spare
- * room is split evenly on both sides, across and down (a wide computer-layout page sits in the
- * middle of a tall phone screen). A container exactly the viewport's size gets scale 1 and no
- * offset. Unknown viewport sizes draw 1:1.
+ * The largest Float scale at which [viewport] pixels fit in [container] pixels: `viewport * scale`
+ * is never more than [container]. A plain `container.toFloat() / viewport` can round up (1718 / 1080
+ * gives 1.5907408, and 1080 x 1.5907408 is 1718.0001), so the drawn page would end a fraction of a
+ * pixel past its container and capture, which needs the whole page inside it, would refuse. The
+ * check is exact: a Float times an Int is exact in Double, and Float rounding of a product that is
+ * not above the (exactly representable) container cannot go above it. Both sizes must be positive.
+ */
+internal fun fitAxisScale(container: Int, viewport: Int): Float {
+    var scale = (container.toDouble() / viewport).toFloat()
+    while (scale > 0f && scale.toDouble() * viewport > container) scale = Math.nextDown(scale)
+    return scale
+}
+
+/**
+ * Fits a [viewportWidth] x [viewportHeight] page into a [containerWidth] x [containerHeight] box
+ * with one uniform scale: the whole page always stays visible (never cropped) and keeps its
+ * proportions (never stretched). A container larger than the page enlarges it until one side
+ * touches (a 1920 x 1080 computer-layout page on a landscape tablet fills the width or height), so
+ * only the aspect difference is left as an even band on the other axis. A smaller container scales
+ * it down the same way (a wide page sits in the middle of a tall phone screen). A container exactly
+ * the viewport's size gets scale 1 and no offset; phone layout's page is the full-screen page area,
+ * so it never needs enlarging. Only the drawn size changes: the page keeps its fixed size, so no
+ * reflow or reload. Unknown viewport sizes draw 1:1.
+ *
+ * This is the keyboard-closed presentation. While the keyboard is open, [keyboardViewportTransform]
+ * is used instead, so the keyboard never changes the page's scale.
  */
 internal fun fixedViewportTransform(
     containerWidth: Int,
@@ -40,10 +61,56 @@ internal fun fixedViewportTransform(
 ): ViewportTransform {
     if (viewportWidth <= 0 || viewportHeight <= 0) return ViewportTransform(1f, 0f, 0f)
     if (containerWidth <= 0 || containerHeight <= 0) return ViewportTransform(MIN_VIEWPORT_SCALE, 0f, 0f)
-    val scale = min(containerWidth.toFloat() / viewportWidth, containerHeight.toFloat() / viewportHeight)
-        .coerceIn(MIN_VIEWPORT_SCALE, 1f)
+    // No upper bound: the container itself bounds the result, so the page can never be drawn
+    // larger than the area it sits in.
+    val scale = min(fitAxisScale(containerWidth, viewportWidth), fitAxisScale(containerHeight, viewportHeight))
+        .coerceAtLeast(MIN_VIEWPORT_SCALE)
     val offsetX = ((containerWidth - viewportWidth * scale) / 2f).coerceAtLeast(0f)
     val offsetY = ((containerHeight - viewportHeight * scale) / 2f).coerceAtLeast(0f)
+    return ViewportTransform(scale, offsetX, offsetY)
+}
+
+/**
+ * The page while the keyboard is open. The keyboard only covers part of the window for a while, so
+ * it changes what is visible, never the page's scale:
+ *
+ * - Scale is the keyboard-closed presentation's: [fixedViewportTransform] of the page area the same
+ *   window has with the keyboard closed ([referenceWidth] x [referenceHeight], computed by the
+ *   window layout from the keyboard-closed safe area, not sampled from an animating frame). Only a
+ *   real width change (the window became narrower) can lower it, to fit the width; the height the
+ *   keyboard takes away never does.
+ * - The page stays centred across. Down, a page that still fits is centred; a taller page is cut by
+ *   the container and moved so [anchorPageY] (page pixels, the tap that opened the keyboard) sits
+ *   in the middle of the visible part, never moving an edge of the page inside the container. With
+ *   no anchor the page's top is shown.
+ *
+ * The page is then usually not completely visible, so capture refuses (it needs the whole page).
+ * Without a usable reference this falls back to [fixedViewportTransform].
+ */
+internal fun keyboardViewportTransform(
+    containerWidth: Int,
+    containerHeight: Int,
+    viewportWidth: Int,
+    viewportHeight: Int,
+    referenceWidth: Int,
+    referenceHeight: Int,
+    anchorPageY: Float?,
+): ViewportTransform {
+    if (viewportWidth <= 0 || viewportHeight <= 0 || containerWidth <= 0 || containerHeight <= 0 ||
+        referenceWidth <= 0 || referenceHeight <= 0
+    ) {
+        return fixedViewportTransform(containerWidth, containerHeight, viewportWidth, viewportHeight)
+    }
+    val closedScale = fixedViewportTransform(referenceWidth, referenceHeight, viewportWidth, viewportHeight).scale
+    val scale = min(closedScale, fitAxisScale(containerWidth, viewportWidth)).coerceAtLeast(MIN_VIEWPORT_SCALE)
+    val offsetX = ((containerWidth - viewportWidth * scale) / 2f).coerceAtLeast(0f)
+    val spare = containerHeight - viewportHeight * scale
+    val anchor = anchorPageY?.takeIf { it.isFinite() }?.coerceIn(0f, viewportHeight.toFloat())
+    val offsetY = when {
+        spare >= 0f -> spare / 2f
+        anchor == null -> 0f
+        else -> (containerHeight / 2f - anchor * scale).coerceIn(spare, 0f)
+    }
     return ViewportTransform(scale, offsetX, offsetY)
 }
 
@@ -102,6 +169,9 @@ internal interface BrowserViewportHost {
  * resizing or going full screen never resizes the page, never reflows its layout and never reloads
  * it. Touches are mapped back into page pixels by the platform, through the child's scale and
  * translation (ViewGroup applies the inverse matrix before the WebView sees an event).
+ *
+ * While the keyboard is open ([setKeyboard]) the page keeps its keyboard-closed scale and is cut by
+ * this container instead of shrunk; see [keyboardViewportTransform].
  */
 internal open class FixedViewportContainer(context: Context) : FrameLayout(context), BrowserViewportHost {
     private var viewportWidth = 0
@@ -138,8 +208,90 @@ internal open class FixedViewportContainer(context: Context) : FrameLayout(conte
         requestLayout()
     }
 
+    /**
+     * The keyboard-closed page area of the current window, in pixels, while the keyboard is open;
+     * null while it is closed. Comes from the window layout (keyboard target state, not an animation
+     * frame), so it is already right when the keyboard is open before this container first lays out.
+     */
+    private var keyboardReference: Pair<Int, Int>? = null
+
+    /**
+     * The last tap on the page since the keyboard was last closed, in WebView content pixels
+     * (view-local y plus the WebView's own scroll then), so a page scroll between the tap and the
+     * keyboard opening is accounted for. A drag never becomes the anchor.
+     */
+    private var tapContentY: Float? = null
+
+    /**
+     * The anchor actually used while the keyboard is open, in view-local page pixels. Fixed when the
+     * keyboard opens (or on a new tap while it is open) and then left alone, so the person's own
+     * page scrolling or any other layout pass never moves the presentation under them.
+     */
+    private var keyboardAnchorY: Float? = null
+    private var downX = Float.NaN
+    private var downY = Float.NaN
+    private var downViewY = Float.NaN
+    private var downScrollY = 0
+    private val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+
+    /**
+     * Keyboard state from the window layout. [referencePx] is the keyboard-closed page area of this
+     * window (null when the keyboard is closed). Presentation only: never resizes the page.
+     */
+    fun setKeyboard(referencePx: Pair<Int, Int>?) {
+        if (referencePx == keyboardReference) return
+        val opening = keyboardReference == null && referencePx != null
+        keyboardReference = referencePx
+        if (referencePx == null) {
+            tapContentY = null
+            keyboardAnchorY = null
+        } else if (opening) {
+            // Only when the page holds focus: a keyboard for the app's own address field must not
+            // move the page to an older tap.
+            val child = if (childCount > 0) getChildAt(0) else null
+            keyboardAnchorY = if (child != null && child.hasFocus()) tapContentY?.let { it - child.scrollY } else null
+        }
+        requestLayout()
+    }
+
+    /** Only reads the touch to remember where the page was tapped; never consumes or changes it. */
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        val child = if (childCount > 0) getChildAt(0) else null
+        val t = transform
+        if (child != null && t.scale > 0f) {
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    downViewY = (event.y - t.offsetY) / t.scale
+                    downScrollY = child.scrollY
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val tap = downY.isFinite() && downViewY.isFinite() &&
+                        kotlin.math.abs(event.x - downX) <= touchSlop && kotlin.math.abs(event.y - downY) <= touchSlop
+                    if (tap) {
+                        tapContentY = downViewY + downScrollY
+                        if (keyboardReference != null && keyboardAnchorY != downViewY) {
+                            // Keyboard already open: a tap on another field brings that one into view.
+                            keyboardAnchorY = downViewY
+                            requestLayout()
+                        }
+                    }
+                    downY = Float.NaN
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> downY = Float.NaN
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     private fun pageWidth(containerWidth: Int) = if (viewportWidth > 0) viewportWidth else containerWidth
     private fun pageHeight(containerHeight: Int) = if (viewportHeight > 0) viewportHeight else containerHeight
+
+    private fun presentationFor(w: Int, h: Int): ViewportTransform {
+        val reference = keyboardReference ?: return fixedViewportTransform(width, height, w, h)
+        return keyboardViewportTransform(width, height, w, h, reference.first, reference.second, keyboardAnchorY)
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = View.MeasureSpec.getSize(widthMeasureSpec)
@@ -153,7 +305,7 @@ internal open class FixedViewportContainer(context: Context) : FrameLayout(conte
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         val w = pageWidth(width)
         val h = pageHeight(height)
-        val next = fixedViewportTransform(width, height, w, h)
+        val next = presentationFor(w, h)
         for (i in 0 until childCount) {
             val child = getChildAt(i)
             // Same bounds as before: the WebView sees no size change while the window changes.
