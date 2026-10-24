@@ -136,8 +136,8 @@ class BrowserImePresentationInstrumentationTest {
                 OpenChamberProviderFixtures.ORIGIN,
                 "ime-open",
                 "desktop",
-                1920,
-                1080,
+                1440,
+                2160,
             )
             assertTrue("desktop open failed: ${opened.errorCode} ${opened.message}", opened.ok)
             harness.awaitPageReady()
@@ -168,15 +168,15 @@ class BrowserImePresentationInstrumentationTest {
                 timeOriginBeforeUi,
                 evalString(harness, view, "String(performance.timeOrigin)"),
             )
-            assertEquals("the fixed native canvas must not change", 1920, view.width)
-            assertEquals("the fixed native canvas must not change", 1080, view.height)
+            assertEquals("the fixed native canvas must not change", 1440, view.width)
+            assertEquals("the fixed native canvas must not change", 2160, view.height)
             assertTrue("the page must be in desktop mode", harness.state.desktopMode)
             assertFalse("the fresh page must not require reopen", harness.state.requiresReopen)
 
             val witnessBefore = evalString(harness, view, "String((window.__acWitness||{}).documentId||'')")
             assertTrue("the document witness must exist", witnessBefore.isNotBlank())
             val timeOriginBeforeInput = evalString(harness, view, "String(performance.timeOrigin)")
-            addImeProbe(harness, view, topCssPx = 850.0)
+            addImeProbe(harness, view, topCssPx = 700.0)
             assertEquals(
                 "adding the probe input must not change the document witness",
                 witnessBefore,
@@ -269,7 +269,7 @@ class BrowserImePresentationInstrumentationTest {
             val imeOpen = imeState(harness.activity)
             val metricsOpen = readMetrics(harness, view)
             val frameOpen = viewFrame(view)
-            val visibleOpen = globalVisibleRect(view)
+            val visibleOpen = presentationVisibleRect(view)
             val imeTop = imeOpen.top
             android.util.Log.i(
                 "AndChamberIme",
@@ -278,7 +278,7 @@ class BrowserImePresentationInstrumentationTest {
                     "css=${metricsOpen.innerWidth}x${metricsOpen.innerHeight} " +
                     "visual=${metricsOpen.visualWidth}x${metricsOpen.visualHeight} " +
                     "imeTop=$imeTop imeBottom=${imeOpen.bottom} visible=$visibleOpen " +
-                    "displayed=${1920 * frameOpen.scaleX}x${1080 * frameOpen.scaleY}",
+                    "displayed=${view.width * frameOpen.scaleX}x${view.height * frameOpen.scaleY}",
             )
 
             // IME presentation: no scale shrink, no native/CSS canvas change, no reload or new grant.
@@ -293,8 +293,8 @@ class BrowserImePresentationInstrumentationTest {
                 abs(frameOpen.scaleY - frameBefore.scaleY) <= 0.001f,
             )
             assertTrue("the page scale must not grow with the IME", frameOpen.scaleX <= frameBefore.scaleX + 0.001f)
-            assertEquals("the native canvas width must not change with the IME", 1920, view.width)
-            assertEquals("the native canvas height must not change with the IME", 1080, view.height)
+            assertEquals("the native canvas width must not change with the IME", 1440, view.width)
+            assertEquals("the native canvas height must not change with the IME", 2160, view.height)
             assertTrue(
                 "the displayed screen width must not shrink with the IME: " +
                     "before=${1920 * frameBefore.scaleX} after=${1920 * frameOpen.scaleX}",
@@ -673,6 +673,16 @@ class BrowserImePresentationInstrumentationTest {
         var rect = Rect()
         instrumentation.runOnMainSync { view.getGlobalVisibleRect(rect) }
         return rect
+    }
+
+    /** The same clipped window rectangle production capture uses, not the WebView's full canvas. */
+    private fun presentationVisibleRect(view: WebView): Rect {
+        var rect: Rect? = null
+        instrumentation.runOnMainSync {
+            val host = view.parent as? BrowserViewportHost
+            rect = host?.presentationSnapshot()?.visible
+        }
+        return requireNotNull(rect) { "production presentation has no visible page rectangle" }
     }
 
     private fun displayedWidth(view: WebView): Float = view.width * view.scaleX

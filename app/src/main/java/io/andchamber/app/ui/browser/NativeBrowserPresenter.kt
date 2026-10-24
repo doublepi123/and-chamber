@@ -1202,6 +1202,35 @@ class NativeBrowserPresenter(
      */
     suspend fun navigateManual(url: String): ProviderResult = navigateManual(url, ManualOpenKind.NAVIGATE)
 
+    /**
+     * The person's "new page" entry. Unlike [navigateManual], it never names the selected tab, so the
+     * registry allocates a fresh id and the current page is kept. The owner is the selected tab's
+     * owner, or the console session when no tab exists. It is the same explicit manual open: it
+     * clears an explicit takeover and, once ready, receives default control through [allow]. Blank
+     * URLs and a missing owner use the existing errors and create no page.
+     */
+    suspend fun openNewTabManual(url: String): ProviderResult {
+        val (owner, directory) = synchronized(lock) {
+            val selected = registry.find(selectedTabId.orEmpty())
+            val owner = selected?.ownerSessionId ?: consoleSessionId
+            owner to (selected?.directory ?: "/")
+        }
+        if (owner.isNullOrBlank()) {
+            return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no owner")
+        }
+        val request = ProviderRequest(
+            serverEpoch = "user",
+            connectionId = connectionId.orEmpty(),
+            requestId = "user-new-tab",
+            action = "browser.open",
+            parameters = mapOf("url" to url),
+            directory = directory,
+            sessionId = owner,
+            timeoutMs = 1_000L,
+        )
+        return openClaimed(request, owner, Long.MAX_VALUE, clock, manualKind = ManualOpenKind.NAVIGATE)
+    }
+
     private suspend fun navigateManual(url: String, kind: ManualOpenKind): ProviderResult {
         val owner = synchronized(lock) {
             // The address bar belongs to the shown page; fall back to the console identity only
@@ -1405,6 +1434,9 @@ class NativeBrowserPresenter(
     fun close(tabId: String): Boolean {
         // Closing a tab whose page is pressed destroys that page: retire the press first.
         if (pages[tabId]?.page?.mousePressActive() == true) retireBound(pages[tabId]?.page, "tab-closed")
+        // Capture the order before removal: the fallback is the next tab, otherwise the previous.
+        // Closing a background tab keeps the current selection and grant untouched.
+        val order = synchronized(lock) { registry.tabs().map { it.tabId } }
         val removed = synchronized(lock) { registry.close(tabId) } ?: return false
         synchronized(lock) {
             awaitingAllowTabs.remove(removed.tabId)
@@ -1418,7 +1450,7 @@ class NativeBrowserPresenter(
         pages.remove(removed.tabId)?.page?.destroy()
         if (selectedTabId == removed.tabId) {
             synchronized(lock) {
-                selectedTabId = registry.tabs().lastOrNull()?.tabId
+                selectedTabId = nextSelectedTabAfterClose(order, removed.tabId)
                 val bound = selectedTabId?.let { pages[it] }
                 // A retired fallback shows its placeholder only: no page and no adapter.
                 page = if (bound?.retired == true) null else bound?.page
@@ -1427,6 +1459,10 @@ class NativeBrowserPresenter(
                 if (selectedTabId == null) releasePageLocked()
             }
             revokeAll("tab closed")
+            // Same order as select: selection and revoke first, then a neighbour that is only a
+            // registry tab (another owner's parked tab) gets its one page, loaded once. A tab that
+            // already has a page, or no tab at all, makes this a no-op. It is not a grant.
+            materializeSelected()
         }
         synchronized(lock) { publishLocked() }
         return true
@@ -2789,19 +2825,27 @@ class NativeBrowserPresenter(
     }
 
     /**
-     * Session report that the shown address or the page's own error changed (a same-document
-     * history update, a refused navigation, a load start that cleared an error). It only republishes
-     * state for the exact current page, view and load ticket; a late report from a replaced page,
-     * another view or an older ticket is dropped. It never grants, never touches recovery or refs,
-     * and is not a navigation receipt.
+     * Session report that the page's address, error or title changed (a same-document history
+     * update, a refused navigation, a load start that cleared an error, the engine's title
+     * callback). The source page, its tab, view and load ticket are checked first; a late report
+     * from a replaced page, another view or an older ticket writes nothing.
+     *
+     * A background tab may update only its own registry title/url and republish the tab list. It
+     * never changes the selected displayUrl/pageError, recovery or the grant. The title is display
+     * text; a URL still goes through the same https policy before it replaces the registry url. It
+     * never grants, never touches refs, and is not a navigation receipt.
      */
     private fun onPageStatus(source: ControlledBrowserPage, status: BrowserPageStatus) {
         synchronized(lock) {
-            if (page !== source) return
-            val tabId = selectedTabId ?: return
+            val tabId = source.tabId ?: return
             val bound = pages[tabId] ?: return
-            if (bound.page !== source || bound.retired || source.tabId != tabId) return
+            if (bound.page !== source || bound.retired) return
             if (status.viewId != source.viewId() || status.ticket != source.ticket()) return
+            registry.updateTitle(tabId, status.title.orEmpty())
+            val url = status.displayUrl
+            if (!url.isNullOrBlank() && policy().checkSyntax(url) is UrlDecision.Allow) {
+                registry.updateUrl(tabId, url)
+            }
             publishLocked()
         }
     }

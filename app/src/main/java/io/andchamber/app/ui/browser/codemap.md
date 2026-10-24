@@ -2,10 +2,10 @@
 
 ## Responsibility
 
-The in-app floating browser over the local chat. One public-https page the user can browse, and that
-an agent may use by default after a foreground open passes the current grant checks. Takeover or hiding
-revokes control; restoring the window does not restore a grant. It is not the OpenChamber page, not the
-WebView pool, and not a `WebSessionProfiles` profile.
+The in-app floating browser over the local chat. Multiple public-https pages can be opened, switched
+and closed by the user or the agent. A foreground open may grant the agent by default after the current
+grant checks; Takeover or hiding revokes control, and restoring the window does not restore a grant.
+It is not the OpenChamber page, not the WebView pool, and not a `WebSessionProfiles` profile.
 
 Files:
 - `NativeBrowserPresenter.kt`: the single authority. Owns pages, tabs, grants, connection ids and
@@ -13,6 +13,15 @@ Files:
   unconfirmed action (observation only) from an invalid document (reopen required).
 - `BrowserFloatWindow.kt`, `BrowserFloatPage.kt`, `BrowserFloatLayout.kt`, `BrowserHostSurface.kt`:
   the Compose window, its header/menu/status and the host surface that reports the console session.
+  Several pages: with two or more tabs the address pill ends in a compact "2/3" counter (its own
+  48dp target, no extra bar) that opens the page list (title, else the shown view's title for the
+  current page, else host; selected state; 48dp close). Selecting calls `presenter.select` (which
+  revokes and never restores the grant); closing a current or background page calls
+  `presenter.close`. More > New page opens an empty address editor and calls
+  `presenter.openNewTabManual`. Pure projection: `browserTabEntries`/`browserTabPosition`; test tags
+  (`BrowserAddress`, `BrowserTabCounter`, `BrowserTabList`, `BrowserTabItem<n>`, `BrowserTabClose<n>`,
+  `BrowserNewTabField`) are exposed as resource ids for device tests. The address's accessible name
+  is the shown address (else title), with "Edit web address" as its click action.
 - `BrowserSession.kt`: one WebView, profile bind, clients, viewport capture.
 - `BrowserDesktopViewport.kt`: bounded, paired desktop CSS dimensions (1920 × 1080 by default),
   retained per tab independently of phone window presentation.
@@ -110,9 +119,10 @@ Files:
   controlled provenance). No ready probe, reconnect or late callback grants it; only Resume does.
   Without a takeover Reload keeps default control. Reopen (and the address bar) is a new open of
   the person's own and clears the takeover.
-- `BrowserSession` reports address/error changes (`BrowserPageStatus`, Main only) through
-  `ControlledBrowserPage.onPageStatus`. The presenter only republishes `displayUrl`/`pageError` for
-  the exact current page, view and ticket; it never grants, touches recovery or treats it as a receipt.
+- `BrowserSession` reports address/error/title changes (`BrowserPageStatus`, Main only) through
+  `ControlledBrowserPage.onPageStatus`. The presenter republishes `displayUrl`/`pageError` only for
+  the exact current page, view and ticket. A background tab may update only its own registry title/url;
+  stale pages cannot write anywhere, and no callback grants, changes recovery or acts as a receipt.
 
 ## Flow
 

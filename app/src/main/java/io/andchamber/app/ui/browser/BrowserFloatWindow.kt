@@ -3,7 +3,9 @@ package io.andchamber.app.ui.browser
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -14,8 +16,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imeAnimationTarget
@@ -31,6 +35,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.Lock
@@ -58,11 +63,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -75,9 +82,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
@@ -118,7 +132,7 @@ internal class BrowserWindowUiState {
  * control keeps working through all of them. Hide, Close page and Take over are the only window
  * actions that stop the agent, and they do it through the presenter.
  */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
 internal fun BrowserFloatWindow(
     ui: BrowserWindowUiState,
@@ -164,6 +178,16 @@ internal fun BrowserFloatWindow(
     /** Height of the chat composer above the keyboard; a small window stays above it. */
     bottomClearance: Dp = 72.dp,
     /**
+     * The open pages, in order, from [browserTabEntries]. With two or more, the address shows a
+     * compact "2/3" that opens the page list. Presentation only: selecting goes through
+     * [onSelectTab], closing through [onCloseTab].
+     */
+    tabs: List<BrowserTabEntry> = emptyList(),
+    onSelectTab: (String) -> Unit = {},
+    onCloseTab: (String) -> Unit = {},
+    /** Opens a checked address as a new page, keeping the shown one. Null hides New page. */
+    onNewTab: ((String) -> Unit)? = null,
+    /**
      * Computer layout's page size in CSS px (the agent's choice, default 1920 x 1080), or null in
      * phone layout. It changes only the page's fixed size and the window's proportions; full
      * screen, small window and the window's place stay as they are.
@@ -182,7 +206,11 @@ internal fun BrowserFloatWindow(
     var menu by remember { mutableStateOf(false) }
     var confirmDesktop by remember { mutableStateOf<Boolean?>(null) }
     var confirmClearSiteData by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf(false) }
+    var tabList by remember { mutableStateOf(false) }
+    // What the address area is editing: the shown page's address, or a new page's (empty start).
+    var editTarget by remember { mutableStateOf<AddressEditTarget?>(null) }
+    val editing = editTarget != null
+    val tabPosition = browserTabPosition(tabs)
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         // The parent (WebScreen) already removed system bars, cutout and the keyboard's target inset
@@ -235,10 +263,13 @@ internal fun BrowserFloatWindow(
         val full = layout.presentation == BrowserPresentation.Full
         val float = layout.presentation == BrowserPresentation.Float
         val action = browserControlAction(agentOn, reopenNeeded, canResume, agentReadOnly)
+        // The list stays open while pages are closed one after another, and closes with its counter
+        // (fewer than two pages) or when the window folds, so it never pops back up later.
+        if (tabList && (blocked || tabs.size < 2)) SideEffect { tabList = false }
 
         // Back leaves full screen first, like a phone browser; it never hides or stops the agent.
         BackHandler(enabled = ui.fullRequested && !editing) { ui.fullRequested = false }
-        BackHandler(enabled = editing) { editing = false }
+        BackHandler(enabled = editing) { editTarget = null }
 
         val window = layout.window
         Surface(
@@ -247,7 +278,11 @@ internal fun BrowserFloatWindow(
                 .width(window.width.dp)
                 .height(window.height.dp)
                 .testTag("BrowserFloatSurface")
-                .semantics { contentDescription = "BrowserFloatSurface" },
+                .semantics {
+                    contentDescription = "BrowserFloatSurface"
+                    // Device tests find the address, page counter and list by their test tags.
+                    testTagsAsResourceId = true
+                },
             shape = if (full) RoundedCornerShape(0.dp) else RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             shadowElevation = if (full) 0.dp else 8.dp,
@@ -271,17 +306,31 @@ internal fun BrowserFloatWindow(
                         .padding(start = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (editing && onNavigate != null) {
-                        AddressEditor(
-                            initial = address.orEmpty(),
-                            modifier = Modifier.weight(1f),
-                            onGo = { url ->
-                                editing = false
-                                onNavigate(url)
-                            },
-                            onRefused = { resource -> Toast.makeText(context, resource, Toast.LENGTH_SHORT).show() },
-                            onCancel = { editing = false },
-                        )
+                    val target = editTarget
+                    val go: ((String) -> Unit)? = when (target) {
+                        AddressEditTarget.Current -> onNavigate
+                        AddressEditTarget.NewTab -> onNewTab
+                        null -> null
+                    }
+                    // The entry went away while editing (page closed, owner gone): stop editing,
+                    // so Back and the bar behave normally again.
+                    if (target != null && go == null) SideEffect { editTarget = null }
+                    if (target != null && go != null) {
+                        // A new key per target: switching from editing this page to a new page
+                        // starts a fresh field (empty for a new page), never the old text.
+                        key(target) {
+                            AddressEditor(
+                                initial = if (target == AddressEditTarget.NewTab) "" else address.orEmpty(),
+                                newTab = target == AddressEditTarget.NewTab,
+                                modifier = Modifier.weight(1f),
+                                onGo = { url ->
+                                    editTarget = null
+                                    go(url)
+                                },
+                                onRefused = { resource -> Toast.makeText(context, resource, Toast.LENGTH_SHORT).show() },
+                                onCancel = { editTarget = null },
+                            )
+                        }
                     } else if (blocked) {
                         // Folded: there is no room for any page. Say so in place of the address;
                         // the only action offered is Hide.
@@ -304,7 +353,10 @@ internal fun BrowserFloatWindow(
                             title = title,
                             agentOn = agentOn,
                             modifier = Modifier.weight(1f),
-                            onEdit = if (onNavigate != null) ({ editing = true }) else null,
+                            onEdit = if (onNavigate != null) ({ editTarget = AddressEditTarget.Current }) else null,
+                            // Shares the address pill; no extra bar and no extra 48dp button.
+                            tabPosition = tabPosition,
+                            onOpenTabs = { if (!latestPressCheck()) tabList = true },
                         )
                         run {
                             val fullLabel = stringResource(if (full) R.string.browser_restore else R.string.browser_enlarge)
@@ -357,12 +409,32 @@ internal fun BrowserFloatWindow(
                                     mousePressActive = mousePressActive,
                                     clearingSiteData = clearingSiteData,
                                     onReload = onReload?.let { reload -> { menu = false; reload() } },
+                                    onNewTab = onNewTab?.let {
+                                        { if (!latestPressCheck()) { menu = false; editTarget = AddressEditTarget.NewTab } }
+                                    },
                                     onDesktop = { if (!latestPressCheck()) { menu = false; confirmDesktop = !desktopOn } },
                                     onMouse = { if (!latestPressCheck()) { menu = false; onMouseMode(!mouseOn) } },
                                     onClearSiteData = onClearSiteData?.let {
                                         { if (!latestPressCheck()) { menu = false; confirmClearSiteData = true } }
                                     },
                                     onClosePage = { menu = false; onClosePage() },
+                                )
+                                // The page list hangs from the top bar's end, like the menu, so it
+                                // never takes a bar of its own and never reflows the page.
+                                BrowserTabList(
+                                    expanded = tabList && tabs.size >= 2 && !blocked,
+                                    tabs = tabs,
+                                    onDismiss = { tabList = false },
+                                    onSelect = { id ->
+                                        if (!latestPressCheck()) {
+                                            tabList = false
+                                            onSelectTab(id)
+                                        }
+                                    },
+                                    onClose = { id -> if (!latestPressCheck()) onCloseTab(id) },
+                                    onNewTab = onNewTab?.let {
+                                        { if (!latestPressCheck()) { tabList = false; editTarget = AddressEditTarget.NewTab } }
+                                    },
                                 )
                             }
                         }
@@ -458,7 +530,13 @@ internal fun BrowserFloatWindow(
     }
 }
 
-/** The shown address: host first and strong, the rest muted, cut at the end. Tap to edit. */
+/**
+ * The shown address: host first and strong, the rest muted, cut at the end. Tap to edit.
+ *
+ * With two or more pages a compact "2/3" sits at the pill's end. It is its own 48dp target (the
+ * pill stays 40dp tall; the counter uses the full bar height), so it costs one button's width only
+ * while there is more than one page, and the address itself stays one tap from editing.
+ */
 @Composable
 private fun AddressLabel(
     address: String?,
@@ -466,42 +544,218 @@ private fun AddressLabel(
     agentOn: Boolean,
     modifier: Modifier,
     onEdit: (() -> Unit)?,
+    tabPosition: BrowserTabPosition? = null,
+    onOpenTabs: () -> Unit = {},
 ) {
-    val editLabel = stringResource(R.string.browser_address)
+    val editLabel = stringResource(R.string.browser_address_edit)
     val parts = address?.let { splitAddress(it) }
+    val fallback = title.ifBlank { stringResource(R.string.browser_entry_title) }
+    // The accessible name is what the pill shows (the real address, else the title), never a fixed
+    // word; the action label says that a tap edits it.
+    val spoken = address ?: fallback
+    val pillShape = RoundedCornerShape(20.dp)
+    Box(modifier = modifier.fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
+        // One 40dp pill behind both parts, so the counter reads as part of the address.
+        Box(
+            Modifier
+                .matchParentSize()
+                .padding(vertical = 4.dp)
+                .clip(pillShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        )
+        Row(Modifier.fillMaxWidth().fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp)
+                    .clip(pillShape)
+                    .then(if (onEdit != null) Modifier.clickable(onClickLabel = editLabel, onClick = onEdit) else Modifier)
+                    // Before the clearing modifier: semantics after it on this node are dropped.
+                    .testTag(BROWSER_ADDRESS_TAG)
+                    .clearAndSetSemantics {
+                        contentDescription = spoken
+                        if (onEdit != null) onClick(label = editLabel) { onEdit(); true }
+                    }
+                    .padding(start = 10.dp, end = if (tabPosition != null) 4.dp else 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatusDot(tone = if (agentOn) StatusTone.Live else StatusTone.Idle, size = 7.dp)
+                Spacer(Modifier.width(6.dp))
+                if (parts != null) {
+                    Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(4.dp))
+                }
+                val muted = MaterialTheme.colorScheme.onSurfaceVariant
+                Text(
+                    text = if (parts == null) {
+                        buildAnnotatedString { append(fallback) }
+                    } else {
+                        buildAnnotatedString {
+                            append(parts.first)
+                            withStyle(SpanStyle(color = muted)) { append(parts.second) }
+                        }
+                    },
+                    style = ChamberTextStyles.code,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (tabPosition != null) TabCounter(tabPosition, onOpenTabs)
+        }
+    }
+}
+
+/**
+ * "2/3": which page is shown and how many are open. A tinted chip, so it is noticed next to the
+ * monospace address, with tabular figures so it never jitters while switching. Opens the list.
+ */
+@Composable
+private fun TabCounter(position: BrowserTabPosition, onOpen: () -> Unit) {
+    val description = stringResource(R.string.browser_tabs_position, position.index, position.total)
+    val showLabel = stringResource(R.string.browser_tabs_show)
+    val accent = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(role = Role.Button, onClickLabel = showLabel, onClick = onOpen)
+            .testTag(BROWSER_TAB_COUNTER_TAG)
+            .clearAndSetSemantics {
+                contentDescription = description
+                role = Role.Button
+                onClick(label = showLabel) { onOpen(); true }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .height(26.dp)
+                .widthIn(min = 34.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.primaryContainer)
+                .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = browserTabPositionText(position),
+                style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * The open pages, hung from the top bar like the menu. Each row: an accent bar and tint on the shown
+ * page, a meaningful title (the host when the page gave none) with its host below, and a 48dp close
+ * button. Tapping a row shows that page; closing never switches by itself unless the shown page
+ * is the one closed (the presenter picks the neighbour).
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun BrowserTabList(
+    expanded: Boolean,
+    tabs: List<BrowserTabEntry>,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+    onClose: (String) -> Unit,
+    onNewTab: (() -> Unit)?,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier
+            .widthIn(min = 240.dp, max = 320.dp)
+            .semantics { testTagsAsResourceId = true }
+            .testTag(BROWSER_TAB_LIST_TAG),
+    ) {
+        Text(
+            text = stringResource(R.string.browser_tabs_title),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 6.dp)
+                .semantics { heading() },
+        )
+        tabs.forEachIndexed { index, tab -> TabRow(index, tab, onSelect, onClose) }
+        if (onNewTab != null) {
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.browser_new_tab)) },
+                leadingIcon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                onClick = onNewTab,
+                modifier = Modifier.testTag(BROWSER_TAB_LIST_NEW_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TabRow(index: Int, tab: BrowserTabEntry, onSelect: (String) -> Unit, onClose: (String) -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    val currentLabel = stringResource(R.string.browser_tab_current)
+    val closeLabel = stringResource(R.string.browser_tab_close, tab.title)
     Row(
-        modifier = modifier
-            .height(40.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-            .then(if (onEdit != null) Modifier.clickable(onClickLabel = editLabel, onClick = onEdit) else Modifier)
-            .semantics { contentDescription = editLabel }
-            .padding(horizontal = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (tab.current) accent.copy(alpha = 0.10f) else Color.Transparent),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        StatusDot(tone = if (agentOn) StatusTone.Live else StatusTone.Idle, size = 7.dp)
-        Spacer(Modifier.width(6.dp))
-        if (parts != null) {
-            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(12.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(4.dp))
-        }
-        val muted = MaterialTheme.colorScheme.onSurfaceVariant
-        val fallback = title.ifBlank { stringResource(R.string.browser_entry_title) }
-        Text(
-            text = if (parts == null) {
-                buildAnnotatedString { append(fallback) }
-            } else {
-                buildAnnotatedString {
-                    append(parts.first)
-                    withStyle(SpanStyle(color = muted)) { append(parts.second) }
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 56.dp)
+                .selectable(selected = tab.current, role = Role.Tab, onClick = { onSelect(tab.id) })
+                .semantics(mergeDescendants = true) {
+                    if (tab.current) stateDescription = currentLabel
                 }
-            },
-            style = ChamberTextStyles.code,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+                .testTag(browserTabItemTag(index))
+                .padding(start = 6.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // The shown page carries a solid bar; the others keep the same indent, so titles align.
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height(28.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (tab.current) accent else Color.Transparent),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = tab.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (tab.current) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (tab.current) accent else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (tab.host.isNotEmpty() && tab.host != tab.title) {
+                    Text(
+                        text = tab.host,
+                        style = ChamberTextStyles.codeSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        IconButton(
+            onClick = { onClose(tab.id) },
+            modifier = Modifier.size(48.dp).testTag(browserTabCloseTag(index)),
+        ) {
+            Icon(Icons.Rounded.Close, contentDescription = closeLabel, modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -513,6 +767,76 @@ internal fun splitAddress(url: String): Pair<String, String> {
     return rest.substring(0, cut) to tail
 }
 
+/** What the address area is editing. */
+internal enum class AddressEditTarget { Current, NewTab }
+
+/** One row of the page list, display only. [title] is never blank. */
+internal data class BrowserTabEntry(
+    val id: String,
+    val title: String,
+    val host: String,
+    val current: Boolean,
+)
+
+/** 1-based position of the shown page; only when there is more than one page. */
+internal data class BrowserTabPosition(val index: Int, val total: Int)
+
+/**
+ * The page list from presenter state, in tab order. Title: the tab's own title, else (for the shown
+ * page only) the WebView's title, else the host, else the generic name. Display text only.
+ */
+internal fun browserTabEntries(
+    tabs: List<NativeBrowserTab>,
+    selectedTabId: String?,
+    shownTitle: String?,
+    fallbackTitle: String,
+): List<BrowserTabEntry> = tabs.map { tab ->
+    val current = tab.id == selectedTabId
+    val host = browserTabHost(tab.url)
+    BrowserTabEntry(
+        id = tab.id,
+        title = browserTabTitle(tab.title, if (current) shownTitle else null, host, fallbackTitle),
+        host = host,
+        current = current,
+    )
+}
+
+/** The first non-blank of: tab title, shown page title, host, generic name. Trimmed, one line. */
+internal fun browserTabTitle(tabTitle: String?, shownTitle: String?, host: String, fallbackTitle: String): String =
+    listOf(tabTitle, shownTitle, host).firstNotNullOfOrNull { candidate ->
+        candidate?.replace(Regex("\\s+"), " ")?.trim()?.takeIf { it.isNotEmpty() }
+    } ?: fallbackTitle
+
+/** The host of an address, without "www."; empty when there is none. */
+internal fun browserTabHost(url: String?): String {
+    if (url.isNullOrBlank()) return ""
+    return splitAddress(url.trim()).first.substringAfterLast('@').lowercase().removePrefix("www.")
+}
+
+/** Null below two pages (no counter is shown) or when no page is marked current. */
+internal fun browserTabPosition(entries: List<BrowserTabEntry>): BrowserTabPosition? {
+    if (entries.size < 2) return null
+    val index = entries.indexOfFirst { it.current }
+    if (index < 0) return null
+    return BrowserTabPosition(index + 1, entries.size)
+}
+
+/** "2/3"; a three-digit count is capped so the chip keeps its width. */
+internal fun browserTabPositionText(position: BrowserTabPosition): String {
+    val total = if (position.total > 99) "99+" else position.total.toString()
+    return "${position.index.coerceAtMost(99)}/$total"
+}
+
+internal const val BROWSER_ADDRESS_TAG = "BrowserAddress"
+internal const val BROWSER_ADDRESS_FIELD_TAG = "BrowserAddressField"
+internal const val BROWSER_NEW_TAB_FIELD_TAG = "BrowserNewTabField"
+internal const val BROWSER_ADDRESS_CANCEL_TAG = "BrowserAddressCancel"
+internal const val BROWSER_TAB_COUNTER_TAG = "BrowserTabCounter"
+internal const val BROWSER_TAB_LIST_TAG = "BrowserTabList"
+internal const val BROWSER_TAB_LIST_NEW_TAG = "BrowserTabListNew"
+internal fun browserTabItemTag(index: Int) = "BrowserTabItem$index"
+internal fun browserTabCloseTag(index: Int) = "BrowserTabClose$index"
+
 @Composable
 private fun AddressEditor(
     initial: String,
@@ -520,10 +844,13 @@ private fun AddressEditor(
     onGo: (String) -> Unit,
     onRefused: (Int) -> Unit,
     onCancel: () -> Unit,
+    /** Editing a new page's address: empty start, its own name and a hint; the shown page stays. */
+    newTab: Boolean = false,
 ) {
     var value by remember { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
     val focus = remember { FocusRequester() }
-    val fieldLabel = stringResource(R.string.field_address)
+    val fieldLabel = stringResource(if (newTab) R.string.browser_new_tab_address else R.string.field_address)
+    val placeholder = stringResource(R.string.browser_open_page_placeholder)
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(Unit) {
         runCatching { focus.requestFocus() }
@@ -531,7 +858,8 @@ private fun AddressEditor(
     }
     fun submit() {
         when (val check = checkBrowserUrl(value.text)) {
-            is BrowserUrlCheck.Ready -> onGo(check.url)
+            // Close the keyboard with the editor, so the window does not stay folded by it.
+            is BrowserUrlCheck.Ready -> { keyboard?.hide(); onGo(check.url) }
             is BrowserUrlCheck.Refused -> onRefused(R.string.browser_open_page_refused)
             else -> onRefused(R.string.browser_open_page_invalid)
         }
@@ -546,6 +874,21 @@ private fun AddressEditor(
                 .padding(horizontal = 12.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
+            if (newTab && value.text.isEmpty()) {
+                // A visual hint only; nothing is filled in or loaded for the person.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = placeholder,
+                        style = ChamberTextStyles.code,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        modifier = Modifier.clearAndSetSemantics {},
+                    )
+                }
+            }
             // Single line: a long address scrolls sideways while editing.
             BasicTextField(
                 value = value,
@@ -561,13 +904,14 @@ private fun AddressEditor(
                 ),
                 keyboardActions = KeyboardActions(onGo = { submit() }),
                 modifier = Modifier.fillMaxWidth().focusRequester(focus)
-                    .semantics { contentDescription = fieldLabel },
+                    .semantics { contentDescription = fieldLabel }
+                    .testTag(if (newTab) BROWSER_NEW_TAB_FIELD_TAG else BROWSER_ADDRESS_FIELD_TAG),
             )
         }
         IconButton(onClick = { submit() }, modifier = Modifier.size(48.dp)) {
             Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = stringResource(R.string.browser_address_go))
         }
-        IconButton(onClick = onCancel, modifier = Modifier.size(48.dp)) {
+        IconButton(onClick = { keyboard?.hide(); onCancel() }, modifier = Modifier.size(48.dp).testTag(BROWSER_ADDRESS_CANCEL_TAG)) {
             Icon(Icons.Rounded.Close, contentDescription = stringResource(R.string.browser_address_cancel))
         }
     }
@@ -582,12 +926,21 @@ private fun BrowserMenu(
     mousePressActive: Boolean,
     clearingSiteData: Boolean,
     onReload: (() -> Unit)?,
+    onNewTab: (() -> Unit)?,
     onDesktop: () -> Unit,
     onMouse: () -> Unit,
     onClearSiteData: (() -> Unit)?,
     onClosePage: () -> Unit,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (onNewTab != null) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.browser_new_tab)) },
+                leadingIcon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                enabled = !mousePressActive,
+                onClick = onNewTab,
+            )
+        }
         if (onReload != null) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.browser_reload)) },

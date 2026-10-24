@@ -114,6 +114,8 @@ data class BrowserPageStatus(
     val ticket: Long,
     val displayUrl: String?,
     val pageError: String?,
+    /** Display text reported by the page; never a navigation receipt or a trust proof. */
+    val title: String? = null,
 )
 
 data class NativeBrowserTab(
@@ -123,3 +125,14 @@ data class NativeBrowserTab(
     val owner: String,
     val active: Boolean,
 )
+
+/**
+ * Deterministic selection after closing [closingTabId]. [orderedTabIds] is the tab order before the
+ * close: prefer the next tab in that order, otherwise the previous one, and null when no tab remains.
+ * Closing a background tab never calls this; it does not move the selection.
+ */
+internal fun nextSelectedTabAfterClose(orderedTabIds: List<String>, closingTabId: String): String? {
+    val index = orderedTabIds.indexOf(closingTabId)
+    if (index < 0) return null
+    return orderedTabIds.getOrNull(index + 1) ?: orderedTabIds.getOrNull(index - 1)
+}

@@ -361,9 +361,17 @@
     <string name="browser_float_status_agent_waiting">The agent opened this page. It takes over once the page has loaded.</string>
     <string name="browser_hide">Hide browser</string>
     <string name="browser_show">Show browser</string>
-    <string name="browser_address">Web address</string>
+    <string name="browser_address_edit">Edit web address</string>
     <string name="browser_address_go">Go</string>
     <string name="browser_address_cancel">Stop editing</string>
     <string name="browser_reload">Reload page</string>
     <string name="browser_action_outcome_unknown">Unconfirmed action. The agent can only read; Take over revokes access.</string>
+    <string name="browser_tabs_position">Page %1$d of %2$d</string>
+    <string name="browser_tabs_show">Show open pages</string>
+    <string name="browser_tabs_title">Open pages</string>
+    <string name="browser_tab_current">Shown now</string>
+    <string name="browser_tab_close">Close %1$s</string>
+    <string name="browser_new_tab">New page</string>
+    <string name="browser_new_tab_address">New page address</string>
+    <string name="browser_new_tab_failed">Could not open the page. You can try again.</string>
 </resources>

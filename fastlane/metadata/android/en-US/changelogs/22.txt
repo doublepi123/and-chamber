@@ -1,0 +1,6 @@
+0.0.22
+
+Added and improved:
+- Open, switch and close multiple floating-browser pages with a compact page counter.
+- Page titles stay current, and closing the shown page selects its neighbour.
+- Switching to a remote instance no longer destroys the local page, session or scroll state.

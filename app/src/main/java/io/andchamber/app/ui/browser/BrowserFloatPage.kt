@@ -139,6 +139,19 @@ internal fun BrowserFloatPage(
     fun reload() {
         scope.launch { manual.reload() }
     }
+    // New page: the person's own explicit open in a fresh tab; the shown page is kept. The address
+    // was already checked by the editor, and the presenter checks it again.
+    fun openNewTab(url: String) {
+        scope.launch {
+            val result = presenter.openNewTabManual(url)
+            if (!result.ok) Toast.makeText(context, browserNewTabFailureResource(result.message), Toast.LENGTH_SHORT).show()
+        }
+    }
+    // The shown page's name: the tab's own title, else the WebView's, else (inside the window) the
+    // host. Display text only; it never decides anything.
+    val fallbackTitle = stringResource(R.string.browser_entry_title)
+    val tabEntries = browserTabEntries(state.tabs, state.selectedTabId, view?.title, fallbackTitle)
+    val shownTitle = tab?.title?.takeIf { it.isNotBlank() } ?: view?.title.orEmpty()
     // Reopen after an unconfirmed action: one fresh load of the shown address, only on the
     // person's tap. A second tap while it runs does nothing; a failure always says so. Unlike the
     // menu's Reload it is a new open of the person's own (it replaces an earlier takeover).
@@ -161,7 +174,7 @@ internal fun BrowserFloatPage(
 
     BrowserFloatWindow(
         ui = ui,
-        title = view?.title.orEmpty(),
+        title = shownTitle,
         address = address,
         status = status,
         agentOn = state.agentOn,
@@ -208,6 +221,12 @@ internal fun BrowserFloatPage(
         clearingSiteData = clearingSiteData,
         bottomClearance = bottomClearance,
         desktopViewport = if (state.desktopMode) IntSize(state.desktopWidth, state.desktopHeight) else null,
+        tabs = tabEntries,
+        // Selecting another page revokes the agent's grant (presenter rule); it is not restored.
+        onSelectTab = { presenter.select(it) },
+        // Current or background page: the same presenter close; it picks the neighbour itself.
+        onCloseTab = { presenter.close(it) },
+        onNewTab = if (owner.isNullOrBlank()) null else ::openNewTab,
     ) { layoutBlocked, viewportPx, keyboardReferencePx ->
         val presentationBlocked = layoutBlocked || presentationOccluded
         // A real phone-screen change (rotation, split screen) in phone layout resizes the page; that
@@ -508,6 +527,12 @@ private fun browserFloatStatusLine(
 internal fun browserScrollNotSavedResource(reason: ScrollNotSavedReason): Int = when (reason) {
     ScrollNotSavedReason.LOADING, ScrollNotSavedReason.NO_WITNESS -> R.string.browser_scroll_waiting
     else -> R.string.browser_scroll_not_saved
+}
+
+/** A refused New page says why when it is the address; anything else is the generic failure. */
+internal fun browserNewTabFailureResource(message: String?): Int = when (message) {
+    "url refused" -> R.string.browser_open_page_refused
+    else -> browserFloatErrorResource(message) ?: R.string.browser_new_tab_failed
 }
 
 internal fun browserReopenFailureResource(ok: Boolean, message: String?): Int? =

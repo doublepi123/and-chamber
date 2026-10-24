@@ -357,9 +357,17 @@
     <string name="browser_float_status_agent_waiting">代理打开了此页面，加载完成后由代理操作。</string>
     <string name="browser_hide">隐藏浏览器</string>
     <string name="browser_show">显示浏览器</string>
-    <string name="browser_address">网址</string>
+    <string name="browser_address_edit">编辑网址</string>
     <string name="browser_address_go">前往</string>
     <string name="browser_address_cancel">取消编辑</string>
     <string name="browser_reload">重新加载页面</string>
     <string name="browser_action_outcome_unknown">操作未确认；代理只读，点“接管”可撤销权限。</string>
+    <string name="browser_tabs_position">第 %1$d 页，共 %2$d 页</string>
+    <string name="browser_tabs_show">查看已打开的页面</string>
+    <string name="browser_tabs_title">已打开的页面</string>
+    <string name="browser_tab_current">当前显示</string>
+    <string name="browser_tab_close">关闭 %1$s</string>
+    <string name="browser_new_tab">新建页面</string>
+    <string name="browser_new_tab_address">新页面网址</string>
+    <string name="browser_new_tab_failed">无法打开页面，请重试。</string>
 </resources>

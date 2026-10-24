@@ -3127,6 +3127,254 @@ class NativeBrowserPresenterTest {
     }
 
     @Test
+    fun `openNewTabManual creates a new tab for the current owner and grants default control`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/first", "session-a").ok)
+        val firstTab = presenter.state.value.selectedTabId!!
+        presenter.takeover()
+        assertTrue("the person's takeover is latched", presenter.state.value.explicitTakeover)
+
+        val opened = presenter.openNewTabManual("https://example.com/second")
+        assertTrue(opened.errorCode ?: "ok", opened.ok)
+        assertFalse("a new manual page replaces the takeover", presenter.state.value.explicitTakeover)
+        val secondTab = presenter.state.value.selectedTabId!!
+        assertNotEquals(firstTab, secondTab)
+        assertEquals(2, presenter.registry.tabs().size)
+        assertEquals("session-a", presenter.registry.find(secondTab)?.ownerSessionId)
+        assertEquals("https://example.com/second", presenter.registry.find(secondTab)?.url)
+        assertEquals(listOf(1, 1), pages.map { it.loads })
+
+        // The new page keeps the normal ready-time default control.
+        presenter.acceptProbeForTest(pages[1], readyIdentity(pages[1]))
+        assertEquals(secondTab, presenter.registry.currentGrant()?.tabId)
+        assertTrue(presenter.state.value.agentOn)
+
+        // The address bar still reuses the selected tab and never grows the tab list.
+        assertTrue(presenter.navigateManual("https://example.com/third").ok)
+        assertEquals(2, presenter.registry.tabs().size)
+        assertEquals(secondTab, presenter.state.value.selectedTabId)
+        assertEquals(3, pages.size)
+    }
+
+    @Test
+    fun `openNewTabManual refuses a missing owner or blank url without creating a page`() = runBlocking {
+        var created = 0
+        val presenter = presenter { created += 1; FakePage() }
+        assertFalse(presenter.openNewTabManual("https://example.com/x").ok)
+        assertEquals(0, created)
+        assertTrue(presenter.registry.tabs().isEmpty())
+
+        presenter.setConsoleSession("owner-a")
+        val blank = presenter.openNewTabManual("   ")
+        assertEquals(ProviderCodes.INVALID_REQUEST, blank.errorCode)
+        assertEquals(0, created)
+        assertTrue(presenter.registry.tabs().isEmpty())
+    }
+
+    @Test
+    fun `closing the selected tab selects its next neighbour or the previous one for the last tab`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/a", "session-a").ok)
+        val a = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.openNewTabManual("https://example.com/b").ok)
+        val b = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.openNewTabManual("https://example.com/c").ok)
+        val c = presenter.state.value.selectedTabId!!
+        assertEquals(listOf(1, 1, 1), pages.map { it.loads })
+
+        assertTrue(presenter.select(b))
+        assertTrue(presenter.close(b))
+        assertEquals("the next tab is selected", c, presenter.state.value.selectedTabId)
+
+        assertTrue(presenter.close(c))
+        assertEquals("the last tab falls back to the previous one", a, presenter.state.value.selectedTabId)
+        assertEquals("closing does not reload the surviving page", listOf(1, 1, 1), pages.map { it.loads })
+
+        assertTrue(presenter.close(a))
+        assertNull(presenter.state.value.selectedTabId)
+        assertFalse(presenter.state.value.shown)
+        assertTrue(presenter.registry.tabs().isEmpty())
+    }
+
+    @Test
+    fun `closing the selected tab materializes a parked neighbour once and keeps the window shown`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        // A: loaded. B: another owner's parked tab (no page). C: loaded, after B in tab order.
+        assertTrue(presenter.openUser("https://example.com/a", "owner-a").ok)
+        val a = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.openClaimed(openRequest(session = "owner-b", id = "open-b"), 1_000L).ok)
+        val b = presenter.registry.tabs().first { it.ownerSessionId == "owner-b" }.tabId
+        assertEquals("the parked tab has no page yet", 1, pages.size)
+        assertTrue(presenter.openNewTabManual("https://example.com/c").ok)
+        val c = presenter.state.value.selectedTabId!!
+        assertEquals(listOf(a, b, c), presenter.registry.tabs().map { it.tabId })
+        val pageA = pages[0]
+        val pageC = pages[1]
+        assertEquals(2, pages.size)
+
+        assertTrue(presenter.select(a))
+        assertTrue(presenter.allow())
+        assertNotNull(presenter.registry.currentGrant())
+
+        assertTrue(presenter.close(a))
+        assertEquals("the next tab is selected", b, presenter.state.value.selectedTabId)
+        assertEquals("the parked neighbour got exactly one page", 3, pages.size)
+        val pageB = pages[2]
+        assertEquals(b, pageB.tabId)
+        assertEquals(1, pageB.loads)
+        assertTrue("the window stays shown on the materialized neighbour", presenter.state.value.shown)
+        assertEquals(pageB.handle, presenter.state.value.viewHandle)
+        assertNull("closing never restores or keeps a grant", presenter.registry.currentGrant())
+        assertFalse(presenter.state.value.agentOn)
+        assertTrue(pageA.destroyed)
+        assertFalse("an existing page is not rebuilt", pageC.destroyed)
+        assertEquals("an existing page is not reloaded", 1, pageC.loads)
+
+        // The neighbour can switch to the already loaded page without creating or loading anything.
+        assertTrue(presenter.select(c))
+        assertEquals(c, presenter.state.value.selectedTabId)
+        assertEquals(3, pages.size)
+        assertEquals(listOf(1, 1, 1), listOf(pageA, pageC, pageB).map { it.loads })
+        assertNull(presenter.registry.currentGrant())
+
+        // Closing the materialized tab falls to its neighbour, which is already loaded.
+        assertTrue(presenter.select(b))
+        assertTrue(presenter.close(b))
+        assertEquals(c, presenter.state.value.selectedTabId)
+        assertTrue(presenter.state.value.shown)
+        assertEquals(3, pages.size)
+        assertEquals(1, pageC.loads)
+        assertTrue(presenter.select(c))
+        assertNull(presenter.registry.currentGrant())
+
+        // The last tab still hides normally.
+        assertTrue(presenter.close(c))
+        assertNull(presenter.state.value.selectedTabId)
+        assertFalse(presenter.state.value.shown)
+        assertEquals(3, pages.size)
+    }
+
+    @Test
+    fun `closing a background tab keeps the current selection and grant`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/a", "session-a").ok)
+        val a = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.openNewTabManual("https://example.com/b").ok)
+        val b = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.select(a))
+        assertTrue(presenter.allow())
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
+
+        assertTrue(presenter.close(b))
+        assertEquals("the visible tab stays selected", a, presenter.state.value.selectedTabId)
+        assertSame("the visible tab keeps its exact grant", grant, presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+        assertTrue("only the closed page is destroyed", pages[1].destroyed)
+        assertFalse(pages[0].destroyed)
+        assertEquals("the background close reloads nothing", listOf(1, 1), pages.map { it.loads })
+    }
+
+    @Test
+    fun `a page title updates the selected tab and a second document start replaces it`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/one", "session-a").ok)
+        val tab = presenter.state.value.selectedTabId!!
+        val page = pages[0]
+        page.currentUrlValue = "https://example.com/one"
+        page.emitStatus(BrowserPageStatus("view", 1L, "https://example.com/one", null, "First"))
+        assertEquals("First", presenter.registry.find(tab)?.title)
+        assertEquals("First", presenter.state.value.tabs.single { it.id == tab }.title)
+        assertEquals("https://example.com/one", presenter.registry.find(tab)?.url)
+
+        // A second document starts: the old title is cleared, then the new title is published.
+        page.currentUrlValue = null
+        page.emitStatus(BrowserPageStatus("view", 1L, null, null, null))
+        assertEquals("", presenter.registry.find(tab)?.title)
+        page.currentUrlValue = "https://example.com/two"
+        page.emitStatus(BrowserPageStatus("view", 1L, "https://example.com/two", null, "Second"))
+        assertEquals("Second", presenter.registry.find(tab)?.title)
+        assertEquals("Second", presenter.state.value.tabs.single { it.id == tab }.title)
+        assertEquals("https://example.com/two", presenter.registry.find(tab)?.url)
+    }
+
+    @Test
+    fun `stale page status from an old ticket or replaced page never writes the tab`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/live", "session-a").ok)
+        val tab = presenter.state.value.selectedTabId!!
+        val first = pages[0]
+        first.currentUrlValue = "https://example.com/live"
+        first.emitStatus(BrowserPageStatus("view", 1L, "https://example.com/live", null, "Live"))
+        assertEquals("Live", presenter.registry.find(tab)?.title)
+
+        // An older ticket on the same page writes nothing.
+        first.emitStatus(BrowserPageStatus("view", 99L, "https://example.com/stale", null, "Stale"))
+        assertEquals("Live", presenter.registry.find(tab)?.title)
+        assertEquals("https://example.com/live", presenter.registry.find(tab)?.url)
+
+        // Navigate reuses the same tab and replaces the page; the old page is a late writer.
+        assertTrue(presenter.navigateManual("https://example.com/replacement").ok)
+        assertEquals(tab, presenter.state.value.selectedTabId)
+        val replacement = pages[1]
+        replacement.currentUrlValue = "https://example.com/replacement"
+        replacement.emitStatus(BrowserPageStatus("view", 1L, "https://example.com/replacement", null, "Replacement"))
+        assertEquals("Replacement", presenter.registry.find(tab)?.title)
+
+        first.emitStatus(BrowserPageStatus("view", 1L, "https://example.com/old", null, "Old"))
+        assertEquals("the replaced page writes nothing", "Replacement", presenter.registry.find(tab)?.title)
+        assertEquals("https://example.com/replacement", presenter.registry.find(tab)?.url)
+    }
+
+    @Test
+    fun `a background tab title and url update only that tab and never the shown page`() = runBlocking {
+        val pages = mutableListOf<FakePage>()
+        val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
+        presenter.setConnection("c1", 1L)
+        assertTrue(presenter.openUser("https://example.com/a", "session-a").ok)
+        val a = presenter.state.value.selectedTabId!!
+        assertTrue(presenter.openNewTabManual("https://example.com/b").ok)
+        val b = presenter.state.value.selectedTabId!!
+        val shown = pages[1]
+        shown.currentUrlValue = "https://example.com/shown"
+        presenter.onPresentationChanged()
+        presenter.acceptProbeForTest(shown, readyIdentity(shown))
+        val grant = presenter.registry.currentGrant()
+        assertNotNull(grant)
+        val shownUrl = presenter.state.value.displayUrl
+        assertEquals("https://example.com/shown", shownUrl)
+
+        pages[0].emitStatus(BrowserPageStatus("view", 1L, "http://insecure.example.com/x", "background failure", "Background"))
+        assertEquals("the background title is display text", "Background", presenter.registry.find(a)?.title)
+        assertEquals("a non-https url is still refused by the policy", "https://example.com/a", presenter.registry.find(a)?.url)
+        assertEquals("Background", presenter.state.value.tabs.single { it.id == a }.title)
+        assertEquals("the shown url is untouched", shownUrl, presenter.state.value.displayUrl)
+        assertNull("a background error is not the shown page's error", presenter.state.value.pageError)
+        assertFalse(presenter.state.value.requiresReopen)
+        assertFalse(presenter.state.value.actionOutcomeUnknown)
+        assertSame("a background report never changes the grant", grant, presenter.registry.currentGrant())
+        assertTrue(presenter.state.value.agentOn)
+
+        pages[0].emitStatus(BrowserPageStatus("view", 1L, "https://example.com/a2", null, "Background 2"))
+        assertEquals("an allowed https url is recorded", "https://example.com/a2", presenter.registry.find(a)?.url)
+        assertEquals("https://example.com/a2", presenter.state.value.tabs.single { it.id == a }.url)
+        assertEquals(shownUrl, presenter.state.value.displayUrl)
+        assertSame(grant, presenter.registry.currentGrant())
+    }
+
+    @Test
     fun `selecting another owner's parked tab shows its own page and never grants`() = runBlocking {
         val pages = mutableListOf<FakePage>()
         val presenter = presenter(uniqueTabs = true) { FakePage().also { pages += it } }
@@ -4024,6 +4272,12 @@ class NativeBrowserPresenterTest {
         override var onGeometry: ((GeometrySample) -> Unit)? = null
         override var onGeometryRequested: (() -> Unit)? = null
         override var onMouseRetirement: ((String) -> Unit)? = null
+        override var onPageStatus: ((BrowserPageStatus) -> Unit)? = null
+        var lastStatus: BrowserPageStatus? = null
+        fun emitStatus(status: BrowserPageStatus) {
+            lastStatus = status
+            onPageStatus?.invoke(status)
+        }
         override fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver = BrowserDriver { request ->
             driverCalls += 1
             block()

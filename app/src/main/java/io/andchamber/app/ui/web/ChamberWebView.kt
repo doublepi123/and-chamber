@@ -1145,21 +1145,56 @@ private fun webThemeRes(dark: Boolean): Int =
     if (dark) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar
 
 /**
- * Keeps at most one live [ChamberWebView] (the last opened server), so coming back from Home is
- * instant and only one page uses memory.
+ * The pool's two independent slots. The local server's page lives in [Local] and is never destroyed
+ * by opening a remote server; all remote servers share [Remote], so switching between them replaces
+ * only the previous remote page.
+ */
+internal enum class WebViewSlot {
+    Local,
+    Remote,
+    ;
+
+    companion object {
+        fun of(targetId: String): WebViewSlot =
+            if (targetId == io.andchamber.app.runtime.ServerTarget.LOCAL_ID) Local else Remote
+    }
+}
+
+/**
+ * Keeps at most two live [ChamberWebView]s, one per [WebViewSlot]: the local page and the last
+ * opened remote page. Coming back from Home is instant, and going from the local server to a remote
+ * one does not stop or destroy the local page. A second remote server replaces the remote page only.
  */
 internal class WebViewPool(private val downloads: HttpDownloadStarter) {
-    private var current: ChamberWebView? = null
+    private var local: ChamberWebView? = null
+    private var remote: ChamberWebView? = null
 
     /** Vertical position (0..1) of the page menu handle; shared by all servers. */
     var handleFraction by mutableFloatStateOf(0.3f)
 
-    fun peek(targetId: String): ChamberWebView? = current?.takeIf { it.targetId == targetId }
+    private fun holder(slot: WebViewSlot): ChamberWebView? = when (slot) {
+        WebViewSlot.Local -> local
+        WebViewSlot.Remote -> remote
+    }
+
+    private fun replaceHolder(
+        slot: WebViewSlot,
+        web: ChamberWebView?,
+    ) {
+        when (slot) {
+            WebViewSlot.Local -> local = web
+            WebViewSlot.Remote -> remote = web
+        }
+    }
+
+    fun peek(targetId: String): ChamberWebView? =
+        holder(WebViewSlot.of(targetId))?.takeIf { it.targetId == targetId }
 
     /**
-     * Reuses the pooled WebView only for the same identity (target + canonical origin). A different
-     * identity, including the same target at a new origin, gets a new WebView in its own profile.
-     * May return a [ChamberWebView] whose [ChamberWebView.view] is null (isolation failure).
+     * Reuses the slot's pooled WebView only for the same identity (target + canonical origin). A
+     * different identity, including the same target at a new origin, replaces that target's own
+     * slot; the other slot (local or remote) is never touched. May return a [ChamberWebView] whose
+     * [ChamberWebView.view] is null (isolation failure).
      */
     fun obtain(
         context: Context,
@@ -1167,22 +1202,34 @@ internal class WebViewPool(private val downloads: HttpDownloadStarter) {
         darkTheme: Boolean,
         backgroundColor: Int,
     ): ChamberWebView {
-        current?.takeIf { it.binding.identity == binding.identity }?.let {
+        val slot = WebViewSlot.of(binding.identity.targetId)
+        holder(slot)?.takeIf { it.binding.identity == binding.identity }?.let {
             it.applyTheme(darkTheme, backgroundColor)
             return it
         }
-        destroyAll()
-        return ChamberWebView(context, binding, darkTheme, backgroundColor, downloads).also { current = it }
+        // A new identity for this slot replaces only this slot's page. Detach the old page from the
+        // slot before destroying and constructing: if the constructor throws, the slot must stay
+        // empty instead of holding a destroyed WebView that a later obtain would reuse for the same
+        // identity. The other slot is never touched.
+        val replaced = holder(slot)
+        replaceHolder(slot, null)
+        replaced?.destroy()
+        return ChamberWebView(context, binding, darkTheme, backgroundColor, downloads)
+            .also { replaceHolder(slot, it) }
     }
 
+    /** Destroys only [targetId]'s own page; the page of the other slot keeps running. */
     fun discard(targetId: String) {
-        val pooled = peek(targetId) ?: return
+        val slot = WebViewSlot.of(targetId)
+        val pooled = holder(slot)?.takeIf { it.targetId == targetId } ?: return
         pooled.destroy()
-        current = null
+        replaceHolder(slot, null)
     }
 
     fun destroyAll() {
-        current?.destroy()
-        current = null
+        local?.destroy()
+        remote?.destroy()
+        local = null
+        remote = null
     }
 }

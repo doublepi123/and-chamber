@@ -54,6 +54,9 @@ internal class BrowserSession private constructor(
         private set
     var displayUrl by mutableStateOf<String?>(null)
         private set
+    /** Display-only page title from the engine. A new document clears it. */
+    var title by mutableStateOf<String?>(null)
+        private set
     var documentNonce by mutableStateOf(BrowserDriverLogic.newNonce())
         private set
     var installedNonce by mutableStateOf<String?>(null)
@@ -96,8 +99,8 @@ internal class BrowserSession private constructor(
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
     /**
-     * Display-only report on Main: [displayUrl] or [pageError] changed for this view and ticket.
-     * It carries no authority and is not a navigation receipt.
+     * Display-only report on Main: [displayUrl], [pageError] or [title] changed for this view and
+     * ticket. It carries no authority and is not a navigation receipt.
      */
     var onPageStatus: ((BrowserPageStatus) -> Unit)? = null
     private var lastPageStatus: BrowserPageStatus? = null
@@ -112,10 +115,26 @@ internal class BrowserSession private constructor(
             target?.post { publishPageStatus() }
             return
         }
-        val status = BrowserPageStatus(viewId, ticket, displayUrl, pageError)
+        val status = BrowserPageStatus(viewId, ticket, displayUrl, pageError, title)
         if (status == lastPageStatus) return
         lastPageStatus = status
         onPageStatus?.invoke(status)
+    }
+
+    /**
+     * Display-only title from the engine's title callback. Main-thread only, blank becomes null, and
+     * a new document ([beginDocument]) clears it before any later title arrives.
+     */
+    internal fun noteTitle(value: String?) {
+        if (destroyed) return
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            view.post { noteTitle(value) }
+            return
+        }
+        val next = value?.trim()?.takeIf { it.isNotEmpty() }
+        if (title == next) return
+        title = next
+        publishPageStatus()
     }
 
     /**
@@ -166,6 +185,8 @@ internal class BrowserSession private constructor(
         committed = false
         pageError = null
         progress = 0
+        // The old document's title is never the new document's title.
+        title = null
         if (clearUrl) displayUrl = null
         publishPageStatus()
     }
@@ -1522,6 +1543,10 @@ internal class BrowserSession private constructor(
             (view.tag as? BrowserSession)?.let { session ->
                 session.applyProgress(newProgress)
             }
+        }
+
+        override fun onReceivedTitle(view: WebView, title: String?) {
+            (view.tag as? BrowserSession)?.noteTitle(title)
         }
 
         override fun onCreateWindow(
