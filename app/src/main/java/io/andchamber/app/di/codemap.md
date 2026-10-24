@@ -9,7 +9,8 @@ The only Koin composition root: `AppModule.kt` declares `val appModule = module 
 Koin graph (`single` declarations, all process-wide):
 
 - `OkHttpClient`: connect 5 s, read 10 s. Shared by `VerifiedRuntimeDownloader` and `DefaultWebSessionAuthenticator`.
-- `WebSessionProfiles()`: hands out one WebView profile binding per (target id, canonical origin). It is the only WebView cookie path; there is no global `CookieManager` fallback. Apps installed before this change keep their old default-profile data. Nothing is cleared or migrated.
+- `WebSessionProfiles()`: hands out one WebView profile binding per (target id, canonical origin). It is the only WebView cookie path; there is no global `CookieManager` fallback. Legacy default-profile data is neither cleared nor migrated. Removing a remote clears only that server's named profile after its write gate drains.
+- `ScreenAwakeController`: one process-wide preference/navigation reader in `ui_prefs`, used by `MainActivity` for the optional foreground-only local-runtime screen hold and by Home for its switch.
 - `HttpDownloadStarter` → `AndroidHttpDownloadStarter(context)`: a single application-scoped starter, so a download keeps running after its page is gone. It has its own default scope.
 - `RemoteServerStore` → `EncryptedRemoteServerStore.create(context)`.
 - `OpenChamberNotifier(context)`.

@@ -95,6 +95,28 @@ internal class BrowserSession private constructor(
     var onManualDocument: (() -> Unit)? = null
     var onUnknown: (() -> Unit)? = null
     var onCancelNavigation: (() -> Unit)? = null
+    /**
+     * Display-only report on Main: [displayUrl] or [pageError] changed for this view and ticket.
+     * It carries no authority and is not a navigation receipt.
+     */
+    var onPageStatus: ((BrowserPageStatus) -> Unit)? = null
+    private var lastPageStatus: BrowserPageStatus? = null
+
+    /** Reports the current address/error once per change, always from Main. */
+    private fun publishPageStatus() {
+        if (destroyed) return
+        val target: WebView? = view
+        val onMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+        if (!onMain) {
+            // WebView callbacks already run on Main; anything else is moved there, never reported off it.
+            target?.post { publishPageStatus() }
+            return
+        }
+        val status = BrowserPageStatus(viewId, ticket, displayUrl, pageError)
+        if (status == lastPageStatus) return
+        lastPageStatus = status
+        onPageStatus?.invoke(status)
+    }
 
     /**
      * The single native action (Enter or click) this session dispatched. It is one-shot,
@@ -145,11 +167,13 @@ internal class BrowserSession private constructor(
         pageError = null
         progress = 0
         if (clearUrl) displayUrl = null
+        publishPageStatus()
     }
 
     fun beginControlledGet(): Long {
         loadSeq += 1
         ticket = loadSeq
+        manualControlledTicket = 0L
         acceptedDocumentId = null
         mainStarts = 0
         unknownNavigation = false
@@ -163,6 +187,7 @@ internal class BrowserSession private constructor(
     fun beginManualDocument(): Long {
         loadSeq += 1
         ticket = loadSeq
+        manualControlledTicket = 0L
         acceptedDocumentId = null
         committed = false
         // The onPageStarted caller records this document's first start through noteMainStart().
@@ -238,6 +263,7 @@ internal class BrowserSession private constructor(
         if (destroyed || url.isNullOrBlank() || url == ABOUT_BLANK) return
         displayUrl = url
         pageError = null
+        publishPageStatus()
     }
 
     /** Call before the first load. The script creates a fresh id inside each https document. */
@@ -335,6 +361,7 @@ internal class BrowserSession private constructor(
         pageError = message
         progress = 100
         committed = false
+        publishPageStatus()
     }
 
     internal fun applyProgress(value: Int) {
@@ -345,6 +372,7 @@ internal class BrowserSession private constructor(
         if (!destroyed) {
             pageError = message
             committed = false
+            publishPageStatus()
         }
     }
 
@@ -641,8 +669,60 @@ internal class BrowserSession private constructor(
             pageError = pageError,
             controlledGet = controlledGet,
             automationAllowed = !destroyed && !fatal && !unknownNavigation && !automationBlocked,
-            manualNavigation = manualNavigation,
+            // A person's takeover Reload keeps manual navigation on its own controlled GET. That one
+            // load keeps exactly the controlled-load rules (same ticket, no start yet, no witness);
+            // every other manual page stays strict.
+            manualNavigation = manualNavigation && !manualControlledLoadCurrent(),
         )
+
+    /**
+     * The controlled GET ticket started by a person's takeover-preserving Reload. Only that load's
+     * first main-frame start continues the controlled ticket in manual mode; it is not a grant.
+     */
+    private var manualControlledTicket = 0L
+
+    /** The marker names this exact, still-controlled load. */
+    private fun manualControlledLoadCurrent(): Boolean =
+        manualControlledTicket != 0L && manualControlledTicket == ticket &&
+            controlledGet && controlledGetTicket == ticket
+
+    /** The marked controlled load has not started its document yet. */
+    private fun manualControlledFirstStartPending(): Boolean =
+        manualControlledLoadCurrent() && mainStarts == 0 && acceptedDocumentId == null &&
+            !unknownNavigation && !destroyed && !fatal
+
+    /**
+     * A person's takeover-preserving Reload: from now on this page follows the person's own
+     * navigation. The one controlled GET already loading keeps its ticket, its first-start count
+     * and its document witness checks; it is not loaded again and no rule is relaxed for any later
+     * document. Returns whether that controlled load was still pending (the marker was armed).
+     */
+    fun keepManualForControlledLoad(): Boolean {
+        manualNavigation = true
+        val pending = !destroyed && !fatal && !unknownNavigation && controlledGet &&
+            controlledGetTicket == ticket && ticket > 0L && mainStarts == 0 && acceptedDocumentId == null
+        manualControlledTicket = if (pending) ticket else 0L
+        return pending
+    }
+
+    /**
+     * One main-frame document start. In manual mode a start is a person's new document (new
+     * ticket, no controlled provenance, witness cleared), except the first start of the marked
+     * controlled load, which keeps its ticket. Returns false when the start made the page unknown.
+     */
+    internal fun noteDocumentStart(url: String?): Boolean {
+        if (manualNavigation && !manualControlledFirstStartPending()) {
+            beginManualDocument()
+            onManualDocument?.invoke()
+        }
+        if (!noteMainStart()) {
+            onUnknown?.invoke()
+            return false
+        }
+        noteMainFrame(url)
+        applyProgress(5)
+        return true
+    }
 
     /**
      * A same-view controlled reload needs a previously validated witness and must not overlap an
@@ -959,6 +1039,7 @@ internal class BrowserSession private constructor(
             // The real candidate is visible to a later snapshot/probe. It is not a controlled GET:
             // do not mark controlledGet or claim new-load provenance for a same-document route.
             displayUrl = candidateUrl
+            publishPageStatus()
             emitNavigation(
                 BrowserSubmitNavigation.SameDocument(
                     url = candidateUrl,
@@ -976,6 +1057,7 @@ internal class BrowserSession private constructor(
         if (destroyed) return
         if (policyProvider().checkSyntax(url) is io.andchamber.app.browser.UrlDecision.Allow) {
             displayUrl = url
+            publishPageStatus()
         }
     }
 
@@ -1368,16 +1450,7 @@ internal class BrowserSession private constructor(
                 retireMouse("document-start", unavoidable = true)
                 return
             }
-            if (manualNavigation) {
-                beginManualDocument()
-                onManualDocument?.invoke()
-            }
-            if (!noteMainStart()) {
-                onUnknown?.invoke()
-                return
-            }
-            noteMainFrame(url)
-            applyProgress(5)
+            noteDocumentStart(url)
         }
 
         override fun onScaleChanged(view: WebView, oldScale: Float, newScale: Float) {

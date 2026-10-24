@@ -99,7 +99,20 @@ Files:
   dispatched click/type restricts it to snapshot/capture under the existing verified grant, without
   replaying that action. Only explicit user resume can clear the action uncertainty after rechecking
   identity; document-invalid states require a fresh load. `NativeBrowserState.requiresReopen` and
-  `actionOutcomeUnknown` drive the recovery UI, never website text.
+  `actionOutcomeUnknown` drive the recovery UI, never website text. `agentReadOnly` is derived from
+  the live grant of the shown page plus OBSERVE_ONLY; the window then offers Take over (revoke).
+- Menu Reload and Reopen are separate app-chosen kinds (`ManualOpenKind`), never request
+  parameters. Reload after an explicit takeover keeps the latch, creates no default-control intent
+  and is the person's page from the commit on (`manualNavigation` before ready, so their own links
+  and forms are never blocked). Its one controlled GET is not repeated: `BrowserSession` marks that
+  ticket (`keepManualForControlledLoad`) so only its first main-frame start continues the controlled
+  ticket and witness rules; every later start is a person's manual document (new ticket, no
+  controlled provenance). No ready probe, reconnect or late callback grants it; only Resume does.
+  Without a takeover Reload keeps default control. Reopen (and the address bar) is a new open of
+  the person's own and clears the takeover.
+- `BrowserSession` reports address/error changes (`BrowserPageStatus`, Main only) through
+  `ControlledBrowserPage.onPageStatus`. The presenter only republishes `displayUrl`/`pageError` for
+  the exact current page, view and ticket; it never grants, touches recovery or treats it as a receipt.
 
 ## Flow
 

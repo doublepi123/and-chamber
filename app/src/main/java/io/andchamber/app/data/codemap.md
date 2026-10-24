@@ -6,6 +6,7 @@ Network and persistence adapters for remote and local OpenChamber servers, used 
 
 - `WebSessionAuthenticatorImpl.kt`: prepares a server for the WebView (health check, login, cookie hand-off). Implements `runtime.WebSessionAuthenticator`. Also defines `LocalReadiness`.
 - `WebSessionOrigin.kt`, `WebSessionProfiles.kt`: per-target WebView isolation. `canonicalWebOrigin` normalizes the origin. `WebSessionProfiles` hands out a `WebProfileBinding` per (target id, canonical origin). A `WebSessionCookies` capability is bound to that profile's `CookieManager`. No code path falls back to the global `CookieManager`. Isolation applies to the page's own profile. It does not promise per-origin isolation for every sub-resource inside that profile.
+- `WebProfileRemoval.kt`: per-identity write/open gates and ordered cleanup when a remote server is removed. Started cookie batches finish before the named profile's cookies and WebStorage are cleared; later writes and bindings are refused. Only a completed clear lets the UI delete the saved server.
 - `HttpDownloads.kt`, `HttpDownloadPolicy.kt`, `HttpDownloadTransfer.kt`, `HttpDownloadDestinations.kt`: native http(s) downloads, started through `HttpDownloadStarter` (singleton `AndroidHttpDownloadStarter`). Cookies come from the bound profile, one hop at a time. `DownloadManager` is not used for downloads; it appears only in the notification tap intent.
   - Redirects are followed by hand (`HttpDownloadTransfer`, `NO_COOKIES`, no automatic redirect). The Cookie header is sent only while the chain is on the binding's origin. Once a hop leaves that origin the rest of the chain has no Cookie, and it does not come back. https is never downgraded to http. At most 5 hops.
   - Writes are streamed. Android 10+ uses a pending MediaStore item, published on success. API 26–28 writes a hidden `.part` file and renames it. A failure or cancel removes partial output. Cancel is rethrown.
@@ -27,6 +28,12 @@ Network and persistence adapters for remote and local OpenChamber servers, used 
 - Results include `NeedsGatewayLogin(base)` when Cloudflare Access gates health, probe or login; its pure detector recognizes Access redirects and challenge headers. This result never sends the UI password.
 - Set-Cookie headers are written through the bound profile's `WebSessionCookies.storeCookies` and flushed there. OpenChamber names the cookie `oc_ui_session_<port>`, which keeps two servers on one host apart.
 - Login body: `{"password": ..., "trustDevice": true}`. 401 and 3xx map to `NeedsLogin`; other non-2xx map to `Unreachable`.
+
+### Named profile removal
+
+- Removing a remote retires its (target id, current canonical origin) gate before discarding the pooled view. The gate refuses new opens and cookie writes while an already-started `NonCancellable` batch drains.
+- Only the exact derived profile is addressed; `Default`, the independent browser and other targets are never enumerated or cleared. Older origins from address edits are not claimed.
+- Cookie callback completion and WebStorage deletion must finish before the root commits `remotes.remove` and forgets the page. Failure, timeout or cancellation reopens the gate and keeps the server; success keeps the removed identity frozen against stale pages.
 
 ### LocalApiClient
 

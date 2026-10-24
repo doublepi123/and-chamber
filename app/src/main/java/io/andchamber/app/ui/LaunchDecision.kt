@@ -135,6 +135,36 @@ internal fun withSessionPath(
 ): String = baseUrl.trimEnd('/') + "/" + path.trimStart('/')
 
 /**
+ * The origin (`scheme://authority`) of [baseUrl] exactly as written, or null when it isn't a plain,
+ * credential-free http(s) address. Validated by the same canonical origin profiles and the WebView
+ * use, so a userinfo address can never become a remembered-page target.
+ */
+internal fun originAddress(baseUrl: String): String? {
+    if (canonicalWebOrigin(baseUrl) == null) return null
+    val schemeEnd = baseUrl.indexOf("://")
+    if (schemeEnd <= 0) return null
+    val authority = baseUrl.substring(schemeEnd + 3).takeWhile { it != '/' && it != '?' && it != '#' }
+    if (authority.isEmpty()) return null
+    return baseUrl.substring(0, schemeEnd + 3) + authority
+}
+
+/**
+ * A remembered page [path] (`/openchamber/?session=…`, already a same-origin path+query) restored on
+ * the origin of [baseUrl]. The saved path is absolute, so it already contains the instance's base
+ * path: joining it to the full base URL (as a notification link is joined) would repeat that path.
+ * The path is appended untouched, so the characters saved on disk keep their original escaping.
+ * Null when [baseUrl] has no usable origin or [path] isn't absolute.
+ */
+internal fun withRememberedPagePath(
+    baseUrl: String,
+    path: String,
+): String? {
+    if (!path.startsWith("/")) return null
+    val origin = originAddress(baseUrl) ?: return null
+    return origin + path
+}
+
+/**
  * A start that was just requested reads as Starting until the runtime reports back, so screens
  * don't show "Stopped" (or the old failure) for the moment the service takes to pick it up.
  * [pendingStartFrom] is the state the start was requested from, or null when none is pending.

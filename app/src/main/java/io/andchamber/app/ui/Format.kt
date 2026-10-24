@@ -44,8 +44,19 @@ internal fun uptimeLabel(
     }
 }
 
-/** "http://127.0.0.1:3000/" -> "127.0.0.1:3000" for compact display. */
-internal fun displayAddress(url: String): String = url.substringAfter("://").trimEnd('/')
+/**
+ * "http://127.0.0.1:3000/" -> "127.0.0.1:3000" for compact display. A saved address that still
+ * carries userinfo (older versions accepted one) shows its host only, so a stored password is
+ * never rendered again; the same applies when the address can't be parsed at all.
+ */
+internal fun displayAddress(url: String): String {
+    val schemeEnd = url.indexOf("://")
+    val rest = if (schemeEnd >= 0) url.substring(schemeEnd + 3) else url
+    val authorityEnd = rest.indexOfFirst { it == '/' || it == '?' || it == '#' }
+    val authority = if (authorityEnd >= 0) rest.substring(0, authorityEnd) else rest
+    val userInfoEnd = authority.lastIndexOf('@')
+    return if (userInfoEnd >= 0) rest.substring(userInfoEnd + 1).trimEnd('/') else rest.trimEnd('/')
+}
 
 internal sealed interface AddressCheck {
     data object Empty : AddressCheck
@@ -78,10 +89,15 @@ internal fun checkServerAddress(raw: String): AddressCheck {
     val scheme = uri.scheme?.lowercase(Locale.ROOT)
     if (scheme != "http" && scheme != "https") return AddressCheck.Invalid(R.string.address_scheme)
     val authority = uri.rawAuthority ?: return AddressCheck.Invalid(R.string.address_no_host)
+    // Credentials are never part of a server address: the strict host parse can fail on them and
+    // the loose fallback would then hide a stored password inside a "valid" URL.
+    if (uri.rawUserInfo != null || authority.contains('@')) {
+        return AddressCheck.Invalid(R.string.address_no_userinfo)
+    }
     // java.net.URI rejects some valid names (e.g. with "_"); fall back to the raw authority.
     val host =
         uri.host?.takeIf { it.isNotBlank() }
-            ?: authority.substringAfterLast('@').substringBefore(':').takeIf { it.isNotBlank() }
+            ?: authority.substringBefore(':').takeIf { it.isNotBlank() }
             ?: return AddressCheck.Invalid(R.string.address_no_host)
     val path = uri.rawPath.orEmpty().trimEnd('/')
     return AddressCheck.Valid(url = "$scheme://$authority$path", host = host)

@@ -11,7 +11,8 @@ Key constraints:
 - Guest paths: home `~` = `/root` (bind of `<runtime>/home`), server working directory `/root`.
 - All embedded pages require `WebViewFeature.MULTI_PROFILE`: unsupported or failed binding blocks page loading before authentication. Home, notifications and the local runtime remain available; remote addresses can be opened explicitly in a browser without adding credentials.
 - Profiles are keyed by target ID and canonical origin. Old default-profile data is neither cleared nor migrated; isolation between target profiles does not change browser Cookie rules for subresources inside one profile.
-- Native HTTP downloads use controlled redirects and the app process; they do not resume after process death. Unknown notification-send outcomes preserve the draft and session entry instead of automatically replaying the operation.
+- Native HTTP downloads use controlled redirects and the app process; they do not resume after process death. Unknown notification-send outcomes preserve the draft and session entry instead of automatically replaying the operation. Reply and permission PendingIntents have explicit per-notification/session/directory identities, so one notification cannot overwrite another's action.
+- Removing a remote server clears only its current named WebView profile after started cookie writes drain; failed cleanup keeps the saved server. Optional screen awake is off by default and holds the foreground Activity window only while the local runtime is Running and no remote page is shown.
 - Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
 
@@ -20,12 +21,12 @@ Key constraints:
 | File | Role |
 |---|---|
 | `app/src/main/java/io/andchamber/app/AndChamberApplication.kt` | Process entry: starts Koin (`di/AppModule.kt`) and the notification observer |
-| `app/src/main/java/io/andchamber/app/MainActivity.kt` | Single launcher activity (singleTop): hosts Compose `AndChamberApp`, turns notification taps into `OpenSessionLink` |
+| `app/src/main/java/io/andchamber/app/MainActivity.kt` | Single launcher activity (singleTop): hosts Compose `AndChamberApp`, turns notification taps into `OpenSessionLink`, owns the optional foreground local-runtime screen hold |
 | `app/src/main/java/io/andchamber/app/service/RuntimeService.kt` | `specialUse` foreground service that runs runtime operations and keeps the server alive |
 | `app/src/main/AndroidManifest.xml` | Components, permissions (FGS, notifications, all-files access, microphone), locale config |
 | `app/src/main/assets/runtime-manifest.json` | Pinned runtime: Alpine rootfs per ABI (URL + SHA-256), OpenChamber/OpenCode versions, port 3000 |
 | `app/build.gradle.kts` | App build; offline Exec task `buildAndChamberRuntimeNative` compiles PRoot JNI libs from prepared sources (NDK 29.0.14206865); Sync task `syncNativeLicenseAssets` packages `third_party/native-runtime/` as `assets/licenses/native/` in every variant; env-driven release signing (`ANDCHAMBER_*`); debug-only `andchamber.testApplicationId` override |
-| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.20 / 20); the release workflow checks them against the tag |
+| `gradle.properties` | Canonical release version as literal `andchamber.versionName` / `andchamber.versionCode` (currently 0.0.21 / 21); the release workflow checks them against the tag |
 | `build.gradle.kts`, `settings.gradle.kts` | AGP 8.5.2, Kotlin 2.0.21; single `:app` module |
 | `.github/workflows/ci.yml` | Push/PR: offline Python tests, JVM unit tests and debug APK |
 | `.github/workflows/release.yml` | Tag `v*`: Python/JVM tests, signed release APK, `apksigner` verify, sha256, GitHub release (notes from `docs/release-notes/v<ver>.md`) |

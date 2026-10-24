@@ -46,6 +46,8 @@
     <string name="launch_checking">Checking…</string>
     <string name="auto_open_label">Open last used OpenChamber when the app starts</string>
     <string name="auto_open_hint">Remembers the server and page you had open. Starts the local server first if it isn\'t running.</string>
+    <string name="screen_awake_label">Keep screen on while the local server runs</string>
+    <string name="screen_awake_hint">Only while AndChamber is in the foreground. Leaving the app lets the screen sleep normally.</string>
 
     <!-- Sections -->
     <string name="section_this_device">On this phone</string>
@@ -197,7 +199,8 @@
     <string name="more_options">More options</string>
     <string name="password_saved">Password saved</string>
     <string name="remove_server_title">Remove %1$s?</string>
-    <string name="remove_server_body">The saved address and password are deleted from this phone. The server itself isn\'t changed.</string>
+    <string name="remove_server_body">The saved address, password and this server\'s website data are deleted from this phone. The server itself isn\'t changed.</string>
+    <string name="remote_remove_clear_failed">Couldn\'t clear this server\'s website data. The server wasn\'t removed; try again.</string>
 
     <!-- Server dialog -->
     <string name="field_address">Address</string>
@@ -218,6 +221,7 @@
     <string name="address_scheme">Use an http:// or https:// address</string>
     <string name="address_invalid">This doesn\'t look like a valid address</string>
     <string name="address_no_host">Add a host name or IP address</string>
+    <string name="address_no_userinfo">The address can\'t include a user name or password</string>
 
     <!-- Web screen -->
     <string name="connecting_to">Connecting to %1$s</string>
@@ -361,5 +365,5 @@
     <string name="browser_address_go">Go</string>
     <string name="browser_address_cancel">Stop editing</string>
     <string name="browser_reload">Reload page</string>
-    <string name="browser_action_outcome_unknown">Last action unconfirmed. Check the page before resuming.</string>
+    <string name="browser_action_outcome_unknown">Unconfirmed action. The agent can only read; Take over revokes access.</string>
 </resources>

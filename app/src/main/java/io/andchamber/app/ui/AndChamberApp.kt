@@ -2,6 +2,7 @@ package io.andchamber.app.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -21,8 +22,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -46,7 +49,9 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import io.andchamber.app.R
 import io.andchamber.app.data.canonicalWebOrigin
+import io.andchamber.app.data.WebProfileRemovalResult
 import io.andchamber.app.notify.OpenSessionLink
 import io.andchamber.app.runtime.FailurePhase
 import io.andchamber.app.runtime.LocalRuntimeController
@@ -63,10 +68,12 @@ import io.andchamber.app.ui.web.WebViewPool
 import io.andchamber.app.ui.web.rememberWebDependencies
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -203,6 +210,12 @@ fun AndChamberApp(
         val webDeps = rememberWebDependencies()
         val pool = remember(webDeps) { WebViewPool(webDeps.downloads) }
         DisposableEffect(pool) { onDispose { pool.destroyAll() } }
+
+        // A server being removed is frozen for open/edit/remove until its own profile data is cleared.
+        // Only a successful clear commits the removal; failure leaves the saved server in place.
+        val pendingRemovalIds = remember { mutableStateMapOf<String, Unit>() }
+        val removalScope = rememberCoroutineScope()
+        val context = LocalContext.current
 
         val askForNotifications = rememberNotificationPermissionRequest()
         val local = remember(runtime, askForNotifications, pool) { LocalActions(runtime, askForNotifications, pool) }
@@ -398,7 +411,7 @@ fun AndChamberApp(
                         val storageState by storage.state.collectAsStateWithLifecycle()
                         val updates by runtime.updates.collectAsStateWithLifecycle()
                         val actions =
-                            remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess, uiPrefs) {
+                            remember(local, remotes, pool, nav, entry, storage, refreshStorage, requestStorageAccess, uiPrefs, webDeps) {
                                 HomeActions(
                                     onSetUp = local::install,
                                     onStart = local::start,
@@ -407,12 +420,46 @@ fun AndChamberApp(
                                     onRepair = local::repair,
                                     onUninstall = local::uninstall,
                                     onOpenLocal = { nav.openIfResumed(entry, Routes.web(ServerTarget.LOCAL_ID)) },
-                                    onOpenRemote = { server -> nav.openIfResumed(entry, Routes.web(server.id)) },
-                                    onSaveRemote = remotes::upsert,
+                                    onOpenRemote = { server ->
+                                        // A server being removed has no profile to open any more.
+                                        if (server.id !in pendingRemovalIds) nav.openIfResumed(entry, Routes.web(server.id))
+                                    },
+                                    onSaveRemote = { server ->
+                                        if (server.id !in pendingRemovalIds) remotes.upsert(server)
+                                    },
                                     onRemoveRemote = { server ->
-                                        pool.discard(server.id)
-                                        uiPrefs.forgetPage(server.id)
-                                        remotes.remove(server.id)
+                                        if (server.id !in pendingRemovalIds) {
+                                            pendingRemovalIds[server.id] = Unit
+                                            removalScope.launch {
+                                                try {
+                                                    val profiles = webDeps.profiles
+                                                    val result =
+                                                        profiles?.removeProfile(server) { pool.discard(server.id) }
+                                                            ?: WebProfileRemovalResult.NothingStored
+                                                    when (result) {
+                                                        WebProfileRemovalResult.Removed,
+                                                        WebProfileRemovalResult.NothingStored -> {
+                                                            // Committing is not a suspension point: once the
+                                                            // profile is cleared, the saved server is removed
+                                                            // even if the composition is being torn down.
+                                                            withContext(NonCancellable) {
+                                                                uiPrefs.forgetPage(server.id)
+                                                                remotes.remove(server.id)
+                                                            }
+                                                        }
+                                                        is WebProfileRemovalResult.Failed -> {
+                                                            Toast.makeText(
+                                                                context,
+                                                                R.string.remote_remove_clear_failed,
+                                                                Toast.LENGTH_SHORT,
+                                                            ).show()
+                                                        }
+                                                    }
+                                                } finally {
+                                                    pendingRemovalIds.remove(server.id)
+                                                }
+                                            }
+                                        }
                                     },
                                     onSharedStorageChange = { on -> storageJobs.trySend { storage.setEnabled(on) } },
                                     onAllowStorageAccess = requestStorageAccess,

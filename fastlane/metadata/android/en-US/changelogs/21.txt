@@ -1,0 +1,11 @@
+0.0.21
+
+Added:
+- Optionally keep the screen on while the local server runs in the foreground.
+
+Fixed:
+- Restoring a subpath instance no longer appends its base path twice.
+- Removing a server clears its website data and reports cleanup failures.
+- Notification replies keep status and drafts with the correct notification.
+- Reload preserves takeover; remaining read-only agent access can be revoked.
+- Browser address and error feedback stays current; short panels scroll.

@@ -294,10 +294,11 @@ internal fun WebScreen(
                     // A session picked from a notification, or the remembered page of this instance,
                     // is the first page, not a second load. The notification link wins over the
                     // remembered page. Keep it pending through gateway retries so the final
-                    // authenticated prepare still loads the requested page.
-                    val startPage = startPageDecision(latestDeepLink, latestResumePath, gateway)
+                    // authenticated prepare still loads the requested page. The saved page is an
+                    // absolute path on this origin, so it is not joined onto the base path again.
+                    val startPage = startPageUrl(start, current.baseUrl, latestDeepLink, latestResumePath, gateway)
                     view.load(
-                        startPage.path?.let { withSessionPath(start, it) } ?: start,
+                        startPage.url,
                         key,
                         gatewayLogin = gateway && gatewayPreparations < 2,
                     )

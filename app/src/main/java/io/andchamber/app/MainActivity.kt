@@ -9,6 +9,8 @@ import io.andchamber.app.runtime.RemoteServerStore
 import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.ui.AndChamberApp
+import io.andchamber.app.ui.ScreenAwakeController
+import io.andchamber.app.ui.keepScreenOnWhileLocalRuns
 import org.koin.android.ext.android.get
 
 class MainActivity : ComponentActivity() {
@@ -18,9 +20,19 @@ class MainActivity : ComponentActivity() {
         // A recreated activity still carries the intent it was first launched with; that tap was
         // already handled (or is kept in the UI's saved state), so it is offered only once.
         if (savedInstanceState == null) offerSessionFrom(intent)
+        val runtime = get<LocalRuntimeController>()
+        val screenAwake = get<ScreenAwakeController>()
+        // Opt-in: holds this window's screen on only while the local server runs and the app is in
+        // front. Released on stop, failure, background, a remote page, and when the activity goes.
+        keepScreenOnWhileLocalRuns(
+            window = window,
+            enabled = screenAwake.enabled,
+            runtime = runtime.state,
+            viewedTargetId = screenAwake.viewedTargetId,
+        )
         setContent {
             AndChamberApp(
-                runtime = get<LocalRuntimeController>(),
+                runtime = runtime,
                 remotes = get<RemoteServerStore>(),
                 auth = get<WebSessionAuthenticator>(),
                 storage = get<SharedStorageController>(),

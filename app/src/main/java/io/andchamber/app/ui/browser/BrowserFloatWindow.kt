@@ -129,6 +129,11 @@ internal fun BrowserFloatWindow(
     agentOn: Boolean,
     canResume: Boolean,
     /**
+     * The agent keeps a read-only grant on this page (an unconfirmed action). Take over is offered
+     * so the person can revoke it; [agentOn] stays false.
+     */
+    agentReadOnly: Boolean = false,
+    /**
      * The app has confirmed the page needs a fresh load before the agent can use it again (an
      * earlier action's outcome is unknown). Resume is then replaced by Reopen.
      */
@@ -229,7 +234,7 @@ internal fun BrowserFloatWindow(
         SideEffect { onPresentationBlocked(blocked) }
         val full = layout.presentation == BrowserPresentation.Full
         val float = layout.presentation == BrowserPresentation.Float
-        val action = browserControlAction(agentOn, reopenNeeded, canResume)
+        val action = browserControlAction(agentOn, reopenNeeded, canResume, agentReadOnly)
 
         // Back leaves full screen first, like a phone browser; it never hides or stops the agent.
         BackHandler(enabled = ui.fullRequested && !editing) { ui.fullRequested = false }
@@ -691,13 +696,19 @@ private fun ControlBar(
 internal enum class BrowserControlAction { TakeOver, Reopen, Resume, None }
 
 /**
- * Which control action to show. The agent in control: Take over. The page needs a fresh load
- * (confirmed by the app, not page text): Reopen, never Resume, because Resume would be refused.
- * Otherwise Resume when it can work, or nothing.
+ * Which control action to show. The agent in control, or still holding a read-only grant after an
+ * unconfirmed action: Take over (it revokes). The page needs a fresh load (confirmed by the app,
+ * not page text): Reopen, never Resume, because Resume would be refused. Otherwise Resume when it
+ * can work, or nothing.
  */
-internal fun browserControlAction(agentOn: Boolean, reopenNeeded: Boolean, canResume: Boolean): BrowserControlAction =
+internal fun browserControlAction(
+    agentOn: Boolean,
+    reopenNeeded: Boolean,
+    canResume: Boolean,
+    agentReadOnly: Boolean = false,
+): BrowserControlAction =
     when {
-        agentOn -> BrowserControlAction.TakeOver
+        agentOn || agentReadOnly -> BrowserControlAction.TakeOver
         reopenNeeded -> BrowserControlAction.Reopen
         canResume -> BrowserControlAction.Resume
         else -> BrowserControlAction.None

@@ -63,7 +63,9 @@ import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ChamberMark
 import io.andchamber.app.ui.components.IconTile
 import io.andchamber.app.ui.components.SectionHeader
+import io.andchamber.app.ui.ScreenAwakeSetting
 import io.andchamber.app.ui.rememberLastNonNull
+import io.andchamber.app.ui.rememberScreenAwakeSetting
 import io.andchamber.app.ui.revealOnEnter
 
 /** Everything the home screen can do, so previews and the app share one surface. */
@@ -114,6 +116,11 @@ internal fun HomeScreen(
     autoOpenLocal: Boolean? = null,
     /** Update check and the outcome of the last update of the local server. */
     updates: RuntimeUpdateState = RuntimeUpdateState(),
+    /**
+     * "Keep screen on while the local server runs"; null hides the setting. By default the app's
+     * own setting (the process-wide [io.andchamber.app.ui.ScreenAwakeController]), null in previews.
+     */
+    screenAwake: ScreenAwakeSetting? = rememberScreenAwakeSetting(),
 ) {
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
     var removingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -170,6 +177,8 @@ internal fun HomeScreen(
                         sharedFolderInUse = storage?.status == SharedStorageStatus.Active,
                         autoOpenLocal = autoOpenLocal,
                         onAutoOpenChange = actions.onAutoOpenChange,
+                        keepScreenOn = screenAwake?.enabled,
+                        onKeepScreenOnChange = screenAwake?.onChange ?: {},
                         updates = updates,
                         onUpdate = actions.onUpdate,
                         onCheckForUpdates = actions.onCheckForUpdates,

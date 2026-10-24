@@ -54,6 +54,8 @@ import io.andchamber.app.runtime.process.HealthProbe
 import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.runtime.process.ProotOpenChamberServer
 import io.andchamber.app.runtime.process.ProviderPageRouter
+import io.andchamber.app.ui.ScreenAwakeController
+import io.andchamber.app.ui.UiPrefs
 import io.andchamber.app.ui.browser.NativeBrowserPresenter
 import io.andchamber.app.runtime.process.ProotStaleServerCleaner
 import io.andchamber.app.service.RuntimeService
@@ -83,6 +85,12 @@ val appModule =
         single<RemoteServerStore> { EncryptedRemoteServerStore.create(get<Context>()) }
 
         single { OpenChamberNotifier(get<Context>()) }
+
+        // "Keep screen on while the local server runs": one instance, read by MainActivity and Home.
+        // The file is the one UiPrefs uses; Android hands out one SharedPreferences per file.
+        single {
+            ScreenAwakeController(get<Context>().getSharedPreferences(UiPrefs.FILE, Context.MODE_PRIVATE))
+        }
 
         single {
             val context = get<Context>()

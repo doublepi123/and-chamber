@@ -231,6 +231,9 @@ internal fun LocalRuntimeCard(
     /** Open-on-launch setting shown in Details; null hides it. */
     autoOpenLocal: Boolean? = null,
     onAutoOpenChange: (Boolean) -> Unit = {},
+    /** Keep-screen-on setting shown in Details; null hides it. */
+    keepScreenOn: Boolean? = null,
+    onKeepScreenOnChange: (Boolean) -> Unit = {},
     /** OpenChamber / OpenCode update check and the outcome of the last update. */
     updates: RuntimeUpdateState = RuntimeUpdateState(),
     onUpdate: () -> Unit = {},
@@ -423,6 +426,8 @@ internal fun LocalRuntimeCard(
                 actionsEnabled = !phase.isBusy,
                 autoOpen = autoOpenLocal,
                 onAutoOpenChange = onAutoOpenChange,
+                keepScreenOn = keepScreenOn,
+                onKeepScreenOnChange = onKeepScreenOnChange,
                 updates = updates,
                 // A check while the environment is being replaced would compare against old versions.
                 checkEnabled = phase != RuntimePhase.Installing,
@@ -1391,6 +1396,38 @@ internal fun AutoOpenRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+) = SettingSwitchRow(
+    label = stringResource(R.string.auto_open_label),
+    hint = stringResource(R.string.auto_open_hint),
+    checked = checked,
+    onCheckedChange = onCheckedChange,
+    modifier = modifier,
+)
+
+/**
+ * "Keep screen on while the local server runs", the same quiet switch row as [AutoOpenRow]. The
+ * hint says it only applies while the app is in front.
+ */
+@Composable
+internal fun ScreenAwakeRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) = SettingSwitchRow(
+    label = stringResource(R.string.screen_awake_label),
+    hint = stringResource(R.string.screen_awake_hint),
+    checked = checked,
+    onCheckedChange = onCheckedChange,
+    modifier = modifier,
+)
+
+@Composable
+private fun SettingSwitchRow(
+    label: String,
+    hint: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -1406,13 +1443,13 @@ internal fun AutoOpenRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = stringResource(R.string.auto_open_label),
+                    text = label,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = stringResource(R.string.auto_open_hint),
+                    text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1429,6 +1466,8 @@ private fun DetailsSection(
     actionsEnabled: Boolean,
     autoOpen: Boolean?,
     onAutoOpenChange: (Boolean) -> Unit,
+    keepScreenOn: Boolean?,
+    onKeepScreenOnChange: (Boolean) -> Unit,
     updates: RuntimeUpdateState,
     checkEnabled: Boolean,
     onCheckForUpdates: () -> Unit,
@@ -1441,6 +1480,14 @@ private fun DetailsSection(
             AutoOpenRow(
                 checked = autoOpen,
                 onCheckedChange = onAutoOpenChange,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
+        // Next to the other launch-and-use setting; there is a server to run once installed.
+        if (keepScreenOn != null && info != null) {
+            ScreenAwakeRow(
+                checked = keepScreenOn,
+                onCheckedChange = onKeepScreenOnChange,
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }

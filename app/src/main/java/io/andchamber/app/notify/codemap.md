@@ -28,6 +28,7 @@ Pipeline for OpenChamber events (stdout from the server):
   - Content: small icon `ic_notification`, accent `#EDB449`, BigTextStyle, `CATEGORY_MESSAGE`, auto-cancel.
   - Tap intent: `MainActivity` with `ACTION_OPEN_SESSION`, extras `andchamber.open_session` and `andchamber.open_directory`.
   - Action intents: `NotificationActionReceiver` broadcasts with extras `session_id`, `directory`, `notification_id`, plus `request_id`/`decision` or `form_id`/`field_key`/`value`. RemoteInput key `reply_text`.
+  - Reply and permission PendingIntents come from `NotificationActionIdentity`: an explicitly encoded data URI includes action, notification id, session, optional directory and permission request/decision. The request-code hash is auxiliary only, so equal hashes cannot merge actions; `FLAG_UPDATE_CURRENT` still updates only the exact same action, and RemoteInput stays mutable.
   - `postAlert(RuntimeAlert)`: Errors channel, id from `alert:<key>`, tap opens Home.
   - `updateStatus(id, channel, text): String?`: in-place "Sent" (success path only), `setOnlyAlertOnce`. It writes a new revision as pending-Sent and returns the token, or null when posting is not allowed.
   - Every write goes through `NotificationRevisionGate.publish(id, sent)` under one lock. A write also stores its token in extras `andchamber.revision`. `cancelIfCurrent(id, token)` and `forgetSent(id, token)` are the Sent clean-up entry points; `cancel(id)` is the explicit removal and drops any pending entry for that id.

@@ -1192,7 +1192,7 @@ class NativeBrowserPresenter(
      * takeover, hide, connection change or later navigation revokes it.
      */
     suspend fun openUser(url: String, ownerSessionId: String): ProviderResult =
-        navigateManual(url, ownerSessionId)
+        navigateManual(url, ownerSessionId, ManualOpenKind.NAVIGATE)
 
     /**
      * The address-bar navigation entry. It reuses the selected tab when that tab belongs to the
@@ -1200,16 +1200,23 @@ class NativeBrowserPresenter(
      * new tab. It takes over, applies the existing URL policy and loads exactly one controlled GET.
      * A refused URL changes nothing and leaves the current page in place.
      */
-    suspend fun navigateManual(url: String): ProviderResult {
+    suspend fun navigateManual(url: String): ProviderResult = navigateManual(url, ManualOpenKind.NAVIGATE)
+
+    private suspend fun navigateManual(url: String, kind: ManualOpenKind): ProviderResult {
         val owner = synchronized(lock) {
             // The address bar belongs to the shown page; fall back to the console identity only
             // when no page exists yet.
             registry.find(selectedTabId.orEmpty())?.ownerSessionId ?: consoleSessionId
         } ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no owner")
-        return navigateManual(url, owner)
+        return navigateManual(url, owner, kind)
     }
 
-    private suspend fun navigateManual(url: String, ownerSessionId: String): ProviderResult {
+    /**
+     * [kind] is chosen only by the app's own entry point (address bar, menu Reload, Reopen). It is
+     * never read from a request parameter, so an agent cannot pick the takeover-preserving reload.
+     */
+    private suspend fun navigateManual(url: String, ownerSessionId: String, kind: ManualOpenKind): ProviderResult {
+        if (ownerSessionId.isBlank()) return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST)
         val target = synchronized(lock) {
             selectedTabId?.let { id -> registry.find(id)?.takeIf { it.ownerSessionId == ownerSessionId } }
         }
@@ -1226,18 +1233,38 @@ class NativeBrowserPresenter(
             sessionId = ownerSessionId,
             timeoutMs = 1_000L,
         )
-        return openClaimed(request, Long.MAX_VALUE)
+        return openClaimed(request, ownerSessionId, Long.MAX_VALUE, clock, manualKind = kind)
     }
 
     /**
-     * The Reload entry: the currently displayed URL of the selected page, opened as a fresh
+     * The menu Reload entry: the currently displayed URL of the selected page, opened as a fresh
      * controlled GET through [navigateManual]. A page with no known URL is refused.
+     *
+     * Without an explicit takeover it keeps the default control of a person's open. After an
+     * explicit takeover it stays the person's page: the latch is kept, no default-control intent is
+     * created, and the new page accepts the person's own navigation from its commit on, before
+     * ready. That decision is read under the lock at the moment the new page is committed, never
+     * saved across a suspension.
      */
     suspend fun reloadManual(): ProviderResult {
-        val url = synchronized(lock) {
-            page?.currentUrl() ?: selectedTabId?.let { registry.find(it)?.url }
-        } ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no page")
-        return navigateManual(url)
+        val url = shownUrlLocked()
+            ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no page")
+        return navigateManual(url, ManualOpenKind.RELOAD)
+    }
+
+    /**
+     * The explicit Reopen entry (a page the app classified as needing a fresh load, or an
+     * unconfirmed action). It keeps the person's new-open meaning: an explicit takeover is cleared
+     * and the ready page receives default control through [allow].
+     */
+    suspend fun reopenManual(): ProviderResult {
+        val url = shownUrlLocked()
+            ?: return ProviderResult(false, errorCode = ProviderCodes.INVALID_REQUEST, message = "no page")
+        return navigateManual(url, ManualOpenKind.REOPEN)
+    }
+
+    private fun shownUrlLocked(): String? = synchronized(lock) {
+        page?.currentUrl() ?: selectedTabId?.let { registry.find(it)?.url }
     }
 
     /** Binding compatibility. Allow itself re-probes; this only records the requested tab. */
@@ -2367,6 +2394,8 @@ class NativeBrowserPresenter(
         now: () -> Long,
         onAutoGrantIntent: ((AutoGrantIntent) -> Unit)? = null,
         autoGrantDeadline: AutoGrantDeadline? = null,
+        /** Set only by the app's own manual entries; null for every agent/tool request. */
+        manualKind: ManualOpenKind? = null,
     ): ProviderResult = withContext(main) {
         // An explicit open is one of the two ways to show a hidden window again. It still fails closed
         // if the host or console cannot present; only the person's hide choice is overridden.
@@ -2493,34 +2522,47 @@ class NativeBrowserPresenter(
                 mode = ProviderMode.MANUAL
                 val revealed = hidden
                 hidden = false
+                // A plain menu Reload after an explicit takeover stays the person's page. The latch
+                // is read here, in the same critical section that commits the new page, so a
+                // takeover that landed during the load is honoured and nothing is restored later.
+                val keepTakeover = browserReloadKeepsTakeover(manualKind, explicitTakeover)
                 // Only a person's own open replaces an explicit takeover decision. An agent open
                 // may show the window, but it cannot reclaim control after a takeover.
-                if (request.serverEpoch == "user") explicitTakeover = false
+                if (request.serverEpoch == "user" && !keepTakeover) explicitTakeover = false
                 if (revealed) presentationRequestSerial += 1
-                created.manualNavigation = false
+                // A takeover-preserving Reload is the person's page from this commit on: their own
+                // links and forms are never blocked, even before ready. Its one controlled GET keeps
+                // its ticket and witness checks (see keepManualForControlledLoad); it is not reloaded.
+                if (keepTakeover) created.keepManualForControlledLoad() else created.manualNavigation = false
                 bind(created)
-                // Explicit open: default control is decided once this exact load becomes ready.
-                // pageAdapter.openClaimed has already run present() -> loadOnce(), which calls
-                // beginControlledGet() and fixes the ticket; viewId is fixed at page creation.
-                // The ready callback can only run after this main coroutine yields, so these
-                // identities are final here and the first probe cannot miss the intent.
-                val intent = AutoGrantIntent(
-                    tabId = tabId,
-                    viewId = created.viewId(),
-                    ticket = created.ticket(),
-                    consoleGeneration = prepared.host.consoleGeneration,
-                    consoleSession = consoleSessionId,
-                    // Bind to the connection this open was admitted on, never a connection that
-                    // replaced it while the load was in flight.
-                    connection = request.connectionId.takeIf { it.isNotBlank() } ?: connectionId,
-                    hostInstanceKey = prepared.host.instanceKey,
-                    page = created,
-                    deadline = autoGrantDeadline,
-                )
-                autoGrantIntent = intent
-                // A submit continuation captures exactly the replacement intent it created, so a
-                // failure/timeout/cancel can clear only that intent and not a later person's open.
-                onAutoGrantIntent?.invoke(intent)
+                if (keepTakeover) {
+                    // No default-control intent: no ready probe, reconnect or late callback can
+                    // reclaim this page. Only the person's Resume (or a new explicit open) can.
+                    autoGrantIntent = null
+                } else {
+                    // Explicit open: default control is decided once this exact load becomes ready.
+                    // pageAdapter.openClaimed has already run present() -> loadOnce(), which calls
+                    // beginControlledGet() and fixes the ticket; viewId is fixed at page creation.
+                    // The ready callback can only run after this main coroutine yields, so these
+                    // identities are final here and the first probe cannot miss the intent.
+                    val intent = AutoGrantIntent(
+                        tabId = tabId,
+                        viewId = created.viewId(),
+                        ticket = created.ticket(),
+                        consoleGeneration = prepared.host.consoleGeneration,
+                        consoleSession = consoleSessionId,
+                        // Bind to the connection this open was admitted on, never a connection that
+                        // replaced it while the load was in flight.
+                        connection = request.connectionId.takeIf { it.isNotBlank() } ?: connectionId,
+                        hostInstanceKey = prepared.host.instanceKey,
+                        page = created,
+                        deadline = autoGrantDeadline,
+                    )
+                    autoGrantIntent = intent
+                    // A submit continuation captures exactly the replacement intent it created, so a
+                    // failure/timeout/cancel can clear only that intent and not a later person's open.
+                    onAutoGrantIntent?.invoke(intent)
+                }
                 noteOpenedByAgent(request, tabId)
             } else {
                 created.destroy()
@@ -2743,6 +2785,25 @@ class NativeBrowserPresenter(
         created.onGeometryRequested = { scope.launch(main) { onGeometrySettled() } }
         created.onMouseRetirement = { reason -> retireBound(created, reason) }
         created.onSubmitNavigation = { event -> onSubmitNavigation(created, event) }
+        created.onPageStatus = { status -> scope.launch(main) { onPageStatus(created, status) } }
+    }
+
+    /**
+     * Session report that the shown address or the page's own error changed (a same-document
+     * history update, a refused navigation, a load start that cleared an error). It only republishes
+     * state for the exact current page, view and load ticket; a late report from a replaced page,
+     * another view or an older ticket is dropped. It never grants, never touches recovery or refs,
+     * and is not a navigation receipt.
+     */
+    private fun onPageStatus(source: ControlledBrowserPage, status: BrowserPageStatus) {
+        synchronized(lock) {
+            if (page !== source) return
+            val tabId = selectedTabId ?: return
+            val bound = pages[tabId] ?: return
+            if (bound.page !== source || bound.retired || source.tabId != tabId) return
+            if (status.viewId != source.viewId() || status.ticket != source.ticket()) return
+            publishLocked()
+        }
     }
 
     private fun acceptSample(source: ControlledBrowserPage, sample: GeometrySample) {
@@ -3415,13 +3476,30 @@ class NativeBrowserPresenter(
         val previous = _state.value
         val transportInvalidation = previous.transportInvalidation +
             if (previous.transportEligible && !transportEligible) 1L else 0L
+        val grant = registry.currentGrant()
+        val selectedLive = bound != null && !bound.retired && bound.page === page
         _state.value = NativeBrowserState(
             tabs = tabs,
             selectedTabId = selectedTabId,
             shown = visible,
             mode = mode,
-            agentOn = mode == ProviderMode.AGENT && registry.currentGrant() != null &&
+            agentOn = mode == ProviderMode.AGENT && grant != null &&
                 !presentationBlocked && !hidden && recovery == PageRecovery.NONE,
+            // Derived from the same live grant plus the page's recovery class, never from agentOn:
+            // the agent still holds this exact page's grant, but only for snapshot/capture.
+            agentReadOnly = browserAgentReadOnly(
+                agentMode = mode == ProviderMode.AGENT,
+                grantTabId = grant?.tabId,
+                grantConnectionId = grant?.connectionId,
+                selectedTabId = selectedTabId,
+                connectionId = connectionId,
+                selectedLive = selectedLive,
+                recovery = recovery,
+                presentationBlocked = presentationBlocked,
+                hidden = hidden,
+                explicitTakeover = explicitTakeover,
+            ),
+            displayUrl = if (selectedLive) page?.currentUrl() else null,
             pageError = if (pages[selectedTabId]?.retired == true) "mouse-gesture-interrupted" else forced,
             pageReady = pages[selectedTabId]?.retired != true && page?.ready == true,
             requiresReopen = recovery == PageRecovery.REOPEN_REQUIRED,
@@ -3596,6 +3674,15 @@ interface ControlledBrowserPage {
     val pageError: String?
     val ready: Boolean
     var manualNavigation: Boolean
+    /**
+     * A person's takeover-preserving Reload: manual navigation from now on, while the one controlled
+     * GET already loading keeps its ticket and witness checks (production: its first document start
+     * continues that ticket instead of starting a manual document). Fakes default to the flag only.
+     */
+    fun keepManualForControlledLoad(): Boolean {
+        manualNavigation = true
+        return false
+    }
     var onProbe: ((String, Long) -> Unit)?
     var onReadyProbe: ((ReadyProbeIdentity) -> Unit)?
     var onFatal: (() -> Unit)?
@@ -3615,6 +3702,13 @@ interface ControlledBrowserPage {
     fun finishSubmitNavigation() = Unit
     var onGeometry: ((GeometrySample) -> Unit)?
     var onGeometryRequested: (() -> Unit)?
+    /**
+     * The shown address or the page's own error changed. Display only: the presenter republishes
+     * state for the exact current page/view/ticket and does nothing else. Default no-op for fakes.
+     */
+    var onPageStatus: ((BrowserPageStatus) -> Unit)?
+        get() = null
+        set(_) = Unit
     fun driver(policy: () -> BrowserUrlPolicy): BrowserDriver
     suspend fun loadOnce(url: String): Boolean
     suspend fun probe(identity: ReadyProbeIdentity): ProbeAcceptance? = probe()
@@ -3679,6 +3773,40 @@ interface ControlledBrowserPage {
     fun destroy()
 }
 
+/**
+ * Which of the person's own entries started a manual open. Chosen only by app code (address bar,
+ * menu Reload, Reopen), never by a request parameter.
+ */
+internal enum class ManualOpenKind { NAVIGATE, RELOAD, REOPEN }
+
+/**
+ * A plain menu Reload keeps an explicit takeover; an address-bar navigation or an explicit Reopen
+ * is a new open of the person's own and replaces it. Agent opens have no manual kind.
+ */
+internal fun browserReloadKeepsTakeover(kind: ManualOpenKind?, explicitTakeover: Boolean): Boolean =
+    kind == ManualOpenKind.RELOAD && explicitTakeover
+
+/**
+ * The agent still holds the current, valid grant for the shown page, but an unconfirmed click/type
+ * restricts it to snapshot/capture. Presentation only; the mutation gate is [PageRecovery] itself.
+ */
+internal fun browserAgentReadOnly(
+    agentMode: Boolean,
+    grantTabId: String?,
+    grantConnectionId: String?,
+    selectedTabId: String?,
+    connectionId: String?,
+    selectedLive: Boolean,
+    recovery: PageRecovery,
+    presentationBlocked: Boolean,
+    hidden: Boolean,
+    explicitTakeover: Boolean,
+): Boolean =
+    agentMode && grantTabId != null && grantTabId == selectedTabId &&
+        connectionId != null && grantConnectionId == connectionId &&
+        selectedLive && recovery == PageRecovery.OBSERVE_ONLY &&
+        !presentationBlocked && !hidden && !explicitTakeover
+
 private object UnavailableDriver : BrowserDriver {
     override suspend fun execute(request: io.andchamber.app.browser.BrowserRequest): io.andchamber.app.browser.BrowserReply =
         io.andchamber.app.browser.BrowserReply(ok = false)
@@ -3702,6 +3830,7 @@ internal class WebControlledPage(
     override var manualNavigation: Boolean
         get() = session.manualNavigation
         set(value) { session.manualNavigation = value }
+    override fun keepManualForControlledLoad(): Boolean = session.keepManualForControlledLoad()
     override var onReadyProbe: ((ReadyProbeIdentity) -> Unit)?
         get() = session.onReadyProbe
         set(value) { session.onReadyProbe = value }
@@ -3736,6 +3865,9 @@ internal class WebControlledPage(
             session.onSubmitNavigation = value
         }
     override fun finishSubmitNavigation() = session.finishSubmitNavigation()
+    override var onPageStatus: ((BrowserPageStatus) -> Unit)?
+        get() = session.onPageStatus
+        set(value) { session.onPageStatus = value }
     private var loaded = false
     private var desktopWidth = BrowserDesktopViewport.DEFAULT_WIDTH
     private var desktopHeight = BrowserDesktopViewport.DEFAULT_HEIGHT

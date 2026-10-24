@@ -121,12 +121,14 @@ internal fun BrowserFloatPage(
         awaitingAllow = state.awaitingAllow,
         requiresReopen = state.requiresReopen,
         actionOutcomeUnknown = state.actionOutcomeUnknown,
+        agentReadOnly = state.agentReadOnly,
     )
     // No resource: the page's own error text, shown as it was reported.
     val status = if (statusResource != null) stringResource(statusResource) else state.pageError.orEmpty()
-    // The address the page actually shows (the WebView's own main-frame URL), never a typed or
-    // agent-reported value; read again on every presenter update (load, ready, navigation).
-    val address = browserShownAddress(view?.url, tab?.url)
+    // The address the page actually shows: the session's own main-frame URL, published into state
+    // for the current page/view/load (including same-document history updates), never a typed or
+    // agent-reported value. The tab's recorded address covers only the time before it is known.
+    val address = browserShownAddress(state.displayUrl, tab?.url)
     val owner = tab?.owner
     // Address bar and Reload are the person's own navigation. They go through one presenter seam
     // (see [BrowserManualNavigation]) so the UI never loads a URL into the WebView itself.
@@ -138,13 +140,14 @@ internal fun BrowserFloatPage(
         scope.launch { manual.reload() }
     }
     // Reopen after an unconfirmed action: one fresh load of the shown address, only on the
-    // person's tap. A second tap while it runs does nothing; a failure always says so.
+    // person's tap. A second tap while it runs does nothing; a failure always says so. Unlike the
+    // menu's Reload it is a new open of the person's own (it replaces an earlier takeover).
     fun reopen() {
         if (reopening || presenter.state.value.mousePressActive) return
         reopening = true
         scope.launch {
             try {
-                val result = presenter.reloadManual()
+                val result = presenter.reopenManual()
                 browserReopenFailureResource(result.ok, result.message)?.let {
                     Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
                 }
@@ -162,6 +165,8 @@ internal fun BrowserFloatPage(
         address = address,
         status = status,
         agentOn = state.agentOn,
+        // The agent still holds a read-only grant: Take over is offered and revokes it.
+        agentReadOnly = state.agentReadOnly,
         // Resume is offered only when it can work: a live agent connection and a ready page.
         canResume = !reopenNeeded && state.connected && !state.pageRetired && !state.mousePressActive &&
             browserFloatCanAllow(state.eligible, state.pageReady, owner),
@@ -440,8 +445,10 @@ internal fun browserFloatErrorResource(error: String?): Int? = when (error) {
  * 1. A page error: retired page, reopen required, layout change, mouse unsupported, or the
  *    page's own load error, such as a refused address or an untrusted certificate.
  * 2. The agent is in control. Who controls the page always shows.
- * 0. An earlier action's outcome is unconfirmed but the page is still usable: check it, then
- *    Resume. Comes first unless a real page error is shown, and never uses the reopen wording.
+ * 0. An earlier action's outcome is unconfirmed and the agent still holds the page's grant, read
+ *    only ([agentReadOnly]): say so next to Take over. Comes first unless a real page error is
+ *    shown. An unconfirmed page never shows an older reopen notice; once the person took over
+ *    (no grant left) the ordinary manual line and Resume apply.
  * 2a. The app confirmed the page needs a fresh load (shown next to the Reopen button).
  * 3. Mouse mode while an accessibility service is on. Websites get no hover then; clicks, drags and
  *    scrolling still work. A retired page has nothing to hover and never shows it. Loading does not
@@ -460,11 +467,33 @@ internal fun browserFloatStatusResource(
     awaitingAllow: Boolean = false,
     requiresReopen: Boolean = false,
     actionOutcomeUnknown: Boolean = false,
-): Int? = when {
+    agentReadOnly: Boolean = false,
+): Int? {
     // An unconfirmed action on a page that is still usable is not a reopen: never say "reopen"
     // for it, even if an older reopen notice is still attached as the page error.
-    actionOutcomeUnknown && !requiresReopen && !pageRetired && !agentOn &&
-        (pageError == null || browserFloatErrorResource(pageError) == R.string.browser_reopen_required) ->
+    val staleReopenNotice = (actionOutcomeUnknown || agentReadOnly) && !requiresReopen && !pageRetired &&
+        pageError != null && browserFloatErrorResource(pageError) == R.string.browser_reopen_required
+    val error = if (staleReopenNotice) null else pageError
+    return browserFloatStatusLine(
+        error, agentOn, pageReady, pageRetired, mouseMode, accessibilityEnabled, awaitingAllow,
+        requiresReopen, agentReadOnly,
+    )
+}
+
+private fun browserFloatStatusLine(
+    pageError: String?,
+    agentOn: Boolean,
+    pageReady: Boolean,
+    pageRetired: Boolean,
+    mouseMode: Boolean,
+    accessibilityEnabled: Boolean,
+    awaitingAllow: Boolean,
+    requiresReopen: Boolean,
+    agentReadOnly: Boolean,
+): Int? = when {
+    // The agent still holds this page's grant, but only to read it: say so, next to Take over,
+    // which revokes it. Once revoked the ordinary manual line (and Resume) applies again.
+    agentReadOnly && !requiresReopen && !pageRetired && !agentOn && pageError == null ->
         R.string.browser_action_outcome_unknown
     pageError != null -> browserFloatErrorResource(pageError)
     agentOn -> R.string.browser_status_on

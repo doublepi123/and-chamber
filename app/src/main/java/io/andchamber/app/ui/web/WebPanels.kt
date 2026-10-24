@@ -10,7 +10,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,7 +25,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -42,6 +44,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,8 +55,31 @@ import io.andchamber.app.ui.theme.ChamberTextStyles
 internal class PanelAction(val label: String, val onClick: () -> Unit)
 
 /**
+ * Where the panel's content sits inside the area left after insets and padding. Short content is
+ * centered exactly as before. Content taller than that area starts at the top and the whole panel
+ * (title, text, detail and every button) scrolls, so no action is ever cut off on a short screen.
+ */
+internal data class StatusPanelPlacement(
+    /** Height of the scrolling content box: never less than the available height. */
+    val height: Int,
+    /** Top of the content inside that box. */
+    val contentTop: Int,
+) {
+    /** Only content taller than the available height can scroll. */
+    fun scrolls(availableHeight: Int): Boolean = height > availableHeight
+}
+
+internal fun statusPanelPlacement(availableHeight: Int, contentHeight: Int): StatusPanelPlacement {
+    val available = availableHeight.coerceAtLeast(0)
+    val content = contentHeight.coerceAtLeast(0)
+    val height = maxOf(available, content)
+    return StatusPanelPlacement(height = height, contentTop = (height - content) / 2)
+}
+
+/**
  * Centered status panel used for every full-screen state of the web screen (connecting, errors,
- * local server stopped). [progress]: null hides the bar, NaN shows an indeterminate bar.
+ * local server stopped). [progress]: null hides the bar, NaN shows an indeterminate bar. When the
+ * content does not fit (a short or split screen, large text), the whole panel scrolls vertically.
  */
 @Composable
 internal fun StatusPanel(
@@ -69,101 +95,131 @@ internal fun StatusPanel(
     tertiary: PanelAction? = null,
     breathingMark: Boolean = false,
 ) {
-    Box(
+    BoxWithConstraints(
         modifier =
             modifier
                 .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(24.dp),
-        contentAlignment = Alignment.Center,
+                .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
-        Column(
-            modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            if (icon != null) {
-                Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(40.dp))
-            } else {
-                BreathingMark(animate = breathingMark)
+        val viewportHeight = if (constraints.hasBoundedHeight) constraints.maxHeight else null
+        val padding = 24.dp
+        Layout(
+            content = { StatusPanelContent(title, icon, iconTint, body, detail, progress, primary, secondary, tertiary, breathingMark) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(padding),
+        ) { measurables, constraints ->
+            val placeable = measurables.single().measure(constraints.copy(minWidth = 0, minHeight = 0))
+            val available = viewportHeight?.let { it - 2 * padding.roundToPx() } ?: placeable.height
+            val placement = statusPanelPlacement(available, placeable.height)
+            val width = if (constraints.hasBoundedWidth) constraints.maxWidth else placeable.width
+            layout(width, placement.height) {
+                placeable.placeRelative((width - placeable.width) / 2, placement.contentTop)
             }
-            Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun StatusPanelContent(
+    title: String,
+    icon: ImageVector?,
+    iconTint: androidx.compose.ui.graphics.Color,
+    body: String?,
+    detail: String?,
+    progress: Float?,
+    primary: PanelAction?,
+    secondary: PanelAction?,
+    tertiary: PanelAction?,
+    breathingMark: Boolean,
+) {
+    Column(
+        modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(40.dp))
+        } else {
+            BreathingMark(animate = breathingMark)
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
+        if (!body.isNullOrBlank()) {
+            Spacer(Modifier.height(8.dp))
             Text(
-                text = title,
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
+                text = body,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
-            if (!body.isNullOrBlank()) {
-                Spacer(Modifier.height(8.dp))
+        }
+        if (!detail.isNullOrBlank()) {
+            Spacer(Modifier.height(14.dp))
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
-                    text = body,
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = detail,
+                    style = ChamberTextStyles.codeSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
+                    maxLines = 6,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                 )
             }
-            if (!detail.isNullOrBlank()) {
-                Spacer(Modifier.height(14.dp))
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        text = detail,
-                        style = ChamberTextStyles.codeSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 6,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    )
+        }
+        if (progress != null) {
+            Spacer(Modifier.height(20.dp))
+            val barModifier = Modifier.width(180.dp).height(4.dp).clip(CircleShape)
+            if (progress.isNaN()) {
+                LinearProgressIndicator(
+                    modifier = barModifier,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    strokeCap = StrokeCap.Round,
+                    gapSize = 0.dp,
+                )
+            } else {
+                val animated by animateFloatAsState(progress.coerceIn(0f, 1f), label = "panelProgress")
+                LinearProgressIndicator(
+                    progress = { animated },
+                    modifier = barModifier,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    strokeCap = StrokeCap.Round,
+                    gapSize = 0.dp,
+                    drawStopIndicator = {},
+                )
+            }
+        }
+        if (primary != null || secondary != null) {
+            Spacer(Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)) {
+                secondary?.let {
+                    OutlinedButton(
+                        onClick = it.onClick,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(it.label) }
+                }
+                primary?.let {
+                    Button(
+                        onClick = it.onClick,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text(it.label) }
                 }
             }
-            if (progress != null) {
-                Spacer(Modifier.height(20.dp))
-                val barModifier = Modifier.width(180.dp).height(4.dp).clip(CircleShape)
-                if (progress.isNaN()) {
-                    LinearProgressIndicator(
-                        modifier = barModifier,
-                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        strokeCap = StrokeCap.Round,
-                        gapSize = 0.dp,
-                    )
-                } else {
-                    val animated by animateFloatAsState(progress.coerceIn(0f, 1f), label = "panelProgress")
-                    LinearProgressIndicator(
-                        progress = { animated },
-                        modifier = barModifier,
-                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        strokeCap = StrokeCap.Round,
-                        gapSize = 0.dp,
-                        drawStopIndicator = {},
-                    )
-                }
-            }
-            if (primary != null || secondary != null) {
-                Spacer(Modifier.height(24.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally)) {
-                    secondary?.let {
-                        OutlinedButton(
-                            onClick = it.onClick,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.heightIn(min = 48.dp),
-                        ) { Text(it.label) }
-                    }
-                    primary?.let {
-                        Button(
-                            onClick = it.onClick,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.heightIn(min = 48.dp),
-                        ) { Text(it.label) }
-                    }
-                }
-            }
-            tertiary?.let {
-                Spacer(Modifier.height(4.dp))
-                TextButton(onClick = it.onClick) { Text(it.label) }
-            }
+        }
+        tertiary?.let {
+            Spacer(Modifier.height(4.dp))
+            TextButton(onClick = it.onClick) { Text(it.label) }
         }
     }
 }

@@ -25,6 +25,19 @@ data class NativeBrowserState(
     val shown: Boolean = false,
     val mode: ProviderMode = ProviderMode.MANUAL,
     val agentOn: Boolean = false,
+    /**
+     * The agent still holds the current, valid grant for the shown page, but an unconfirmed
+     * click/type limits it to snapshot/capture ([PageRecovery.OBSERVE_ONLY]). Derived from the live
+     * grant plus recovery, independently of [agentOn]; the UI offers Take over, which revokes it.
+     * Presentation only: it is not authority and does not change the mutation gate.
+     */
+    val agentReadOnly: Boolean = false,
+    /**
+     * The shown page's own main-frame address as the session last recorded it (load start, commit,
+     * finish, or a same-document history update the URL policy allows). Display only: it is not a
+     * navigation receipt, not proof of a document and never a grant.
+     */
+    val displayUrl: String? = null,
     val pageError: String? = null,
     val pageReady: Boolean = false,
     /** True only for a document-invalid/unavailable page; the UI offers reload/reopen. */
@@ -90,6 +103,17 @@ data class NativeBrowserState(
     val pointerX: Float = 0f,
     val pointerY: Float = 0f,
     val pointerUi: PointerUi = PointerUi(0, 0L, 0f, 0f, false),
+)
+
+/**
+ * One display-only report from a page session: its view and load ticket, and the address and error
+ * it now shows. The presenter uses the identity only to drop reports from an older page/view/load.
+ */
+data class BrowserPageStatus(
+    val viewId: String,
+    val ticket: Long,
+    val displayUrl: String?,
+    val pageError: String?,
 )
 
 data class NativeBrowserTab(

@@ -30,6 +30,7 @@ import io.andchamber.app.ui.home.AutoOpenRow
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.home.LocalRuntimeCard
+import io.andchamber.app.ui.home.ScreenAwakeRow
 import io.andchamber.app.ui.home.ServerEditorDialog
 import io.andchamber.app.ui.home.SharedStorageCard
 import io.andchamber.app.ui.home.UpdateCheckRow
@@ -355,6 +356,19 @@ private fun AutoOpenRowPreview() {
     AndChamberTheme {
         Surface(color = MaterialTheme.colorScheme.background) {
             AutoOpenRow(checked = true, onCheckedChange = {}, modifier = Modifier.padding(16.dp))
+        }
+    }
+}
+
+@Preview(name = "Details · keep screen on", uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+private fun ScreenAwakeRowPreview() {
+    AndChamberTheme {
+        Surface(color = MaterialTheme.colorScheme.background) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                AutoOpenRow(checked = true, onCheckedChange = {}, modifier = Modifier.padding(bottom = 6.dp))
+                ScreenAwakeRow(checked = false, onCheckedChange = {})
+            }
         }
     }
 }

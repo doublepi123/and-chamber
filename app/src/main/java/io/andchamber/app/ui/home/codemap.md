@@ -6,7 +6,7 @@ The control-room home screen (`Routes.HOME`). Shows the on-device OpenChamber ru
 
 Files:
 - `HomeScreen.kt`: `HomeScreen`, `HomeActions` (lambdas passed in from the root), header, one-shot `HomeEntrance`, `BrowserEntryCard`.
-- `LocalRuntimeCard.kt`: `LocalRuntimeCard`, `RuntimePhase` (coarse phase of `RuntimeState`), per-phase bodies, the update notice (`UpdateOfferRow`, `UpdateProblemRow`, `RawOutput`, `VersionChanges`), footer toggles, `AutoOpenRow`, `UpdateCheckRow`.
+- `LocalRuntimeCard.kt`: `LocalRuntimeCard`, `RuntimePhase` (coarse phase of `RuntimeState`), per-phase bodies, the update notice (`UpdateOfferRow`, `UpdateProblemRow`, `RawOutput`, `VersionChanges`), footer toggles, `AutoOpenRow`, `ScreenAwakeRow`, `UpdateCheckRow`.
 - `SharedStorageCard.kt`: `SharedStorageCard` (switch, status, folder tree, restart notice, permission and unavailable bodies).
 - `RemoteServers.kt`: `RemoteServersSection`, server rows, `RemoveServerDialog`, `ServerEditorDialog`.
 
@@ -19,7 +19,7 @@ Files:
 - Running shows the URL, uptime (a 30 s `produceState` ticker), port and a copy action. Failed shows `failed.reason`. Recoverable failures get Retry and Repair. Non-recoverable ones get only Repair, with an explanation.
 - Repair, Uninstall and Update go through `ConfirmDialog` (`PendingConfirm`). The uninstall wording changes when the shared folder is in use, since projects stay in place. The update wording changes when the server is up (it is stopped and started again, so running tasks are interrupted); the dialog closes itself if the offer disappears.
 - Update notice: a slot under the phase body, shown only with `info != null` in Stopped, Starting, Running, Stopping or Failed. `RuntimeUpdateState.lastFailure` wins over `available`. The offer (`primaryContainer`) lists only changed packages ("OpenChamber 2.4.0 → 2.5.0", versions in mono) with an Update button on the title line; `TitleWithAction` (a small custom `Layout`) gives the version lines the full width so they don't wrap on a 360 dp phone. The failure row (`errorContainer`, like `FailedBody`) shows the localised `UserMessages.headline(messageKey)`, a note that the current version still works, Details (English reason plus raw `detail` in a selectable, copyable terminal box, max 180 dp, scrolls), Try again (only while an offer exists; asks again) and a close button (`onDismissUpdateFailure`). Update and Try again are disabled while Starting or Stopping. After confirming, `updateRequested` hides the slot until the runtime reports Installing, or 15 s (`UPDATE_PICKUP_GRACE_MS`).
-- Details: `UpdateCheckRow` sits above the version table. The whole row calls `onCheckForUpdates` (disabled while checking or Installing) and summarises the state: Checking… with a spinner, Couldn't check for updates (`checkFailed`, warning tint), Update available or Up to date with "checked N minutes ago" (`R.plurals.checked_*_ago`, 30 s ticker), or Not checked yet.
+- Details: `AutoOpenRow` and `ScreenAwakeRow` share one switch-row layout. Screen awake is opt-in and persisted by `ScreenAwakeController`; it holds the Activity window only while the local runtime is Running, the app is foreground and no remote page is in view. `UpdateCheckRow` sits above the version table. The whole row calls `onCheckForUpdates` (disabled while checking or Installing) and summarises the state: Checking… with a spinner, Couldn't check for updates (`checkFailed`, warning tint), Update available or Up to date with "checked N minutes ago" (`R.plurals.checked_*_ago`, 30 s ticker), or Not checked yet.
 - `NotInstalledBody` shows free space from `filesDir.usableSpace` and warns below 3 GiB (`LOW_SPACE_BYTES`).
 - `SharedStorageCard` has three states: `Off`, `NeedsPermission`, `Active`. Turning it off while Active asks for confirmation. The folder tree is drawn with rails. `codeSpans()` sets paths in mono.
 - Remote editor: address and name use `rememberSaveable`. The password uses plain `remember`, so it is never saved in instance state. The address is normalized as the user types (`checkServerAddress`). Plain HTTP to a non-loopback host needs an explicit opt-in checkbox.
@@ -51,12 +51,14 @@ Update:
 Remote servers:
 1. Empty list: `EmptyServersCard`. Otherwise, a `SectionHeader` with an Add button.
 2. Row tap → `onOpenRemote` → `openIfResumed(Routes.web(server.id))`.
-3. Row menu: Edit → `ServerEditorDialog`. Remove → `RemoveServerDialog` → `onRemoveRemote`, which discards the pooled WebView and calls `remotes.remove`.
+3. Row menu: Edit → `ServerEditorDialog`. Remove → `RemoveServerDialog` → `onRemoveRemote`. The root freezes that server, drains started cookie writes, discards the pooled WebView and clears its named profile's cookies/WebStorage. Only success commits `remotes.remove` and forgets the page; failure keeps the server and shows a retry message.
 4. Save: `checkServerAddress` must return `Valid`. An insecure remote with a password needs the opt-in. Then `onSaveRemote(ServerTarget.Remote(...))`. New servers get a UUID, and the id is kept on edit.
 
 The in-app browser is opened from the local chat's edge menu ("Open web page"), not from Home. Home never creates a browser page.
 
 Auto-open setting: `AutoOpenRow` appears in Details when `autoOpenLocal != null` and `info != null`. It calls `onAutoOpenChange`, which updates `UiPrefs`.
+
+Screen-awake setting: `ScreenAwakeRow` appears beside Auto-open once installed. `HomeScreen` obtains the process-wide `ScreenAwakeController` directly (previews hide it), so the root does not need another action; `MainActivity` owns the foreground/runtime/window-flag binding.
 
 Storage card:
 1. Switch on → `storage.setEnabled(true)` on the IO channel. Switch off while Active → confirm → `setEnabled(false)`.

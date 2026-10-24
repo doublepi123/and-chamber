@@ -46,6 +46,8 @@
     <string name="launch_checking">正在检查…</string>
     <string name="auto_open_label">启动时打开上次使用的 OpenChamber</string>
     <string name="auto_open_hint">会记住你上次打开的服务器和页面。本地服务器未运行时会先启动它。</string>
+    <string name="screen_awake_label">本机服务器运行时保持屏幕常亮</string>
+    <string name="screen_awake_hint">仅在 AndChamber 位于前台时生效；离开应用后，屏幕可正常休眠。</string>
 
     <!-- 分区 -->
     <string name="section_this_device">本机</string>
@@ -193,7 +195,8 @@
     <string name="more_options">更多选项</string>
     <string name="password_saved">密码已保存</string>
     <string name="remove_server_title">移除 %1$s？</string>
-    <string name="remove_server_body">已保存的地址和密码将从手机中删除。服务器本身不会改变。</string>
+    <string name="remove_server_body">已保存的地址、密码和此服务器的网站数据将从手机中删除。服务器本身不会改变。</string>
+    <string name="remote_remove_clear_failed">无法清除此服务器的网站数据，服务器尚未移除，请重试。</string>
 
     <!-- 服务器对话框 -->
     <string name="field_address">地址</string>
@@ -214,6 +217,7 @@
     <string name="address_scheme">请使用 http:// 或 https:// 地址</string>
     <string name="address_invalid">这不像是有效的地址</string>
     <string name="address_no_host">请添加主机名或 IP 地址</string>
+    <string name="address_no_userinfo">地址不能包含用户名或密码</string>
 
     <!-- 网页界面 -->
     <string name="connecting_to">正在连接到 %1$s</string>
@@ -357,5 +361,5 @@
     <string name="browser_address_go">前往</string>
     <string name="browser_address_cancel">取消编辑</string>
     <string name="browser_reload">重新加载页面</string>
-    <string name="browser_action_outcome_unknown">上次操作未确认，核对后交给代理。</string>
+    <string name="browser_action_outcome_unknown">操作未确认；代理只读，点“接管”可撤销权限。</string>
 </resources>

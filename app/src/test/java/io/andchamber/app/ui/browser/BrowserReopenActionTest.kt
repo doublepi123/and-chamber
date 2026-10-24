@@ -57,13 +57,34 @@ class BrowserReopenActionTest {
         assertEquals(null, browserReopenFailureResource(true, null))
     }
 
-    @Test fun `an unconfirmed action says so and keeps Resume, never the reopen wording`() {
+    @Test fun `a read-only grant offers Take over and its own line until the person takes over`() {
+        fun status(pageError: String? = null, readOnly: Boolean = true, unknown: Boolean = true, reopen: Boolean = false) =
+            browserFloatStatusResource(pageError, false, true, false, false, false,
+                requiresReopen = reopen, actionOutcomeUnknown = unknown, agentReadOnly = readOnly)
+        assertEquals(BrowserControlAction.TakeOver,
+            browserControlAction(agentOn = false, reopenNeeded = false, canResume = true, agentReadOnly = true))
+        assertEquals(R.string.browser_action_outcome_unknown, status())
+        assertEquals(R.string.browser_action_outcome_unknown, status(pageError = "Re-open this page before allowing control"))
+        // A real page error and a document reopen still win.
+        assertEquals(null, status(pageError = "The certificate isn't trusted"))
+        assertEquals(R.string.browser_reopen_required, status(reopen = true))
+        // After Take over the grant is gone: the manual line and Resume.
+        assertEquals(R.string.browser_float_status_manual, status(readOnly = false))
+        assertEquals(BrowserControlAction.Resume,
+            browserControlAction(agentOn = false, reopenNeeded = false, canResume = true, agentReadOnly = false))
+        // The agent in full control keeps Take over as before.
+        assertEquals(BrowserControlAction.TakeOver,
+            browserControlAction(agentOn = true, reopenNeeded = false, canResume = false, agentReadOnly = false))
+    }
+
+    @Test fun `an unconfirmed action without a grant keeps Resume, never the reopen wording`() {
         fun status(pageError: String? = null, agentOn: Boolean = false, retired: Boolean = false, reopen: Boolean = false) =
             browserFloatStatusResource(pageError, agentOn, true, retired, false, false,
                 requiresReopen = reopen, actionOutcomeUnknown = true)
-        assertEquals(R.string.browser_action_outcome_unknown, status())
-        // Even with an older reopen notice still attached as the page error.
-        assertEquals(R.string.browser_action_outcome_unknown, status(pageError = "Re-open this page before allowing control"))
+        // No grant is left (the person took over): the read-only notice would be untrue.
+        assertEquals(R.string.browser_float_status_manual, status())
+        // An older reopen notice still attached as the page error is never shown for it.
+        assertEquals(R.string.browser_float_status_manual, status(pageError = "Re-open this page before allowing control"))
         // A real document problem still wins.
         assertEquals(R.string.browser_reopen_required, status(reopen = true))
         assertEquals(null, status(pageError = "The certificate isn't trusted"))

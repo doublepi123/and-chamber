@@ -2,6 +2,8 @@ package io.andchamber.app.data
 
 import android.webkit.CookieManager
 import android.webkit.WebView
+import androidx.webkit.Profile
+import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import io.andchamber.app.runtime.ServerTarget
@@ -31,10 +33,16 @@ class WebIsolationException(
  * profile or to the global CookieManager: if MULTI_PROFILE is missing or a binding fails, acquire or
  * bindFreshWebView throws [WebIsolationException].
  *
+ * Can also clear one target's own named profile when that server is removed. The identity stays
+ * frozen after a successful removal, so a stale page cannot recreate its data.
+ *
  * Call from the main thread (WebView API).
  */
-class WebSessionProfiles {
+class WebSessionProfiles(
+    removalStore: RemovableWebProfileStore = PlatformRemovableWebProfileStore(),
+) {
     private val bindings = HashMap<WebSessionIdentity, WebProfileBinding>()
+    private val removal = WebProfileRemovalCoordinator(removalStore)
 
     @Synchronized
     fun acquire(target: ServerTarget): WebProfileBinding {
@@ -43,7 +51,29 @@ class WebSessionProfiles {
         }
         val origin = canonicalWebOrigin(target.baseUrl) ?: throw WebIsolationException(WebIsolationFailure.InvalidServerAddress)
         val identity = WebSessionIdentity(target.id, origin)
-        return bindings.getOrPut(identity) { WebProfileBinding(identity, profileNameFor(identity)) }
+        // A removal freezes the identity before it clears anything; no new page may join it.
+        if (removal.isUnavailable(identity)) throw WebIsolationException(WebIsolationFailure.ProfileBindingFailed)
+        return bindings.getOrPut(identity) { WebProfileBinding(identity, profileNameFor(identity), removal.gateFor(identity)) }
+    }
+
+    /**
+     * Clears the named profile of [target] at its current canonical origin: retires the identity,
+     * waits for cookie batches that had already started, runs [beforeClear] (the caller discards
+     * its pooled WebView there), then removes that profile's cookies and WebStorage.
+     *
+     * Only [WebProfileRemovalResult.Removed] and [WebProfileRemovalResult.NothingStored] mean the
+     * caller may delete the saved server. Any [WebProfileRemovalResult.Failed] leaves it in place and
+     * reopens the identity for another attempt. Cancellation reopens the identity too.
+     */
+    suspend fun removeProfile(
+        target: ServerTarget,
+        beforeClear: suspend () -> Unit = {},
+    ): WebProfileRemovalResult {
+        val identity = profileRemovalIdentity(target)
+            ?: return WebProfileRemovalResult.Failed(WebProfileRemovalFailure.InvalidServerAddress)
+        // Drop the current capability first; the gate is what stops writes from old holders.
+        synchronized(this) { bindings.remove(identity) }
+        return removal.remove(identity, beforeClear)
     }
 }
 
@@ -51,6 +81,7 @@ class WebSessionProfiles {
 class WebProfileBinding internal constructor(
     val identity: WebSessionIdentity,
     val profileName: String,
+    private val gate: WebProfileWriteGate,
 ) {
     /**
      * Binds a brand-new WebView to this profile. Must run before any other WebView operation on [view]
@@ -62,6 +93,11 @@ class WebProfileBinding internal constructor(
             view.destroy()
             throw WebIsolationException(WebIsolationFailure.UnsupportedWebView)
         }
+        // The identity may have been frozen for removal after this binding was handed out.
+        if (gate.isRetired) {
+            view.destroy()
+            throw WebIsolationException(WebIsolationFailure.ProfileBindingFailed)
+        }
         try {
             WebViewCompat.setProfile(view, profileName)
             val profile = WebViewCompat.getProfile(view)
@@ -69,7 +105,7 @@ class WebProfileBinding internal constructor(
             val manager = profile.cookieManager
             manager.setAcceptCookie(true)
             manager.setAcceptThirdPartyCookies(view, false)
-            return PlatformWebSessionCookies(identity, manager)
+            return PlatformWebSessionCookies(identity, manager, gate)
         } catch (error: Exception) {
             view.destroy()
             throw WebIsolationException(WebIsolationFailure.ProfileBindingFailed, error)
@@ -81,8 +117,10 @@ class WebProfileBinding internal constructor(
 private class PlatformWebSessionCookies(
     override val identity: WebSessionIdentity,
     private val manager: CookieManager,
+    private val gate: WebProfileWriteGate,
 ) : WebSessionCookies {
     override suspend fun cookieHeader(url: String): String? {
+        if (gate.isRetired) return null
         if (canonicalWebOrigin(url) != identity.origin) return null
         return withContext(Dispatchers.IO) { manager.getCookie(url) }
     }
@@ -93,12 +131,16 @@ private class PlatformWebSessionCookies(
     ) {
         require(canonicalWebOrigin(url) == identity.origin) { "Cookies are only stored for the bound origin" }
         if (headers.isEmpty()) return
-        // Once a batch has started it must finish: a cancelled caller must not leave a half-written login.
-        withContext(NonCancellable) {
-            withContext(Dispatchers.Main.immediate) {
-                for (header in headers) setOne(url, header)
-                @Suppress("DEPRECATION")
-                manager.flush()
+        // The gate refuses a batch once removal froze this identity; a batch that already started
+        // finishes before the gate lets the removal proceed. Once a batch has started it must finish:
+        // a cancelled caller must not leave a half-written login.
+        gate.write {
+            withContext(NonCancellable) {
+                withContext(Dispatchers.Main.immediate) {
+                    for (header in headers) setOne(url, header)
+                    @Suppress("DEPRECATION")
+                    manager.flush()
+                }
             }
         }
     }
@@ -115,4 +157,39 @@ private class PlatformWebSessionCookies(
             }
         }
     }
+}
+
+/** Production profile lookup. Main thread only, like all ProfileStore/WebView APIs. */
+private class PlatformRemovableWebProfileStore : RemovableWebProfileStore {
+    override fun profilesSupported(): Boolean = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+
+    override fun existingProfile(name: String): RemovableWebProfile? {
+        val store = ProfileStore.getInstance()
+        // getProfile() throws for a name that was never created. The name list is the reliable
+        // "does not exist" signal; a profile that is listed but cannot be read stays a failure.
+        if (name !in store.allProfileNames) return null
+        val profile = store.getProfile(name)
+            ?: throw IllegalStateException("WebView profile '$name' is listed but cannot be read")
+        return PlatformRemovableWebProfile(profile)
+    }
+}
+
+/**
+ * One profile's data. `removeAllCookies` resumes on the platform's completion callback regardless of
+ * its Boolean (which only says whether a cookie was there); a callback that never arrives makes the
+ * coordinator's timeout fail the removal, so the server entry is kept.
+ */
+private class PlatformRemovableWebProfile(private val profile: Profile) : RemovableWebProfile {
+    override val name: String get() = profile.name
+
+    override suspend fun removeAllCookies(): Boolean =
+        suspendCancellableCoroutine { continuation ->
+            profile.cookieManager.removeAllCookies {
+                if (continuation.isActive) continuation.resume(true)
+            }
+        }
+
+    override fun flushCookies() = profile.cookieManager.flush()
+
+    override fun deleteAllStorage() = profile.webStorage.deleteAllData()
 }

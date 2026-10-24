@@ -326,21 +326,19 @@ class OpenChamberNotifier(
         notificationId: Int,
         requestId: String?,
         decision: String?,
-    ): PendingIntent {
-        val intent =
-            Intent(context, NotificationActionReceiver::class.java)
-                .setAction(action)
-                .putExtra(NotificationActionReceiver.EXTRA_SESSION_ID, sessionId)
-                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
-                .apply {
-                    directory?.let { putExtra(NotificationActionReceiver.EXTRA_DIRECTORY, it) }
-                    requestId?.let { putExtra(NotificationActionReceiver.EXTRA_REQUEST_ID, it) }
-                    decision?.let { putExtra(NotificationActionReceiver.EXTRA_DECISION, it) }
-                }
-        // Mutable so the RemoteInput result can be attached for reply actions.
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-        return PendingIntent.getBroadcast(context, (action + sessionId + (requestId ?: "") + (decision ?: "")).hashCode(), intent, flags)
-    }
+    ): PendingIntent =
+        // The explicit data URI, not the request code, keeps actions of the same session apart.
+        NotificationActionIdentity.pendingIntent(
+            context = context,
+            spec = NotificationActionIdentity.Spec(
+                action = action,
+                notificationId = notificationId,
+                sessionId = sessionId,
+                directory = directory,
+                requestId = requestId,
+                decision = decision,
+            ),
+        )
 
     private fun canPost(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
