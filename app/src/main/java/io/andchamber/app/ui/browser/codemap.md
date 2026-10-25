@@ -21,7 +21,10 @@ Files:
   `presenter.openNewTabManual`. Pure projection: `browserTabEntries`/`browserTabPosition`; test tags
   (`BrowserAddress`, `BrowserTabCounter`, `BrowserTabList`, `BrowserTabItem<n>`, `BrowserTabClose<n>`,
   `BrowserNewTabField`) are exposed as resource ids for device tests. The address's accessible name
-  is the shown address (else title), with "Edit web address" as its click action.
+  is the shown address (else title), with "Edit web address" as its click action. Back dismisses the
+  page list first, then the address editor; it exits a requested full screen when a small window fits,
+  or hides automatic-full/collapsed presentation instead of changing the obscured chat. Small-window
+  Back stays with the chat.
 - `BrowserSession.kt`: one WebView, profile bind, clients, viewport capture.
 - `BrowserDesktopViewport.kt`: bounded, paired desktop CSS dimensions (1920 × 1080 by default),
   retained per tab independently of phone window presentation.
@@ -100,8 +103,11 @@ Files:
 - Explicit foreground opens default to agent control once ready. A grant binds one runtime launch, connection id, console session
   and visible tab. The plugin tool server connects only while the presenter reports
   `transportEligible`; losing eligibility (background, console change, detach) clears the connection
-  and revokes the grant. A reconnect never restores a grant. Explicit Take over or the
-  window closing revokes control. Page scrolling and window dragging/resizing do not revoke it.
+  and revokes the grant. A reconnect never restores a grant. An ordinary revoke that leaves the
+  selected live page without a grant also enables the person's own links/forms; a still-loading
+  controlled GET keeps its ticket/witness checks. Restoring/resuming presentation alone grants
+  nothing; a verified grant disables manual navigation again. Explicit takeover stays latched
+  through hide/restore. Page scrolling and window dragging/resizing do not revoke it.
 - Test entry points (`attachHostForTest`, `installPageDecorator`, `beginForTest`,
   `acceptProbeForTest`) refuse to run outside a debug build.
 - Snapshot/capture errors and missing scroll replies do not alone invalidate the page. An uncertain

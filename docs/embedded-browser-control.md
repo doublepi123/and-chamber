@@ -47,6 +47,10 @@ returns a plain "not available" text error. It never prints the token, and it do
    An explicit takeover cannot be overridden by agent opens or actions. The person can choose
    **Resume agent** or explicitly open another page to request control again. Ordinary page callbacks
    and foreground restoration never silently re-enable revoked control.
+   After an ordinary revoke without an explicit takeover, the retained page accepts the person's
+   links and forms under the same URL/TLS policy; this does not restore an agent grant. A controlled
+   load still in flight keeps its document checks. Resume agent or a verified agent wake returns
+   navigation to the agent only after the normal checks.
 
 Sign-in cookies can remain in the browser's own profile, `andchamber_browser_v1`. They are not copied
 from, or into, the OpenChamber page profile.
@@ -55,6 +59,10 @@ from, or into, the OpenChamber page profile.
 
 - The window has a visible address bar, address editing and reload, full-screen/small-window switching,
   a hide action, and an explicit takeover action. Closing a page is separate from hiding its window.
+  Back first dismisses the page list, then leaves the address editor. It exits a requested full
+  screen when a small window fits; automatic full screen or the keyboard-folded bar hides the
+  browser, rather than navigating the chat behind it. A small floating window leaves Back to the
+  chat as before.
 - Mobile pages keep a phone-sized viewport. Desktop pages keep a separate fixed viewport, defaulting
   to **1920 × 1080 CSS pixels**. Resizing the small window scales its presentation,
   rather than repeatedly changing the website's responsive layout. Full screen uses the same page,

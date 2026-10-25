@@ -63,6 +63,15 @@ class RequestTrackerTest {
     }
 
     @Test
+    fun `claims are isolated by session while same session duplicates are refused`() {
+        val tracker = RequestTracker()
+
+        assertEquals(Claim.CLAIMED, tracker.claim("session-1:call", "session-1:call"))
+        assertEquals(Claim.CLAIMED, tracker.claim("session-2:call", "session-2:call"))
+        assertEquals(Claim.DUPLICATE, tracker.claim("session-1:call", "session-1:call"))
+    }
+
+    @Test
     fun `a cancel key is never evicted by later cancels`() {
         val tracker = RequestTracker()
         assertFalse(tracker.cancel("session:first"))

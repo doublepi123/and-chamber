@@ -1009,6 +1009,7 @@ class NativeBrowserPresenter(
             actionReceipt = null
             if (clearPendingWake) pendingWake = null
             mode = ProviderMode.MANUAL
+            handSelectedPageToPersonLocked(reason, keepRequestId)
             documentEpoch += 1
             inflightGeometry = null
             adapter?.clearRefs()
@@ -1042,6 +1043,26 @@ class NativeBrowserPresenter(
         job?.cancel()
         // Every revoke is visible at once: the window must never keep showing "agent on".
         synchronized(lock) { publishLocked() }
+    }
+
+    /**
+     * The single revoke-time handoff. Once a revoke has left the selected live page without any
+     * grant, the window says "Manual control", so the person's own links and forms must work there:
+     * the page becomes manual (see [browserRevokeHandsPageToPerson] for the reasons that do not).
+     * This only changes how navigation is admitted. It is not a takeover (the latch stays as it
+     * is), grants nothing, and a later allow() hands navigation back to the agent. A page still
+     * loading its controlled GET keeps that load's ticket and witness checks through
+     * [ControlledBrowserPage.keepManualForControlledLoad]. Must hold [lock].
+     */
+    private fun handSelectedPageToPersonLocked(reason: String, keepRequestId: String?) {
+        if (!browserRevokeHandsPageToPerson(reason, keepRequestId)) return
+        val tabId = selectedTabId ?: return
+        val current = page ?: return
+        val bound = pages[tabId] ?: return
+        if (bound.retired || bound.page !== current) return
+        // A grant that survives for this very page keeps the agent's navigation rules.
+        if (registry.currentGrant()?.tabId == tabId) return
+        if (!current.manualNavigation) current.keepManualForControlledLoad()
     }
 
     /** Host left the foreground. Revokes, but keeps the window so resume can show it again. */
@@ -3829,6 +3850,20 @@ internal enum class ManualOpenKind { NAVIGATE, RELOAD, REOPEN }
  */
 internal fun browserReloadKeepsTakeover(kind: ManualOpenKind?, explicitTakeover: Boolean): Boolean =
     kind == ManualOpenKind.RELOAD && explicitTakeover
+
+/**
+ * Whether a revoke with [reason] leaves the selected live page to the person's own navigation.
+ * Not for: a revoke made by an open or a mode change that keeps its caller's request alive (the
+ * replacement page is configured by its own commit), the takeover itself (already manual and the
+ * latch owner), and a failed or unrecognised document (fatal, unknown navigation, refused mode
+ * switch), where Reopen, not free navigation, is the recovery.
+ */
+internal fun browserRevokeHandsPageToPerson(reason: String, keepRequestId: String?): Boolean =
+    keepRequestId == null && reason !in REVOKE_REASONS_KEEPING_AGENT_RULES
+
+private val REVOKE_REASONS_KEEPING_AGENT_RULES = setOf(
+    "open", "takeover", "fatal", "unknown navigation", "desktop mode refused",
+)
 
 /**
  * The agent still holds the current, valid grant for the shown page, but an unconfirmed click/type

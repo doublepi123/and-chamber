@@ -267,9 +267,30 @@ internal fun BrowserFloatWindow(
         // (fewer than two pages) or when the window folds, so it never pops back up later.
         if (tabList && (blocked || tabs.size < 2)) SideEffect { tabList = false }
 
-        // Back leaves full screen first, like a phone browser; it never hides or stops the agent.
-        BackHandler(enabled = ui.fullRequested && !editing) { ui.fullRequested = false }
-        BackHandler(enabled = editing) { editTarget = null }
+        // Back, in order: dismiss the page list; stop editing the address; leave a full screen the
+        // person chose (when a small window exists to go back to); hide a browser that covers the
+        // chat with no smaller window to fall back to (automatic full screen, folded). A small
+        // window leaves Back to the chat underneath. Only Hide touches the agent.
+        val floatFitsWhenClosed = browserWindowLayout(
+            safeWidth, safeHeight, 0f, bottomClearance.value, vpW, vpH,
+            fullRequested = false, placement = ui.placement,
+        ).presentation == BrowserPresentation.Float
+        val backAction = browserBackAction(
+            tabListShown = tabList && tabs.size >= 2 && !blocked,
+            editorShown = editing,
+            presentation = layout.presentation,
+            fullRequested = ui.fullRequested,
+            floatFitsWhenClosed = floatFitsWhenClosed,
+        )
+        BackHandler(enabled = backAction != BrowserBackAction.PassThrough) {
+            when (backAction) {
+                BrowserBackAction.DismissTabs -> tabList = false
+                BrowserBackAction.EndEditing -> editTarget = null
+                BrowserBackAction.ExitFull -> ui.fullRequested = false
+                BrowserBackAction.Hide -> onHide()
+                BrowserBackAction.PassThrough -> Unit
+            }
+        }
 
         val window = layout.window
         Surface(
@@ -1043,6 +1064,36 @@ private fun ControlBar(
             BrowserControlAction.None -> Unit
         }
     }
+}
+
+/** What the system Back key does while the browser window is composed. */
+internal enum class BrowserBackAction { DismissTabs, EndEditing, ExitFull, Hide, PassThrough }
+
+/**
+ * Back never reaches the chat underneath while the browser actually covers it.
+ *
+ * 1. The page list is open: dismiss it.
+ * 2. An address editor is shown: stop editing, including a new page with no current-page callback.
+ * 3. Full screen the person asked for, and a small window fits when the keyboard is closed
+ *    ([floatFitsWhenClosed]): go back to the small window. Without a small window to go back to,
+ *    leaving full screen would change nothing, so this falls through to Hide.
+ * 4. Full screen the layout forced (landscape, short screens, keyboard) or the folded bar: Hide.
+ * 5. A small window: not consumed; the chat handles Back as before.
+ *
+ * No page history is involved. A hidden window is not composed and consumes nothing.
+ */
+internal fun browserBackAction(
+    tabListShown: Boolean,
+    editorShown: Boolean,
+    presentation: BrowserPresentation,
+    fullRequested: Boolean,
+    floatFitsWhenClosed: Boolean,
+): BrowserBackAction = when {
+    tabListShown -> BrowserBackAction.DismissTabs
+    editorShown -> BrowserBackAction.EndEditing
+    presentation == BrowserPresentation.Float -> BrowserBackAction.PassThrough
+    presentation == BrowserPresentation.Full && fullRequested && floatFitsWhenClosed -> BrowserBackAction.ExitFull
+    else -> BrowserBackAction.Hide
 }
 
 /** The one control action the window offers. */

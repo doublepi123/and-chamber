@@ -237,6 +237,27 @@ class BrowserToolServerTest {
     }
 
     @Test
+    fun `the same callID in different sessions executes even after the first completes`() {
+        val executor = RecordingExecutor()
+        val server = server(executor)
+        val port = server.start()
+        server.setConnection("conn-1")
+        try {
+            val first = post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("shared-call", sessionId = "session-1"))
+            val second = post(port, BrowserToolEndpoint.TOOL_PATH, toolBody("shared-call", sessionId = "session-2"))
+
+            assertEquals(200, first.status)
+            assertEquals(200, second.status)
+            assertEquals(null, code(first))
+            assertEquals(null, code(second))
+            assertEquals(2, executor.calls.get())
+            assertEquals(listOf("session-1", "session-2"), executor.requests.map { it.sessionId })
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `concurrent identical calls execute once and the rest are DUPLICATE_CALL`() {
         val executor = RecordingExecutor {
             Thread.sleep(100)
@@ -556,10 +577,11 @@ class BrowserToolServerTest {
         callId: String,
         action: String = "snapshot",
         allowWaitMs: String? = null,
+        sessionId: String = "session-1",
     ): String =
         buildJsonObject {
             put("version", 1)
-            put("sessionID", "session-1")
+            put("sessionID", sessionId)
             put("callID", callId)
             // Raw JSON so a test can send a type the contract does not accept.
             if (allowWaitMs != null) put("allowWaitMs", kotlinx.serialization.json.Json.parseToJsonElement(allowWaitMs))

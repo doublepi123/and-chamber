@@ -189,7 +189,7 @@ class BrowserToolServer(
         val key = inflightKey(call.sessionId, request.requestId)
         // Claim, cancel tombstone and in-flight job share one per-launch state, under one lock.
         // A cancel that arrived before this claim keeps the key refused for the whole launch.
-        when (requests.claim(claimKey = request.requestId, cancelKey = key)) {
+        when (requests.claim(claimKey = key, cancelKey = key)) {
             RequestTracker.Claim.CANCELLED -> {
                 writeJson(socket, cancelled(request.action), 200)
                 return
@@ -420,7 +420,7 @@ class BrowserToolServer(
 /**
  * Per-launch atomic claim, registration and cancellation state.
  *
- * Claim keys are deduped per launch; cancel keys are bound to `(session, request)`. Both sets live
+ * Claim and cancel keys are bound to `(session, request)`. Both sets live
  * in this object for the whole launch and are released only by [clear] when the launch ends: a
  * cancelled key is never forgotten, so a late request cannot be re-admitted by capacity pressure.
  * Jobs and tombstones share one lock, so claim/register/cancel races have exactly one outcome.
