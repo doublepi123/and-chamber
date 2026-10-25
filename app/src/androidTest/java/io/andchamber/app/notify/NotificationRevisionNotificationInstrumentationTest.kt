@@ -24,6 +24,10 @@ import org.junit.runner.RunWith
 /**
  * A real notification: a Fields form is posted, then kept with a new revision. The kept notification's
  * Fill form action must carry that new revision, so reopening it can still act while the old one cannot.
+ *
+ * Legacy compatibility only: the question sink no longer posts [FormAnswer.Fields] (plain text forms
+ * are answered inline, see InlineNotificationFormNotificationInstrumentationTest), but a Fields
+ * notification posted before an upgrade can still be kept, and must keep this revision protection.
  */
 @RunWith(AndroidJUnit4::class)
 class NotificationRevisionNotificationInstrumentationTest {

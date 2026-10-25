@@ -4,6 +4,7 @@ import io.andchamber.app.notify.NotificationPayload.text
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -59,6 +60,17 @@ sealed interface FormAnswer {
     data object OpenOnly : FormAnswer
 }
 
+/**
+ * The inline path's accepted fields and a canonical fingerprint of their raw answering constraints.
+ * The fingerprint covers every raw key of each field except the display-only title/description/
+ * placeholder, so a pattern, custom permission, option list, required flag, default or any future
+ * constraint change is detected before a map collected under the old schema can be sent.
+ */
+internal data class InlineFormSpec(
+    val fields: FormAnswer.Fields,
+    val schema: String,
+)
+
 object PendingForms {
     /** Buttons are only offered for choices that fit a notification. */
     const val MAX_CHOICE_BUTTONS = 3
@@ -100,6 +112,115 @@ object PendingForms {
     }
 
     /**
+     * The inline notification path's classification. OpenCode v2.0.32 question fields normally carry
+     * `type:"string"`, an `options` array and `custom:true`; a custom field is free text even when it
+     * has suggestion options (q0 with three values to merge is one such field). The rules are:
+     *
+     *  - no `options` key: free text;
+     *  - `options` present: free text only when `custom` is explicitly JSON `true`;
+     *  - `options` present without explicit `custom:true`: the notification path cannot know whether
+     *    the answer may be arbitrary, so it refuses inline and keeps [classifyForm]'s Choice/OpenOnly
+     *    fallback.
+     *
+     * An illegal `options` type or illegal `custom` type, a duplicate field key, `when` or a hidden
+     * field is refused. [classifyForm]'s existing Fields classification is not widened here.
+     */
+    fun inlineForm(form: JsonObject): FormAnswer.Fields? = inlineFormSpec(form)?.fields
+
+    /** Finds [formId] among the session's pending forms for the inline notification path. */
+    fun inlineForm(
+        pending: JsonObject,
+        sessionId: String,
+        formId: String,
+    ): FormAnswer.Fields? = inlineFormSpec(pending, sessionId, formId)?.fields
+
+    /** [inlineForm] plus the raw-schema fingerprint the send fence compares. */
+    internal fun inlineFormSpec(form: JsonObject): InlineFormSpec? {
+        val formId = form.text("id").orEmpty()
+        val sessionId = form.text("sessionID").orEmpty()
+        if (formId.isBlank() || sessionId.isBlank() || sessionId == "global") return null
+        val fields = form["fields"] as? JsonArray ?: return null
+        if (fields.size !in 1..MAX_FORM_FIELDS) return null
+        return parseInlineFields(formId, sessionId, form.text("title").orEmpty(), fields)
+    }
+
+    internal fun inlineFormSpec(
+        pending: JsonObject,
+        sessionId: String,
+        formId: String,
+    ): InlineFormSpec? {
+        val forms = (pending[sessionId] as? JsonObject)?.get("forms") as? JsonArray ?: return null
+        val form = forms.filterIsInstance<JsonObject>().firstOrNull { it.text("id") == formId } ?: return null
+        // The reply is addressed to [sessionId]; a form claiming another session is not answerable here.
+        if (form.text("sessionID") != sessionId) return null
+        return inlineFormSpec(form)
+    }
+
+    /**
+     * Parses the inline path's 1..[MAX_FORM_FIELDS] string fields. Unlike the form-screen parser, an
+     * options array is allowed only when the field explicitly permits custom input. Invalid option or
+     * custom types are refused rather than coerced.
+     */
+    private fun parseInlineFields(
+        formId: String,
+        sessionId: String,
+        title: String,
+        fields: JsonArray,
+    ): InlineFormSpec? {
+        val parsed = ArrayList<FormTextField>(fields.size)
+        for (raw in fields) {
+            val field = raw as? JsonObject ?: return null
+            val key = field.text("key")?.takeIf { it.isNotBlank() } ?: return null
+            if (field.containsKey("when") || field["hidden"] == JsonPrimitive(true)) return null
+            if (field.text("type") != "string") return null
+            val custom =
+                when (val present = field["custom"]) {
+                    null -> false
+                    is JsonPrimitive -> {
+                        if (present.isString) return null
+                        present.booleanOrNull ?: return null
+                    }
+                    else -> return null
+                }
+            if (field.containsKey("options")) {
+                field["options"] as? JsonArray ?: return null
+                // Options without explicit custom:true mean the answer must be one of the choices.
+                // Empty or suggestion-only options are fine for a custom free-text field; the array
+                // does not constrain the typed value.
+                if (!custom) return null
+            }
+            parsed +=
+                FormTextField(
+                    key = key,
+                    title = field.text("title")?.takeIf { it.isNotBlank() } ?: key,
+                    description = field.text("description")?.takeIf { it.isNotBlank() },
+                    required = field["required"] == JsonPrimitive(true),
+                    placeholder = field.text("placeholder")?.takeIf { it.isNotBlank() },
+                    defaultValue = field.text("default")?.takeIf { it.isNotBlank() },
+                )
+        }
+        if (parsed.map { it.key }.distinct().size != parsed.size) return null
+        return InlineFormSpec(
+            fields = FormAnswer.Fields(formId, sessionId, title, parsed),
+            schema = inlineSchema(fields),
+        )
+    }
+
+    /**
+     * A stable fingerprint of every raw field constraint except display-only text. It deliberately
+     * includes unknown keys too, so a newly added pattern or any constraint the model does not store
+     * still invalidates a staged answer instead of being silently ignored.
+     */
+    private fun inlineSchema(fields: JsonArray): String =
+        fields.joinToString(separator = "\u001F") { raw ->
+            val field = raw as JsonObject
+            field.keys
+                .filterNot { it == "title" || it == "description" || it == "placeholder" }
+                .sorted()
+                .joinToString(separator = "\u001E") { key -> "$key=${field[key]}" }
+        }
+
+    /**
      * A single-field form keeps its direct notification actions. Conditional or hidden fields need
      * the rest of the form, so they stay open-only.
      */
@@ -112,9 +233,14 @@ object PendingForms {
         val key = field.text("key")?.takeIf { it.isNotBlank() } ?: return FormAnswer.OpenOnly
         if (field.containsKey("when") || field["hidden"] == JsonPrimitive(true)) return FormAnswer.OpenOnly
         if (field.text("type") != "string") return FormAnswer.OpenOnly
-        val options = field["options"] as? JsonArray
+        // An options key is a closed set of choices. An empty array is not free text: without a
+        // custom flag the notification cannot know the answer may be arbitrary, so it must open the app.
+        // Custom question fields are answered by the inline path; this legacy direct-action classifier
+        // is only the fallback for a closed field.
+        if (!field.containsKey("options")) return FormAnswer.Text(formId, sessionId, key)
+        val options = field["options"] as? JsonArray ?: return FormAnswer.OpenOnly
         return when {
-            options == null || options.isEmpty() -> FormAnswer.Text(formId, sessionId, key)
+            options.isEmpty() -> FormAnswer.OpenOnly
             options.size <= MAX_CHOICE_BUTTONS -> {
                 val pairs = options.filterIsInstance<JsonObject>().mapNotNull { option ->
                     val value = option.text("value")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -138,6 +264,16 @@ object PendingForms {
         fields: JsonArray,
     ): FormAnswer.Fields? {
         if (fields.size !in 2..MAX_FORM_FIELDS) return null
+        return parseFields(formId, sessionId, title, fields)
+    }
+
+    /** Parses 1..[MAX_FORM_FIELDS] plain text fields; the caller decides the accepted size. */
+    private fun parseFields(
+        formId: String,
+        sessionId: String,
+        title: String,
+        fields: JsonArray,
+    ): FormAnswer.Fields? {
         val parsed =
             fields.map { raw ->
                 val field = raw as? JsonObject ?: return null

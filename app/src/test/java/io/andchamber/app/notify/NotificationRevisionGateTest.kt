@@ -3,6 +3,7 @@ package io.andchamber.app.notify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -284,6 +285,37 @@ class NotificationRevisionGateTest {
         assertEquals(1, applied)
         assertTrue(gate.ifCurrent(7, current) { gate.cancel(7) })
         assertFalse(system.shown.containsKey(7))
+    }
+
+    @Test
+    fun publishIfLatestRepostsOnlyForTheLocallyNewestRevision() {
+        // The system lags behind the newest local write; recovery must still be able to post.
+        val older = post(7)
+        val newest = gate.publish(7, sent = false) { token -> token }
+        assertEquals("the system still shows the old revision", older, system.shown[7])
+        var recovered: String? = null
+        val ran =
+            gate.publishIfLatest(7, newest) {
+                recovered = gate.publish(7, sent = false) { token -> system.shown[7] = token; token }
+            }
+        assertNotNull(ran)
+        assertEquals(recovered, system.shown[7])
+        assertNull("an older local revision can no longer recover", gate.publishIfLatest(7, older) { error("must not run") })
+        assertNull(gate.publishIfLatest(8, newest) { error("must not run") })
+    }
+
+    @Test
+    fun aDismissedRevisionBlocksLateWritesButANewPostRecovers() {
+        val token = post(7)
+        gate.markDismissed(7, token)
+        var writes = 0
+        assertFalse(gate.ifCurrent(7, token) { writes++ })
+        assertNull(gate.publishIfLatest(7, token) { writes++ })
+        assertEquals(0, writes)
+
+        val newer = post(7)
+        assertTrue("a new publication clears the dismissal", gate.ifCurrent(7, newer) { writes++ })
+        assertEquals(1, writes)
     }
 
     @Test

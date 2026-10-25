@@ -37,6 +37,32 @@
     <string name="notify_your_reply">Your reply: %1$s</string>
     <string name="action_fill_form">Fill form</string>
 
+    <!-- Inline form, answered field by field inside the notification. Never shows an answer. -->
+    <string name="inline_step_title">%1$d/%2$d · %3$s</string>
+    <string name="inline_action_answer">Answer</string>
+    <string name="inline_action_answer_send">Answer &amp; send</string>
+    <string name="inline_action_back">Back</string>
+    <string name="inline_action_skip">Skip</string>
+    <string name="inline_action_skip_send">Skip &amp; send</string>
+    <string name="inline_action_cancel">Cancel</string>
+    <string name="inline_action_retry">Try again</string>
+    <string name="inline_action_resume">Check status</string>
+    <string name="inline_input_optional">%1$s (optional)</string>
+    <string name="inline_hint_staged">This answer is kept on this device for now. Everything is sent together after the last field.</string>
+    <string name="inline_hint_last">Last field. Your answer is sent together with the others, %1$d in all, once.</string>
+    <string name="inline_hint_single">Your answer is sent once.</string>
+    <string name="inline_status_required">This field is required. Type an answer to continue.</string>
+    <string name="inline_status_check_failed">Couldn\'t check with OpenChamber, so nothing was sent. Your answers are kept. Make sure OpenChamber is running, then try again.</string>
+    <string name="inline_status_send_failed">OpenChamber didn\'t accept the answers. Check the fields and send again.</string>
+    <string name="inline_status_result_unknown">Not sure your answers arrived. Try again checks first and sends only if the form is still waiting.</string>
+    <string name="inline_status_schema_changed">The form changed, so nothing was sent. Please answer it again from the first field.</string>
+    <string name="inline_notice_restarted">Your earlier answers were cleared. Start again from the first field.</string>
+    <string name="inline_checking">Checking…</string>
+    <string name="inline_done_sent">Answers sent</string>
+    <string name="inline_done_gone">This form was already answered or closed</string>
+    <string name="inline_lookup_title">OpenChamber needs your answer</string>
+    <string name="inline_lookup_body">Couldn\'t load the form. Try again, or tap to open the session.</string>
+
     <!-- Form screen opened from a notification ("Fill form") -->
     <string name="form_kicker">OpenChamber needs your answer</string>
     <string name="form_untitled">Answer the questions</string>

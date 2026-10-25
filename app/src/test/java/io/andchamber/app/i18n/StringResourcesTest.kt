@@ -92,10 +92,9 @@ class StringResourcesTest {
 
     @Test
     fun `the number of translated strings is what the brief committed to`() {
-        // 317 existing keys plus 15 for the multi-field notification form: action label, headings,
-        // required/send/status copy, loading, close, retry and open-session actions. One entry per
-        // key, as the loader keeps them.
-        assertEquals(332, english.size)
+        // 332 existing keys plus 24 for inline notification steps, actions, privacy-safe status
+        // messages and draft recovery. One entry per key, as the loader keeps them.
+        assertEquals(356, english.size)
     }
 
     private companion object {

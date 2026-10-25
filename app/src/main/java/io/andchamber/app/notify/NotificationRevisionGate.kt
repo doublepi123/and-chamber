@@ -17,6 +17,13 @@ internal class NotificationRevisionState {
      * that closes that gap.
      */
     val latestWritten = HashMap<Int, String>()
+
+    /**
+     * The last revision a user swiped away while its Sending/Checking write was in flight. A late
+     * result or recovery for exactly that revision must not redraw the notification. A new publish for
+     * the id clears the entry. Bounded, like the local revision table.
+     */
+    val dismissedRevisions = LinkedHashMap<Int, String>()
 }
 
 /** The state every notifier and receiver in this process shares. Tests inject their own instance. */
@@ -55,6 +62,7 @@ internal class NotificationRevisionGate(
     ): T =
         synchronized(state.lock) {
             state.pendingSent.remove(id)
+            state.dismissedRevisions.remove(id)
             val token = newToken()
             state.latestWritten[id] = token
             val result = write(token)
@@ -99,12 +107,43 @@ internal class NotificationRevisionGate(
     ): Boolean =
         synchronized(state.lock) {
             // Only a newer local token vetoes; no record means "trust the system" (process restart).
+            if (state.dismissedRevisions[id] == token) return@synchronized false
             val newest = state.latestWritten[id]
             if (newest != null && newest != token) return@synchronized false
             val shown = runCatching { readRevision(id) }.getOrNull()
             if (shown == null || shown != token) return@synchronized false
             write()
             true
+        }
+
+    /** Records that the user swiped the notification showing [token]; its late result must not redraw. */
+    fun markDismissed(
+        id: Int,
+        token: String,
+    ) {
+        synchronized(state.lock) {
+            state.dismissedRevisions[id] = token
+            if (state.dismissedRevisions.size > MAX_DISMISSED) {
+                state.dismissedRevisions.entries.firstOrNull()?.let { state.dismissedRevisions.remove(it.key) }
+            }
+        }
+    }
+
+    /**
+     * Runs [write] only while [token] is still the newest revision this process wrote for [id]
+     * ([NotificationRevisionState.latestWritten]). The system is deliberately not consulted: this is
+     * the recovery path for a lagging SystemUI, and a locally-owned revision must be able to repost an
+     * actionable notification. A newer local write makes it a no-op. The lock is reentrant.
+     */
+    fun <T> publishIfLatest(
+        id: Int,
+        token: String,
+        write: () -> T,
+    ): T? =
+        synchronized(state.lock) {
+            if (state.dismissedRevisions[id] == token) return@synchronized null
+            if (state.latestWritten[id] != token) return@synchronized null
+            write()
         }
 
     /** Drops the pending "Sent" [token] of [id] without removing anything (a clean-up that never ran). */
@@ -122,7 +161,12 @@ internal class NotificationRevisionGate(
         synchronized(state.lock) {
             state.pendingSent.remove(id)
             state.latestWritten.remove(id)
+            state.dismissedRevisions.remove(id)
             remove(id)
         }
+    }
+
+    private companion object {
+        const val MAX_DISMISSED = 128
     }
 }

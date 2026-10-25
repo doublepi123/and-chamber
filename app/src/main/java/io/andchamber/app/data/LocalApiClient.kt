@@ -2,14 +2,17 @@ package io.andchamber.app.data
 
 import io.andchamber.app.notify.ApiRequest
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -20,9 +23,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okio.BufferedSink
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 /** Outcome of one local API call. [status] 0 means the request never completed. */
 data class ApiResult(
@@ -46,8 +51,8 @@ data class ApiResult(
  * Default readiness denies everything. Callers must pass a real [LocalReadiness].
  *
  * Sends are serialized by a mutex, so a second send cannot interleave with a login or a 401 retry of
- * the first. Redirects are never followed. Failures never throw across this boundary and never log
- * credentials.
+ * the first. Redirects are never followed. Failures never throw across this boundary (cancellation
+ * does), never log credentials and never re-send a business request automatically.
  */
 class LocalApiClient(
     private val baseUrl: () -> String?,
@@ -84,20 +89,31 @@ class LocalApiClient(
 
     private val json = Json
 
+    /**
+     * Test-only synchronization point: runs inside the send mutex after a call resumed successfully,
+     * after `ensureActive`, and before its response cookies are merged into the shared jar. Production
+     * leaves this null; it exists to deterministically hold an old call's cookies while a cancellation
+     * and a newer lease happen.
+     */
+    internal var beforeCookieCommitForTest: (suspend () -> Unit)? = null
+
+    private class CallResponse(
+        val result: ApiResult,
+        val cookies: MemoryCookieJar,
+    )
+
     /** Runs [request] against the local server, logging in first when there is no session. */
     suspend fun send(
         request: ApiRequest,
         directory: String? = null,
     ): ApiResult =
-        withContext(Dispatchers.IO) {
-            mutex.withLock {
-                try {
-                    sendLocked(request, directory)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    abandon()
-                }
+        mutex.withLock {
+            try {
+                sendLocked(request, directory)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                abandon()
             }
         }
 
@@ -117,7 +133,7 @@ class LocalApiClient(
     }
 
     /** Caller holds [mutex]. */
-    private fun sendLocked(
+    private suspend fun sendLocked(
         request: ApiRequest,
         directory: String?,
     ): ApiResult {
@@ -156,7 +172,7 @@ class LocalApiClient(
     }
 
     /** Signs in with the UI password. False when there is no password, the lease is stale, or the server refuses. */
-    private fun login(lease: LocalApiLease): Boolean {
+    private suspend fun login(lease: LocalApiLease): Boolean {
         if (!isCurrent(lease)) return false
         val pw = runCatching { password() }.getOrNull()?.takeIf { it.isNotEmpty() } ?: return false
         val body =
@@ -172,14 +188,20 @@ class LocalApiClient(
                 .post(body.toRequestBody(JSON))
                 .build()
         val ok =
-            runCatching {
-                client.newCall(request).execute().use { it.code in 200..299 }
-            }.getOrDefault(false)
+            try {
+                val call = executeCall(request, lease)
+                commitCookies(call, lease)
+                call.result.ok
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
         // Set-Cookie was stored by the bridge before this point; a change during the call discards it.
         return ok && isCurrent(lease)
     }
 
-    private fun execute(
+    private suspend fun execute(
         lease: LocalApiLease,
         target: HttpUrl,
         request: ApiRequest,
@@ -194,12 +216,77 @@ class LocalApiClient(
                 .tag(LocalApiLease::class.java, lease)
         // OpenChamber decodes this with decodeURIComponent, so encode like encodeURIComponent: space is %20.
         if (!directory.isNullOrBlank()) builder.header("x-opencode-directory", encodeUriComponent(directory))
-        return runCatching {
-            client.newCall(builder.build()).execute().use { response ->
-                ApiResult(response.code, response.body?.string().orEmpty())
-            }
-        }.getOrElse { ApiResult(0, it.message ?: "Request failed") }
+        return try {
+            val call = executeCall(builder.build(), lease)
+            commitCookies(call, lease)
+            call.result
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ApiResult(0, e.message ?: "Request failed")
+        }
     }
+
+    /**
+     * Commits one call's cookies to the shared jar only after the call resumed successfully inside the
+     * send mutex, the coroutine is still active, and the captured lease is still current. A cancelled,
+     * late or stale-lease response therefore never overwrites a newer login.
+     */
+    private suspend fun commitCookies(
+        call: CallResponse,
+        lease: LocalApiLease,
+    ) {
+        currentCoroutineContext().ensureActive()
+        if (!isCurrent(lease)) return
+        beforeCookieCommitForTest?.invoke()
+        currentCoroutineContext().ensureActive()
+        if (!isCurrent(lease)) return
+        jar.merge(call.cookies.snapshot())
+    }
+
+    /**
+     * One HTTP call, actually tied to coroutine cancellation: OkHttp runs it asynchronously and the
+     * cancellation handler cancels the Call, so a delayed response cannot keep the caller or the
+     * client mutex blocked. Each call gets a private cookie jar seeded from the shared snapshot; the
+     * shared jar is only touched later, by [commitCookies]. The Response is read and closed inside the
+     * callback; it never escapes. A cancelled or failed call is [ApiResult] status 0 and is never
+     * automatically re-sent.
+     */
+    private suspend fun executeCall(
+        request: Request,
+        lease: LocalApiLease,
+    ): CallResponse =
+        suspendCancellableCoroutine { continuation ->
+            // A private jar keeps OkHttp's BridgeInterceptor from writing a late/old response cookie
+            // into the shared jar after the cancellation released the mutex.
+            val callJar = MemoryCookieJar(jar.snapshot())
+            val callClient = client.newBuilder().cookieJar(callJar).build()
+            val call = callClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(
+                object : Callback {
+                    override fun onFailure(
+                        call: Call,
+                        e: IOException,
+                    ) {
+                        val result = ApiResult(0, e.message ?: "Request failed")
+                        if (continuation.isActive) runCatching { continuation.resume(CallResponse(result, callJar)) }
+                    }
+
+                    override fun onResponse(
+                        call: Call,
+                        response: Response,
+                    ) {
+                        // Read and close the body here: no Response object leaves this callback.
+                        val result =
+                            runCatching {
+                                response.use { ApiResult(it.code, it.body?.string().orEmpty()) }
+                            }.getOrElse { ApiResult(0, it.message ?: "Request failed") }
+                        if (continuation.isActive) runCatching { continuation.resume(CallResponse(result, callJar)) }
+                    }
+                },
+            )
+        }
 
     /** True while [lease] is still the trusted launch on its origin (and [url], when given, stays on it). */
     private fun isCurrent(
@@ -262,20 +349,36 @@ internal class OneShotJsonBody(private val payload: String) : RequestBody() {
 }
 
 /** Holds cookies for the lifetime of the client only. Nothing is written to disk. */
-class MemoryCookieJar : CookieJar {
-    private val cookies = mutableListOf<Cookie>()
+class MemoryCookieJar(
+    initial: List<Cookie> = emptyList(),
+) : CookieJar {
+    private val cookies = initial.toMutableList()
 
     @Synchronized
     override fun saveFromResponse(
         url: HttpUrl,
         cookies: List<Cookie>,
     ) {
-        this.cookies.removeAll { existing -> cookies.any { it.name == existing.name } }
-        this.cookies += cookies
+        mergeLocked(cookies)
     }
 
     @Synchronized
     override fun loadForRequest(url: HttpUrl): List<Cookie> = cookies.filter { it.matches(url) }
+
+    /** An immutable copy for one HTTP call's private jar; later changes to this jar do not affect it. */
+    @Synchronized
+    fun snapshot(): List<Cookie> = cookies.toList()
+
+    /** Copies [incoming] into this jar, replacing saved cookies with the same name. */
+    @Synchronized
+    fun merge(incoming: List<Cookie>) {
+        mergeLocked(incoming)
+    }
+
+    private fun mergeLocked(incoming: List<Cookie>) {
+        cookies.removeAll { existing -> incoming.any { it.name == existing.name } }
+        cookies += incoming
+    }
 
     /** True when a non-expired OpenChamber session cookie covers [url]. */
     @Synchronized

@@ -37,6 +37,32 @@
     <string name="notify_your_reply">你的回复：%1$s</string>
     <string name="action_fill_form">填写表单</string>
 
+    <!-- 在通知里逐项填写的表单，任何时候都不显示填写内容 -->
+    <string name="inline_step_title">%1$d/%2$d · %3$s</string>
+    <string name="inline_action_answer">填写</string>
+    <string name="inline_action_answer_send">填写并发送</string>
+    <string name="inline_action_back">上一项</string>
+    <string name="inline_action_skip">跳过</string>
+    <string name="inline_action_skip_send">跳过并发送</string>
+    <string name="inline_action_cancel">取消</string>
+    <string name="inline_action_retry">重试</string>
+    <string name="inline_action_resume">检查状态</string>
+    <string name="inline_input_optional">%1$s（选填）</string>
+    <string name="inline_hint_staged">本项先暂存在本机，填完最后一项后统一发送一次。</string>
+    <string name="inline_hint_last">这是最后一项。填好后会和其他内容一起发送，共 %1$d 项，只发一次。</string>
+    <string name="inline_hint_single">填好后只发送一次。</string>
+    <string name="inline_status_required">这一项必填，请输入后继续。</string>
+    <string name="inline_status_check_failed">无法向 OpenChamber 确认状态，因此没有发送。已填内容仍保留。请确认 OpenChamber 正在运行后重试。</string>
+    <string name="inline_status_send_failed">OpenChamber 没有接受这次填写。请检查各项后再发送。</string>
+    <string name="inline_status_result_unknown">不确定内容是否已送达。点“重试”会先确认，只有表单仍在等待时才会发送。</string>
+    <string name="inline_status_schema_changed">表单已变化，因此没有发送。请从第一项重新填写。</string>
+    <string name="inline_notice_restarted">之前填写的内容已清除，请从第一项重新开始。</string>
+    <string name="inline_checking">正在确认…</string>
+    <string name="inline_done_sent">已发送</string>
+    <string name="inline_done_gone">这个表单已在别处回答或关闭</string>
+    <string name="inline_lookup_title">OpenChamber 需要你回答</string>
+    <string name="inline_lookup_body">无法加载表单。请重试，或点按打开会话。</string>
+
     <!-- 从通知打开的表单页（“填写表单”） -->
     <string name="form_kicker">OpenChamber 需要你回答</string>
     <string name="form_untitled">请回答以下问题</string>
