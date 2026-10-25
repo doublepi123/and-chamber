@@ -15,6 +15,13 @@ class NotificationDecisionsTest {
     private val permissionPending = obj("""{"ses_1":{"permissions":[{"id":"per_9","action":"bash","resources":["npm test"]}]}}""")
     private val textForm = obj("""{"ses_1":{"forms":[{"id":"frm_1","sessionID":"ses_1","fields":[{"key":"name","type":"string"}]}]}}""")
     private val multiFieldForm =
+        obj(
+            """{"ses_1":{"forms":[{"id":"frm_1","sessionID":"ses_1","fields":[
+               {"key":"a","type":"string"},{"key":"b","type":"string"},{"key":"c","type":"string"},
+               {"key":"d","type":"string"},{"key":"e","type":"string"},{"key":"f","type":"string"},
+               {"key":"g","type":"string"},{"key":"h","type":"string"},{"key":"i","type":"string"}]}]}}""",
+        )
+    private val fillableForm =
         obj("""{"ses_1":{"forms":[{"id":"frm_1","sessionID":"ses_1","fields":[{"key":"a","type":"string"},{"key":"b","type":"string"}]}]}}""")
     private val nothingPending = obj("""{}""")
 
@@ -55,6 +62,7 @@ class NotificationDecisionsTest {
         assertEquals(PendingCheck.Pending, ActionDecisions.checkForm(textForm, "ses_1", "frm_1"))
         assertEquals(PendingCheck.Gone, ActionDecisions.checkForm(textForm, "ses_1", "frm_other"))
         assertEquals(PendingCheck.NotAnswerable, ActionDecisions.checkForm(multiFieldForm, "ses_1", "frm_1"))
+        assertEquals("a fillable multi-field form is pending", PendingCheck.Pending, ActionDecisions.checkForm(fillableForm, "ses_1", "frm_1"))
     }
 
     // --- before sending ---

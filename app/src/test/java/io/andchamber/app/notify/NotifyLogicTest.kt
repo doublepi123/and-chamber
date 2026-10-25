@@ -112,6 +112,41 @@ class NotifyLogicTest {
     }
 
     @Test
+    fun `two to eight plain string fields become a fillable form`() {
+        val answer = PendingForms.classifyForm(
+            obj(
+                """{"id":"frm_7","sessionID":"ses_1","title":"Deploy","fields":[
+                   {"key":"env","type":"string","title":"Environment","description":"target env","required":true,"placeholder":"dev","default":"dev"},
+                   {"key":"branch","type":"string","title":"Branch"},
+                   {"key":"note","type":"string","title":"Note","required":false}]}""",
+            ),
+        )
+        assertEquals(
+            FormAnswer.Fields(
+                "frm_7",
+                "ses_1",
+                "Deploy",
+                listOf(
+                    FormTextField("env", "Environment", "target env", true, "dev", "dev"),
+                    FormTextField("branch", "Branch", null, false, null, null),
+                    FormTextField("note", "Note", null, false, null, null),
+                ),
+            ),
+            answer,
+        )
+    }
+
+    @Test
+    fun `a multi-field form with a choice, when or hidden field stays open-only`() {
+        val choice = """{"id":"f","sessionID":"ses_1","fields":[{"key":"a","type":"string"},{"key":"b","type":"string","options":[{"value":"x","label":"X"}]}]}"""
+        val conditional = """{"id":"f","sessionID":"ses_1","fields":[{"key":"a","type":"string"},{"key":"b","type":"string","when":[{"key":"a","op":"eq","value":"x"}]}]}"""
+        val hidden = """{"id":"f","sessionID":"ses_1","fields":[{"key":"a","type":"string"},{"key":"b","type":"string","hidden":true}]}"""
+        listOf(choice, conditional, hidden).forEach { text ->
+            assertEquals(FormAnswer.OpenOnly, PendingForms.classifyForm(obj(text)))
+        }
+    }
+
+    @Test
     fun `a choice with more than three options is not answerable from the notification`() {
         val four =
             """{"id":"frm_3","sessionID":"ses_1","title":"x","fields":[{"key":"k","type":"string",
@@ -120,12 +155,13 @@ class NotifyLogicTest {
     }
 
     @Test
-    fun `multi-field, non-string, conditional and global forms are open-only`() {
-        val two = """{"id":"f","sessionID":"ses_1","title":"t","fields":[{"key":"a","type":"string"},{"key":"b","type":"string"}]}"""
+    fun `non-string, conditional, global and too-many-field forms are open-only`() {
+        val tooMany = (1..9).joinToString(",") { """{"key":"k$it","type":"string"}""" }
+        val nine = """{"id":"f","sessionID":"ses_1","title":"t","fields":[$tooMany]}"""
         val number = """{"id":"f","sessionID":"ses_1","title":"t","fields":[{"key":"a","type":"number"}]}"""
         val conditional = """{"id":"f","sessionID":"ses_1","title":"t","fields":[{"key":"a","type":"string","when":[{"key":"x","op":"eq","value":"y"}]}]}"""
         val global = """{"id":"f","sessionID":"global","title":"t","fields":[{"key":"a","type":"string"}]}"""
-        listOf(two, number, conditional, global).forEach { text ->
+        listOf(nine, number, conditional, global).forEach { text ->
             assertEquals(FormAnswer.OpenOnly, PendingForms.classifyForm(obj(text)))
         }
     }
@@ -141,6 +177,34 @@ class NotifyLogicTest {
     fun `answer body is a record keyed by the field key, as Form-Reply requires`() {
         val body = PendingForms.answerBody("env", "prod")
         assertEquals("prod", (body["answer"] as JsonObject)["env"]!!.toString().trim('"'))
+    }
+
+    @Test
+    fun `a multi-field answer body carries every field in one map`() {
+        val body = PendingForms.answerBody(mapOf("env" to "prod", "branch" to "main", "note" to ""))
+        val answer = body["answer"] as JsonObject
+        assertEquals("prod", answer["env"]!!.toString().trim('"'))
+        assertEquals("main", answer["branch"]!!.toString().trim('"'))
+        assertEquals("", answer["note"]!!.toString().trim('"'))
+    }
+
+    @Test
+    fun `missing required fields are listed by key after trimming`() {
+        val form =
+            FormAnswer.Fields(
+                "frm_1",
+                "ses_1",
+                "t",
+                listOf(
+                    FormTextField("a", "A", null, true, null, null),
+                    FormTextField("b", "B", null, false, null, null),
+                    FormTextField("c", "C", null, true, null, null),
+                ),
+            )
+
+        assertEquals(listOf("a", "c"), PendingForms.missingRequiredFields(form, mapOf("a" to "  ", "b" to "ok")))
+        assertEquals(emptyList<String>(), PendingForms.missingRequiredFields(form, mapOf("a" to "x", "c" to " y ")))
+        assertEquals(listOf("a"), PendingForms.missingRequiredFields(form, mapOf("c" to "z")))
     }
 
     // --- action to request mapping ---
@@ -167,6 +231,15 @@ class NotifyLogicTest {
         val request = NotificationActions.formReply("ses_1", "frm_1", "env", "dev")
         assertEquals("/api/session/ses_1/form/frm_1/reply", request.path)
         assertEquals("dev", ((request.body!!["answer"]) as JsonObject)["env"]!!.toString().trim('"'))
+    }
+
+    @Test
+    fun `form reply with the map keeps every answer in one request`() {
+        val request = NotificationActions.formReply("ses_1", "frm_1", mapOf("env" to "dev", "branch" to "main"))
+        assertEquals("/api/session/ses_1/form/frm_1/reply", request.path)
+        val answer = request.body!!["answer"] as JsonObject
+        assertEquals("dev", answer["env"]!!.toString().trim('"'))
+        assertEquals("main", answer["branch"]!!.toString().trim('"'))
     }
 
     @Test

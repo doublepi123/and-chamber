@@ -10,6 +10,13 @@ import java.util.UUID
 internal class NotificationRevisionState {
     val lock = Any()
     val pendingSent = HashMap<Int, String>()
+
+    /**
+     * The last revision this process wrote for each id, recorded before the write. The system can show
+     * an older notification for a while after a newer write; [latestWritten] is the local authority
+     * that closes that gap.
+     */
+    val latestWritten = HashMap<Int, String>()
 }
 
 /** The state every notifier and receiver in this process shares. Tests inject their own instance. */
@@ -36,7 +43,9 @@ internal class NotificationRevisionGate(
     }
 
     /**
-     * Runs one write for [id] under the lock, with a fresh token. The pending "Sent" of [id] is dropped first.
+     * Runs one write for [id] under the lock, with a fresh token. The pending "Sent" of [id] is dropped first,
+     * and the token becomes [NotificationRevisionState.latestWritten] before the write (so a newer revision
+     * is authoritative even while the system still shows the old notification).
      * When [sent] is true the new token becomes the pending "Sent"; a failed write leaves nothing pending.
      */
     fun <T> publish(
@@ -47,6 +56,7 @@ internal class NotificationRevisionGate(
         synchronized(state.lock) {
             state.pendingSent.remove(id)
             val token = newToken()
+            state.latestWritten[id] = token
             val result = write(token)
             if (sent) state.pendingSent[id] = token
             result
@@ -70,6 +80,33 @@ internal class NotificationRevisionGate(
             matches
         }
 
+    /**
+     * Runs [write] only while [token] is not older than the newest revision this process wrote for [id]
+     * ([NotificationRevisionState.latestWritten]) and is the one the system shows. The system can lag
+     * behind a newer publish; checking only it would let a stale action run while the old notification
+     * is still visible. When there is no local record (a fresh process after a restart) the system's
+     * revision is trusted instead, so actions still work after process death. Both checks and the write
+     * happen under [state]'s lock, so no newer write can land between them (no TOCTOU). A missing or
+     * failed read runs nothing. True when [write] ran.
+     *
+     * Unlike [cancelIfCurrent] this does not consult the pending "Sent" table: a plain post (sent =
+     * false) can be matched too. [write] may itself write through this gate; the lock is reentrant.
+     */
+    fun ifCurrent(
+        id: Int,
+        token: String,
+        write: () -> Unit,
+    ): Boolean =
+        synchronized(state.lock) {
+            // Only a newer local token vetoes; no record means "trust the system" (process restart).
+            val newest = state.latestWritten[id]
+            if (newest != null && newest != token) return@synchronized false
+            val shown = runCatching { readRevision(id) }.getOrNull()
+            if (shown == null || shown != token) return@synchronized false
+            write()
+            true
+        }
+
     /** Drops the pending "Sent" [token] of [id] without removing anything (a clean-up that never ran). */
     fun forget(
         id: Int,
@@ -80,10 +117,11 @@ internal class NotificationRevisionGate(
         }
     }
 
-    /** Removes [id] now, whatever its revision, and drops any pending "Sent" for it. */
+    /** Removes [id] now, whatever its revision, and drops its pending "Sent" and latest token. */
     fun cancel(id: Int) {
         synchronized(state.lock) {
             state.pendingSent.remove(id)
+            state.latestWritten.remove(id)
             remove(id)
         }
     }

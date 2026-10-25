@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -153,6 +154,75 @@ class NotificationActionPendingIntentInstrumentationTest {
         } finally {
             first.cancel()
             second.cancel()
+        }
+    }
+
+    @Test
+    fun formScreenActivityIntentIsDistinctAndImmutable() {
+        val spec =
+            NotificationActionIdentity.Spec(
+                action = NotificationFormActivity.ACTION_ANSWER_FORM,
+                notificationId = 707,
+                sessionId = "ses_1",
+                directory = "/repo",
+                requestId = "frm_pair",
+            )
+        val first = NotificationActionIdentity.activityPendingIntent(app, spec)
+        val otherForm = NotificationActionIdentity.activityPendingIntent(app, spec.copy(requestId = "frm_other"))
+        val otherNotification = NotificationActionIdentity.activityPendingIntent(app, spec.copy(notificationId = 708))
+        try {
+            assertTrue("the native form does not need RemoteInput", first.isImmutable)
+            assertFalse("different forms must not share an activity PendingIntent", first == otherForm)
+            assertFalse("different notifications must not share an activity PendingIntent", first == otherNotification)
+            val intent = NotificationActionIdentity.activityIntent(app, spec)
+            assertEquals(NotificationFormActivity::class.java.name, intent.component?.className)
+            assertEquals(NotificationFormActivity.ACTION_ANSWER_FORM, intent.action)
+            assertEquals(NotificationActionIdentity.dataUri(spec), intent.dataString)
+            assertEquals("ses_1", intent.getStringExtra(NotificationActionReceiver.EXTRA_SESSION_ID))
+            assertEquals("frm_pair", intent.getStringExtra(NotificationActionReceiver.EXTRA_FORM_ID))
+            assertEquals(707, intent.getIntExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, 0))
+            assertEquals("/repo", intent.getStringExtra(NotificationActionReceiver.EXTRA_DIRECTORY))
+        } finally {
+            first.cancel()
+            otherForm.cancel()
+            otherNotification.cancel()
+        }
+    }
+
+    @Test
+    fun formScreenTargetCarriesItsRevisionAndRejectsAMissingOne() {
+        val spec =
+            NotificationActionIdentity.Spec(
+                action = NotificationFormActivity.ACTION_ANSWER_FORM,
+                notificationId = 707,
+                sessionId = "ses_1",
+                directory = "/repo",
+                requestId = "frm_pair",
+                decision = "rev-7",
+            )
+        val older = NotificationActionIdentity.activityPendingIntent(app, spec)
+        val newer = NotificationActionIdentity.activityPendingIntent(app, spec.copy(decision = "rev-8"))
+        try {
+            assertFalse(
+                "a newer revision of the same form must not reuse the older activity PendingIntent",
+                older == newer,
+            )
+            val intent = NotificationActionIdentity.activityIntent(app, spec)
+            assertEquals("rev-7", intent.getStringExtra(OpenChamberNotifier.EXTRA_REVISION))
+            val target = NotificationFormActivity.Target.from(intent)
+            assertEquals("rev-7", target?.revision)
+            assertEquals("ses_1", target?.sessionId)
+            assertEquals("frm_pair", target?.formId)
+            assertEquals(707, target?.notificationId)
+            assertEquals("/repo", target?.directory)
+
+            // Without the revision the screen cannot tell its own notification from a newer one.
+            val missing = NotificationActionIdentity.activityIntent(app, spec)
+            missing.removeExtra(OpenChamberNotifier.EXTRA_REVISION)
+            assertNull(NotificationFormActivity.Target.from(missing))
+        } finally {
+            older.cancel()
+            newer.cancel()
         }
     }
 

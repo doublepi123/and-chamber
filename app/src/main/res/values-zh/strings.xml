@@ -35,6 +35,23 @@
     <string name="notify_result_unknown">不确定你的回答是否已送达。请先打开会话核对，再决定是否重新发送。</string>
     <string name="notify_answer_in_app">这个问题只能在 OpenChamber 中回答。点按即可打开会话。</string>
     <string name="notify_your_reply">你的回复：%1$s</string>
+    <string name="action_fill_form">填写表单</string>
+
+    <!-- 从通知打开的表单页（“填写表单”） -->
+    <string name="form_kicker">OpenChamber 需要你回答</string>
+    <string name="form_untitled">请回答以下问题</string>
+    <string name="form_intro">填好下面的内容后发送。所有内容会一起发送，只发一次。</string>
+    <string name="form_required">必填</string>
+    <string name="form_required_missing">请先填写这一项再发送。</string>
+    <string name="form_send">发送</string>
+    <string name="form_sending">正在发送…</string>
+    <string name="form_send_refused">OpenChamber 没有接受这次回答。请检查填写的内容后再发送。</string>
+    <string name="form_close">关闭</string>
+    <string name="form_loading">正在加载表单…</string>
+    <string name="form_check_failed_title">无法加载表单</string>
+    <string name="form_unavailable_title">请在 OpenChamber 中回答</string>
+    <string name="form_unavailable_body">这个表单只能在 OpenChamber 中回答。打开会话即可作答。</string>
+    <string name="form_open_session">打开会话</string>
 
     <!-- AndChamber 运行时提醒（通知） -->
     <string name="alert_setup_failed">设置失败</string>

@@ -90,6 +90,40 @@ internal object NotificationActionIdentity {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
         )
 
+    /**
+     * Opens [NotificationFormActivity] for one identity. The same data URI as a broadcast action keeps
+     * two pending forms apart; [Spec.requestId] carries the form id and [Spec.decision] the revision
+     * the form was posted with, also copied to [OpenChamberNotifier.EXTRA_REVISION] for the screen.
+     * The activity builds its own UI, so its PendingIntent is immutable.
+     */
+    fun activityIntent(
+        context: Context,
+        spec: Spec,
+    ): Intent =
+        Intent(context, NotificationFormActivity::class.java)
+            .setAction(NotificationFormActivity.ACTION_ANSWER_FORM)
+            .setData(Uri.parse(dataUri(spec)))
+            .putExtra(NotificationActionReceiver.EXTRA_SESSION_ID, spec.sessionId)
+            .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, spec.notificationId)
+            .apply {
+                spec.directory?.let { putExtra(NotificationActionReceiver.EXTRA_DIRECTORY, it) }
+                spec.requestId?.let { putExtra(NotificationActionReceiver.EXTRA_FORM_ID, it) }
+                spec.decision?.let { putExtra(OpenChamberNotifier.EXTRA_REVISION, it) }
+            }
+
+    /** The form screen's PendingIntent. See [activityIntent] for the identity it carries. */
+    fun activityPendingIntent(
+        context: Context,
+        spec: Spec,
+        requestCode: Int = requestCode(spec),
+    ): PendingIntent =
+        PendingIntent.getActivity(
+            context,
+            requestCode,
+            activityIntent(context, spec),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
     private fun encode(value: String): String =
         buildString(value.length) {
             for (byte in value.toByteArray(Charsets.UTF_8)) {

@@ -8,11 +8,24 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+/** One visible text input of a multi-field form. */
+data class FormTextField(
+    val key: String,
+    val title: String,
+    val description: String?,
+    val required: Boolean,
+    val placeholder: String?,
+    val defaultValue: String?,
+)
+
 /**
  * What the notification can answer for one pending form. The real OpenCode 2.0.32 schema (form.js):
  * a form has `id`, `sessionID`, `title`, and a non-empty `fields` array. A single choice is a `string`
- * field carrying `options: [{value,label,description?}]`; there is no select type. Multi-field forms
- * and other field types are never answerable from the notification.
+ * field carrying `options: [{value,label,description?}]`; there is no select type.
+ *
+ * A notification can answer one field directly ([Choice], [Text]) or, for a small form of plain text
+ * fields, open a form screen that submits every answer at once ([Fields]). Everything else is
+ * [OpenOnly].
  */
 sealed interface FormAnswer {
     /** One field, one answer: tap one of these buttons (choice with at most three options). */
@@ -30,6 +43,18 @@ sealed interface FormAnswer {
         val fieldKey: String,
     ) : FormAnswer
 
+    /**
+     * A small form of 2 to [PendingForms.MAX_FORM_FIELDS] plain string fields. OpenCode validates the
+     * whole answer map once, so the form screen submits all fields together; a field cannot be filled
+     * in one notification tap after another.
+     */
+    data class Fields(
+        val formId: String,
+        val sessionId: String,
+        val title: String,
+        val fields: List<FormTextField>,
+    ) : FormAnswer
+
     /** Anything else: the notification only opens the app. */
     data object OpenOnly : FormAnswer
 }
@@ -37,6 +62,9 @@ sealed interface FormAnswer {
 object PendingForms {
     /** Buttons are only offered for choices that fit a notification. */
     const val MAX_CHOICE_BUTTONS = 3
+
+    /** Above this many fields the form screen is not offered from a notification. */
+    const val MAX_FORM_FIELDS = 8
 
     /**
      * Finds [formId] among the session's pending forms and classifies it. Null when the form is no
@@ -67,11 +95,21 @@ object PendingForms {
         val sessionId = form.text("sessionID").orEmpty()
         if (formId.isBlank() || sessionId.isBlank() || sessionId == "global") return FormAnswer.OpenOnly
         val fields = form["fields"] as? JsonArray ?: return FormAnswer.OpenOnly
-        // Only a single-field form is answerable from a notification.
-        if (fields.size != 1) return FormAnswer.OpenOnly
-        val field = fields[0] as? JsonObject ?: return FormAnswer.OpenOnly
+        if (fields.size == 1) return classifySingleField(formId, sessionId, fields[0] as? JsonObject)
+        return classifyFields(formId, sessionId, form.text("title").orEmpty(), fields) ?: FormAnswer.OpenOnly
+    }
+
+    /**
+     * A single-field form keeps its direct notification actions. Conditional or hidden fields need
+     * the rest of the form, so they stay open-only.
+     */
+    private fun classifySingleField(
+        formId: String,
+        sessionId: String,
+        field: JsonObject?,
+    ): FormAnswer {
+        field ?: return FormAnswer.OpenOnly
         val key = field.text("key")?.takeIf { it.isNotBlank() } ?: return FormAnswer.OpenOnly
-        // Conditional or hidden fields need the rest of the form; leave those to the app.
         if (field.containsKey("when") || field["hidden"] == JsonPrimitive(true)) return FormAnswer.OpenOnly
         if (field.text("type") != "string") return FormAnswer.OpenOnly
         val options = field["options"] as? JsonArray
@@ -89,14 +127,63 @@ object PendingForms {
     }
 
     /**
-     * The `answer` body the form reply route expects: `{ "answer": { <fieldKey>: <value> } }`. The key is
-     * the field's key (Form.Reply is a record, not a bare value).
+     * A form screen can collect a small set of plain text fields. An option, a conditional rule or a
+     * hidden field means the form needs the app's own renderer; more than [MAX_FORM_FIELDS] fields do
+     * not fit the notification path. Null means open-only.
+     */
+    private fun classifyFields(
+        formId: String,
+        sessionId: String,
+        title: String,
+        fields: JsonArray,
+    ): FormAnswer.Fields? {
+        if (fields.size !in 2..MAX_FORM_FIELDS) return null
+        val parsed =
+            fields.map { raw ->
+                val field = raw as? JsonObject ?: return null
+                val key = field.text("key")?.takeIf { it.isNotBlank() } ?: return null
+                if (field.containsKey("when") || field["hidden"] == JsonPrimitive(true)) return null
+                if (field.text("type") != "string") return null
+                // A choice in a multi-field form needs a picker, which the form screen does not offer.
+                if (field.containsKey("options")) return null
+                FormTextField(
+                    key = key,
+                    title = field.text("title")?.takeIf { it.isNotBlank() } ?: key,
+                    description = field.text("description")?.takeIf { it.isNotBlank() },
+                    required = field["required"] == JsonPrimitive(true),
+                    placeholder = field.text("placeholder")?.takeIf { it.isNotBlank() },
+                    defaultValue = field.text("default")?.takeIf { it.isNotBlank() },
+                )
+            }
+        return FormAnswer.Fields(formId, sessionId, title, parsed)
+    }
+
+    /**
+     * Required keys whose submitted value is missing or blank after trimming. The form screen and
+     * [NotificationFormController] both use this before sending anything.
+     */
+    fun missingRequiredFields(
+        form: FormAnswer.Fields,
+        values: Map<String, String>,
+    ): List<String> =
+        form.fields
+            .filter { it.required && values[it.key]?.trim().isNullOrEmpty() }
+            .map { it.key }
+
+    /** The `answer` body the form reply route expects: `{ "answer": { <fieldKey>: <value> } }`. */
+    fun answerBody(answers: Map<String, String>): JsonObject =
+        buildJsonObject {
+            putJsonObject("answer") {
+                answers.forEach { (key, value) -> put(key, value) }
+            }
+        }
+
+    /**
+     * The `answer` body the form reply route expects, for one field: `{ "answer": { <fieldKey>: <value> } }`.
+     * The key is the field's key (Form.Reply is a record, not a bare value).
      */
     fun answerBody(
         fieldKey: String,
         value: String,
-    ): JsonObject =
-        buildJsonObject {
-            putJsonObject("answer") { put(fieldKey, value) }
-        }
+    ): JsonObject = answerBody(mapOf(fieldKey to value))
 }

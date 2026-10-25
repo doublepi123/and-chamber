@@ -93,7 +93,7 @@ object ActionDecisions {
         pending ?: return PendingCheck.Unknown
         return when (PendingForms.classify(pending, sessionId, formId)) {
             null -> PendingCheck.Gone
-            is FormAnswer.Choice, is FormAnswer.Text -> PendingCheck.Pending
+            is FormAnswer.Choice, is FormAnswer.Text, is FormAnswer.Fields -> PendingCheck.Pending
             FormAnswer.OpenOnly -> PendingCheck.NotAnswerable
         }
     }

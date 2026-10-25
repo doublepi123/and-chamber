@@ -92,14 +92,10 @@ class StringResourcesTest {
 
     @Test
     fun `the number of translated strings is what the brief committed to`() {
-        // 317 unique keys on both sides: upstream launch/update copy and uptime units, the plugin
-        // transport's browser strings (floating window, modes and status, including the agent-open
-        // wait), the "Open web page" entry and dialog, the floating window's "Clear site data"
-        // action with its partial result, address editing, window controls and unconfirmed actions,
-        // the page counter, page list and New page entry (eight keys; the fixed address name became
-        // its edit action), plus server-address/removal feedback and the optional local-runtime
-        // screen-awake setting. One entry per key, as the loader keeps them.
-        assertEquals(317, english.size)
+        // 317 existing keys plus 15 for the multi-field notification form: action label, headings,
+        // required/send/status copy, loading, close, retry and open-session actions. One entry per
+        // key, as the loader keeps them.
+        assertEquals(332, english.size)
     }
 
     private companion object {

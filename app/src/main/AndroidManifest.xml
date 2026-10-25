@@ -50,6 +50,16 @@
             android:name=".notify.NotificationActionReceiver"
             android:exported="false" />
 
+        <!-- Multi-field form from a notification. Not exported: only our own immutable PendingIntent opens
+             it. Its own task, so filling a form does not bring the main screen along; kept out of Recents. -->
+        <activity
+            android:name=".notify.NotificationFormActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".service.RuntimeService"
             android:exported="false"

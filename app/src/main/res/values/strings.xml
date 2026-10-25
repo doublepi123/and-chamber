@@ -35,6 +35,23 @@
     <string name="notify_result_unknown">Not sure your answer arrived. Open the session and check before you send it again.</string>
     <string name="notify_answer_in_app">This can only be answered in OpenChamber. Tap to open the session.</string>
     <string name="notify_your_reply">Your reply: %1$s</string>
+    <string name="action_fill_form">Fill form</string>
+
+    <!-- Form screen opened from a notification ("Fill form") -->
+    <string name="form_kicker">OpenChamber needs your answer</string>
+    <string name="form_untitled">Answer the questions</string>
+    <string name="form_intro">Fill in the fields below, then send. Everything is sent together, once.</string>
+    <string name="form_required">Required</string>
+    <string name="form_required_missing">Fill this in before sending.</string>
+    <string name="form_send">Send</string>
+    <string name="form_sending">Sending…</string>
+    <string name="form_send_refused">OpenChamber didn\'t accept the answer. Check the fields and send again.</string>
+    <string name="form_close">Close</string>
+    <string name="form_loading">Loading the form…</string>
+    <string name="form_check_failed_title">Couldn\'t load the form</string>
+    <string name="form_unavailable_title">Answer this in OpenChamber</string>
+    <string name="form_unavailable_body">This form can only be answered in OpenChamber. Open the session to answer it.</string>
+    <string name="form_open_session">Open the session</string>
 
     <!-- AndChamber runtime alerts (notifications) -->
     <string name="alert_setup_failed">Setup failed</string>

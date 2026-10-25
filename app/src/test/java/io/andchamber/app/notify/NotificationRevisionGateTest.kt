@@ -2,6 +2,7 @@ package io.andchamber.app.notify
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -118,6 +119,171 @@ class NotificationRevisionGateTest {
     fun absentNotificationIsNotRemoved() {
         assertFalse(gate.cancelIfCurrent(9, "rev-x"))
         assertTrue(system.removed.isEmpty())
+    }
+
+    @Test
+    fun ifCurrentRunsTheWriteOnlyForTheShownRevision() {
+        val token = post(7)
+        var writes = 0
+        assertTrue(gate.ifCurrent(7, token) { writes++ })
+        assertEquals(1, writes)
+        assertFalse(gate.ifCurrent(7, "stale") { writes++ })
+        assertEquals(1, writes)
+        assertFalse(gate.ifCurrent(9, token) { writes++ })
+        assertEquals(1, writes)
+    }
+
+    @Test
+    fun ifCurrentNeedsNoPendingSentEntry() {
+        // A plain post (sent = false) has no pending "Sent" but is still the shown revision.
+        val posted = post(7)
+        assertTrue(gate.ifCurrent(7, posted) { gate.cancel(7) })
+        assertTrue(system.removed.contains(7))
+        assertFalse(system.shown.containsKey(7))
+    }
+
+    @Test
+    fun ifCurrentDoesNothingWhenTheSystemCannotBeRead() {
+        val token = post(7)
+        system.readFailure = true
+        var writes = 0
+        assertFalse(gate.ifCurrent(7, token) { writes++ })
+        assertEquals(0, writes)
+        assertTrue(system.shown.containsKey(7))
+    }
+
+    @Test
+    fun ifCurrentCannotInterleaveWithANewerWrite() {
+        // The read waits on a latch while holding the gate lock; a concurrent publish for the same id
+        // must wait, so the order is check -> matching write -> newer publish.
+        val events = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val checkEntered = CountDownLatch(1)
+        val releaseCheck = CountDownLatch(1)
+        val raced =
+            NotificationRevisionGate(
+                readRevision = { id ->
+                    events += "check"
+                    val value = system.shown[id]
+                    checkEntered.countDown()
+                    releaseCheck.await(5, TimeUnit.SECONDS)
+                    value
+                },
+                remove = { id ->
+                    events += "remove"
+                    system.remove(id)
+                },
+                newToken = { "race-${++counter}" },
+                state = NotificationRevisionState(),
+            )
+        val token =
+            raced.publish(7, sent = false) { next ->
+                system.shown[7] = next
+                next
+            }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val matched =
+                pool.submit<Boolean> {
+                    raced.ifCurrent(7, token) {
+                        events += "matched"
+                        system.shown[7] = "cleared"
+                    }
+                }
+            assertTrue(checkEntered.await(5, TimeUnit.SECONDS))
+            val writeStarted = CountDownLatch(1)
+            val newer =
+                pool.submit {
+                    writeStarted.countDown()
+                    raced.publish(7, sent = false) { next ->
+                        events += "write"
+                        system.shown[7] = next
+                    }
+                }
+            assertTrue(writeStarted.await(5, TimeUnit.SECONDS))
+            releaseCheck.countDown()
+            assertTrue(matched.get(5, TimeUnit.SECONDS))
+            newer.get(5, TimeUnit.SECONDS)
+            assertEquals(listOf("check", "matched", "write"), events.toList())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun aNewerWriteBlocksTheOldActionWhileTheSystemStillShowsIt() {
+        // A is shown. B publishes but the system has not caught up and still reports A: A must not run.
+        val older = post(7)
+        val newer =
+            gate.publish(7, sent = false) { token ->
+                token // the system is deliberately not updated yet
+            }
+        assertEquals(older, system.shown[7])
+        var writes = 0
+        assertFalse(gate.ifCurrent(7, older) { writes++ })
+        assertEquals(0, writes)
+
+        // Once the system shows B, the old action stays stale and the new one runs.
+        system.shown[7] = newer
+        assertFalse(gate.ifCurrent(7, older) { writes++ })
+        assertEquals(0, writes)
+        assertTrue(gate.ifCurrent(7, newer) { writes++ })
+        assertEquals(1, writes)
+    }
+
+    @Test
+    fun afterAProcessRestartTheSystemRevisionIsTrusted() {
+        // A new process has no latestWritten record; the token in the notification extras still works.
+        val token = post(7)
+        val restarted =
+            NotificationRevisionGate(
+                readRevision = system::readRevision,
+                remove = system::remove,
+                newToken = { "other-process" },
+                state = NotificationRevisionState(),
+            )
+        var writes = 0
+        assertTrue(restarted.ifCurrent(7, token) { writes++ })
+        assertEquals(1, writes)
+    }
+
+    @Test
+    fun aNewerRevisionOnTheSameIdMakesTheOldFormActionStale() {
+        // Two posts for the same notification id: an answer screen opened by the older one must not
+        // cancel or keep the newer notification.
+        val older = post(7)
+        val newer = post(7)
+        var writes = 0
+        assertFalse(gate.ifCurrent(7, older) { writes++ })
+        assertEquals(0, writes)
+        assertTrue(gate.ifCurrent(7, newer) { writes++ })
+        assertEquals(1, writes)
+        assertTrue(system.shown.containsKey(7))
+    }
+
+    @Test
+    fun keptRevisionIsTheOnlyOneOldAndNewActionsMatch() {
+        // Models keepIfRevision: the keep writes a new revision under the same lock. A later retry or
+        // success uses the new token; the old token is stale and must not touch the kept notification.
+        val posted = post(7)
+        var kept: String? = null
+        assertTrue(
+            gate.ifCurrent(7, posted) {
+                kept =
+                    gate.publish(7, sent = false) { next ->
+                        system.shown[7] = next
+                        next
+                    }
+            },
+        )
+        val current = kept!!
+        assertNotEquals(posted, current)
+        var applied = 0
+        assertFalse(gate.ifCurrent(7, posted) { applied++ })
+        assertEquals(0, applied)
+        assertTrue(gate.ifCurrent(7, current) { applied++ })
+        assertEquals(1, applied)
+        assertTrue(gate.ifCurrent(7, current) { gate.cancel(7) })
+        assertFalse(system.shown.containsKey(7))
     }
 
     @Test

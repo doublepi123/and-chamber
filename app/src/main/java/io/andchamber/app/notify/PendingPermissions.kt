@@ -39,11 +39,26 @@ object NotificationActions {
         )
 
     /** POST /api/session/:sid/form/:fid/reply, body `{ "answer": { <fieldKey>: value } }`. */
-    fun formReply(sessionId: String, formId: String, fieldKey: String, value: String): ApiRequest =
+    fun formReply(
+        sessionId: String,
+        formId: String,
+        fieldKey: String,
+        value: String,
+    ): ApiRequest = formReply(sessionId, formId, mapOf(fieldKey to value))
+
+    /**
+     * POST /api/session/:sid/form/:fid/reply with the whole answer map. OpenCode validates a form's
+     * answer once, so every field must be present in this one request.
+     */
+    fun formReply(
+        sessionId: String,
+        formId: String,
+        answers: Map<String, String>,
+    ): ApiRequest =
         ApiRequest(
             "POST",
             "/api/session/${encodeSegment(sessionId)}/form/${encodeSegment(formId)}/reply",
-            PendingForms.answerBody(fieldKey, value),
+            PendingForms.answerBody(answers),
         )
 
     /** Path segments are opaque ids; keep them safe in the URL. */

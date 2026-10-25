@@ -68,24 +68,27 @@ class OpenChamberNotifier(
         val builder = baseBuilder(channel, event.title, event.body, openIntent(event.sessionId, event.directory, id))
         // The original text, so a later status line replaces the previous one instead of piling up.
         builder.addExtras(Bundle().apply { putString(EXTRA_ORIGINAL_BODY, event.body) })
-        if (questionAnswer != null) {
-            addQuestionActions(builder, event, id, questionAnswer)
-        } else {
-            addActions(builder, event, id)
-        }
         // A newer post on this id gets a new revision, so an older "Sent" clean-up no longer matches it.
+        // Actions are created inside the write because the form screen's PendingIntent carries the token:
+        // an answer submitted through an older form must not cancel or overwrite a newer notification.
         revisions.publish(id, sent = false) { token ->
+            if (questionAnswer != null) {
+                addQuestionActions(builder, event, id, questionAnswer, token)
+            } else {
+                addActions(builder, event, id)
+            }
             builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
             notify(id, builder.build())
         }
     }
 
-    /** A classified single form: choice buttons, a text reply field, or nothing (tap to open). */
+    /** A classified form: choice buttons, a text reply field, a form screen, or nothing (tap to open). */
     private fun addQuestionActions(
         builder: NotificationCompat.Builder,
         event: DesktopNotification,
         id: Int,
         answer: FormAnswer,
+        revision: String,
     ) {
         when (answer) {
             is FormAnswer.Choice -> {
@@ -107,9 +110,46 @@ class OpenChamberNotifier(
                     ).addRemoteInput(input).build(),
                 )
             }
+            is FormAnswer.Fields -> {
+                // A keep rebuilds from these extras and must attach a Fill form action for its own
+                // revision, not the old PendingIntent copied with the notification.
+                builder.addExtras(
+                    Bundle().apply {
+                        putString(EXTRA_FORM_STYLE, FORM_STYLE_FIELDS)
+                        putString(EXTRA_FORM_ID, answer.formId)
+                    },
+                )
+                builder.addAction(
+                    R.drawable.ic_notification,
+                    context.getString(R.string.action_fill_form),
+                    formScreenIntent(answer.sessionId, event.directory, id, answer.formId, revision),
+                )
+            }
             FormAnswer.OpenOnly -> Unit
         }
     }
+
+    /** Opens the form screen. The activity loads the form again and submits every field at once. */
+    private fun formScreenIntent(
+        sessionId: String,
+        directory: String?,
+        notificationId: Int,
+        formId: String,
+        revision: String,
+    ): PendingIntent =
+        NotificationActionIdentity.activityPendingIntent(
+            context = context,
+            spec = NotificationActionIdentity.Spec(
+                action = NotificationFormActivity.ACTION_ANSWER_FORM,
+                notificationId = notificationId,
+                sessionId = sessionId,
+                directory = directory,
+                requestId = formId,
+                // The revision is part of the identity and reaches the screen as an extra, so an answer
+                // from an older notification can only act while that revision is still the shown one.
+                decision = revision,
+            ),
+        )
 
     private fun formIntent(
         sessionId: String,
@@ -178,6 +218,39 @@ class OpenChamberNotifier(
         token: String,
     ): Boolean = revisions.cancelIfCurrent(id, token)
 
+    /**
+     * Removes [id] only while the system still shows [token]. Unlike [cancelIfCurrent] it does not need a
+     * pending "Sent", so an answer screen opened from a plain post can also clean up its own revision.
+     * A newer post, alert, status or kept draft has another token and is left alone. False when stale.
+     */
+    fun cancelIfRevision(
+        id: Int,
+        token: String,
+    ): Boolean = revisions.ifCurrent(id, token) { revisions.cancel(id) }
+
+    /**
+     * Keeps [id] with [plan] only while the system still shows [token], and returns the revision of the
+     * kept notification; null when [token] is stale (nothing was written) or posting is not allowed.
+     * A stale form screen must not overwrite a newer notification on the same id.
+     */
+    fun keepIfRevision(
+        id: Int,
+        token: String,
+        plan: KeepPlan,
+    ): String? {
+        if (!canPost()) return null
+        ensureChannels()
+        var kept: String? = null
+        val wrote =
+            revisions.ifCurrent(id, token) {
+                kept =
+                    revisions.publish(id, sent = false) { next ->
+                        keepLocked(id, plan, next)
+                    }
+            }
+        return if (wrote) kept else null
+    }
+
     /** Releases the pending "Sent" [token] of [id] without removing anything, when its clean-up did not run. */
     fun forgetSent(
         id: Int,
@@ -194,28 +267,52 @@ class OpenChamberNotifier(
      * buttons and reply field stay. The status replaces any earlier one, never piles up. A reply that
      * didn't go through is shown again (reply history and extras); nothing is sent again automatically.
      * If the notification was swiped away meanwhile, a small one on Errors still opens the session.
+     * Returns the new revision of the kept notification, or null when nothing was posted: callers that
+     * act again on the same screen must use that revision, since the old one is stale after a keep.
      */
     fun keep(
         id: Int,
         plan: KeepPlan,
-    ) {
-        if (!canPost()) return
+    ): String? {
+        if (!canPost()) return null
         ensureChannels()
         // Read the old notification and write the kept one under the same lock as every other write, so
         // the copy cannot be stale by the time it is posted, and a concurrent cancelIfCurrent sees one state.
-        revisions.publish(id, sent = false) { token -> keepLocked(id, plan, token) }
+        return revisions.publish(id, sent = false) { token -> keepLocked(id, plan, token) }
     }
 
     private fun keepLocked(
         id: Int,
         plan: KeepPlan,
         token: String,
-    ) {
+    ): String {
         val original = activeNotification(id)
+        val wasFields = original?.extras?.getString(EXTRA_FORM_STYLE) == FORM_STYLE_FIELDS
+        val formId = original?.extras?.getString(EXTRA_FORM_ID)?.takeIf { it.isNotBlank() }
         val builder =
             if (original != null) {
                 NotificationCompat.Builder(context, original).apply {
-                    if (!plan.keepActions) clearActions()
+                    if (wasFields) {
+                        // The copied Fields action carries the old revision. Replace it with one for this
+                        // write's token, so a reopened screen can still act; without a form id, keep none.
+                        clearActions()
+                        if (plan.keepActions && formId != null) {
+                            addAction(
+                                R.drawable.ic_notification,
+                                context.getString(R.string.action_fill_form),
+                                formScreenIntent(plan.sessionId, plan.directory, id, formId, token),
+                            )
+                        }
+                        // Explicit, so a second keep still knows this is a form screen.
+                        addExtras(
+                            Bundle().apply {
+                                putString(EXTRA_FORM_STYLE, FORM_STYLE_FIELDS)
+                                formId?.let { putString(EXTRA_FORM_ID, it) }
+                            },
+                        )
+                    } else if (!plan.keepActions) {
+                        clearActions()
+                    }
                     // A tap must open the session, also if the original had no tap action.
                     if (original.contentIntent == null) setContentIntent(openIntent(plan.sessionId, plan.directory, id))
                 }
@@ -237,6 +334,7 @@ class OpenChamberNotifier(
         // Kept notifications get a new revision too: an older "Sent" clean-up must not remove the draft.
         builder.addExtras(Bundle().apply { putString(EXTRA_REVISION, token) })
         notify(id, builder.build())
+        return token
     }
 
     /** The posted notification with [id], as the system holds it now; null when it is gone. */
@@ -365,6 +463,11 @@ class OpenChamberNotifier(
         private const val EXTRA_DRAFT = "andchamber.draft"
 
         /** The local revision of this notification (see [NotificationRevisionGate]). Not a protocol message id. */
-        private const val EXTRA_REVISION = "andchamber.revision"
+        internal const val EXTRA_REVISION = "andchamber.revision"
+
+        /** Marks a notification whose answer action is the form screen, with the form it fills. */
+        internal const val EXTRA_FORM_STYLE = "andchamber.form_style"
+        internal const val EXTRA_FORM_ID = "andchamber.form_id"
+        private const val FORM_STYLE_FIELDS = "fields"
     }
 }
