@@ -1,0 +1,7 @@
+0.0.25
+
+- Answer text questions directly in notifications without leaving the pairing dialog.
+- Custom text and multi-field answers are collected inline and submitted together.
+- Back, skip, cancel and safe recovery; no automatic resends or echoed answers.
+- Fixed request cancellation, late cookies and stale notification updates.
+- Single- and multi-field flows passed real notification input and on-device ADB pairing on an emulator.
