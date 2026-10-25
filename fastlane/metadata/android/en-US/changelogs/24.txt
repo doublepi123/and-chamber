@@ -1,0 +1,7 @@
+0.0.24
+
+Added and fixes:
+- Multi-field notifications now open a native form so pairing ports, codes and connection ports can be submitted together.
+- Missing required values block submission; answers stay isolated by form, preserved on failure and never auto-resent.
+- Notification revisions stop stale results overwriting newer ones, and kept actions still work after reopening.
+- Failure messages no longer echo response bodies or verification codes; Send stays whole above the soft keyboard.
