@@ -1,0 +1,319 @@
+// AndChamber phone-control tool for OpenCode.
+//
+// OpenCode loads this file with a bare dynamic import from its own directory, so it must not import
+// anything at module scope: nothing resolves from that directory (no node_modules). Node/Bun
+// globals only.
+//
+// The endpoint file lives outside this directory and is rewritten by the App on every launch (the
+// port and token rotate), so it is re-read on every call.
+//
+// This tool is not an authority. The person enables phone control and grants one target/action set
+// in the AndChamber UI; nothing here can enable, pair, grant, resume or acknowledge anything.
+
+const ENDPOINT_ENV = "ANDCHAMBER_PHONE_TOOL_FILE";
+const MAX_ENDPOINT_BYTES = 8192;
+const MAX_TOKEN_LENGTH = 512;
+const CANCEL_TIMEOUT_MS = 2000;
+
+const UNAVAILABLE =
+  "AndChamber phone control is not available. Open the AndChamber chat screen on the phone and try again.";
+
+/** Fixed reply for a successful, read-only proposal. The person confirms natively. */
+const CONFIRM_TEXT = "请在AndChamber手机控制中确认";
+
+const DESCRIPTION = [
+  "Control one app on the user's Android phone through the AndChamber phone-control channel.",
+  'Start with "status": it reports whether phone control is enabled, its phase, epoch, capabilities and runtime readiness, and it needs no grant.',
+  'Use "request" to propose a task before any control exists. It is read-only preparation: it only asks the person to confirm in AndChamber phone control and answers with the fixed text 请在AndChamber手机控制中确认. It never enables, pairs, grants, resumes, acknowledges or opens a screen, and it never starts the task itself. The person still chooses the target, duration and actions.',
+  'A successful "request" is refused while a grant is active, so the task cannot silently change mid-control. Only one pending task exists; another chat session cannot replace it, and the same session may explicitly update it with a new summary or package before it is confirmed.',
+  'Every action except "status" and "request" requires a native grant the person gives on the phone for one target app and a short lease. This tool can never enable, pair, grant, resume or acknowledge; never claim that it can.',
+  'Take "snapshot" first. It returns observationId plus accessibility nodes with refs, roles, labels and bounds in display pixels. Use that observationId for "capture", "tap", "swipe", "input" and "back"; a newer snapshot or any change to the window/geometry makes the old observationId stale, so take a new snapshot instead of guessing.',
+  'One action per call. "tap" uses either ref or x/y; "swipe" uses x/y and x2/y2 in display pixels plus optional durationMs; "input" types text into the focused field, or focuses ref first; "back" presses the system back.',
+  'Non-ASCII input may be refused with UNICODE_UNSUPPORTED. Do not silently replace it with an approximation.',
+  'Only SENT means the driver injected the action; it does not prove the app did what was intended. An OUTCOME_UNKNOWN result does not prove failure. Never repeat the action to find out: take a fresh snapshot if possible, then ask the person to check the phone. Ask the person to resume control on the phone if needed.',
+  'Only one chat session owns a grant epoch. After another session performs a real action, this session is refused with SESSION_BUSY; do not retry in a loop. Ask the person to grant phone control again if this chat should own it. "status" never claims the epoch.',
+  'A session label is routing only, not authentication; never claim that this tool proves which chat is speaking. Immediately after a native grant, actions may be refused with ROUTE_NOT_PUBLISHED until the phone publishes the confirmed route; wait for the person, do not retry in a loop.',
+  '"snapshot", "capture" and "tap" may also fail with NOT_GRANTED, LEASE_EXPIRED, EPOCH_CHANGED, PAUSED, GRANT_ACTIVE, ROUTE_NOT_PUBLISHED, ACTION_NOT_GRANTED, RUNTIME_NOT_READY, DISABLED, NOT_CONNECTED or BUSY. These are fixed refusals, not retry hints.',
+].join(" ");
+
+// Reading the endpoint file:
+// OpenCode imports the plugin natively (`await import(entry)` in
+// packages/opencode/src/plugin/loader.ts), with no bundling step, so a dynamic
+// import of a Node builtin resolves the same way OpenCode's own code does.
+// Bun also exposes `Bun.file`, which avoids module resolution entirely, so use
+// it when it exists and fall back to node:fs/promises (Node, which also runs
+// this file in scripts/tests/phone-tool-plugin.test.cjs).
+const readTextFile = async (file) => {
+  if (globalThis.Bun && typeof globalThis.Bun.file === "function") {
+    return await globalThis.Bun.file(file).text();
+  }
+  const { readFile } = await import("node:fs/promises");
+  return await readFile(file, "utf8");
+};
+
+const isLoopbackEndpoint = (value, path) => {
+  if (typeof value !== "string") return false;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === "http:" &&
+    parsed.hostname === "127.0.0.1" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    parsed.pathname === path &&
+    parsed.search === "" &&
+    parsed.hash === ""
+  );
+};
+
+const validToken = (value) =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= MAX_TOKEN_LENGTH &&
+  !/[\s\u0000-\u001f\u007f]/.test(value);
+
+// Resolve the App-written endpoint descriptor for this call. Any problem
+// (absent env, unreadable file, bad JSON, unexpected shape) is reported as the
+// single user-facing unavailable message, never as a thrown error or a path.
+const readEndpoint = async () => {
+  const file = process.env[ENDPOINT_ENV];
+  if (typeof file !== "string" || file.length === 0) return null;
+  try {
+    const raw = await readTextFile(file);
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_ENDPOINT_BYTES) return null;
+    const endpoint = JSON.parse(raw);
+    if (!endpoint || typeof endpoint !== "object") return null;
+    if (endpoint.version !== 1) return null;
+    if (!validToken(endpoint.token)) return null;
+    if (!isLoopbackEndpoint(endpoint.url, "/v1/tool")) return null;
+    if (!isLoopbackEndpoint(endpoint.cancelUrl, "/v1/cancel")) return null;
+    return {
+      url: endpoint.url,
+      cancelUrl: endpoint.cancelUrl,
+      token: endpoint.token,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const textResult = (text) => ({ content: [{ type: "text", text }] });
+
+const requestHeaders = (token) => ({
+  authorization: `Bearer ${token}`,
+  "content-type": "application/json",
+});
+
+// Best effort, and deliberately short: the caller already gave up, so nothing
+// here may delay the cancelled result beyond CANCEL_TIMEOUT_MS or surface as an
+// error. The request is awaited so it is not lost if the process stops next.
+// The body names only this (session, call): no other session can cancel it.
+const sendCancel = async (endpoint, sessionID, callID) => {
+  try {
+    await fetch(endpoint.cancelUrl, {
+      method: "POST",
+      headers: requestHeaders(endpoint.token),
+      body: JSON.stringify({ version: 1, sessionID, callID }),
+      signal: AbortSignal.timeout(CANCEL_TIMEOUT_MS),
+      redirect: "error",
+    });
+  } catch {
+    // Ignore: the cancellation is advisory.
+  }
+};
+
+const isAbort = (error, context) =>
+  context?.signal?.aborted === true ||
+  (typeof error === "object" && error !== null && error.name === "AbortError");
+
+const IMAGE_MIME = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+};
+
+// The envelope travels as text because the tool declares no output schema.
+// Strip only the base64 payload from the text copy: it is carried as a file
+// part instead, and duplicating it would blow up the transcript.
+const toContent = (payload) => {
+  const envelope = { ...payload };
+  if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+    const { base64, ...rest } = payload.data;
+    envelope.data = rest;
+  }
+  const content = [{ type: "text", text: JSON.stringify(envelope) }];
+  const data = payload.data;
+  const extension = data && typeof data === "object" ? IMAGE_MIME[data.mime] : undefined;
+  if (
+    payload.ok === true &&
+    data &&
+    typeof data === "object" &&
+    typeof data.base64 === "string" &&
+    data.base64.length > 0 &&
+    extension
+  ) {
+    content.push({
+      type: "file",
+      uri: data.base64,
+      mime: data.mime,
+      name: `andchamber-phone-capture.${extension}`,
+    });
+  }
+  return { content };
+};
+
+export default {
+  id: "andchamber-phone",
+  setup: async (ctx) => {
+    await ctx.tool.transform((tools) => {
+      tools.add({
+        name: "andchamber_phone",
+        description: DESCRIPTION,
+        // Direct tool, never behind Code Mode: the model must see it in the
+        // normal tool list.
+        options: { codemode: false },
+        input: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["status", "request", "snapshot", "capture", "tap", "swipe", "input", "back"],
+              description: "One phone action per call.",
+            },
+            summary: {
+              type: "string",
+              maxLength: 200,
+              description:
+                'Short task summary shown to the person for native confirmation ("request" only). Do not include secrets or unrelated personal data.',
+            },
+            packageName: {
+              type: "string",
+              maxLength: 200,
+              description:
+                'Optional target package to preselect for the person ("request" only). The person still chooses the target.',
+            },
+            observationId: {
+              type: "string",
+              description:
+                'observationId from the latest "snapshot". Required for "capture", "tap", "swipe", "input" and "back".',
+            },
+            ref: {
+              type: "string",
+              description:
+                'Node ref from the latest snapshot. For "tap" it selects the element; for "input" it focuses that editable field before typing.',
+            },
+            x: {
+              type: "integer",
+              minimum: 0,
+              maximum: 10000,
+              description: 'Display-pixel x for "tap" (with y) or the swipe start.',
+            },
+            y: {
+              type: "integer",
+              minimum: 0,
+              maximum: 10000,
+              description: 'Display-pixel y for "tap" (with x) or the swipe start.',
+            },
+            x2: {
+              type: "integer",
+              minimum: 0,
+              maximum: 10000,
+              description: 'Display-pixel x where a "swipe" ends.',
+            },
+            y2: {
+              type: "integer",
+              minimum: 0,
+              maximum: 10000,
+              description: 'Display-pixel y where a "swipe" ends.',
+            },
+            durationMs: {
+              type: "integer",
+              minimum: 50,
+              maximum: 5000,
+              description: 'Swipe duration in milliseconds ("swipe" only); defaults to 300.',
+            },
+            text: {
+              type: "string",
+              description: 'Text to type ("input" only). Non-ASCII may be refused.',
+            },
+          },
+          required: ["action"],
+          additionalProperties: false,
+        },
+        async execute(input, context) {
+          const args = input && typeof input === "object" ? input : {};
+          const sessionID = context?.sessionID;
+          const callID = context?.id;
+
+          const endpoint = await readEndpoint();
+          if (!endpoint) return textResult(UNAVAILABLE);
+
+          let response;
+          try {
+            response = await fetch(endpoint.url, {
+              method: "POST",
+              headers: requestHeaders(endpoint.token),
+              body: JSON.stringify({
+                version: 1,
+                sessionID,
+                callID,
+                messageID: context?.messageID,
+                agent: context?.agent,
+                input: args,
+              }),
+              signal: context?.signal,
+              // The token is scoped to this loopback listener; never hand it
+              // to a redirect target.
+              redirect: "error",
+            });
+          } catch (error) {
+            if (isAbort(error, context)) {
+              await sendCancel(endpoint, sessionID, callID);
+              return textResult("Cancelled.");
+            }
+            return textResult("AndChamber phone request failed (network error).");
+          }
+
+          if (!response.ok) {
+            // Status only: the body is not trusted and may echo request data.
+            return textResult(`AndChamber phone request failed (HTTP ${response.status}).`);
+          }
+
+          let payload;
+          try {
+            payload = await response.json();
+          } catch (error) {
+            if (isAbort(error, context)) {
+              await sendCancel(endpoint, sessionID, callID);
+              return textResult("Cancelled.");
+            }
+            return textResult("AndChamber phone returned an invalid response.");
+          }
+
+          if (
+            !payload ||
+            typeof payload !== "object" ||
+            payload.version !== 1 ||
+            typeof payload.ok !== "boolean" ||
+            typeof payload.action !== "string" ||
+            !Number.isInteger(payload.epoch)
+          ) {
+            return textResult("AndChamber phone returned an invalid response.");
+          }
+
+          // A successful proposal is a fixed, non-actionable answer; the person confirms natively.
+          // The summary is never echoed back by the server, so there is nothing to render here.
+          if (payload.ok === true && payload.action === "phone.request") {
+            return textResult(CONFIRM_TEXT);
+          }
+
+          return toContent(payload);
+        },
+      });
+    });
+  },
+};

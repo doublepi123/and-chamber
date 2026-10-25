@@ -1,0 +1,440 @@
+package io.andchamber.app.phone.tool
+
+import io.andchamber.app.phone.core.PhoneLimits
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.security.MessageDigest
+
+/** One validated `/v1/tool` request from the phone plugin. */
+data class PhoneToolCall(
+    val sessionId: String,
+    val callId: String,
+    val messageId: String?,
+    val agent: String?,
+    val action: String,
+    val input: JsonObject,
+)
+
+/**
+ * The fixed, closed action surface. There is no generic shell, arbitrary intent, key-event stream
+ * or package listing here: each action carries exactly the fields it needs.
+ */
+sealed interface PhoneToolAction {
+    data object Status : PhoneToolAction
+
+    data object Snapshot : PhoneToolAction
+
+    data class Capture(val observationId: String) : PhoneToolAction
+
+    data class TapRef(
+        val ref: String,
+        val observationId: String,
+    ) : PhoneToolAction
+
+    data class TapPoint(
+        val x: Int,
+        val y: Int,
+        val observationId: String,
+    ) : PhoneToolAction
+
+    data class Swipe(
+        val fromX: Int,
+        val fromY: Int,
+        val toX: Int,
+        val toY: Int,
+        val durationMs: Int,
+        val observationId: String,
+    ) : PhoneToolAction
+
+    data class Input(
+        val text: String,
+        val ref: String?,
+        val observationId: String,
+    ) : PhoneToolAction
+
+    data class Back(val observationId: String) : PhoneToolAction
+
+    /**
+     * Read-only preparation: proposes a task to the person. It never enables, pairs, grants or
+     * starts anything; the native screen decides. [summary] and [packageName] are untrusted text
+     * and stay only in the in-memory pending store.
+     */
+    data class Request(
+        val summary: String,
+        val packageName: String?,
+    ) : PhoneToolAction
+}
+
+/**
+ * Pure request/response mapping for the phone tool server.
+ *
+ * Everything the model can name is re-validated here, independently of the plugin's JSON schema, so
+ * a direct caller of the loopback port cannot widen the surface. Error messages are fixed strings:
+ * they never carry page text, labels, coordinates, tokens or a package list.
+ */
+object PhoneToolProtocol {
+    const val VERSION = 1
+    const val MAX_BODY_BYTES = 65_536
+    const val MAX_SESSION_CHARS = 128
+    const val MAX_CALL_ID_CHARS = 256
+    const val MAX_MESSAGE_CHARS = 256
+    const val MAX_AGENT_CHARS = 128
+    const val MAX_OBSERVATION_ID_CHARS = 128
+    const val MAX_REF_CHARS = 64
+    const val MAX_SUMMARY_CHARS = 200
+    const val MAX_PACKAGE_CHARS = PhoneLimits.MAX_PACKAGE_CHARS
+    const val MAX_COORDINATE = PhoneLimits.MAX_DISPLAY_PX
+    const val DEFAULT_SWIPE_MS = 300
+
+    /** The fixed reply for a successful proposal: the person confirms in the app, not here. */
+    const val CONFIRM_IN_APP = "请在AndChamber手机控制中确认"
+
+    /** Placeholder action for a request that failed before its action could be read. */
+    const val UNKNOWN_ACTION = "phone.unknown"
+
+    val ACTIONS = setOf("status", "request", "snapshot", "capture", "tap", "swipe", "input", "back")
+
+    private val BODY_KEYS = setOf("version", "sessionID", "callID", "messageID", "agent", "input")
+
+    private val REQUEST_ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,128}$")
+    private val REF_PATTERN = Regex("^[A-Za-z0-9:_-]{1,64}$")
+    private val OBSERVATION_ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,128}$")
+    private val PACKAGE_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val json = Json { ignoreUnknownKeys = false }
+
+    fun serverEpoch(launchId: Long): String = "launch-$launchId"
+
+    /** A callID that is already a safe request id is kept; anything else becomes a digest. */
+    fun requestId(callId: String): String =
+        if (REQUEST_ID_PATTERN.matches(callId)) callId else "c-" + sha256(callId).take(40)
+
+    /** Returns null for anything that does not match the contract's body shape. */
+    fun parseBody(raw: String): PhoneToolCall? =
+        runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            if (root.keys.any { it !in BODY_KEYS }) return@runCatching null
+            if (root["version"]?.jsonPrimitive?.intOrNull != VERSION) return@runCatching null
+            val sessionId = root.string("sessionID")?.takeIf {
+                it.length in 1..MAX_SESSION_CHARS && it.none(Char::isISOControl)
+            } ?: return@runCatching null
+            val callId = root.string("callID")?.takeIf { it.length in 1..MAX_CALL_ID_CHARS }
+                ?: return@runCatching null
+            val input = root["input"] as? JsonObject ?: return@runCatching null
+            val action = input["action"]?.jsonPrimitive?.takeIf { it.isString }?.content
+                ?: return@runCatching null
+            if (action !in ACTIONS) return@runCatching null
+            val messageId = root.optionalString("messageID", MAX_MESSAGE_CHARS) ?: return@runCatching null
+            val agent = root.optionalString("agent", MAX_AGENT_CHARS) ?: return@runCatching null
+            PhoneToolCall(
+                sessionId = sessionId,
+                callId = callId,
+                messageId = messageId,
+                agent = agent,
+                action = action,
+                input = input,
+            )
+        }.getOrNull()
+
+    /**
+     * Strict per-action validation. Every action has its own closed key set; an unknown key, a
+     * non-integer coordinate, a partial point, a mixed ref/coordinate tap or an out-of-range value
+     * refuses the whole call instead of being ignored.
+     */
+    fun parseAction(call: PhoneToolCall): PhoneToolAction? =
+        runCatching {
+            val input = call.input
+            when (call.action) {
+                "status" -> {
+                    requireKeys(input, emptySet())
+                    PhoneToolAction.Status
+                }
+                "request" -> {
+                    requireKeys(input, setOf("summary", "packageName"))
+                    val summary = input.string("summary") ?: return@runCatching null
+                    if (summary.isBlank() ||
+                        summary.length > MAX_SUMMARY_CHARS ||
+                        summary.any(Char::isISOControl)
+                    ) {
+                        return@runCatching null
+                    }
+                    PhoneToolAction.Request(summary, optionalPackage(input))
+                }
+                "snapshot" -> {
+                    requireKeys(input, emptySet())
+                    PhoneToolAction.Snapshot
+                }
+                "capture" -> {
+                    requireKeys(input, setOf("action", "observationId"))
+                    PhoneToolAction.Capture(observationId(input))
+                }
+                "tap" -> {
+                    val ref = optionalRef(input)
+                    val x = optionalInt(input, "x")
+                    val y = optionalInt(input, "y")
+                    val observation = observationId(input)
+                    when {
+                        ref != null && (x != null || y != null) -> null
+                        ref != null -> {
+                            requireKeys(input, setOf("action", "observationId", "ref"))
+                            PhoneToolAction.TapRef(ref, observation)
+                        }
+                        x != null && y != null -> {
+                            requireKeys(input, setOf("action", "observationId", "x", "y"))
+                            requireCoordinate(x)
+                            requireCoordinate(y)
+                            PhoneToolAction.TapPoint(x, y, observation)
+                        }
+                        else -> null
+                    }
+                }
+                "swipe" -> {
+                    requireKeys(
+                        input,
+                        setOf("action", "observationId", "x", "y", "x2", "y2", "durationMs"),
+                    )
+                    val x = requiredInt(input, "x") ?: return@runCatching null
+                    val y = requiredInt(input, "y") ?: return@runCatching null
+                    val x2 = requiredInt(input, "x2") ?: return@runCatching null
+                    val y2 = requiredInt(input, "y2") ?: return@runCatching null
+                    listOf(x, y, x2, y2).forEach(::requireCoordinate)
+                    val duration = optionalInt(input, "durationMs") ?: DEFAULT_SWIPE_MS
+                    if (duration !in PhoneLimits.MIN_SWIPE_MS..PhoneLimits.MAX_SWIPE_MS) {
+                        return@runCatching null
+                    }
+                    if (x == x2 && y == y2) return@runCatching null
+                    PhoneToolAction.Swipe(x, y, x2, y2, duration, observationId(input))
+                }
+                "input" -> {
+                    requireKeys(input, setOf("action", "observationId", "text", "ref"))
+                    val text = input.string("text") ?: return@runCatching null
+                    if (text.isBlank() || text.length > PhoneLimits.MAX_INPUT_CHARS) {
+                        return@runCatching null
+                    }
+                    if (text.any(Char::isISOControl)) return@runCatching null
+                    PhoneToolAction.Input(text, optionalRef(input), observationId(input))
+                }
+                "back" -> {
+                    requireKeys(input, setOf("action", "observationId"))
+                    PhoneToolAction.Back(observationId(input))
+                }
+                else -> null
+            }
+        }.getOrNull()
+
+    /**
+     * Every envelope carries `version`, `ok`, `action` and the grant `epoch`. `data` is present on
+     * success only; `error.code`/`error.message` are fixed values on failure.
+     */
+    fun envelope(
+        action: String,
+        ok: Boolean,
+        epoch: Long,
+        data: JsonObject? = null,
+        code: String? = null,
+    ): String =
+        buildJsonObject {
+            put("version", VERSION)
+            put("ok", ok)
+            put("action", action)
+            put("epoch", epoch)
+            if (ok) {
+                put("data", data ?: buildJsonObject { })
+            } else {
+                val error = code ?: PhoneToolCodes.OUTCOME_UNKNOWN
+                put(
+                    "error",
+                    buildJsonObject {
+                        put("code", error)
+                        put("message", fixedMessage(error))
+                    },
+                )
+            }
+        }.toString()
+
+    fun errorBody(
+        code: String,
+        action: String = UNKNOWN_ACTION,
+        epoch: Long = 0L,
+    ): String = envelope(action = action, ok = false, epoch = epoch, code = code)
+
+    /** Fixed messages only: driver output may quote labels or page content. */
+    fun fixedMessage(code: String): String =
+        when (code) {
+            PhoneToolCodes.DISABLED -> "Phone control is turned off on the phone."
+            PhoneToolCodes.NOT_GRANTED -> "Phone control is not granted. Ask the person to grant it on the phone."
+            PhoneToolCodes.LEASE_EXPIRED -> "The phone-control grant expired. Ask the person to grant it again."
+            PhoneToolCodes.EPOCH_CHANGED -> "The phone-control grant changed. Take a new snapshot and use the new epoch."
+            PhoneToolCodes.PAUSED -> "Phone control is paused on the phone. Ask the person to resume it."
+            PhoneToolCodes.OUTCOME_UNKNOWN ->
+                "The action's outcome is unconfirmed. Do not repeat it. Take a fresh snapshot if possible, then ask the person to check the phone."
+            PhoneToolCodes.DUPLICATE, PhoneToolCodes.DUPLICATE_CALL -> "This call was already handled."
+            PhoneToolCodes.CAPACITY -> "Too many phone-control requests for this launch."
+            PhoneToolCodes.BUSY -> "The phone is busy with another action."
+            PhoneToolCodes.TARGET_FORBIDDEN -> "That app cannot be controlled."
+            PhoneToolCodes.TARGET_MISMATCH -> "The foreground app changed. Take a new snapshot."
+            PhoneToolCodes.WINDOW_CHANGED -> "The phone window changed. Take a new snapshot."
+            PhoneToolCodes.GEOMETRY_CHANGED -> "The screen geometry changed. Take a new snapshot."
+            PhoneToolCodes.STALE_OBSERVATION -> "The observation expired. Take a new snapshot."
+            PhoneToolCodes.OBSERVATION_REQUIRED -> "Take a snapshot first and use its observationId."
+            PhoneToolCodes.UNSUPPORTED_ACTION -> "Unsupported action."
+            PhoneToolCodes.UNICODE_UNSUPPORTED -> "This text cannot be entered on this device."
+            PhoneToolCodes.ACTION_NOT_GRANTED -> "That action is not included in the grant."
+            PhoneToolCodes.INVALID_REQUEST -> "Invalid request."
+            PhoneToolCodes.OUT_OF_BOUNDS -> "The point is outside the current screen. Take a new snapshot."
+            PhoneToolCodes.NOT_CONNECTED -> "The phone is not connected."
+            PhoneToolCodes.DRIVER_UNAVAILABLE -> "Phone control is unavailable on this device."
+            PhoneToolCodes.DEADLINE -> "The action timed out."
+            PhoneToolCodes.CANCELLED -> "Cancelled."
+            PhoneToolCodes.SESSION_BUSY ->
+                "Another chat session owns phone control for the current request or grant. Ask the person to grant phone control again if this session should have it."
+            PhoneToolCodes.ROUTE_NOT_PUBLISHED ->
+                "Phone control is not ready for this grant yet. Do not retry in a loop; the person must confirm the task in AndChamber phone control."
+            PhoneToolCodes.GRANT_ACTIVE ->
+                "Phone control already has an active grant. Finish or revoke it on the phone before requesting another task."
+            PhoneToolCodes.RUNTIME_NOT_READY ->
+                "The local runtime is not ready. Open the AndChamber chat screen on the phone and try again."
+            PhoneToolCodes.PHONE_UNAVAILABLE ->
+                "AndChamber phone control is not available. Open the AndChamber chat screen on the phone and try again."
+            PhoneToolCodes.UNAUTHORIZED -> "Unauthorized."
+            PhoneToolCodes.FORBIDDEN -> "Forbidden."
+            PhoneToolCodes.NOT_FOUND -> "Not found."
+            PhoneToolCodes.TOO_LARGE -> "Request too large."
+            PhoneToolCodes.BAD_REQUEST -> "Invalid request."
+            else -> "The phone action failed."
+        }
+
+    private fun JsonObject.string(name: String): String? =
+        (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
+
+    private fun JsonObject.optionalString(
+        name: String,
+        maxChars: Int,
+    ): String? {
+        val value = this[name] ?: return ""
+        if (value is JsonNull) return ""
+        val primitive = value as? JsonPrimitive ?: return null
+        if (!primitive.isString) return null
+        val text = primitive.content
+        if (text.isEmpty()) return ""
+        if (text.length > maxChars || text.any(Char::isISOControl)) return null
+        return text
+    }
+
+    private fun observationId(input: JsonObject): String {
+        val id = input.string("observationId") ?: throw Refused()
+        if (id.length > MAX_OBSERVATION_ID_CHARS || !OBSERVATION_ID_PATTERN.matches(id)) throw Refused()
+        return id
+    }
+
+    private fun optionalRef(input: JsonObject): String? {
+        val raw = input["ref"] ?: return null
+        if (raw is JsonNull) return null
+        val primitive = raw as? JsonPrimitive ?: throw Refused()
+        if (!primitive.isString) throw Refused()
+        val ref = primitive.content
+        if (ref.length > MAX_REF_CHARS || !REF_PATTERN.matches(ref)) throw Refused()
+        return ref
+    }
+
+    private fun optionalPackage(input: JsonObject): String? {
+        val raw = input["packageName"] ?: return null
+        if (raw is JsonNull) return null
+        val primitive = raw as? JsonPrimitive ?: throw Refused()
+        if (!primitive.isString) throw Refused()
+        val packageName = primitive.content
+        if (packageName.isBlank() ||
+            packageName.length > MAX_PACKAGE_CHARS ||
+            packageName.any(Char::isISOControl) ||
+            !PACKAGE_PATTERN.matches(packageName)
+        ) {
+            throw Refused()
+        }
+        return packageName
+    }
+
+    private fun requiredInt(
+        input: JsonObject,
+        name: String,
+    ): Int? {
+        val raw = input[name] ?: return null
+        val primitive = raw as? JsonPrimitive ?: return null
+        if (primitive.isString) return null
+        return primitive.intOrNull
+    }
+
+    private fun optionalInt(
+        input: JsonObject,
+        name: String,
+    ): Int? {
+        if (!input.containsKey(name)) return null
+        val raw = input[name]
+        if (raw is JsonNull) throw Refused()
+        return requiredInt(input, name) ?: throw Refused()
+    }
+
+    private fun requireCoordinate(value: Int) {
+        if (value !in 0..MAX_COORDINATE) throw Refused()
+    }
+
+    private fun requireKeys(
+        input: JsonObject,
+        allowed: Set<String>,
+    ) {
+        if (input.keys.any { it != "action" && it !in allowed }) throw Refused()
+        if ("action" !in input || input["action"]?.jsonPrimitive?.takeIf { it.isString } == null) throw Refused()
+    }
+
+    private class Refused : Exception()
+
+    private fun sha256(text: String): String =
+        MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+}
+
+/** Protocol codes beyond the core enum: transport/session state, never a new authority. */
+object PhoneToolCodes {
+    const val DISABLED = "DISABLED"
+    const val NOT_GRANTED = "NOT_GRANTED"
+    const val LEASE_EXPIRED = "LEASE_EXPIRED"
+    const val EPOCH_CHANGED = "EPOCH_CHANGED"
+    const val PAUSED = "PAUSED"
+    const val OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+    const val DUPLICATE = "DUPLICATE"
+    const val CAPACITY = "CAPACITY"
+    const val BUSY = "BUSY"
+    const val TARGET_FORBIDDEN = "TARGET_FORBIDDEN"
+    const val TARGET_MISMATCH = "TARGET_MISMATCH"
+    const val WINDOW_CHANGED = "WINDOW_CHANGED"
+    const val GEOMETRY_CHANGED = "GEOMETRY_CHANGED"
+    const val STALE_OBSERVATION = "STALE_OBSERVATION"
+    const val OBSERVATION_REQUIRED = "OBSERVATION_REQUIRED"
+    const val UNSUPPORTED_ACTION = "UNSUPPORTED_ACTION"
+    const val UNICODE_UNSUPPORTED = "UNICODE_UNSUPPORTED"
+    const val ACTION_NOT_GRANTED = "ACTION_NOT_GRANTED"
+    const val INVALID_REQUEST = "INVALID_REQUEST"
+    const val OUT_OF_BOUNDS = "OUT_OF_BOUNDS"
+    const val NOT_CONNECTED = "NOT_CONNECTED"
+    const val DRIVER_UNAVAILABLE = "DRIVER_UNAVAILABLE"
+    const val DEADLINE = "DEADLINE"
+    const val CANCELLED = "CANCELLED"
+
+    /** Transport-level refusals. They add no capability and grant nothing. */
+    const val SESSION_BUSY = "SESSION_BUSY"
+    const val GRANT_ACTIVE = "GRANT_ACTIVE"
+    const val ROUTE_NOT_PUBLISHED = "ROUTE_NOT_PUBLISHED"
+    const val RUNTIME_NOT_READY = "RUNTIME_NOT_READY"
+    const val PHONE_UNAVAILABLE = "PHONE_UNAVAILABLE"
+    const val DUPLICATE_CALL = "DUPLICATE_CALL"
+    const val UNAUTHORIZED = "UNAUTHORIZED"
+    const val FORBIDDEN = "FORBIDDEN"
+    const val NOT_FOUND = "NOT_FOUND"
+    const val TOO_LARGE = "TOO_LARGE"
+    const val BAD_REQUEST = "BAD_REQUEST"
+}

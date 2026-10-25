@@ -63,6 +63,7 @@ import io.andchamber.app.ui.components.ChamberCard
 import io.andchamber.app.ui.components.ChamberMark
 import io.andchamber.app.ui.components.IconTile
 import io.andchamber.app.ui.components.SectionHeader
+import io.andchamber.app.ui.phone.PhoneControlEntry
 import io.andchamber.app.ui.ScreenAwakeSetting
 import io.andchamber.app.ui.rememberLastNonNull
 import io.andchamber.app.ui.rememberScreenAwakeSetting
@@ -116,6 +117,11 @@ internal fun HomeScreen(
     autoOpenLocal: Boolean? = null,
     /** Update check and the outcome of the last update of the local server. */
     updates: RuntimeUpdateState = RuntimeUpdateState(),
+    /**
+     * Opens the experimental phone-control screen. Null in previews; production always passes it so
+     * the experiment is reachable and a lower API can explain why it is unavailable.
+     */
+    onOpenPhone: (() -> Unit)? = null,
     /**
      * "Keep screen on while the local server runs"; null hides the setting. By default the app's
      * own setting (the process-wide [io.andchamber.app.ui.ScreenAwakeController]), null in previews.
@@ -202,6 +208,13 @@ internal fun HomeScreen(
                                 modifier = Modifier.padding(top = 12.dp),
                             )
                         }
+                    }
+
+                    onOpenPhone?.let { openPhone ->
+                        PhoneControlEntry(
+                            onClick = openPhone,
+                            modifier = Modifier.padding(top = 12.dp).revealOnEnter(2, animate),
+                        )
                     }
 
                     SectionHeader(

@@ -90,6 +90,27 @@ class ProotOpenChamberServer(
      * presenter transport eligibility, and is stopped with the launch.
      */
     private val browserTool: BrowserToolHost = BrowserToolHost.None,
+    /**
+     * Phone control is off by default. DI passes true together with the asset reader and host; when
+     * false this launch injects no phone plugin, endpoint or environment at all. The browser entry
+     * is unaffected either way.
+     */
+    private val phonePluginEnabled: Boolean = false,
+    /**
+     * Sampled exactly once at the start of every launch; the constructor Boolean is only its
+     * default. One long-lived server can follow a mutable enable switch without being rebuilt.
+     * A change affects only the next start, never a start that is already in progress.
+     */
+    private val phonePluginEnabledNow: () -> Boolean = { phonePluginEnabled },
+    /**
+     * Reads the two packaged phone plugin files. A missing or blank asset degrades only the phone
+     * entry for this launch; it never fails the OpenChamber start and never disables the browser.
+     */
+    private val phonePluginAssets: () -> PhonePluginAssets.Assets = { error("phone-tool assets unavailable") },
+    /** The loopback phone tool server for this launch. Off by default. */
+    private val phoneTool: PhoneToolHost = PhoneToolHost.None,
+    /** Receives a short, non-sensitive reason when phone control is skipped for this launch. */
+    private val onPhoneUnavailable: (String) -> Unit = {},
     /** Spawns the guest command. Injected so tests can stand in a fake child process. */
     private val spawn: (command: List<String>, env: Map<String, String>, dir: File) -> Process = { command, env, dir ->
         ProcessBuilder(command)
@@ -118,6 +139,9 @@ class ProotOpenChamberServer(
     /** Launch whose browser lease was already revoked. Stops a death callback from revoking the next one. */
     private var browserRevokedLaunch = 0L
 
+    /** Launch whose phone grant was already dropped. Independent from the browser watermark. */
+    private var phoneRevokedLaunch = 0L
+
     override fun readyLaunchId(): Long? =
         synchronized(lock) {
             val id = readyId ?: return@synchronized null
@@ -132,6 +156,9 @@ class ProotOpenChamberServer(
         onLog: (String) -> Unit,
         isCancelled: () -> Boolean,
     ): Long {
+        // One sample per launch. Asset sync, env and the listener all use this exact value, so a
+        // switch flipped mid-start can never produce a half-phone launch.
+        val phoneEnabled = runCatching { phonePluginEnabledNow() }.getOrDefault(false)
         stop()
         val port = runtime.metadata.port
         // OpenChamber's own data dir inside the guest. home is bind-mounted to /root (see GuestBinds).
@@ -145,11 +172,15 @@ class ProotOpenChamberServer(
         // a new enable for the whole prepare. Revoke first; a failed file delete must not skip it.
         // Delete only while this start still owns the slot. A newer start may already have revoked.
         revokeBrowserLease(synchronized(lock) { launchId })
+        revokePhoneLease(synchronized(lock) { launchId })
         // The binding owns the shared endpoint file. Revoking the previous launch above already
         // removed its file; this only clears a stale file that no installed launch owns, so a
         // concurrent newer launch's endpoint is never deleted here.
-        val endpointCleared = synchronized(lock) { process == null && readyId == null } &&
+        val launchSlotEmpty = synchronized(lock) { process == null && readyId == null }
+        val endpointCleared = launchSlotEmpty &&
             browserTool.clearStaleEndpoint(paths.home, browserTrustedRoot)
+        val phoneEndpointCleared = phoneEnabled && launchSlotEmpty &&
+            phoneTool.clearStaleEndpoint(paths.home, browserTrustedRoot)
         runCatching { refreshDns(runtime) }
         // Best effort: an install from before the policy existed gets it here, and a failure must not block
         // the start. Without it OpenChamber offers its own OpenCode/OpenChamber update paths.
@@ -160,6 +191,7 @@ class ProotOpenChamberServer(
         runCatching { BrowserPluginAssets.cleanupLegacy(paths.home, browserTrustedRoot) }
         openChamberSettingsDefault()
         val pluginMode = prepareBrowserPlugin(endpointCleared)
+        val phoneMode = phoneEnabled && preparePhonePlugin(phoneEndpointCleared)
 
         paths.logs.mkdirs()
         paths.workspace.mkdirs()
@@ -188,11 +220,29 @@ class ProotOpenChamberServer(
             } else {
                 emptyMap()
             }
+        // Serial merge, independent failure: the phone overlay starts from the browser-merged config
+        // (or the user's original when the browser entry was skipped), so both plugin directories
+        // survive. A phone failure leaves the browser overlay exactly as it was.
+        val phoneEnvironment =
+            if (phoneMode) {
+                val existingConfig = pluginEnvironment[PhonePluginAssets.CONFIG_ENV]
+                    ?: suiteEnvironment[PhonePluginAssets.CONFIG_ENV]
+                val environment = PhonePluginAssets.launchEnvironment(existingConfig)
+                if (environment == null) {
+                    onPhoneUnavailable("phone-tool skipped: invalid existing OPENCODE_CONFIG_CONTENT")
+                    emptyMap()
+                } else {
+                    environment
+                }
+            } else {
+                emptyMap()
+            }
         val env = ProotCommands.serverEnvironment(
             suiteEnvironment,
             paths.prootTmp,
             uiPassword,
             browserTool = pluginEnvironment,
+            phoneTool = phoneEnvironment,
         )
         val signal = CompletableDeferred<Unit>()
         val started = spawn(command, env, paths.root)
@@ -225,6 +275,11 @@ class ProotOpenChamberServer(
                 runCatching { browserTool.start(id, paths.home, browserTrustedRoot) }.getOrDefault(false)
             if (!running) onBrowserUnavailable("browser-tool server did not start")
         }
+        if (stillCurrent && phoneMode && phoneEnvironment.isNotEmpty()) {
+            val running =
+                runCatching { phoneTool.start(id, paths.home, browserTrustedRoot) }.getOrDefault(false)
+            if (!running) onPhoneUnavailable("phone-tool server did not start")
+        }
         // Watch the network only for a server that is ready. A failure here is reported by the monitor
         // itself; it must not fail a start that already succeeded.
         runCatching { dnsMonitor.start(runtime.rootfs) }
@@ -247,6 +302,7 @@ class ProotOpenChamberServer(
         // Outside the lock: the callback may hop to Main and must not deadlock a UI caller.
         val stoppedLaunch = synchronized(lock) { launchId }
         revokeBrowserLease(stoppedLaunch)
+        revokePhoneLease(stoppedLaunch)
         // Stop the DNS monitor first, so no network refresh can write after the server is torn down.
         // It is idempotent, and a failed start (waitUntilReady throws) also comes through here.
         runCatching { dnsMonitor.stop() }
@@ -311,6 +367,41 @@ class ProotOpenChamberServer(
             },
         )
 
+    /**
+     * Revokes the phone grant for [launch] at most once and stops its server. A late pump from an
+     * older launch is a no-op once that launch was revoked by stop; a newer launch is not consumed.
+     */
+    private fun revokePhoneLease(launch: Long) {
+        val should = synchronized(lock) {
+            if (launch <= phoneRevokedLaunch) {
+                false
+            } else {
+                phoneRevokedLaunch = launch
+                true
+            }
+        }
+        if (should) {
+            // The binding deletes the endpoint only when this launch still owns it; the routed
+            // stale clear only removes a file no installed launch owns. Its stop also revokes the
+            // controller grant synchronously.
+            runCatching { phoneTool.stop(launch) }
+            runCatching { phoneTool.clearStaleEndpoint(paths.home, browserTrustedRoot) }
+        }
+    }
+
+    private fun preparePhonePlugin(endpointCleared: Boolean): Boolean =
+        runCatching {
+            check(endpointCleared) { "phone-tool endpoint was not cleared" }
+            val assets = phonePluginAssets()
+            PhonePluginAssets.sync(paths.home, assets, browserTrustedRoot)
+        }.fold(
+            onSuccess = { true },
+            onFailure = { error ->
+                onPhoneUnavailable("phone-tool skipped: ${error.javaClass.simpleName}")
+                false
+            },
+        )
+
     private fun pumpOutput(
         process: Process,
         launch: Long,
@@ -353,7 +444,10 @@ class ProotOpenChamberServer(
                 }
                 // readyLaunchId() may already have revoked this death. Do not revoke again, and never
                 // revoke a launch that replaced this process.
-                if (current) revokeBrowserLease(launch)
+                if (current) {
+                    revokeBrowserLease(launch)
+                    revokePhoneLease(launch)
+                }
             }
         }, "openchamber-output").apply { isDaemon = true; start() }
 

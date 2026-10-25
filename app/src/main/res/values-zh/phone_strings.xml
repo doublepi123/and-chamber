@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机操控（实验）。键与 values/phone_strings.xml 保持一致。 -->
+<resources>
+    <!-- 顶部 -->
+    <string name="phone_title">手机操控</string>
+    <string name="phone_experimental">实验</string>
+    <string name="phone_entry_body">让代理在这台手机的一个应用里短时操作。默认关闭，需要你手动开启。</string>
+    <string name="phone_unavailable_title">此版本不提供</string>
+    <string name="phone_unavailable_body">手机操控仍在实验中，此版本未开启。</string>
+
+    <!-- 开启 -->
+    <string name="phone_enable_title">让代理操作这台手机上的应用</string>
+    <string name="phone_enable_intro">代理可以在你选定的一个应用里点按、滑动和输入文字，时长由你设定且很短。你随时可以暂停、自己操作或结束任务。</string>
+    <string name="phone_risk_title">开启前请了解</string>
+    <string name="phone_risk_runtime">信任的是整个本机运行环境：其中运行的任何程序或代理都能使用这条连接，不只是你当前的对话。</string>
+    <string name="phone_risk_adb">无线调试提供设备级权限。连接期间，持有连接的一方能做的远超本页面允许的范围。用完请关闭无线调试。</string>
+    <string name="phone_risk_model">所选应用屏幕上的内容（包括文字和截图）可能会发送给对话所用的 AI 模型。</string>
+    <string name="phone_risk_confirm">在本应用中确认只会记录你的选择，无法证明是真人点按的：操控手机的软件同样可以点按它。</string>
+    <string name="phone_enable_limits">默认关闭。关闭后会结束任务并断开连接。</string>
+    <string name="phone_risk_ack">我已了解这些风险</string>
+    <string name="phone_enable">开启手机操控</string>
+    <string name="phone_enable_switch">手机操控</string>
+    <string name="phone_disable_hint">关闭后会结束任务并断开连接。</string>
+
+    <!-- 状态 -->
+    <string name="phone_status_device">设备</string>
+    <string name="phone_status_control">控制权</string>
+    <string name="phone_status_task">任务</string>
+    <string name="phone_device_disconnected">未连接</string>
+    <string name="phone_device_connecting">正在连接…</string>
+    <string name="phone_device_connected">已通过无线调试连接</string>
+    <string name="phone_device_lost">连接已断开</string>
+    <string name="phone_control_none">你（代理无权操作）</string>
+    <string name="phone_control_agent">代理 · %1$s · 剩余 %2$s</string>
+    <string name="phone_control_paused">已暂停 · 由你操作</string>
+    <string name="phone_control_pausing">正在停止…</string>
+    <string name="phone_task_none">没有任务</string>
+    <string name="phone_task_ended">已结束 · 请核对结果</string>
+    <string name="phone_minutes_left">%1$d 分钟</string>
+    <string name="phone_seconds_left">%1$d 秒</string>
+
+    <!-- 进行中 -->
+    <string name="phone_pending_enabling">正在开启…</string>
+    <string name="phone_pending_pairing">正在配对…</string>
+    <string name="phone_pending_connecting">正在连接…</string>
+    <string name="phone_pending_disconnecting">正在断开…</string>
+    <string name="phone_pending_granting">正在开始任务…</string>
+    <string name="phone_pending_pausing">正在暂停…</string>
+    <string name="phone_pending_finishing">正在结束任务…</string>
+    <string name="phone_pending_observing">正在读取屏幕…</string>
+
+    <!-- 停止控制 -->
+    <string name="phone_pause">暂停</string>
+    <string name="phone_take_over">我来操作</string>
+    <string name="phone_finish">结束任务</string>
+
+    <!-- 连接 -->
+    <string name="phone_connect_title">连接到这台手机</string>
+    <string name="phone_step_wireless">开启无线调试</string>
+    <string name="phone_step_wireless_body">在“开发者选项”中开启“无线调试”。手机需要连接 Wi-Fi。</string>
+    <string name="phone_open_wireless_settings">打开无线调试设置</string>
+    <string name="phone_step_pair">配对（仅首次）</string>
+    <string name="phone_paired_before">已配对过。只有连接失败时才需要重新配对。</string>
+    <string name="phone_pair_again">重新配对</string>
+    <string name="phone_pair_how">在无线调试页面点按“使用配对码配对设备”，并让这个弹窗保持打开。切回 AndChamber 会关闭弹窗，配对码随即失效。</string>
+    <string name="phone_pair_with_notification">通过通知配对</string>
+    <string name="phone_pair_waiting_title">在通知中输入配对码</string>
+    <string name="phone_pair_waiting_body">保持配对弹窗打开，下拉通知栏，在 AndChamber 的通知里输入 6 位配对码。不要把配对码粘贴到对话里。</string>
+    <string name="phone_pair_blocked_title">通知已关闭</string>
+    <string name="phone_pair_blocked_body">无法显示配对通知。请开启通知；如果配对弹窗能一直保持打开，也可以在下方手动配对。</string>
+    <string name="phone_pair_manual_show">不通过通知配对</string>
+    <string name="phone_pair_manual_hide">收起手动配对</string>
+    <string name="phone_pair_manual_body">只有配对弹窗一直留在屏幕上时才有效，例如分屏时。配对码不会被保存。</string>
+    <string name="phone_pairing_port">配对端口</string>
+    <string name="phone_pairing_port_hint">配对弹窗里的端口，不是无线调试页面上的端口。</string>
+    <string name="phone_pairing_code">配对码</string>
+    <string name="phone_pairing_code_hint">配对弹窗里的 6 位数字。</string>
+    <string name="phone_pair">配对</string>
+    <string name="phone_step_connect">连接</string>
+    <string name="phone_connect_port_body">使用无线调试页面上“IP 地址和端口”中的端口。它和配对端口不同，每次重新开启无线调试都会变化。</string>
+    <string name="phone_connect_port">连接端口</string>
+    <string name="phone_connect_port_hint">无线调试页面上“IP 地址和端口”中的端口。</string>
+    <string name="phone_port_invalid">请输入 1 到 65535 之间的端口。</string>
+    <string name="phone_host_custom">使用其他地址</string>
+    <string name="phone_host_default">默认：本机（%1$s）</string>
+    <string name="phone_host">地址</string>
+    <string name="phone_host_hint">IP 地址或主机名，不含端口。</string>
+    <string name="phone_host_invalid">请输入不含端口的 IP 地址或主机名。</string>
+    <string name="phone_connect">连接</string>
+
+    <!-- 连接问题 -->
+    <string name="phone_problem_wireless_off">无线调试未开启</string>
+    <string name="phone_problem_wireless_off_body">请在开发者选项中开启后重试。</string>
+    <string name="phone_problem_no_wifi">未连接 Wi-Fi</string>
+    <string name="phone_problem_no_wifi_body">无线调试需要连接 Wi-Fi。</string>
+    <string name="phone_problem_code_rejected">配对失败</string>
+    <string name="phone_problem_code_rejected_body">配对码错误或已失效。请重新打开配对弹窗，使用新的配对码。</string>
+    <string name="phone_problem_pair_port">无法连接配对端口</string>
+    <string name="phone_problem_pair_port_body">请核对当前配对弹窗里的端口。每次打开弹窗，端口都会变化。</string>
+    <string name="phone_problem_connect_refused">无法连接</string>
+    <string name="phone_problem_connect_refused_body">请核对无线调试页面上的连接端口。如果还没配对，请先配对。</string>
+    <string name="phone_problem_not_authorized">手机尚未允许此连接</string>
+    <string name="phone_problem_not_authorized_body">请重新配对后再连接。</string>
+    <string name="phone_problem_lost">连接已断开</string>
+    <string name="phone_problem_lost_body">无线调试可能已关闭，或 Wi-Fi 发生了变化。请重新连接。</string>
+    <string name="phone_problem_other">出现问题</string>
+    <string name="phone_problem_other_body">技术信息见“详细信息”，然后重试。</string>
+
+    <!-- 请求反馈（固定文案；原始信息只放在详细信息里） -->
+    <string name="phone_feedback_tool_title">代理暂时无法使用手机操控</string>
+    <string name="phone_feedback_tool_body">正在运行的 OpenChamber 还没有加载手机操控工具，所以任务已取消，没有在应用里执行任何操作。请在首页重启 OpenChamber，再重新设置任务。</string>
+    <string name="phone_feedback_locked_title">屏幕已锁定</string>
+    <string name="phone_feedback_locked_body">任务没有开始。请解锁手机后重新设置任务。</string>
+    <string name="phone_feedback_target_title">这个应用不可用</string>
+    <string name="phone_feedback_target_body">任务没有开始。它可能已被卸载或被禁止选择。请从列表中选择应用。</string>
+    <string name="phone_feedback_grant_title">任务没有开始</string>
+    <string name="phone_feedback_grant_body">没有授予任何权限。请检查连接和上方的设置，然后自己再试一次。技术信息见“详细信息”。</string>
+    <string name="phone_feedback_request_title">上一个请求没有完成</string>
+    <string name="phone_feedback_request_body">这不代表之前的操作没有生效；如不确定，请在应用中核对。技术信息见“详细信息”。</string>
+
+    <!-- 本机运行环境未就绪（持续显示；出口是首页） -->
+    <string name="phone_runtime_restart_title">需要重启 OpenChamber 才能使用手机操控</string>
+    <string name="phone_runtime_restart_body">本机的 OpenChamber 正在运行，但它是在手机操控可用之前启动的，所以代理暂时无法使用。请返回首页重启 OpenChamber。重启会中断 OpenChamber 里正在运行的任务。</string>
+    <string name="phone_runtime_not_running_title">请先启动 OpenChamber</string>
+    <string name="phone_runtime_not_running_body">本机的 OpenChamber 没有运行，代理无法使用手机操控。请返回首页启动它。</string>
+    <string name="phone_runtime_go_home">返回首页</string>
+    <string name="phone_runtime_draft_kept">你填写的内容会保留，OpenChamber 准备好后即可允许任务。</string>
+
+    <!-- 停止入口门槛 -->
+    <string name="phone_stop_gate_title">无法开始：在其他应用中无法暂停代理</string>
+    <string name="phone_stop_gate_notifications">AndChamber 的通知已关闭，其他应用在前台时无法显示“暂停”。请开启通知后重新检查。</string>
+    <string name="phone_stop_gate_channel">“手机操控”通知类别已关闭。请在通知设置中开启后重新检查。</string>
+    <string name="phone_stop_gate_unknown">AndChamber 无法确认你能在其他应用中暂停代理。请重新检查；如果仍然如此，请自己完成这项操作。</string>
+    <string name="phone_open_notification_settings">打开通知设置</string>
+
+    <!-- 授权 -->
+    <string name="phone_grant_title">给代理一个短任务</string>
+    <string name="phone_request_title">代理请求使用一个应用</string>
+    <string name="phone_request_body">它建议了下面的任务。应用、时长和动作都由你决定，你确认之前什么都不会开始。</string>
+    <string name="phone_grant_step_app">选择一个应用</string>
+    <string name="phone_grant_app_body">代理只能在这个应用里操作。应用列表只保留在本机，不会发送给模型。</string>
+    <string name="phone_target_search">搜索应用</string>
+    <string name="phone_targets_empty">没有可选的应用。</string>
+    <string name="phone_targets_no_match">没有匹配的应用。</string>
+    <string name="phone_targets_more">还有 %1$d 个，可搜索查找。</string>
+    <string name="phone_targets_blocked_hidden">另有 %1$d 个系统、设置类或 AndChamber 自身的应用不可选择，未列出。搜索应用名可查看原因。</string>
+    <string name="phone_targets_none_allowed">这台手机上没有可选择的应用。不支持系统应用和设置类应用。</string>
+    <string name="phone_target_block_host">不能选择 AndChamber 自己。</string>
+    <string name="phone_target_block_system">不能选择系统应用和设置类应用。</string>
+    <string name="phone_target_block_invalid">不能选择这个应用。</string>
+    <string name="phone_grant_step_task">描述任务</string>
+    <string name="phone_summary">任务</string>
+    <string name="phone_summary_hint">要让代理做什么？代理工作时你会一直看到这段描述。</string>
+    <string name="phone_summary_required">请描述任务。</string>
+    <string name="phone_summary_too_long">请控制在 %1$d 个字以内。</string>
+    <string name="phone_grant_step_limits">设定限制</string>
+    <string name="phone_duration">时长</string>
+    <string name="phone_duration_minutes">%1$d 分钟</string>
+    <string name="phone_duration_hint">时间到了代理会自动暂停，它不会自己延长时间。</string>
+    <string name="phone_actions_allowed">允许的动作</string>
+    <string name="phone_action_tap">点按</string>
+    <string name="phone_action_swipe">滑动和滚动</string>
+    <string name="phone_action_input">输入文字</string>
+    <string name="phone_action_input_hint">仅支持部分 ASCII 字符；不支持中文、密码输入或自动提交。</string>
+    <string name="phone_action_back">返回</string>
+    <string name="phone_actions_observe_note">读取屏幕始终包含在内，代理需要它来看清自己在做什么。</string>
+    <string name="phone_list_separator">、</string>
+    <string name="phone_grant_review">检查并允许…</string>
+    <string name="phone_block_not_connected">请先连接。</string>
+    <string name="phone_block_no_target">请选择一个应用。</string>
+    <string name="phone_block_target_not_allowed">不能选择这个应用。</string>
+    <string name="phone_block_summary_too_long">任务描述太长了。</string>
+    <string name="phone_block_no_actions">请至少允许一种动作。</string>
+    <string name="phone_block_busy">请等待当前步骤完成。</string>
+    <string name="phone_grant_confirm_title">允许代理使用 %1$s？</string>
+    <string name="phone_grant_confirm_actions">允许：%1$s</string>
+    <string name="phone_grant_confirm_time">持续 %1$d 分钟，之后自动暂停。</string>
+    <string name="phone_grant_confirm_stops">你随时可以在这里或通知中暂停、自己操作或结束任务。</string>
+    <string name="phone_grant_confirm_screen">确认只会在本应用中记录你的选择，无法证明是谁点按的。</string>
+    <string name="phone_grant_allow">允许</string>
+
+    <!-- 运行中 -->
+    <string name="phone_running_title">代理正在操作 %1$s</string>
+    <string name="phone_running_limits">允许：%1$s · 剩余 %2$s</string>
+    <string name="phone_running_auto_pause">时间到了、你回到 AndChamber、应用离开屏幕或无法确认当前页面时，代理都会自动暂停。</string>
+    <string name="phone_running_no_renew">代理不会自己延长时间，需要更多时间时要由你确认。</string>
+    <string name="phone_open_target">打开 %1$s</string>
+    <string name="phone_open_target_check">打开 %1$s 核对</string>
+
+    <!-- 已停止 -->
+    <string name="phone_halt_title">代理已停止：%1$s</string>
+    <string name="phone_halt_pending_title">正在停止：%1$s</string>
+    <string name="phone_halt_pending_body">已停止接纳新操作。代理的上一操作还没有结束，可能仍在生效。不需要再次点按“暂停”。</string>
+    <string name="phone_pausing_label">正在暂停…等待上一操作结束</string>
+    <string name="phone_running_in_flight">代理正在执行一个操作。现在暂停的话，这个操作仍可能完成。</string>
+    <string name="phone_busy_agent_title">代理的新操作被拒绝</string>
+    <string name="phone_busy_agent_body">它的上一操作还没有结束。没有排队任何操作，你不需要点按任何按钮。</string>
+    <string name="phone_busy_request_title">上一步还在进行</string>
+    <string name="phone_busy_request_body">你刚才的点按没有生效，因为还有一步在进行。请等它结束后再试。</string>
+    <string name="phone_halt_none_in_flight">没有执行后续步骤。</string>
+    <string name="phone_halt_may_apply">已停止接纳新操作，但上一操作可能仍在生效。请先在 %1$s 中核对，再决定下一步。</string>
+    <string name="phone_halt_user_checked">你已标记上一操作已核对。不再接纳新操作。</string>
+    <string name="phone_halt_task">在 %1$s 中的任务：</string>
+    <string name="phone_ack_checked">我已核对</string>
+    <string name="phone_halt_paused">你暂停了它</string>
+    <string name="phone_halt_taken_over">你接管了操作</string>
+    <string name="phone_halt_expired">时间已到</string>
+    <string name="phone_halt_host_returned">你回到了 AndChamber</string>
+    <string name="phone_halt_target_left">应用离开了屏幕</string>
+    <string name="phone_halt_screen_locked">屏幕已锁定</string>
+    <string name="phone_halt_connection_lost">连接已断开</string>
+    <string name="phone_halt_stop_channel_lost">“暂停”入口已不可用</string>
+    <string name="phone_halt_screen_uncertain">无法确认当前页面</string>
+    <string name="phone_halt_outcome_unknown">某个动作的结果未知</string>
+    <string name="phone_halt_runtime_changed">运行环境已重启</string>
+    <string name="phone_resume_duration">继续时的时长</string>
+    <string name="phone_resume_review">继续交给代理…</string>
+    <string name="phone_resume_note">继续需要你重新确认并设定新的时长，不会自动续期。</string>
+    <string name="phone_resume_needs_connection">请先在下方重新连接，再继续。连接不会让代理自动继续，仍需你在这里确认。</string>
+    <string name="phone_resume_confirm_title">让代理在 %1$s 中继续？</string>
+    <string name="phone_resume">继续</string>
+
+    <!-- 结果 -->
+    <string name="phone_result_verified">已核对</string>
+    <string name="phone_result_verified_body">每一步都已从应用中重新读取并确认一致。</string>
+    <string name="phone_result_partial">部分完成</string>
+    <string name="phone_result_partial_body">有些步骤无法确认，请在应用中核对。</string>
+    <string name="phone_result_needs_check">待核对</string>
+    <string name="phone_result_needs_check_body">以下内容都没有在应用中确认。工具报告成功，不代表这一步真的生效了。</string>
+    <string name="phone_result_no_steps">这里尚无已核验的结果记录，请打开目标应用或对话核对。</string>
+    <string name="phone_check_verified">已在应用中核对</string>
+    <string name="phone_check_reported">代理报告已完成 · 未核对</string>
+    <string name="phone_check_unknown">结果未知 · 请在应用中核对</string>
+    <string name="phone_result_done">关闭</string>
+
+    <!-- 详细信息 -->
+    <string name="phone_details">详细信息</string>
+    <string name="phone_disconnect">断开连接</string>
+    <string name="phone_observe">重新读取屏幕</string>
+    <string name="phone_observe_needs_lease">只在代理正在所选应用中工作时可用。回到 AndChamber 会结束这项访问，因此不会在这里读取屏幕。</string>
+    <string name="phone_detail_runtime">运行环境</string>
+    <string name="phone_detail_connection">连接</string>
+    <string name="phone_detail_observed_nodes">屏幕元素</string>
+    <string name="phone_detail_last_error">最近的错误</string>
+</resources>

@@ -7,6 +7,7 @@ Packaged static inputs read at runtime by the app, not by the build:
 - `runtime-manifest.json`: pins the guest runtime (Alpine rootfs per ABI, OpenChamber and OpenCode versions, port).
 - `android-shim.cjs`: a Node preload script copied into the guest rootfs to work around an Android SELinux failure.
 - `browser-tool/package.json`, `browser-tool/index.js`: the App-injected OpenCode plugin tool `andchamber_web` for the in-app browser. Both files are synced into the private guest home on launch.
+- `phone-tool/package.json`, `phone-tool/index.js`: the independent opt-in `andchamber_phone` plugin. Its per-launch endpoint and native grant are separate from the browser.
 
 ## Design
 
@@ -14,6 +15,7 @@ Packaged static inputs read at runtime by the app, not by the build:
 - **Schema versioned.** `schemaVersion: 1` lets the Kotlin parser reject unknown layouts.
 - **Shim is a plain CJS file.** `android-shim.cjs` wraps `os.networkInterfaces`. If the original throws (`uv_interface_addresses` gives EACCES under SELinux on Android), it returns a synthetic loopback-only `lo` entry. It is `'use strict'`, has no dependencies, and is deliberately small.
 - **Browser plugin is a zero-dependency ESM package.** `browser-tool/index.js` registers one tool, `andchamber_web`, with one action per call. It reads the endpoint file named by `ANDCHAMBER_BROWSER_TOOL_FILE` on every call and never prints the token.
+- **Phone plugin is also zero-dependency ESM.** It reads `ANDCHAMBER_PHONE_TOOL_FILE` on each call, uses V2 execution-context labels, cannot authorize itself, propagates cancellation and returns capture bytes as a file part rather than duplicating them as text.
 - **Assets are not compiled.** Files are read as bytes or text, so changing them needs no Kotlin change, only a rebuild.
 
 ## Flow

@@ -33,6 +33,7 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 - **中英双语**：界面跟随系统语言显示中文或英文。
 - **远程服务器**：添加电脑上 OpenChamber 的地址即可连接；明文 HTTP 需要手动确认。
 - **终端可用**：`node-pty` 在设备上针对 musl 重新编译，OpenChamber 的终端功能正常可用。
+- **手机操控（实验，默认关闭）**：Android 11+ 可在原生页面确认一个应用、任务范围和短时授权，通过本机 `andchamber_phone` 工具操作；支持通知内配对、暂停/接管、结果未知不重放。仅适用于可信本机运行时，当前输入限已声明的 ASCII 子集。见[功能边界](docs/phone-control.md)与[模拟器验证](docs/testing-phone-control.md)。
 
 ## 系统要求
 
@@ -69,6 +70,12 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 - 在 OpenChamber 中按返回：先在网页内后退，退到底后 App 回到后台，服务继续运行。
 - 想回到 AndChamber 首页：点屏幕右侧边缘的小把手，选择 **Home**。
 - 首页的 Details 中可以关闭“Open OpenChamber when the app starts”。
+
+### 手机操控（实验）
+
+在首页打开“手机操控”，阅读风险后手动开启。已运行的 OpenChamber 需要由你返回首页重启才会加载工具，应用不会静默中断现有任务。配对与连接是不同步骤，连接成功也不会授予控制权；每个任务仍需原生确认。处理登录等敏感内容前，请选择“我来操作”或返回 AndChamber。
+
+已覆盖 API 35 / x86_64 模拟器；未验证 arm64 真机、厂商后台策略或任意第三方业务。普通暂停只阻止新修改，接管/返回宿主/结束任务会连同观察权限一起撤销。当前不支持中文输入、密码输入或自动提交，不能把工具回执当成业务完成。
 
 ### 公共目录
 
@@ -107,7 +114,7 @@ export ANDROID_HOME=$HOME/Android/Sdk
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;29.0.14206865"
 # 1. 准备原生源码（联网，Gradle 构建之前执行）
 python3 scripts/prepare_android_runtime_sources.py --output-dir build/runtime-sources
-# 2. 构建与测试（原生编译离线运行，Maven 与 Google 仓库仍需网络）
+# 2. 构建与测试（原生编译离线运行，Maven、Google 与 JitPack 依赖仍需网络）
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 # 输出：app/build/outputs/apk/debug/app-debug.apk
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'   # 构建脚本的离线测试
@@ -127,6 +134,7 @@ app/src/main/java/io/andchamber/app/
 ├── service/          前台服务与唤醒锁
 ├── data/             远程服务器存储、WebView 自动登录
 ├── di/               Koin 依赖注入
+├── phone/            实验手机操控：原生 ADB、受控工具通道、任务授权与通知
 └── ui/               Compose 界面：首页、WebView、启动流程、主题
 runtime_tools/, scripts/   构建时准备 PRoot 原生库
 ```

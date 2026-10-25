@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stable resource ids so real uiautomator XML exposes predictable resource-id values. -->
+<resources>
+    <item name="fixture_root" type="id" />
+    <item name="fixture_title" type="id" />
+    <item name="fixture_counter" type="id" />
+    <item name="fixture_input" type="id" />
+    <item name="fixture_input_echo" type="id" />
+    <item name="fixture_password" type="id" />
+    <item name="fixture_save" type="id" />
+    <item name="fixture_next" type="id" />
+    <item name="fixture_list" type="id" />
+    <item name="fixture_second_title" type="id" />
+    <item name="fixture_second_body" type="id" />
+    <item name="fixture_back" type="id" />
+</resources>

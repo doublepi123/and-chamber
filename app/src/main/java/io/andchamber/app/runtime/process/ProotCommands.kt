@@ -104,6 +104,8 @@ object ProotCommands {
         prootTmp: File,
         uiPassword: String,
         browserTool: Map<String, String> = emptyMap(),
+        /** Phone-tool overlay, applied after [browserTool] so a shared config key carries both. */
+        phoneTool: Map<String, String> = emptyMap(),
     ): Map<String, String> =
         buildMap {
             putAll(suiteEnvironment)
@@ -124,6 +126,9 @@ object ProotCommands {
             // The plugin entry and its endpoint-file path. A failed prepare passes an empty map, so
             // the user's inline config stays untouched and no overlay is injected.
             putAll(browserTool)
+            // Independent phone-tool overlay. Absent by default; applied last so its merged
+            // OPENCODE_CONFIG_CONTENT contains both plugin directories when both are present.
+            putAll(phoneTool)
         }
 
     /** Environment for installer steps (apk, npm): no server secrets, no shim. */

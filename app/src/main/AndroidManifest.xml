@@ -10,6 +10,16 @@
     <!-- WebView voice input (the page requests the microphone through the app). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Phone control (experimental): only launcher apps may be offered as targets. The picker asks
+         for this exact intent; the app never requests QUERY_ALL_PACKAGES or lists all packages. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <!-- Shared storage (/sdcard/AndChamber). API 30+ uses MANAGE_EXTERNAL_STORAGE granted from Settings;
          API 26-29 use the runtime storage permissions, with legacy external storage requested. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -68,5 +78,34 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps the on-device OpenChamber web server running while the app is in the background." />
         </service>
+
+        <!-- Phone control (experimental): keeps one short, natively confirmed lease visible with its
+             Pause/Return controls while the person is in the controlled app. Independent from the
+             runtime service and never started by the agent. -->
+        <service
+            android:name=".phone.android.PhoneControlService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Shows the short, user-confirmed phone-control session with its Pause and Return controls while the user is in another app." />
+        </service>
+
+        <!-- The notification's Return action. A direct Activity PendingIntent (not a service
+             trampoline, which Android 12+ blocks). Invisible, not exported, never in history: it
+             validates the nonce and lease epoch, revokes that lease, then opens AndChamber. -->
+        <activity
+            android:name=".phone.android.PhoneControlReturnActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- The two RemoteInput replies of the pairing notification. Not exported: only our own
+             notification's PendingIntent (explicit component) can reach it. It is a broadcast on
+             purpose, so answering never opens an Activity and the system pairing dialog stays up. -->
+        <receiver
+            android:name=".phone.android.PhonePairingActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

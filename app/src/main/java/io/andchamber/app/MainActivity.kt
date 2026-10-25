@@ -19,9 +19,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // A recreated activity still carries the intent it was first launched with; that tap was
         // already handled (or is kept in the UI's saved state), so it is offered only once.
-        if (savedInstanceState == null) offerSessionFrom(intent)
+        if (savedInstanceState == null) {
+            offerSessionFrom(intent)
+            offerPhoneFrom(intent)
+        }
         val runtime = get<LocalRuntimeController>()
         val screenAwake = get<ScreenAwakeController>()
+        val phone = get<io.andchamber.app.phone.android.PhoneIntegration>()
         // Opt-in: holds this window's screen on only while the local server runs and the app is in
         // front. Released on stop, failure, background, a remote page, and when the activity goes.
         keepScreenOnWhileLocalRuns(
@@ -36,14 +40,31 @@ class MainActivity : ComponentActivity() {
                 remotes = get<RemoteServerStore>(),
                 auth = get<WebSessionAuthenticator>(),
                 storage = get<SharedStorageController>(),
+                phone = phone,
             )
         }
+    }
+
+    /**
+     * Coming back to the host is a stop path for phone control: while an agent holds a lease, showing
+     * AndChamber again revokes it (the controller does the revoking; the coordinator keeps the facts).
+     */
+    override fun onResume() {
+        super.onResume()
+        get<io.andchamber.app.phone.android.PhoneIntegration>().onHostResumed()
     }
 
     /** singleTop: a notification tap while the app is open arrives here instead of onCreate. */
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         offerSessionFrom(intent)
+        offerPhoneFrom(intent)
+    }
+
+    /** The phone session/paired notification's content intent asks for the phone screen. */
+    private fun offerPhoneFrom(intent: android.content.Intent?) {
+        if (intent?.action != io.andchamber.app.phone.android.PhoneControlService.ACTION_OPEN_PHONE) return
+        io.andchamber.app.phone.android.PhoneOpenRequest.offer()
     }
 
     private fun offerSessionFrom(intent: android.content.Intent?) {

@@ -1,0 +1,158 @@
+name: Phone native smoke
+# Native entry/off-state UI smoke only. This is not TLS, ADB pairing, OpenCode tool-loop or
+# real phone-action end-to-end proof.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "app/src/main/assets/phone-tool/**"
+      - "app/src/main/java/io/andchamber/app/phone/**"
+      - "app/src/main/java/io/andchamber/app/MainActivity.kt"
+      - "app/src/main/java/io/andchamber/app/runtime/process/Phone*.kt"
+      - "app/src/main/java/io/andchamber/app/ui/AndChamberApp.kt"
+      - "app/src/main/java/io/andchamber/app/ui/home/HomeScreen.kt"
+      - "app/src/main/java/io/andchamber/app/ui/phone/**"
+      - "app/src/main/res/values*/phone*"
+      - "app/src/androidTest/java/io/andchamber/app/phone/smoke/**"
+      - "scripts/phone-e2e/**"
+      - "scripts/tests/phone-e2e-fixture.test.cjs"
+      - ".github/workflows/phone-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phone-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  phone-native-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;29.0.14206865"
+
+      # Host tools used by build_android_runtime_native.py.
+      - name: Check host tools for the native source build
+        run: |
+          for tool in python3 make patch awk tar xz gzip bzip2; do
+            command -v "$tool" > /dev/null || { echo "::error::Missing host tool: $tool"; exit 1; }
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Phone fixture Node tests
+        run: node --test scripts/tests/phone-e2e-fixture.test.cjs
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Same source preparation and real native build as the main CI. No fake JNI libraries.
+      - name: Cache prepared runtime sources
+        id: cache-runtime-sources
+        uses: actions/cache@v4
+        with:
+          path: build/runtime-sources
+          key: runtime-sources-v1-${{ hashFiles('runtime_tools/runtime_sources.lock.json', 'scripts/prepare_android_runtime_sources.py') }}
+
+      - name: Cache native runtime JNI output
+        uses: actions/cache@v4
+        with:
+          path: build/generated/runtime-jni
+          key: runtime-jni-v1-ndk29.0.14206865-${{ hashFiles('runtime_tools/runtime_sources.lock.json', 'scripts/build_android_runtime_native.py', 'scripts/prepare_android_runtime_sources.py', 'runtime_tools/patches/**') }}
+
+      - name: Prepare runtime sources
+        if: steps.cache-runtime-sources.outputs.cache-hit != 'true'
+        run: python3 scripts/prepare_android_runtime_sources.py --output-dir build/runtime-sources
+
+      - name: Build debug app and test APK with a dedicated id
+        run: |
+          ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
+            -Pandchamber.testApplicationId=io.andchamber.phonesmoke \
+            --stacktrace
+
+      - name: Verify the dedicated test package
+        run: |
+          aapt2="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}/build-tools/35.0.0/aapt2"
+          "$aapt2" dump badging app/build/outputs/apk/debug/app-debug.apk \
+            | grep -q "package: name='io.andchamber.phonesmoke'"
+          "$aapt2" dump xmltree --file AndroidManifest.xml \
+            app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+            | grep -q 'targetPackage(0x01010021)="io.andchamber.phonesmoke"'
+
+      - name: Run native smoke on API 35 x86_64
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: >-
+            -no-window -no-audio -no-boot-anim -no-snapshot
+            -gpu swiftshader_indirect
+          script: |
+            set -euo pipefail
+            SERIAL="${ANDROID_SERIAL:-emulator-5554}"
+            export ANDROID_SERIAL="$SERIAL"
+            EVIDENCE="${RUNNER_TEMP}/phone-smoke-evidence"
+            mkdir -p "$EVIDENCE"
+
+            adb -s "$SERIAL" wait-for-device
+            adb -s "$SERIAL" shell getprop sys.boot_completed | grep -q 1
+
+            # Fresh test app and test package; the first test asserts the phone store starts off.
+            adb -s "$SERIAL" uninstall io.andchamber.phonesmoke >/dev/null 2>&1 || true
+            adb -s "$SERIAL" uninstall io.andchamber.phonesmoke.test >/dev/null 2>&1 || true
+            adb -s "$SERIAL" install -r -t app/build/outputs/apk/debug/app-debug.apk
+            adb -s "$SERIAL" install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+
+            restore_settings() {
+              adb -s "$SERIAL" shell wm size reset >/dev/null 2>&1 || true
+              adb -s "$SERIAL" shell wm density reset >/dev/null 2>&1 || true
+              adb -s "$SERIAL" shell settings put system font_scale 1.0 >/dev/null 2>&1 || true
+            }
+            trap restore_settings EXIT
+
+            set +e
+            adb -s "$SERIAL" shell am instrument -w -r \
+              -e class io.andchamber.app.phone.smoke.PhoneNativeSmokeTest \
+              -e expectedPackage io.andchamber.phonesmoke \
+              io.andchamber.phonesmoke.test/androidx.test.runner.AndroidJUnitRunner \
+              | tee "$EVIDENCE/instrumentation.txt"
+            run_status=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$run_status" -ne 0 ] \
+              || ! grep -qE '^OK \([0-9]+ tests?\)' "$EVIDENCE/instrumentation.txt" \
+              || ! grep -q 'INSTRUMENTATION_CODE: -1' "$EVIDENCE/instrumentation.txt"; then
+              # Failure evidence only: instrumentation output and the fresh smoke UI itself.
+              adb -s "$SERIAL" exec-out screencap -p > "$EVIDENCE/synthetic-smoke-screen.png" || true
+              exit 1
+            fi
+
+      - name: Upload smoke failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phone-smoke-failure
+          path: ${{ runner.temp }}/phone-smoke-evidence/*
+          if-no-files-found: warn
+          retention-days: 7

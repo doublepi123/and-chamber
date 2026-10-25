@@ -47,8 +47,8 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Browser tool and UI script tests
-        run: node --test app/src/test/js/*.cjs scripts/tests/browser-tool-plugin.test.cjs
+      - name: Tool plugins, protocol fixtures and UI script tests
+        run: node --test app/src/test/js/*.cjs scripts/tests/*.test.cjs
 
       - uses: gradle/actions/setup-gradle@v4
 

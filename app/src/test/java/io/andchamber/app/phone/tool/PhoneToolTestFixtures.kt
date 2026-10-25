@@ -1,0 +1,292 @@
+package io.andchamber.app.phone.tool
+
+import io.andchamber.app.phone.core.PhoneCapabilities
+import io.andchamber.app.phone.core.PhoneConnection
+import io.andchamber.app.phone.core.PhoneDispatchReceipt
+import io.andchamber.app.phone.core.PhoneDispatchRequest
+import io.andchamber.app.phone.core.PhoneDriver
+import io.andchamber.app.phone.core.PhoneDriverAction
+import io.andchamber.app.phone.core.PhoneDriverException
+import io.andchamber.app.phone.core.PhoneDriverFailure
+import io.andchamber.app.phone.core.PhoneGeometry
+import io.andchamber.app.phone.core.PhoneImage
+import io.andchamber.app.phone.core.PhoneNode
+import io.andchamber.app.phone.core.PhoneObservationBinding
+import io.andchamber.app.phone.core.PhoneRect
+import io.andchamber.app.phone.core.PhoneSnapshot
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+
+internal const val TARGET = "com.example.target"
+internal const val TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+internal fun phoneSnapshot(packageName: String = TARGET): PhoneSnapshot =
+    PhoneSnapshot(
+        packageName = packageName,
+        windowId = "window-1",
+        geometry = PhoneGeometry(displayWidth = 1080, displayHeight = 2400, rotation = 0),
+        nodes = listOf(
+            PhoneNode(
+                ref = "n1",
+                role = "button",
+                label = "Continue",
+                bounds = PhoneRect(100, 200, 300, 260),
+                clickable = true,
+            ),
+            PhoneNode(
+                ref = "n2",
+                role = "edit",
+                label = "Search",
+                bounds = PhoneRect(100, 400, 900, 480),
+                editable = true,
+            ),
+        ),
+        refs = mapOf(
+            "n1" to PhoneRect(100, 200, 300, 260),
+            "n2" to PhoneRect(100, 400, 900, 480),
+        ),
+    )
+
+internal fun allCapabilities(unicodeInput: Boolean = false): PhoneCapabilities =
+    PhoneCapabilities(
+        observe = true,
+        capture = true,
+        tap = true,
+        swipe = true,
+        input = true,
+        unicodeInput = unicodeInput,
+        back = true,
+    )
+
+/**
+ * Driver fixture with deterministic dispatch latches. The server tests use real controller,
+ * loopback socket and HTTP parsing; only the platform driver is replaced.
+ */
+internal class FakePhoneDriver : PhoneDriver {
+    @Volatile var capabilities: PhoneCapabilities = allCapabilities()
+    @Volatile var runtimeId: String = "runtime-1"
+    @Volatile var snapshot: PhoneSnapshot = phoneSnapshot()
+    @Volatile var image: PhoneImage = PhoneImage(PNG, "image/png", 1080, 2400)
+    @Volatile var dispatchReceipt: PhoneDispatchReceipt = PhoneDispatchReceipt.Sent
+    @Volatile var observeFailure: PhoneDriverFailure? = null
+    @Volatile var dispatchFailure: PhoneDriverFailure? = null
+    val observeCalls = AtomicInteger(0)
+    val captureCalls = AtomicInteger(0)
+    val dispatched = mutableListOf<PhoneDispatchRequest>()
+    val dispatchStarted = CountDownLatch(1)
+    @Volatile var releaseDispatch: CountDownLatch? = null
+
+    override fun capabilities(): PhoneCapabilities = capabilities
+
+    override suspend fun connect(deadlineMs: Long): PhoneConnection =
+        PhoneConnection("conn-1", runtimeId)
+
+    override suspend fun disconnect(deadlineMs: Long) = Unit
+
+    override suspend fun observe(deadlineMs: Long): PhoneSnapshot {
+        observeCalls.incrementAndGet()
+        observeFailure?.let { throw PhoneDriverException(it) }
+        return snapshot
+    }
+
+    override suspend fun capture(
+        binding: PhoneObservationBinding,
+        deadlineMs: Long,
+    ): PhoneImage {
+        captureCalls.incrementAndGet()
+        return image
+    }
+
+    override suspend fun dispatch(
+        request: PhoneDispatchRequest,
+        deadlineMs: Long,
+    ): PhoneDispatchReceipt {
+        synchronized(dispatched) { dispatched += request }
+        dispatchStarted.countDown()
+        releaseDispatch?.await(5, TimeUnit.SECONDS)
+        dispatchFailure?.let { throw PhoneDriverException(it) }
+        return dispatchReceipt
+    }
+
+    fun dispatchedActions(): List<PhoneDriverAction> = synchronized(dispatched) { dispatched.map { it.action } }
+
+    companion object {
+        /** 1x1 transparent PNG. */
+        val PNG: ByteArray = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        )
+    }
+}
+
+internal fun toolBody(
+    session: String = "ses-a",
+    callId: String = "call-1",
+    input: JsonObject,
+): String =
+    buildJsonObject {
+        put("version", 1)
+        put("sessionID", session)
+        put("callID", callId)
+        put("messageID", "msg-1")
+        put("agent", "build")
+        put("input", input)
+    }.toString()
+
+internal fun input(
+    action: String,
+    observationId: String? = null,
+    extra: Map<String, Any> = emptyMap(),
+): JsonObject =
+    buildJsonObject {
+        put("action", action)
+        observationId?.let { put("observationId", it) }
+        extra.forEach { (key, value) ->
+            when (value) {
+                is Int -> put(key, value)
+                is Long -> put(key, value)
+                is Boolean -> put(key, value)
+                else -> put(key, value.toString())
+            }
+        }
+    }
+
+internal fun cancelBody(
+    session: String = "ses-a",
+    callId: String = "call-1",
+): String =
+    buildJsonObject {
+        put("version", 1)
+        put("sessionID", session)
+        put("callID", callId)
+    }.toString()
+
+internal data class RawResponse(
+    val status: Int,
+    val body: String,
+) {
+    val json: JsonObject
+        get() = kotlinx.serialization.json.Json.parseToJsonElement(body) as JsonObject
+}
+
+internal fun httpPost(
+    port: Int,
+    body: String,
+    path: String = "/v1/tool",
+    token: String? = TOKEN,
+    method: String = "POST",
+    host: String = "127.0.0.1:$port",
+    extraHeaders: List<Pair<String, String>> = emptyList(),
+    omitContentLength: Boolean = false,
+    transferEncoding: String? = null,
+    contentLengthOverride: Int? = null,
+): RawResponse =
+    Socket("127.0.0.1", port).use { socket ->
+        socket.soTimeout = 5_000
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        val head = StringBuilder()
+        head.append("$method $path HTTP/1.1\r\n")
+        head.append("Host: $host\r\n")
+        if (token != null) head.append("Authorization: Bearer $token\r\n")
+        head.append("Content-Type: application/json\r\n")
+        extraHeaders.forEach { (name, value) -> head.append("$name: $value\r\n") }
+        transferEncoding?.let { head.append("Transfer-Encoding: $it\r\n") }
+        if (!omitContentLength) {
+            head.append("Content-Length: ${contentLengthOverride ?: bytes.size}\r\n")
+        }
+        head.append("Connection: close\r\n\r\n")
+        val out = socket.getOutputStream()
+        out.write(head.toString().toByteArray(Charsets.US_ASCII))
+        out.write(bytes)
+        out.flush()
+        readResponse(socket.getInputStream())
+    }
+
+private fun readResponse(input: InputStream): RawResponse {
+    val header = ByteArrayOutputStream()
+    var previous = 0
+    while (true) {
+        val next = input.read()
+        if (next < 0) break
+        header.write(next)
+        if (previous == '\r'.code && next == '\n'.code) {
+            val text = header.toString(Charsets.ISO_8859_1.name())
+            if (text.endsWith("\r\n\r\n")) break
+        }
+        previous = next
+    }
+    val headerText = header.toString(Charsets.ISO_8859_1.name())
+    if (headerText.isEmpty()) return RawResponse(-1, "")
+    val lines = headerText.split("\r\n")
+    val status = lines.first().split(" ").getOrNull(1)?.toIntOrNull() ?: -1
+    val length = lines.drop(1)
+        .firstOrNull { it.lowercase().startsWith("content-length:") }
+        ?.substringAfter(':')?.trim()?.toIntOrNull() ?: 0
+    val body = ByteArray(length)
+    var read = 0
+    while (read < length) {
+        val n = input.read(body, read, length - read)
+        if (n < 0) break
+        read += n
+    }
+    return RawResponse(status, String(body, 0, read, Charsets.UTF_8))
+}
+
+/** Per-test loopback server; call [close] in a finally block. */
+internal class PhoneServerFixture(
+    val launchId: Long = 7L,
+    requestCapacity: Int = PhoneToolServer.MAX_REQUESTS,
+) {
+    var now: Long = 1_000L
+        @Synchronized get
+        @Synchronized set
+    @Volatile var ready: Long? = launchId
+    val driver = FakePhoneDriver()
+    private val observations = AtomicInteger(0)
+    val controller =
+        io.andchamber.app.phone.core.PhoneController(
+            driver = driver,
+            clock = { now },
+            newObservationId = { "obs-" + observations.incrementAndGet() },
+        )
+    val server =
+        PhoneToolServer(
+            launchId = launchId,
+            token = TOKEN,
+            controller = controller,
+            readyLaunch = { ready },
+            requestCapacity = requestCapacity,
+        )
+    val port: Int = server.start()
+
+    suspend fun granted(
+        actions: Set<io.andchamber.app.phone.core.PhoneActionKind> =
+            io.andchamber.app.phone.core.PhoneActionKind.values().toSet(),
+        ttlMs: Long = 60_000L,
+        pinnedSession: String? = null,
+        publishRoute: Boolean = true,
+    ) {
+        controller.enable()
+        check(controller.connect() is io.andchamber.app.phone.core.PhoneConnectionResult.Connected)
+        val result = controller.grant(TARGET, actions, ttlMs)
+        check(result is io.andchamber.app.phone.core.PhoneGrantResult.Granted)
+        if (publishRoute) {
+            check(server.publishGrantRoute(result.grant.epoch, pinnedSession)) {
+                "native grant route was not published"
+            }
+        }
+    }
+
+    fun publishRoute(sessionLabel: String? = null): Boolean =
+        server.publishGrantRoute(controller.state.value.epoch, sessionLabel)
+
+    fun close() {
+        server.stop()
+    }
+}

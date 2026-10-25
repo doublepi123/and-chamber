@@ -15,6 +15,7 @@ Key constraints:
 - Removing a remote server clears only its current named WebView profile after started cookie writes drain; failed cleanup keeps the saved server. Optional screen awake is off by default and holds the foreground Activity window only while the local runtime is Running and no remote page is shown.
 - Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
+- Phone control is a separate, default-off Android 11+ experiment for a trusted local runtime, one selected third-party app and a short native grant. Its `andchamber_phone` plugin never authorizes itself. Covered API 35/x86_64 flows passed [emulator acceptance](docs/testing-phone-control.md); physical arm64/vendor behavior is unverified. See [phone control](docs/phone-control.md).
 
 ## System Entry Points
 
@@ -79,16 +80,19 @@ HTTP downloads ──► data/HttpDownloadStarter ──► MediaStore or app-ex
 | `…/app/di/` | Koin composition root (`appModule`) | [View Map](app/src/main/java/io/andchamber/app/di/codemap.md) |
 | `…/app/i18n/` | Maps runtime message keys and install steps to string resources (English / Simplified Chinese) | [View Map](app/src/main/java/io/andchamber/app/i18n/codemap.md) |
 | `…/app/browser/` | Embedded-browser lease, loopback command admission, and the private credential file. No WebView. Experimental; emulator fixture checks passed, arm64 runtime end-to-end validation pending. | — |
+| `…/app/phone/` | Independent phone-control admission core, native ADB driver, loopback tool, native pairing/foreground-service coordination; does not relax browser authorization | [View Map](app/src/main/java/io/andchamber/app/phone/codemap.md) |
 | `…/app/ui/` | Compose root: navigation (home, web, browser), launch decision and cover, notification deep links, system bars, permission requests | [View Map](app/src/main/java/io/andchamber/app/ui/codemap.md) |
 | `…/app/ui/home/` | Control-room home: local runtime card, shared-storage card, remote servers | [View Map](app/src/main/java/io/andchamber/app/ui/home/codemap.md) |
 | `…/app/ui/web/` | Profile-bound WebView pool, session/page loading, navigation and JS bridge, HTTP download handoff, visibility reporting and isolation/error overlays | [View Map](app/src/main/java/io/andchamber/app/ui/web/codemap.md) |
 | `…/app/ui/browser/` | Floating in-app browser window, its single WebView driver and the presenter that binds grants to the chat view. Ready foreground opens default to agent control; takeover and hiding revoke it. | [View Map](app/src/main/java/io/andchamber/app/ui/browser/codemap.md) |
+| `…/app/ui/phone/` | Native opt-in, pairing guidance, target/task review, stop/resume and unconfirmed result presentation; separate connection/control/task state | [Design and boundaries](docs/phone-control.md) |
 | `…/app/ui/components/` | Stateless shared Compose widgets | [View Map](app/src/main/java/io/andchamber/app/ui/components/codemap.md) |
 | `…/app/ui/theme/` | Material 3 color schemes, typography, shapes, extended `ChamberColors` | [View Map](app/src/main/java/io/andchamber/app/ui/theme/codemap.md) |
 | `app/src/main/assets/` | Runtime manifest pins, the Node preload shim, and the App-injected OpenCode browser-tool plugin | [View Map](app/src/main/assets/codemap.md) |
 | `scripts/` | Build-time tools: network source preparation for the native runtime, offline NDK compilation, the legacy Termux pipeline, and mirror health checks | [View Map](scripts/codemap.md) |
 | `runtime_tools/` | Python library and SHA-256 lock files for the PRoot build (Termux lock and runtime source lock) | [View Map](runtime_tools/codemap.md) |
 | `third_party/native-runtime/` | License texts (PRoot COPYING, talloc LGPL-3.0 and GPL-3.0, libandroid-shmem BSD-3-Clause) and the provenance record for native components; packaged into the APK by `syncNativeLicenseAssets` | [View README](third_party/native-runtime/README.md) |
+| `third_party/phone-adb/` | ADB/SPAKE2/TLS dependency provenance, bundled license texts and rebuild/relink guidance | [View README](third_party/phone-adb/README.md) |
 | `fdroid/` | Candidate F-Droid metadata and submission guide; local fixture build/scans passed, official build, review and signing remain pending | [View README](fdroid/README.md) |
 
 ## Not Mapped

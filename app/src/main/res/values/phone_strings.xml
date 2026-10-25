@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone control (experimental). Keep keys in sync with values-zh/phone_strings.xml. -->
+<resources>
+    <!-- Header -->
+    <string name="phone_title">Phone control</string>
+    <string name="phone_experimental">Experimental</string>
+    <string name="phone_entry_body">Let the agent use one app on this phone for a short time. Off by default; you turn it on yourself.</string>
+    <string name="phone_unavailable_title">Not available in this version</string>
+    <string name="phone_unavailable_body">Phone control is an experiment and isn\'t turned on in this build.</string>
+
+    <!-- Turning it on -->
+    <string name="phone_enable_title">Let the agent use apps on this phone</string>
+    <string name="phone_enable_intro">The agent can tap, swipe and type in one app you choose, for a short time you set. You can pause, take over or end the task at any time.</string>
+    <string name="phone_risk_title">Before you turn this on</string>
+    <string name="phone_risk_runtime">The whole on-device runtime is trusted: any program or agent running in it can use this connection, not only the chat you\'re in.</string>
+    <string name="phone_risk_adb">Wireless debugging gives device-level access. While it\'s connected, whatever holds the connection can do far more than this screen allows. Turn wireless debugging off when you\'re done.</string>
+    <string name="phone_risk_model">What\'s on the chosen app\'s screen, including text and screenshots, may be sent to the AI model the chat uses.</string>
+    <string name="phone_risk_confirm">Confirming in this app records your choice. It can\'t prove that a person tapped it, since software controlling the phone could tap it too.</string>
+    <string name="phone_enable_limits">Off by default. Turning it off ends any task and disconnects.</string>
+    <string name="phone_risk_ack">I understand these risks</string>
+    <string name="phone_enable">Turn on phone control</string>
+    <string name="phone_enable_switch">Phone control</string>
+    <string name="phone_disable_hint">Turning it off ends the task and disconnects.</string>
+
+    <!-- Status strip -->
+    <string name="phone_status_device">Device</string>
+    <string name="phone_status_control">Control</string>
+    <string name="phone_status_task">Task</string>
+    <string name="phone_device_disconnected">Not connected</string>
+    <string name="phone_device_connecting">Connecting…</string>
+    <string name="phone_device_connected">Connected via wireless debugging</string>
+    <string name="phone_device_lost">Connection lost</string>
+    <string name="phone_control_none">You (the agent has no access)</string>
+    <string name="phone_control_agent">Agent · %1$s · %2$s left</string>
+    <string name="phone_control_paused">Paused · you\'re in control</string>
+    <string name="phone_control_pausing">Stopping…</string>
+    <string name="phone_task_none">No task</string>
+    <string name="phone_task_ended">Ended · check the results</string>
+    <string name="phone_minutes_left">%1$d min</string>
+    <string name="phone_seconds_left">%1$d s</string>
+
+    <!-- Pending operations -->
+    <string name="phone_pending_enabling">Turning on…</string>
+    <string name="phone_pending_pairing">Pairing…</string>
+    <string name="phone_pending_connecting">Connecting…</string>
+    <string name="phone_pending_disconnecting">Disconnecting…</string>
+    <string name="phone_pending_granting">Starting the task…</string>
+    <string name="phone_pending_pausing">Pausing…</string>
+    <string name="phone_pending_finishing">Ending the task…</string>
+    <string name="phone_pending_observing">Reading the screen…</string>
+
+    <!-- Stop controls -->
+    <string name="phone_pause">Pause</string>
+    <string name="phone_take_over">I\'ll take over</string>
+    <string name="phone_finish">End task</string>
+
+    <!-- Connecting -->
+    <string name="phone_connect_title">Connect to this phone</string>
+    <string name="phone_step_wireless">Turn on wireless debugging</string>
+    <string name="phone_step_wireless_body">In Developer options, turn on Wireless debugging. The phone must be on Wi-Fi.</string>
+    <string name="phone_open_wireless_settings">Open wireless debugging settings</string>
+    <string name="phone_step_pair">Pair (first time only)</string>
+    <string name="phone_paired_before">Already paired. Pair again only if connecting fails.</string>
+    <string name="phone_pair_again">Pair again</string>
+    <string name="phone_pair_how">On the wireless debugging screen, tap \"Pair device with pairing code\" and keep that dialog open. Switching to AndChamber closes it, and the code stops working.</string>
+    <string name="phone_pair_with_notification">Pair using a notification</string>
+    <string name="phone_pair_waiting_title">Enter the code in the notification</string>
+    <string name="phone_pair_waiting_body">With the pairing dialog still open, pull down the notification shade and type the six-digit code into AndChamber\'s notification. Don\'t paste it into a chat.</string>
+    <string name="phone_pair_blocked_title">Notifications are off</string>
+    <string name="phone_pair_blocked_body">The pairing notification can\'t be shown. Turn on notifications, or pair manually below if the dialog can stay open.</string>
+    <string name="phone_pair_manual_show">Pair without the notification</string>
+    <string name="phone_pair_manual_hide">Hide manual pairing</string>
+    <string name="phone_pair_manual_body">This only works while the pairing dialog stays on screen, for example in split screen. The code is never saved.</string>
+    <string name="phone_pairing_port">Pairing port</string>
+    <string name="phone_pairing_port_hint">From the pairing dialog, not the port on the wireless debugging screen.</string>
+    <string name="phone_pairing_code">Pairing code</string>
+    <string name="phone_pairing_code_hint">Six digits from the pairing dialog.</string>
+    <string name="phone_pair">Pair</string>
+    <string name="phone_step_connect">Connect</string>
+    <string name="phone_connect_port_body">Use the port under \"IP address &amp; port\" on the wireless debugging screen. It differs from the pairing port and changes whenever wireless debugging restarts.</string>
+    <string name="phone_connect_port">Connection port</string>
+    <string name="phone_connect_port_hint">From \"IP address &amp; port\" on the wireless debugging screen.</string>
+    <string name="phone_port_invalid">Enter a port from 1 to 65535.</string>
+    <string name="phone_host_custom">Use another address</string>
+    <string name="phone_host_default">Default: this phone (%1$s)</string>
+    <string name="phone_host">Address</string>
+    <string name="phone_host_hint">IP address or host name, without a port.</string>
+    <string name="phone_host_invalid">Enter an IP address or host name without a port.</string>
+    <string name="phone_connect">Connect</string>
+
+    <!-- Connection problems -->
+    <string name="phone_problem_wireless_off">Wireless debugging is off</string>
+    <string name="phone_problem_wireless_off_body">Turn it on in Developer options, then try again.</string>
+    <string name="phone_problem_no_wifi">Not on Wi-Fi</string>
+    <string name="phone_problem_no_wifi_body">Wireless debugging needs a Wi-Fi connection.</string>
+    <string name="phone_problem_code_rejected">Pairing failed</string>
+    <string name="phone_problem_code_rejected_body">The code was wrong or has expired. Open a new pairing dialog and use its new code.</string>
+    <string name="phone_problem_pair_port">Couldn\'t reach the pairing port</string>
+    <string name="phone_problem_pair_port_body">Check the port in the open pairing dialog. It changes every time the dialog opens.</string>
+    <string name="phone_problem_connect_refused">Couldn\'t connect</string>
+    <string name="phone_problem_connect_refused_body">Check the connection port on the wireless debugging screen. If you haven\'t paired yet, pair first.</string>
+    <string name="phone_problem_not_authorized">The phone hasn\'t approved this connection</string>
+    <string name="phone_problem_not_authorized_body">Pair again, then connect.</string>
+    <string name="phone_problem_lost">Connection lost</string>
+    <string name="phone_problem_lost_body">Wireless debugging may have turned off, or the Wi-Fi changed. Connect again.</string>
+    <string name="phone_problem_other">Something went wrong</string>
+    <string name="phone_problem_other_body">See Details for the technical message, then try again.</string>
+
+    <!-- Request feedback (fixed copy; raw details stay in Details) -->
+    <string name="phone_feedback_tool_title">The agent can\'t use phone control yet</string>
+    <string name="phone_feedback_tool_body">The phone tool isn\'t loaded in the running OpenChamber, so the task was cancelled and nothing was done in the app. Restart OpenChamber from Home, then set up the task again.</string>
+    <string name="phone_feedback_locked_title">The screen is locked</string>
+    <string name="phone_feedback_locked_body">Nothing was started. Unlock the phone, then set up the task again.</string>
+    <string name="phone_feedback_target_title">That app isn\'t available</string>
+    <string name="phone_feedback_target_body">Nothing was started. It may have been removed or blocked. Choose an app from the list.</string>
+    <string name="phone_feedback_grant_title">The task didn\'t start</string>
+    <string name="phone_feedback_grant_body">Nothing was granted. Check the connection and the settings above, then try again yourself. See Details for the technical message.</string>
+    <string name="phone_feedback_request_title">The last request didn\'t complete</string>
+    <string name="phone_feedback_request_body">This says nothing about actions taken earlier; check the app if unsure. See Details for the technical message.</string>
+
+    <!-- Local runtime not ready (persistent; the way out is Home) -->
+    <string name="phone_runtime_restart_title">Restart OpenChamber to use phone control</string>
+    <string name="phone_runtime_restart_body">OpenChamber on this phone is running, but it started before phone control was available, so the agent can\'t use it yet. Go Home and restart OpenChamber. Restarting interrupts tasks running in OpenChamber.</string>
+    <string name="phone_runtime_not_running_title">Start OpenChamber first</string>
+    <string name="phone_runtime_not_running_body">OpenChamber on this phone isn\'t running, so the agent can\'t use phone control. Go Home and start it.</string>
+    <string name="phone_runtime_go_home">Go Home</string>
+    <string name="phone_runtime_draft_kept">What you filled in is kept. You can allow the task once OpenChamber is ready.</string>
+
+    <!-- Stop entry gate -->
+    <string name="phone_stop_gate_title">Can\'t start: no way to pause from other apps</string>
+    <string name="phone_stop_gate_notifications">Notifications for AndChamber are off, so the Pause control can\'t be shown while another app is in front. Turn notifications on, then check again.</string>
+    <string name="phone_stop_gate_channel">The phone control notification category is turned off. Turn it on in notification settings, then check again.</string>
+    <string name="phone_stop_gate_unknown">AndChamber couldn\'t confirm that you can pause the agent from other apps. Check again. If this keeps happening, do the task yourself.</string>
+    <string name="phone_open_notification_settings">Open notification settings</string>
+
+    <!-- Granting -->
+    <string name="phone_grant_title">Give the agent a short task</string>
+    <string name="phone_request_title">The agent asked to use an app</string>
+    <string name="phone_request_body">It suggested the task below. You choose the app, the time and the actions. Nothing starts until you confirm.</string>
+    <string name="phone_grant_step_app">Choose one app</string>
+    <string name="phone_grant_app_body">The agent can act only in this app. The list of apps stays on this phone and isn\'t sent to the model.</string>
+    <string name="phone_target_search">Search apps</string>
+    <string name="phone_targets_empty">No apps to choose from.</string>
+    <string name="phone_targets_no_match">No app matches.</string>
+    <string name="phone_targets_more">%1$d more. Search to find them.</string>
+    <string name="phone_targets_blocked_hidden">%1$d system, settings or AndChamber apps can\'t be chosen and aren\'t listed. Search for one to see why.</string>
+    <string name="phone_targets_none_allowed">No app on this phone can be chosen. System and settings apps aren\'t supported.</string>
+    <string name="phone_target_block_host">AndChamber itself can\'t be chosen.</string>
+    <string name="phone_target_block_system">System and settings apps can\'t be chosen.</string>
+    <string name="phone_target_block_invalid">This app can\'t be chosen.</string>
+    <string name="phone_grant_step_task">Describe the task</string>
+    <string name="phone_summary">Task</string>
+    <string name="phone_summary_hint">What should the agent do? You\'ll see this while it works.</string>
+    <string name="phone_summary_required">Describe the task.</string>
+    <string name="phone_summary_too_long">Keep it under %1$d characters.</string>
+    <string name="phone_grant_step_limits">Set limits</string>
+    <string name="phone_duration">Time limit</string>
+    <string name="phone_duration_minutes">%1$d min</string>
+    <string name="phone_duration_hint">When time runs out, the agent pauses. It never extends its own time.</string>
+    <string name="phone_actions_allowed">Allowed actions</string>
+    <string name="phone_action_tap">Tap</string>
+    <string name="phone_action_swipe">Swipe and scroll</string>
+    <string name="phone_action_input">Type text</string>
+    <string name="phone_action_input_hint">Supported ASCII characters only; no Unicode, passwords, or automatic submission.</string>
+    <string name="phone_action_back">Go back</string>
+    <string name="phone_actions_observe_note">Reading the screen is always included, so the agent can see what it\'s doing.</string>
+    <string name="phone_list_separator">,\u0020</string>
+    <string name="phone_grant_review">Review and allow…</string>
+    <string name="phone_block_not_connected">Connect first.</string>
+    <string name="phone_block_no_target">Choose an app.</string>
+    <string name="phone_block_target_not_allowed">This app can\'t be chosen.</string>
+    <string name="phone_block_summary_too_long">The task description is too long.</string>
+    <string name="phone_block_no_actions">Allow at least one action.</string>
+    <string name="phone_block_busy">Wait for the current step to finish.</string>
+    <string name="phone_grant_confirm_title">Let the agent use %1$s?</string>
+    <string name="phone_grant_confirm_actions">Allowed: %1$s</string>
+    <string name="phone_grant_confirm_time">For %1$d min, then it pauses.</string>
+    <string name="phone_grant_confirm_stops">You can pause, take over or end the task at any time, here or from the notification.</string>
+    <string name="phone_grant_confirm_screen">Confirming records your choice in this app. It doesn\'t prove who tapped it.</string>
+    <string name="phone_grant_allow">Allow</string>
+
+    <!-- Running -->
+    <string name="phone_running_title">The agent is working in %1$s</string>
+    <string name="phone_running_limits">Allowed: %1$s · %2$s left</string>
+    <string name="phone_running_auto_pause">It pauses by itself when time runs out, when you come back to AndChamber, or when the app leaves the screen or can\'t be confirmed.</string>
+    <string name="phone_running_no_renew">It never extends its own time. More time needs your confirmation.</string>
+    <string name="phone_open_target">Open %1$s</string>
+    <string name="phone_open_target_check">Open %1$s to check</string>
+
+    <!-- Halted -->
+    <string name="phone_halt_title">Agent stopped: %1$s</string>
+    <string name="phone_halt_pending_title">Stopping: %1$s</string>
+    <string name="phone_halt_pending_body">No new actions are accepted. The agent\'s last action hasn\'t finished yet and may still take effect. You don\'t need to press Pause again.</string>
+    <string name="phone_pausing_label">Pausing… waiting for the last action to finish</string>
+    <string name="phone_running_in_flight">An action is running now. If you pause, it may still finish.</string>
+    <string name="phone_busy_agent_title">The agent\'s new action was refused</string>
+    <string name="phone_busy_agent_body">Its previous action hasn\'t finished. Nothing was queued, and nothing needs to be pressed.</string>
+    <string name="phone_busy_request_title">Still working on the previous step</string>
+    <string name="phone_busy_request_body">Your last tap wasn\'t applied because a step is still running. Wait for it to finish before trying again.</string>
+    <string name="phone_halt_none_in_flight">No further steps were taken.</string>
+    <string name="phone_halt_may_apply">No new actions are accepted, but the last action may still take effect. Check %1$s before deciding what to do next.</string>
+    <string name="phone_halt_user_checked">You marked the last action as checked. No new actions are accepted.</string>
+    <string name="phone_halt_task">Task in %1$s:</string>
+    <string name="phone_ack_checked">I\'ve checked it</string>
+    <string name="phone_halt_paused">you paused it</string>
+    <string name="phone_halt_taken_over">you took over</string>
+    <string name="phone_halt_expired">time ran out</string>
+    <string name="phone_halt_host_returned">you came back to AndChamber</string>
+    <string name="phone_halt_target_left">the app left the screen</string>
+    <string name="phone_halt_screen_locked">the screen locked</string>
+    <string name="phone_halt_connection_lost">the connection dropped</string>
+    <string name="phone_halt_stop_channel_lost">the Pause control is no longer available</string>
+    <string name="phone_halt_screen_uncertain">the screen couldn\'t be confirmed</string>
+    <string name="phone_halt_outcome_unknown">an action\'s result is unknown</string>
+    <string name="phone_halt_runtime_changed">the runtime restarted</string>
+    <string name="phone_resume_duration">Time limit if you continue</string>
+    <string name="phone_resume_review">Continue with the agent…</string>
+    <string name="phone_resume_note">Continuing asks you to confirm again with a new time limit. Nothing renews by itself.</string>
+    <string name="phone_resume_needs_connection">Connect again below before continuing. Connecting doesn\'t restart the agent; you still confirm here.</string>
+    <string name="phone_resume_confirm_title">Let the agent continue in %1$s?</string>
+    <string name="phone_resume">Continue</string>
+
+    <!-- Results -->
+    <string name="phone_result_verified">Checked</string>
+    <string name="phone_result_verified_body">Every step was read back from the app and matched.</string>
+    <string name="phone_result_partial">Partly checked</string>
+    <string name="phone_result_partial_body">Some steps couldn\'t be confirmed. Check them in the app.</string>
+    <string name="phone_result_needs_check">Needs checking</string>
+    <string name="phone_result_needs_check_body">Nothing here was confirmed in the app. A tool reporting success doesn\'t mean the step worked.</string>
+    <string name="phone_result_no_steps">No verified results are recorded here. Check the target app or the conversation.</string>
+    <string name="phone_check_verified">Checked in the app</string>
+    <string name="phone_check_reported">Agent reported done · not checked</string>
+    <string name="phone_check_unknown">Result unknown · check in the app</string>
+    <string name="phone_result_done">Close</string>
+
+    <!-- Details -->
+    <string name="phone_details">Details</string>
+    <string name="phone_disconnect">Disconnect</string>
+    <string name="phone_observe">Read the screen again</string>
+    <string name="phone_observe_needs_lease">Only while the agent is working in the chosen app. Coming back to AndChamber ends that access, so the screen isn\'t read from here.</string>
+    <string name="phone_detail_runtime">Runtime</string>
+    <string name="phone_detail_connection">Connection</string>
+    <string name="phone_detail_observed_nodes">Screen items</string>
+    <string name="phone_detail_last_error">Last error</string>
+</resources>

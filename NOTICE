@@ -24,11 +24,34 @@ Bundled native components (compiled into the APK's native libraries, not downloa
   - talloc 2.5.0: LGPL-3.0-or-later (with the GPL-3.0 text it refers to); https://www.samba.org/ftp/talloc/
   - libandroid-shmem 0.7: BSD-3-Clause; https://github.com/termux/libandroid-shmem
 
-The license texts for these components are in third_party/native-runtime/ and are packaged
-in the APK under assets/licenses/native/. Upstream source archives, their SHA-256 checksums,
-pinned commits, local patches and build steps are listed in third_party/native-runtime/provenance.json
-and runtime_tools/runtime_sources.lock.json. Local patches are in runtime_tools/patches/ and the
-build steps are in scripts/build_android_runtime_native.py.
+Bundled Java/Kotlin components (packaged in the APK from Maven Central/JitPack, not downloaded at
+runtime):
+
+  - LibADB Android 3.1.1: Apache-2.0 (upstream is dual GPL-3.0-or-later OR Apache-2.0; used here
+    under Apache-2.0; some files are BSD-3-Clause AND the dual license);
+    https://github.com/MuntashirAkon/libadb-android/tree/3.1.1
+  - spake2-android 2.2.1: LGPL-3.0; https://github.com/MuntashirAkon/spake2-java/tree/2.2.1
+  - Bouncy Castle bcprov-jdk15to18 1.81: Bouncy Castle Licence (MIT-style);
+    https://www.bouncycastle.org/licence.html
+  - Conscrypt 2.5.3: Apache-2.0; https://github.com/google/conscrypt
+  - androidx.annotation 1.9.1: Apache-2.0; https://developer.android.com/jetpack/androidx
+
+AndChamber also contains app-local transport and stream-reader patches in the LibADB package,
+app/src/main/java/io/github/muntashirakon/adb/AndChamberAdbTransport.kt and
+AndChamberAdbStreamReader.kt, derived from LibADB Android 3.1.1 under its Apache-2.0 option with
+the applicable BSD-3-Clause notices. They reuse the library's SPAKE2 cipher with bounded,
+cancellable sockets, enforce TLS-only connections and correctly drain queued data before EOF.
+The exact modifications, source URLs, the
+Apache-2.0/LGPL-3.0/GPL-3.0/BSD-3-Clause/Bouncy Castle texts and the rebuild/relink instructions are
+in third_party/phone-adb/ and packaged under assets/licenses/phone-adb/.
+
+The license texts for the native components are in third_party/native-runtime/ (packaged under
+assets/licenses/native/); the Java/Kotlin component texts are in third_party/phone-adb/ (packaged
+under assets/licenses/phone-adb/). Upstream source archives for the native runtime, their SHA-256
+checksums, pinned commits, local patches and build steps are listed in
+third_party/native-runtime/provenance.json and runtime_tools/runtime_sources.lock.json. Local
+patches are in runtime_tools/patches/ and the build steps are in
+scripts/build_android_runtime_native.py.
 
 These notices summarize attribution and source locations; the full license terms remain
 applicable. Redistribution must include the applicable license texts and comply with the

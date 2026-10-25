@@ -53,6 +53,22 @@ import io.andchamber.app.runtime.process.EmbeddedCommandSuite
 import io.andchamber.app.runtime.process.HealthProbe
 import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.runtime.process.ProotOpenChamberServer
+import io.andchamber.app.runtime.process.PhonePluginAssets
+import io.andchamber.app.runtime.process.PhoneToolBinding
+import io.andchamber.app.runtime.process.PhoneToolHost
+import io.andchamber.app.phone.android.PhoneAgentToolReadiness
+import io.andchamber.app.phone.android.PhoneDriverFacade
+import io.andchamber.app.phone.android.PhoneGrantRoutePublisher
+import io.andchamber.app.phone.android.PhoneIdentityStore
+import io.andchamber.app.phone.android.PhoneIntegration
+import io.andchamber.app.phone.android.PhoneIntegrationStore
+import io.andchamber.app.phone.android.PhonePairingReceipts
+import io.andchamber.app.phone.android.PhoneProposalSource
+import io.andchamber.app.phone.android.RuntimePhoneToolReadiness
+import io.andchamber.app.phone.android.phonePluginEnabledNow
+import io.andchamber.app.phone.android.phoneIntegrationStore
+import io.andchamber.app.phone.core.PhoneController
+import io.andchamber.app.phone.core.PhoneTargetPolicy
 import io.andchamber.app.runtime.process.ProviderPageRouter
 import io.andchamber.app.ui.ScreenAwakeController
 import io.andchamber.app.ui.UiPrefs
@@ -156,6 +172,9 @@ val appModule =
 
         single<BrowserToolHost> { get<LocalBrowserProviderBinding>() }
 
+        // One long-lived server. The phone plugin flag is sampled once per launch through
+        // `phonePluginEnabledNow`; toggling the experiment never rebuilds this instance, so the
+        // monotonic launch ids and the browser/phone tool watermarks stay intact.
         single<OpenChamberServer> {
             val context = get<Context>()
             val paths = RuntimePaths.under(context.filesDir)
@@ -198,9 +217,104 @@ val appModule =
                 browserTrustedRoot = context.filesDir,
                 onBrowserUnavailable = { reason -> Log.w("AndChamberBrowser", reason) },
                 browserTool = get(),
+                // Phone control is off unless the person turned it on. Only this launch's start reads
+                // the switch; a change applies to the next start and never stops a running server.
+                phonePluginEnabledNow = phonePluginEnabledNow(get<PhoneIntegrationStore>()),
+                phonePluginAssets = {
+                    PhonePluginAssets.Assets(
+                        packageJson =
+                            context.assets.open(PhonePluginAssets.PACKAGE_ASSET).bufferedReader().use { it.readText() },
+                        indexJs =
+                            context.assets.open(PhonePluginAssets.INDEX_ASSET).bufferedReader().use { it.readText() },
+                    )
+                },
+                phoneTool = get(),
+                onPhoneUnavailable = { reason -> Log.w("AndChamberPhone", reason) },
                 bindsForStart = { storage.prepareForStart() },
                 onStarted = { binds -> storage.recordStarted(binds) },
                 onStopped = { storage.recordStopped() },
+            )
+        }
+
+        // --- Phone control (experimental, off by default) -------------------------------------
+        // The identity is an AndroidKeyStore key created on first driver use: app start does no
+        // keystore work. The controller is the only authority; the integration only displays it.
+        single { PhoneIdentityStore(get<Context>()) }
+
+        single<PhoneIntegrationStore> { phoneIntegrationStore(get<Context>()) }
+
+        single {
+            val context = get<Context>()
+            PhoneDriverFacade(
+                identity = { get<PhoneIdentityStore>().identity() },
+                // The tool binding records `launch-<id>` with the controller; the adapter reports the
+                // same id on connect so the driver's fixed id never overwrites the runtime identity.
+                runtimeIdentity = { PhoneDriverFacade.runtimeEpoch(get<OpenChamberServer>().readyLaunchId()) },
+                // A receipt survives a process restart, but only for the same certificate and host. The
+                // lambda runs at first driver creation (the integration calls that from Dispatchers.IO),
+                // so neither Keystore nor the preferences read happens while this singleton is built.
+                pairingReceipts = { owner -> PhonePairingReceipts.open(context, owner.certificateFingerprint) },
+            )
+        }
+
+        single {
+            val context = get<Context>()
+            PhoneController(
+                driver = get<PhoneDriverFacade>(),
+                // Same monotonic clock the screen uses for its countdown; never wall time.
+                clock = { android.os.SystemClock.elapsedRealtime() },
+                targetPolicy = PhoneTargetPolicy(hostPackage = context.packageName),
+            )
+        }
+
+        single {
+            PhoneToolBinding(
+                controller = get<PhoneController>(),
+                readyLaunch = { get<OpenChamberServer>().readyLaunchId() },
+            )
+        }
+
+        single<PhoneToolHost> { get<PhoneToolBinding>() }
+
+        single<PhoneProposalSource> {
+            val binding = get<PhoneToolBinding>()
+            object : PhoneProposalSource {
+                override val pending = binding.pendingRequest
+
+                override fun dismiss(revision: Long): Boolean = binding.dismissPendingRequest(revision)
+
+                override fun consume(revision: Long) = binding.consumePendingRequest(revision)
+            }
+        }
+
+        // Native-only routing for a freshly granted epoch. The binding fails closed when there is no
+        // current/ready local launch, and the integration revokes the grant in that case.
+        // Read-only readiness probes. `toolReady` is the tool lane's `PhoneToolHost.isReady()`:
+        // true only when the current launch installed the phone tool and the server still reports
+        // that same ready launch. Nothing here restarts the runtime or changes authorization.
+        single<PhoneAgentToolReadiness> {
+            RuntimePhoneToolReadiness(
+                runtimeState = { get<LocalRuntimeController>().state.value },
+                toolReadyProbe = { get<PhoneToolHost>().isReady() },
+            )
+        }
+
+        single<PhoneGrantRoutePublisher> {
+            val binding = get<PhoneToolBinding>()
+            PhoneGrantRoutePublisher { epoch, confirmedSessionLabel ->
+                binding.publishGrantRoute(epoch, confirmedSessionLabel)
+            }
+        }
+
+        single {
+            PhoneIntegration(
+                context = get<Context>(),
+                store = get<PhoneIntegrationStore>(),
+                driver = get<PhoneDriverFacade>(),
+                controller = get<PhoneController>(),
+                proposals = get<PhoneProposalSource>(),
+                grantRoutes = get<PhoneGrantRoutePublisher>(),
+                readiness = get<PhoneAgentToolReadiness>(),
             )
         }
 

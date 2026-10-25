@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone control integration (notifications and foreground service). Keep keys in sync with
+     values/phone_integration_strings.xml. -->
+<resources>
+    <!-- Channels -->
+    <string name="phone_notif_channel_control">手机控制会话</string>
+    <string name="phone_notif_channel_control_desc">显示这次短时的手机控制会话，以及“暂停”和“返回”按钮。想在其他应用里也能停下代理，请保持开启。</string>
+    <string name="phone_notif_channel_pairing">手机控制配对</string>
+    <string name="phone_notif_channel_pairing_desc">向你索取 Android 无线调试界面上的配对端口和六位配对码。</string>
+
+    <!-- Session notification (stop entry) -->
+    <string name="phone_notif_running_title">代理正在使用 %1$s</string>
+    <string name="phone_notif_running_body">你可以随时暂停，或回到 AndChamber。回到 AndChamber 一定会结束会话。</string>
+    <string name="phone_notif_pause">暂停</string>
+    <string name="phone_notif_paused_title">已暂停</string>
+    <string name="phone_notif_paused_body">已暂停。请返回 AndChamber 核对上一操作，并重新确认控制。</string>
+    <string name="phone_notif_pausing_title">正在暂停…</string>
+    <string name="phone_notif_pausing_body">正在暂停。不再接受新的操作，上一操作可能仍然生效。</string>
+    <string name="phone_notif_return">返回 AndChamber</string>
+
+    <!-- Pairing notification -->
+    <string name="phone_pair_notif_title">与这台手机配对</string>
+    <string name="phone_pair_notif_port_body">Android 的无线调试界面已打开。请选择“使用配对码配对设备”，然后在这里输入界面上显示的端口。配对对话框会保持打开。</string>
+    <string name="phone_pair_notif_port_label">配对端口</string>
+    <string name="phone_pair_notif_code_body">在这里输入 Android 配对对话框里的六位配对码。它只使用一次，不会保存，也不会写进聊天。</string>
+    <string name="phone_pair_notif_code_label">六位配对码</string>
+    <string name="phone_pair_notif_busy">正在配对… 只有一次有时限的尝试。如果对话框已经关闭，请取消。</string>
+    <string name="phone_pair_notif_paired_title">已配对</string>
+    <string name="phone_pair_notif_paired_body">回到 AndChamber，输入无线调试界面上显示的连接端口。仅配对还不会连接。</string>
+    <string name="phone_pair_notif_failed_code">配对码被拒绝。请核对界面上的配对码后重新配对。没有授予任何权限。</string>
+    <string name="phone_pair_notif_failed_port">无法连接到配对端口。配对对话框的端口每次都会变化，请重新打开后再试。</string>
+    <string name="phone_pair_notif_failed_policy">这个配对端口或地址不被允许。请使用这台手机自己无线调试界面上的端口。</string>
+    <string name="phone_pair_notif_failed_timeout">配对超时。没有连接任何设备；想重试时请重新打开配对对话框。</string>
+    <string name="phone_pair_notif_failed_other">配对没有完成。没有连接任何设备。本应用没有修改 Android 自身的任何授权。</string>
+    <string name="phone_notif_cancel_pairing">取消配对</string>
+</resources>

@@ -60,6 +60,9 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.ServerTarget
 import io.andchamber.app.runtime.SharedStorageController
 import io.andchamber.app.runtime.WebSessionAuthenticator
+import io.andchamber.app.phone.android.PhoneIntegration
+import io.andchamber.app.phone.android.PhoneOpenRequest
+import io.andchamber.app.ui.phone.PhoneControlScreen
 import io.andchamber.app.ui.home.HomeActions
 import io.andchamber.app.ui.home.HomeScreen
 import io.andchamber.app.ui.theme.AndChamberTheme
@@ -79,6 +82,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal object Routes {
     const val HOME = "home"
+    const val PHONE = "phone"
     const val ARG_TARGET = "targetId"
     const val WEB = "web/{$ARG_TARGET}"
 
@@ -198,11 +202,12 @@ private class LocalActions(
  * navigation graph isn't rebuilt every time a log line arrives.
  */
 @Composable
-fun AndChamberApp(
+internal fun AndChamberApp(
     runtime: LocalRuntimeController,
     remotes: RemoteServerStore,
     auth: WebSessionAuthenticator,
     storage: SharedStorageController,
+    phone: PhoneIntegration? = null,
 ) {
     AndChamberTheme {
         val nav = rememberNavController()
@@ -216,6 +221,13 @@ fun AndChamberApp(
         val pendingRemovalIds = remember { mutableStateMapOf<String, Unit>() }
         val removalScope = rememberCoroutineScope()
         val context = LocalContext.current
+
+        // The session/paired notifications ask for the phone screen; nothing else navigates there.
+        val phoneOpenRequests by PhoneOpenRequest.requests.collectAsStateWithLifecycle()
+        LaunchedEffect(phoneOpenRequests) {
+            if (phoneOpenRequests == 0) return@LaunchedEffect
+            nav.navigate(Routes.PHONE) { launchSingleTop = true }
+        }
 
         val askForNotifications = rememberNotificationPermissionRequest()
         val local = remember(runtime, askForNotifications, pool) { LocalActions(runtime, askForNotifications, pool) }
@@ -481,6 +493,31 @@ fun AndChamberApp(
                             storage = storageState,
                             autoOpenLocal = uiPrefs.autoOpenLocal,
                             updates = updates,
+                            onOpenPhone =
+                                phone?.let {
+                                    { nav.navigate(Routes.PHONE) { launchSingleTop = true } }
+                                },
+                        )
+                    }
+
+                    composable(Routes.PHONE) {
+                        val target = phone ?: return@composable
+                        val phoneState by target.state.collectAsStateWithLifecycle()
+                        // The screen and the controller share one monotonic clock; never wall time.
+                        val phoneActions =
+                            remember(target, nav) {
+                                // Home, always: the phone screen may sit on top of a chat, and the
+                                // runtime notice asks the person to go Home to start/restart it.
+                                target.actions { nav.showHome() }
+                            }
+                        DisposableEffect(target) {
+                            target.onScreenOpened()
+                            onDispose { target.onScreenClosed() }
+                        }
+                        PhoneControlScreen(
+                            state = phoneState,
+                            actions = phoneActions,
+                            clock = target.monotonicClock,
                         )
                     }
 

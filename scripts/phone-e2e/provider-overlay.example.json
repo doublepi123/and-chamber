@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "fixture": {
+      "name": "Phone E2E Fixture",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://10.0.2.2:32123/v1",
+        "apiKey": "test-only-fixture-key"
+      },
+      "models": {
+        "phone": {
+          "name": "phone-fixture",
+          "capabilities": {
+            "tools": true,
+            "input": ["text", "image"],
+            "output": ["text"],
+            "temperature": false
+          }
+        }
+      }
+    }
+  }
+}

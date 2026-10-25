@@ -1,0 +1,705 @@
+package io.andchamber.app.phone.tool
+
+import io.andchamber.app.phone.core.PhoneActionKind
+import io.andchamber.app.phone.core.PhoneBlockReason
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+import java.net.ConnectException
+import java.net.SocketException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+class PhoneToolServerTest {
+    private fun RawResponse.ok(): Boolean = json["ok"]!!.toString().toBoolean()
+    private fun RawResponse.code(): String = (json["error"] as JsonObject)["code"]!!.toString().trim('"')
+    private fun RawResponse.action(): String = json["action"]!!.toString().trim('"')
+    private fun RawResponse.epoch(): Long = json["epoch"]!!.toString().toLong()
+    private fun RawResponse.data(): JsonObject = json["data"] as JsonObject
+    private fun RawResponse.observationId(): String = data()["observationId"]!!.toString().trim('"')
+
+    private fun snapshotBody(
+        session: String = "ses-a",
+        callId: String = "snap-1",
+    ): String = toolBody(session, callId, input("snapshot"))
+
+    private fun tapBody(
+        observationId: String,
+        session: String = "ses-a",
+        callId: String = "tap-1",
+        ref: String = "n1",
+    ): String = toolBody(session, callId, input("tap", observationId, mapOf("ref" to ref)))
+
+    private fun requestBody(
+        summary: String,
+        packageName: String? = null,
+        session: String = "ses-a",
+        callId: String = "req-1",
+    ): String {
+        val extra = buildMap<String, Any> {
+            put("summary", summary)
+            packageName?.let { put("packageName", it) }
+        }
+        return toolBody(session, callId, input("request", extra = extra))
+    }
+
+    @Test
+    fun `status needs no grant, reports the epoch and never claims the session route`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val before = httpPost(fixture.port, toolBody("ses-b", "s1", input("status")))
+            assertEquals(200, before.status)
+            assertTrue(before.ok())
+            assertEquals("phone.status", before.action())
+            assertEquals(0L, before.epoch())
+            val data = before.data()
+            assertEquals("false", data["enabled"].toString())
+            assertEquals("true", data["runtimeReady"].toString())
+            assertEquals("false", data["pausing"].toString())
+            assertEquals("false", data["pendingConfirmation"].toString())
+            assertEquals("DISABLED", data["phase"].toString().trim('"'))
+
+            // Session A's status must not take the route from B or claim it for A.
+            val statusA = httpPost(fixture.port, toolBody("ses-a", "s2", input("status")))
+            assertTrue(statusA.ok())
+
+            // The fixed schema is enforced on the server too, not only by the plugin.
+            val strict = httpPost(
+                fixture.port,
+                toolBody("ses-b", "s3", input("status", extra = mapOf("ref" to "n1"))),
+            )
+            assertEquals(400, strict.status)
+            assertEquals("INVALID_REQUEST", strict.code())
+
+            fixture.granted()
+            val snapA = httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "a-snap"))
+            assertTrue(snapA.ok())
+            assertEquals("phone.snapshot", snapA.action())
+            assertTrue(snapA.epoch() > 0)
+
+            // If status had claimed the route for B, this action would be SESSION_BUSY.
+            val tapA = httpPost(fixture.port, tapBody(snapA.observationId(), session = "ses-a", callId = "a-tap"))
+            assertTrue(tapA.ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a real action requires enable, connection, grant and a ready launch`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val disabled = httpPost(fixture.port, snapshotBody())
+            assertFalse(disabled.ok())
+            assertEquals("DISABLED", disabled.code())
+
+            fixture.controller.enable()
+            val disconnected = httpPost(fixture.port, snapshotBody())
+            assertEquals("NOT_CONNECTED", disconnected.code())
+
+            fixture.granted()
+            fixture.ready = null
+            val notReady = httpPost(fixture.port, snapshotBody())
+            assertEquals("RUNTIME_NOT_READY", notReady.code())
+
+            fixture.ready = fixture.launchId
+            val ready = httpPost(fixture.port, snapshotBody())
+            assertTrue(ready.ok())
+            val data = ready.data()
+            assertEquals(TARGET, data["packageName"]!!.toString().trim('"'))
+            assertEquals(1080, data["displayWidth"]!!.toString().toInt())
+            assertEquals(2400, data["displayHeight"]!!.toString().toInt())
+            assertTrue((data["nodes"] as kotlinx.serialization.json.JsonArray).isNotEmpty())
+
+            fixture.controller.revoke()
+            val revoked = httpPost(fixture.port, snapshotBody(callId = "snap-2"))
+            assertEquals("NOT_GRANTED", revoked.code())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `one session owns a grant epoch and a new epoch reopens the route`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            val first = httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "a-1"))
+            val observation = first.observationId()
+            val firstEpoch = first.epoch()
+            assertTrue(httpPost(fixture.port, tapBody(observation, "ses-a", "a-2")).ok())
+
+            val other = httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b-1"))
+            assertFalse(other.ok())
+            assertEquals("SESSION_BUSY", other.code())
+
+            val statusB = httpPost(fixture.port, toolBody("ses-b", "b-2", input("status")))
+            assertTrue(statusB.ok())
+            assertEquals(firstEpoch, statusB.epoch())
+
+            fixture.controller.grant(TARGET, PhoneActionKind.values().toSet(), 60_000L)
+            val newEpoch = fixture.controller.state.value.epoch
+            assertTrue(newEpoch > firstEpoch)
+            // The native side publishes a manual route for the new epoch; otherwise every action is
+            // refused while the grant/publish window is open.
+            assertTrue(fixture.publishRoute())
+            val bAgain = httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b-3"))
+            assertTrue(bAgain.ok())
+            assertEquals(newEpoch, bAgain.epoch())
+
+            val aAgain = httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "a-3"))
+            assertEquals("SESSION_BUSY", aAgain.code())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `tap, input and capture are bound to the live observation`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            val observation = snap.observationId()
+
+            val byRef = httpPost(fixture.port, tapBody(observation, callId = "t1"))
+            assertTrue(byRef.ok())
+            assertEquals("true", byRef.data()["sent"].toString())
+            assertEquals("tap", byRef.data()["action"]!!.toString().trim('"'))
+            assertTrue(fixture.driver.dispatchedActions().last() is io.andchamber.app.phone.core.PhoneDriverAction.Tap)
+
+            val snap2 = httpPost(fixture.port, snapshotBody(callId = "s2"))
+            val byPoint = httpPost(
+                fixture.port,
+                toolBody("ses-a", "t2", input("tap", snap2.observationId(), mapOf("x" to 150, "y" to 230))),
+            )
+            assertTrue(byPoint.ok())
+
+            val snap3 = httpPost(fixture.port, snapshotBody(callId = "s3"))
+            val outOfBounds = httpPost(
+                fixture.port,
+                toolBody("ses-a", "t3", input("tap", snap3.observationId(), mapOf("x" to 5_000, "y" to 5_000))),
+            )
+            assertEquals("OUT_OF_BOUNDS", outOfBounds.code())
+
+            val snap4 = httpPost(fixture.port, snapshotBody(callId = "s4"))
+            val missingObservation = httpPost(
+                fixture.port,
+                toolBody("ses-a", "t4", input("tap", null, mapOf("ref" to "n1"))),
+            )
+            assertEquals("OBSERVATION_REQUIRED", missingObservation.code())
+
+            val stale = httpPost(fixture.port, tapBody("obs-does-not-exist", callId = "t5"))
+            assertEquals("STALE_OBSERVATION", stale.code())
+
+            // A stale observation must not have reached the driver.
+            assertEquals(2, fixture.driver.dispatchedActions().size)
+
+            val snap5 = httpPost(fixture.port, snapshotBody(callId = "s5"))
+            val typing = httpPost(
+                fixture.port,
+                toolBody("ses-a", "i1", input("input", snap5.observationId(), mapOf("text" to "hello", "ref" to "n2"))),
+            )
+            assertTrue(typing.ok())
+            assertEquals("input", typing.data()["action"]!!.toString().trim('"'))
+
+            val snap6 = httpPost(fixture.port, snapshotBody(callId = "s6"))
+            val unicode = httpPost(
+                fixture.port,
+                toolBody("ses-a", "i2", input("input", snap6.observationId(), mapOf("text" to "你好"))),
+            )
+            assertEquals("UNICODE_UNSUPPORTED", unicode.code())
+
+            val snap7 = httpPost(fixture.port, snapshotBody(callId = "s7"))
+            val capture = httpPost(
+                fixture.port,
+                toolBody("ses-a", "c1", input("capture", snap7.observationId())),
+            )
+            assertTrue(capture.ok())
+            val captureData = capture.data()
+            assertEquals("image/png", captureData["mime"]!!.toString().trim('"'))
+            assertEquals(
+                java.util.Base64.getEncoder().encodeToString(FakePhoneDriver.PNG),
+                captureData["base64"]!!.toString().trim('"'),
+            )
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `request proposes one task without enabling or granting and status keeps it private`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val summary = "Book a table for two at 19:00"
+            val proposed = httpPost(fixture.port, requestBody(summary, TARGET))
+            assertEquals(200, proposed.status)
+            assertTrue(proposed.ok())
+            assertEquals("phone.request", proposed.action())
+            assertEquals(
+                PhoneToolProtocol.CONFIRM_IN_APP,
+                proposed.data()["confirmation"]!!.toString().trim('"'),
+            )
+            assertEquals("PENDING_CONFIRMATION", proposed.data()["state"]!!.toString().trim('"'))
+
+            // A proposal creates no authority of any kind.
+            assertFalse(fixture.controller.state.value.enabled)
+            assertNull(fixture.controller.state.value.grant)
+
+            val pending = fixture.server.pendingRequests.snapshot()!!
+            assertEquals("ses-a", pending.sessionLabel)
+            assertEquals(summary, pending.summary)
+            assertEquals(TARGET, pending.packageName)
+            assertFalse("toString must not leak the task text", pending.toString().contains(summary))
+            assertFalse("toString must not leak the target", pending.toString().contains(TARGET))
+
+            // status exposes only a boolean; the summary and package never leave native memory.
+            val status = httpPost(fixture.port, toolBody("ses-b", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals("true", status.data()["pendingConfirmation"].toString())
+            assertFalse("status leaked the summary", status.body.contains(summary))
+            assertFalse("status leaked the target package", status.body.contains(TARGET))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `one session owns the pending request and may explicitly update it`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val first = httpPost(fixture.port, requestBody("first task", session = "ses-a", callId = "r1"))
+            assertTrue(first.ok())
+            val firstRevision = fixture.server.pendingRequests.snapshot()!!.revision
+
+            val updated = httpPost(
+                fixture.port,
+                requestBody("second task", TARGET, session = "ses-a", callId = "r2"),
+            )
+            assertTrue(updated.ok())
+            val afterUpdate = fixture.server.pendingRequests.snapshot()!!
+            assertEquals("second task", afterUpdate.summary)
+            assertEquals(TARGET, afterUpdate.packageName)
+            assertTrue(afterUpdate.revision > firstRevision)
+            assertEquals("ses-a", afterUpdate.sessionLabel)
+
+            val foreign = httpPost(fixture.port, requestBody("stolen task", session = "ses-b", callId = "r3"))
+            assertFalse(foreign.ok())
+            assertEquals("SESSION_BUSY", foreign.code())
+            val unchanged = fixture.server.pendingRequests.snapshot()!!
+            assertEquals("second task", unchanged.summary)
+            assertEquals("ses-a", unchanged.sessionLabel)
+
+            // A status call from another session is still harmless and does not take the request.
+            assertTrue(httpPost(fixture.port, toolBody("ses-b", "s1", input("status"))).ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `an active grant refuses a new task request`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            val refused = httpPost(fixture.port, requestBody("another task"))
+            assertFalse(refused.ok())
+            assertEquals("GRANT_ACTIVE", refused.code())
+            assertNull(fixture.server.pendingRequests.snapshot())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `request enforces the runtime, target policy and fixed schema`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.ready = null
+            assertEquals("RUNTIME_NOT_READY", httpPost(fixture.port, requestBody("book")).code())
+            assertNull(fixture.server.pendingRequests.snapshot())
+
+            fixture.ready = fixture.launchId
+            assertEquals(
+                "TARGET_FORBIDDEN",
+                httpPost(fixture.port, requestBody("book", "io.andchamber.app")).code(),
+            )
+            assertEquals(
+                "TARGET_FORBIDDEN",
+                httpPost(fixture.port, requestBody("book", "com.android.settings")).code(),
+            )
+            assertNull(fixture.server.pendingRequests.snapshot())
+
+            val blank = httpPost(fixture.port, requestBody("   "))
+            assertEquals(400, blank.status)
+            assertEquals("INVALID_REQUEST", blank.code())
+            val extra = httpPost(
+                fixture.port,
+                toolBody("ses-a", "r9", input("request", extra = mapOf("summary" to "book", "ref" to "n1"))),
+            )
+            assertEquals(400, extra.status)
+            assertEquals("INVALID_REQUEST", extra.code())
+            assertNull(fixture.server.pendingRequests.snapshot())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a grant without a published route refuses every real action`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted(publishRoute = false)
+            val blocked = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            assertEquals("ROUTE_NOT_PUBLISHED", blocked.code())
+
+            // Native publishes the manual route; only then may the first action claim.
+            assertTrue(fixture.publishRoute())
+            assertTrue(httpPost(fixture.port, snapshotBody(callId = "s2")).ok())
+            assertEquals(
+                "SESSION_BUSY",
+                httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b1")).code(),
+            )
+
+            val epoch = fixture.controller.state.value.epoch
+            assertFalse("a duplicate publish must not change the route", fixture.server.publishGrantRoute(epoch, "ses-a"))
+            assertFalse("a stale publish must not change the route", fixture.server.publishGrantRoute(epoch - 1, "ses-b"))
+            assertTrue(httpPost(fixture.port, snapshotBody(callId = "s3")).ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a pinned route refuses another session before any real action`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted(pinnedSession = "ses-a")
+            assertEquals(
+                "SESSION_BUSY",
+                httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b1")).code(),
+            )
+            assertTrue(httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "a1")).ok())
+            assertEquals(
+                "SESSION_BUSY",
+                httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b2")).code(),
+            )
+            // status is always allowed and never claims.
+            assertTrue(httpPost(fixture.port, toolBody("ses-b", "b3", input("status"))).ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a stale epoch never replaces a newer published route`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted(pinnedSession = "ses-a")
+            val firstEpoch = fixture.controller.state.value.epoch
+
+            fixture.controller.grant(TARGET, PhoneActionKind.values().toSet(), 60_000L)
+            val secondEpoch = fixture.controller.state.value.epoch
+            assertTrue(secondEpoch > firstEpoch)
+            assertTrue(fixture.publishRoute("ses-b"))
+
+            assertFalse(
+                "an old epoch publish must not change the new route",
+                fixture.server.publishGrantRoute(firstEpoch, "ses-a"),
+            )
+            assertEquals(
+                "SESSION_BUSY",
+                httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "a1")).code(),
+            )
+            assertTrue(httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b1")).ok())
+            assertFalse(
+                "a duplicate publish must not change the route",
+                fixture.server.publishGrantRoute(secondEpoch, "ses-b"),
+            )
+            assertTrue(httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b2")).ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    /**
+     * Admit a snapshot, block after admission, replace the grant, then release. The admitted request
+     * must be refused against its own frozen epoch; it must never observe the new grant's screen.
+     */
+    private fun admittedSnapshotRace(publishNewRoute: Boolean) = runBlocking {
+        val fixture = PhoneServerFixture()
+        val executor = Executors.newSingleThreadExecutor()
+        val release = CountDownLatch(1)
+        try {
+            fixture.granted()
+            val oldEpoch = fixture.controller.state.value.epoch
+            val entered = CountDownLatch(1)
+            fixture.server.afterAdmissionForTest = {
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            val pending = executor.submit<RawResponse> {
+                httpPost(fixture.port, snapshotBody(callId = "old-admitted"))
+            }
+            assertTrue("the request was never admitted", entered.await(5, TimeUnit.SECONDS))
+
+            // Native regrant while the admitted snapshot is paused; the new epoch may be unpublished
+            // or pinned to a different session.
+            fixture.controller.grant(TARGET, PhoneActionKind.values().toSet(), 60_000L)
+            val newEpoch = fixture.controller.state.value.epoch
+            assertTrue(newEpoch > oldEpoch)
+            if (publishNewRoute) {
+                assertTrue(fixture.server.publishGrantRoute(newEpoch, "ses-b"))
+            }
+
+            val observesBefore = fixture.driver.observeCalls.get()
+            release.countDown()
+            val response = pending.get(5, TimeUnit.SECONDS)
+
+            assertEquals("the old request must not adopt the new epoch", "EPOCH_CHANGED", response.code())
+            assertEquals("the refusal reports the admitted epoch", oldEpoch, response.epoch())
+            assertEquals(
+                "the new grant's screen was never observed",
+                observesBefore,
+                fixture.driver.observeCalls.get(),
+            )
+            assertEquals("no capture under the new grant", 0, fixture.driver.captureCalls.get())
+            assertEquals("no dispatch under the new grant", 0, fixture.driver.dispatched.size)
+        } finally {
+            fixture.server.afterAdmissionForTest = null
+            release.countDown()
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `an admitted snapshot cannot run against a regrant without a published route`() {
+        admittedSnapshotRace(publishNewRoute = false)
+    }
+
+    @Test
+    fun `an admitted snapshot cannot run against a regrant pinned to another session`() {
+        admittedSnapshotRace(publishNewRoute = true)
+    }
+
+    @Test
+    fun `a repeated call id is refused after it was handled`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            assertTrue(httpPost(fixture.port, snapshotBody(callId = "same")).ok())
+            val duplicate = httpPost(fixture.port, snapshotBody(callId = "same"))
+            assertEquals("DUPLICATE_CALL", duplicate.code())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `transport requires the launch token, the exact host, no origin and bounded bodies`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val body = toolBody("ses-a", "s1", input("status"))
+            assertEquals(401, httpPost(fixture.port, body, token = null).status)
+            assertEquals(401, httpPost(fixture.port, body, token = "b".repeat(64)).status)
+            assertEquals(403, httpPost(fixture.port, body, extraHeaders = listOf("Origin" to "http://127.0.0.1")).status)
+            assertEquals(403, httpPost(fixture.port, body, host = "localhost:${fixture.port}").status)
+            assertEquals(404, httpPost(fixture.port, body, method = "GET").status)
+            assertEquals(404, httpPost(fixture.port, body, path = "/v1/other").status)
+            assertEquals(413, httpPost(fixture.port, body, omitContentLength = true).status)
+            assertEquals(413, httpPost(fixture.port, body, transferEncoding = "chunked").status)
+            assertEquals(
+                413,
+                httpPost(fixture.port, body, contentLengthOverride = PhoneToolProtocol.MAX_BODY_BYTES + 1).status,
+            )
+            assertEquals(400, httpPost(fixture.port, "{not json").status)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a second action while one is in flight is refused with BUSY`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            fixture.granted()
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            val release = CountDownLatch(1)
+            fixture.driver.releaseDispatch = release
+            val pending = executor.submit<RawResponse> {
+                httpPost(fixture.port, tapBody(snap.observationId(), callId = "t1"))
+            }
+            assertTrue(fixture.driver.dispatchStarted.await(5, TimeUnit.SECONDS))
+
+            val busy = httpPost(fixture.port, tapBody(snap.observationId(), callId = "t2"))
+            assertEquals("BUSY", busy.code())
+
+            release.countDown()
+            assertTrue(pending.get(5, TimeUnit.SECONDS).ok())
+        } finally {
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `another session cannot cancel this request`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            fixture.granted()
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            val release = CountDownLatch(1)
+            fixture.driver.releaseDispatch = release
+            val pending = executor.submit<RawResponse> {
+                httpPost(fixture.port, tapBody(snap.observationId(), callId = "t1"))
+            }
+            assertTrue(fixture.driver.dispatchStarted.await(5, TimeUnit.SECONDS))
+
+            val foreign = httpPost(fixture.port, cancelBody("ses-b", "t1"), path = PhoneToolEndpoint.CANCEL_PATH)
+            assertEquals(200, foreign.status)
+            assertEquals("false", foreign.json["cancelled"].toString())
+
+            release.countDown()
+            val result = pending.get(5, TimeUnit.SECONDS)
+            assertTrue("the foreign cancel must not abort the action", result.ok())
+        } finally {
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a matching cancel aborts its own request and never claims a rollback`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            fixture.granted()
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            val release = CountDownLatch(1)
+            fixture.driver.releaseDispatch = release
+            val pending = executor.submit<RawResponse> {
+                runCatching { httpPost(fixture.port, tapBody(snap.observationId(), callId = "t1")) }.getOrNull()
+            }
+            assertTrue(fixture.driver.dispatchStarted.await(5, TimeUnit.SECONDS))
+
+            val matched = httpPost(fixture.port, cancelBody("ses-a", "t1"), path = PhoneToolEndpoint.CANCEL_PATH)
+            assertEquals("true", matched.json["cancelled"].toString())
+
+            release.countDown()
+            pending.get(5, TimeUnit.SECONDS)
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            while (fixture.controller.state.value.blocked == null && System.nanoTime() < deadline) {
+                Thread.sleep(10)
+            }
+            assertEquals(PhoneBlockReason.UNKNOWN_OUTCOME, fixture.controller.state.value.blocked)
+            // A mutation that may have been injected blocks new mutations instead of guessing.
+            val blocked = httpPost(fixture.port, toolBody("ses-a", "s2", input("status")))
+            assertTrue(blocked.ok())
+            assertEquals("UNKNOWN_OUTCOME", blocked.data()["blocked"]!!.toString().trim('"'))
+        } finally {
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a cancel tombstone refuses the request even if it arrives later`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            val early = httpPost(fixture.port, cancelBody("ses-a", "later"), path = PhoneToolEndpoint.CANCEL_PATH)
+            assertEquals(200, early.status)
+            assertEquals("false", early.json["cancelled"].toString())
+
+            val refused = httpPost(fixture.port, snapshotBody(callId = "later"))
+            assertEquals("CANCELLED", refused.code())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a full tombstone table refuses a new cancel and keeps the recorded one`() = runBlocking {
+        val fixture = PhoneServerFixture(requestCapacity = 1)
+        try {
+            fixture.granted()
+            val first = httpPost(fixture.port, cancelBody("ses-a", "key-1"), path = PhoneToolEndpoint.CANCEL_PATH)
+            assertEquals(200, first.status)
+            assertEquals("false", first.json["cancelled"].toString())
+
+            val full = httpPost(fixture.port, cancelBody("ses-a", "key-2"), path = PhoneToolEndpoint.CANCEL_PATH)
+            assertEquals(429, full.status)
+
+            val stillCancelled = httpPost(fixture.port, snapshotBody(callId = "key-1"))
+            assertEquals("CANCELLED", stillCancelled.code())
+
+            // The refused tombstone never displaced the recorded one, and the unchosen id is free.
+            val allowed = httpPost(fixture.port, snapshotBody(callId = "key-2"))
+            assertTrue(allowed.ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a full request table refuses new calls without evicting old records`() = runBlocking {
+        val fixture = PhoneServerFixture(requestCapacity = 1)
+        try {
+            fixture.granted()
+            assertTrue(httpPost(fixture.port, snapshotBody(callId = "one")).ok())
+            val capacity = httpPost(fixture.port, snapshotBody(callId = "two"))
+            assertEquals("CAPACITY", capacity.code())
+            val duplicate = httpPost(fixture.port, snapshotBody(callId = "one"))
+            assertEquals("DUPLICATE_CALL", duplicate.code())
+            val status = httpPost(fixture.port, toolBody("ses-a", "three", input("status")))
+            assertTrue(status.ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `stop closes the loopback listener`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        val port = fixture.port
+        fixture.close()
+        try {
+            httpPost(port, toolBody("ses-a", "s1", input("status")))
+            fail("the stopped server still accepted a connection")
+        } catch (_: ConnectException) {
+            // Expected: the listener is gone.
+        } catch (_: SocketException) {
+            // Expected: the listener is gone.
+        }
+    }
+
+    @Test
+    fun `the grant epoch is reported and changes with a new grant`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            val first = fixture.controller.state.value.epoch
+            val status = httpPost(fixture.port, toolBody("ses-a", "s1", input("status")))
+            assertEquals(first, status.epoch())
+            assertEquals("READY", status.data()["phase"]!!.toString().trim('"'))
+
+            fixture.now += 60_001L
+            val expired = httpPost(fixture.port, snapshotBody(callId = "s2"))
+            assertEquals("LEASE_EXPIRED", expired.code())
+            fixture.controller.refresh()
+            assertNotEquals(first, fixture.controller.state.value.epoch)
+        } finally {
+            fixture.close()
+        }
+    }
+}

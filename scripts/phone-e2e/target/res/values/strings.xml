@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Phone Fixture</string>
+    <string name="fixture_title">AndChamber Phone Fixture</string>
+    <string name="fixture_counter_initial">Saved 0 times</string>
+    <string name="fixture_counter_value">Saved %1$d times</string>
+    <string name="fixture_input_hint">fixture-input</string>
+    <string name="fixture_password_hint">fixture-password (test only)</string>
+    <string name="fixture_save">Save</string>
+    <string name="fixture_next">Next page</string>
+    <string name="fixture_row">Fixture row %1$02d</string>
+    <string name="fixture_second_title">Second page</string>
+    <string name="fixture_second_body">Page two ready</string>
+    <string name="fixture_back">Back</string>
+</resources>

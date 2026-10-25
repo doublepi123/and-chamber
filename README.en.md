@@ -33,6 +33,7 @@ AndChamber builds an Alpine Linux userland with PRoot inside the app's private s
 - **English and Chinese**: the UI follows the system language.
 - **Remote servers**: add the address of OpenChamber on your computer; plain HTTP needs an explicit confirmation.
 - **Working terminal**: `node-pty` is rebuilt on the device for musl, so OpenChamber's terminal works.
+- **Phone control (experimental, off by default)**: Android 11+ can approve one target app, task and short lease natively, then use the local `andchamber_phone` tool. Includes notification pairing and native pause/takeover; uncertain operations are not replayed. Requires a trusted local runtime and supports only its declared ASCII input subset. See [boundaries](docs/phone-control.md) and [emulator acceptance](docs/testing-phone-control.md).
 
 ## Requirements
 
@@ -67,6 +68,18 @@ Download `AndChamber-<version>.apk` from [Releases](https://github.com/doublepi1
 - Back inside OpenChamber goes back within the page first, then sends the app to the background (the server keeps running).
 - To reach the AndChamber home screen, tap the small handle on the right edge and choose **Home**.
 - "Open OpenChamber when the app starts" can be turned off under Details on the home screen.
+
+### Phone control (experimental)
+
+Open **Phone control** on Home and explicitly accept the risks. A local OpenChamber that was already
+running needs a user-initiated restart to load the tool; enabling it never silently interrupts tasks.
+Pairing, connecting and granting control are separate. Each task needs native confirmation. Take over
+or return to AndChamber before handling sensitive content such as login.
+
+Covered API 35/x86_64 emulator flows passed; physical arm64, OEM background behavior and arbitrary
+third-party business tasks are unverified. Pause blocks new mutations; takeover, host return and End
+task revoke observation too. Unicode/password input and automatic submission are unsupported, and a
+tool acknowledgement is not business completion.
 
 ### Shared folder
 

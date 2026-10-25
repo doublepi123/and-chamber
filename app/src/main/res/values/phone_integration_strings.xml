@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone control integration (notifications and foreground service). Keep keys in sync with
+     values-zh/phone_integration_strings.xml. -->
+<resources>
+    <!-- Channels -->
+    <string name="phone_notif_channel_control">Phone control session</string>
+    <string name="phone_notif_channel_control_desc">Shows the short phone-control session and its Pause and Return controls. Keep this on if you want to be able to stop the agent from another app.</string>
+    <string name="phone_notif_channel_pairing">Phone control pairing</string>
+    <string name="phone_notif_channel_pairing_desc">Asks for the pairing port and the six-digit code from Android\'s wireless debugging screen.</string>
+
+    <!-- Session notification (stop entry) -->
+    <string name="phone_notif_running_title">Agent is using %1$s</string>
+    <string name="phone_notif_running_body">Pause or come back to AndChamber at any time. Coming back to AndChamber always stops the session.</string>
+    <string name="phone_notif_pause">Pause</string>
+    <string name="phone_notif_paused_title">Paused</string>
+    <string name="phone_notif_paused_body">Paused. Return to AndChamber to check the last operation and grant control again.</string>
+    <string name="phone_notif_pausing_title">Pausing…</string>
+    <string name="phone_notif_pausing_body">Pausing. No new actions are accepted. The last action may still take effect.</string>
+    <string name="phone_notif_return">Return to AndChamber</string>
+
+    <!-- Pairing notification -->
+    <string name="phone_pair_notif_title">Pair with this phone</string>
+    <string name="phone_pair_notif_port_body">Android\'s wireless debugging screen is open. Choose \"Pair device with pairing code\" and type the port shown there here. The dialog stays open.</string>
+    <string name="phone_pair_notif_port_label">Pairing port</string>
+    <string name="phone_pair_notif_code_body">Type the six-digit code from Android\'s pairing dialog here. It is used once, never saved and never written to a chat.</string>
+    <string name="phone_pair_notif_code_label">Six-digit code</string>
+    <string name="phone_pair_notif_busy">Pairing… one bounded attempt is running. Cancel if the dialog was closed.</string>
+    <string name="phone_pair_notif_paired_title">Paired</string>
+    <string name="phone_pair_notif_paired_body">Return to AndChamber and enter the connection port shown on the wireless debugging screen. Pairing alone does not connect.</string>
+    <string name="phone_pair_notif_failed_code">The pairing code was refused. Check the code on the screen and pair again. Nothing was authorized.</string>
+    <string name="phone_pair_notif_failed_port">The pairing port could not be reached. Reopen the pairing dialog, because its port changes, then try again.</string>
+    <string name="phone_pair_notif_failed_policy">This pairing port or address is not allowed. Use the port from this phone\'s own wireless debugging screen.</string>
+    <string name="phone_pair_notif_failed_timeout">Pairing timed out. Nothing is connected; open the pairing dialog again when you want to retry.</string>
+    <string name="phone_pair_notif_failed_other">Pairing did not complete. Nothing is connected. Android\'s own authorization, if any, was not changed by this app.</string>
+    <string name="phone_notif_cancel_pairing">Cancel pairing</string>
+</resources>

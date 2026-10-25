@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Root of the Compose UI. Hosts the navigation graph (home, one web screen per server, and one independent browser), the launch decision and launch cover, notification-tap deep linking, system bar styling, and storage and notification permission requests. Screens live in `home/`, `web/` and `browser/`, shared widgets in `components/`, tokens in `theme/`.
+Root of the Compose UI. Hosts home, server web pages, the floating browser and the native phone-control route, plus launch/deep-link/system-bar/permission coordination. Screens live in `home/`, `web/`, `browser/` and `phone/`, shared widgets in `components/`, tokens in `theme/`.
 
 Files:
 - `AndChamberApp.kt`: `AndChamberApp(...)` root, `Routes`, `LocalActions`, launch, link and record-keeping coroutines.
@@ -18,6 +18,7 @@ Files:
 ## Design
 
 - Navigation: `NavHost` with `Routes.HOME = "home"` and `Routes.WEB = "web/{targetId}"`. `Routes.web(id)` URL-encodes the id. `ServerTarget.LOCAL_ID` denotes the on-device server. The in-app browser is not a route: it is the floating window over the local chat.
+- `Routes.PHONE` hosts the immutable `ui/phone` model and `PhoneIntegration` callbacks. Its Back/Go Home always returns Home; it does not silently restart the runtime. The fixed phone header and an IME-sized scroll viewport preserve reachable controls; step/link changes reset scroll/focus without discarding the task draft. `MainActivity.onResume` revokes phone authority independently of browser rules.
 - Launch decision is a pure function: `launchTarget(RuntimeState)` gives `Wait`, `Home`, `OpenLocal` or `StartAndOpenLocal`. Setup, failures, unsupported ABI, Installing and Stopping go to `Home`. Stopped starts and then opens. Running and Starting open.
 - `LaunchStage` (`Waiting`, `Opening`, `Done`) drives the cover. `initialLaunchStage` runs on frame one, so Home never flashes when an auto-open is possible.
 - `LocalActions` wraps `LocalRuntimeController` for UI intents. `pendingStartFrom` makes a start read as Starting until the runtime reports back, with an 8 s safety timeout (`PENDING_START_TIMEOUT_MS`). `retry()` reinstalls on `FailurePhase.Install` and restarts otherwise. `restart()` is one queued runtime call.
