@@ -1,0 +1,7 @@
+0.0.23
+
+Fixes and improvements:
+- Links and forms work in manual-control pages after grant revocation without restoring access.
+- Back dismisses the page list and address editor, exits full screen or hides the browser without leaking to chat.
+- Request claims and cancellation share one identity, preventing cancelled calls from being re-admitted.
+- Fixed submit-navigation test synchronization on slow CI runners.
