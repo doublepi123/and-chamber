@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -698,12 +699,14 @@ class NativeBrowserPresenterTest {
     @Test
     fun `a submit replacement that is not ready cannot late grant`() = runTest {
         val pages = mutableListOf<FakePage>()
+        val replacementCreated = CompletableDeferred<FakePage>()
         var created = 0
         val presenter = presenter(policy = { submitPolicy }) {
             FakePage().also { page ->
                 created += 1
                 if (created > 1) page.readyForAllow = false
                 pages += page
+                if (pages.size == 2) replacementCreated.complete(page)
             }
         }
         presenter.setConnection("c1", 4L)
@@ -729,12 +732,7 @@ class NativeBrowserPresenterTest {
         }
         runCurrent()
         pages[0].onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
-        repeat(200) {
-            if (pages.size < 2) {
-                runCurrent()
-                yield()
-            }
-        }
+        val fresh = awaitControlledReplacement(replacementCreated)
         assertEquals("the controlled replacement was created", 2, pages.size)
         advanceTimeBy(2_001)
         val result = pending.await()
@@ -744,7 +742,6 @@ class NativeBrowserPresenterTest {
         assertTrue("the failed replacement needs a reopen", presenter.state.value.requiresReopen)
         assertFalse("a reopen is not an effect-only uncertainty", presenter.state.value.actionOutcomeUnknown)
         assertNull("the reopen is state, not a page string", presenter.state.value.pageError)
-        val fresh = pages[1]
         fresh.readyForAllow = true
         presenter.acceptProbeForTest(fresh, readyIdentity(fresh))
         assertNull("a late ready on the failed replacement never grants", presenter.registry.currentGrant())
@@ -1060,12 +1057,16 @@ class NativeBrowserPresenterTest {
     fun `a submit replacement created after Dwork loads nothing and keeps the old page`() = runTest {
         var virtualNow = 0L
         val pages = mutableListOf<FakePage>()
+        val replacementCreated = CompletableDeferred<FakePage>()
         var created = 0
         val presenter = presenter(clock = { virtualNow }, policy = { submitPolicy }) {
             created += 1
             // The replacement factory itself consumes the remaining Dwork.
             if (created > 1) virtualNow = 4_600L
-            FakePage().also { pages += it }
+            FakePage().also { page ->
+                pages += page
+                if (pages.size == 2) replacementCreated.complete(page)
+            }
         }
         presenter.setConnection("c1", 4L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
@@ -1082,12 +1083,7 @@ class NativeBrowserPresenterTest {
         }
         runCurrent()
         old.onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
-        repeat(200) {
-            if (pages.size < 2) {
-                runCurrent()
-                yield()
-            }
-        }
+        awaitControlledReplacement(replacementCreated)
         assertEquals("the replacement page was created", 2, pages.size)
         val result = pending.await()
         assertEquals(ProviderCodes.OUTCOME_UNKNOWN, result.errorCode)
@@ -1105,7 +1101,13 @@ class NativeBrowserPresenterTest {
     fun `an auto grant probe released after Dwork mints no grant`() = runTest {
         var virtualNow = 0L
         val pages = mutableListOf<FakePage>()
-        val presenter = presenter(clock = { virtualNow }, policy = { submitPolicy }) { FakePage().also { pages += it } }
+        val replacementCreated = CompletableDeferred<FakePage>()
+        val presenter = presenter(clock = { virtualNow }, policy = { submitPolicy }) {
+            FakePage().also { page ->
+                pages += page
+                if (pages.size == 2) replacementCreated.complete(page)
+            }
+        }
         presenter.setConnection("c1", 4L)
         assertTrue(presenter.openClaimed(openRequest(), 1_000L).ok)
         assertTrue(presenter.allow())
@@ -1116,14 +1118,8 @@ class NativeBrowserPresenterTest {
         }
         runCurrent()
         pages[0].onSubmitNavigation?.invoke(BrowserSubmitNavigation.Get("https://example.com/next"))
-        repeat(200) {
-            if (pages.size < 2) {
-                runCurrent()
-                yield()
-            }
-        }
+        val fresh = awaitControlledReplacement(replacementCreated)
         assertEquals("the controlled replacement was created", 2, pages.size)
-        val fresh = pages[1]
 
         // The replacement's default control probes through the plain allow path.
         val probeGate = CompletableDeferred<Unit>()
@@ -4176,6 +4172,24 @@ class NativeBrowserPresenterTest {
         presenter.setDesktopMode(true)
         presenter.setMouseMode(true)
         return presenter
+    }
+
+    /**
+     * A submit continuation reaches page creation through a real Dispatchers.IO DNS preflight. Wait
+     * for that exact completion rather than a fixed number of scheduler yields. Keep driving both
+     * schedulers while the real IO completes, but use a wall-clock bound so a broken continuation
+     * cannot hang runTest's virtual scheduler.
+     */
+    private suspend fun TestScope.awaitControlledReplacement(created: CompletableDeferred<FakePage>): FakePage {
+        val started = System.nanoTime()
+        while (!created.isCompleted) {
+            if (System.nanoTime() - started > 5_000_000_000L) {
+                throw AssertionError("the controlled replacement was not created within 5 seconds")
+            }
+            runCurrent()
+            yield()
+        }
+        return created.await()
     }
 
     private fun presenter(
