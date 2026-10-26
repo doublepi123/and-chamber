@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Native task progress labels for the phone-control overlay. Keep keys in sync with values-zh. -->
+<resources>
+    <string name="phone_overlay_progress_event">%1$s · %2$s</string>
+
+    <string name="phone_overlay_progress_kind_task_started">Task confirmed</string>
+    <string name="phone_overlay_progress_kind_task_epoch_updated">Grant updated</string>
+    <string name="phone_overlay_progress_kind_observed">Screen observed</string>
+    <string name="phone_overlay_progress_kind_mutation_sent">Action sent</string>
+    <string name="phone_overlay_progress_kind_mutation_not_sent">Action not sent</string>
+    <string name="phone_overlay_progress_kind_mutation_unknown">Action result unknown</string>
+    <string name="phone_overlay_progress_kind_business_result">Native result</string>
+    <string name="phone_overlay_progress_kind_stop_requested">Stop requested</string>
+    <string name="phone_overlay_progress_kind_stop_acknowledged">New actions and late reads blocked</string>
+    <string name="phone_overlay_progress_kind_task_ended">Task ended</string>
+    <string name="phone_overlay_progress_kind_model_progress">Agent note</string>
+    <string name="phone_overlay_progress_kind_model_need_user">Agent needs you</string>
+    <string name="phone_overlay_progress_kind_model_finish">Agent reports finished</string>
+
+    <string name="phone_overlay_progress_reason_none">Unspecified</string>
+    <string name="phone_overlay_progress_reason_user_confirmed">Confirmed by you</string>
+    <string name="phone_overlay_progress_reason_grant_updated">New grant</string>
+    <string name="phone_overlay_progress_reason_observed">Observed</string>
+    <string name="phone_overlay_progress_reason_user_requested">You requested it</string>
+    <string name="phone_overlay_progress_reason_takeover">Taken over</string>
+    <string name="phone_overlay_progress_reason_lease_expired">Grant expired</string>
+    <string name="phone_overlay_progress_reason_host_returned">Returned to AndChamber</string>
+    <string name="phone_overlay_progress_reason_connection_lost">Connection lost</string>
+    <string name="phone_overlay_progress_reason_device_locked">Device locked</string>
+    <string name="phone_overlay_progress_reason_runtime_changed">Runtime changed</string>
+    <string name="phone_overlay_progress_reason_outcome_unknown">Outcome unknown</string>
+    <string name="phone_overlay_progress_reason_delivery_sent">Sent to the device</string>
+    <string name="phone_overlay_progress_reason_delivery_not_sent">Not sent</string>
+    <string name="phone_overlay_progress_reason_delivery_unknown">Delivery unknown</string>
+    <string name="phone_overlay_progress_reason_verified_done">Checked: done</string>
+    <string name="phone_overlay_progress_reason_verified_not_done">Checked: not done</string>
+    <string name="phone_overlay_progress_reason_model_reported">Unverified report</string>
+    <string name="phone_overlay_progress_reason_need_user">Your turn</string>
+</resources>

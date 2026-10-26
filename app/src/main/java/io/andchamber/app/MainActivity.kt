@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
         val runtime = get<LocalRuntimeController>()
         val screenAwake = get<ScreenAwakeController>()
         val phone = get<io.andchamber.app.phone.android.PhoneIntegration>()
+        val overlay = get<io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator>()
         // Opt-in: holds this window's screen on only while the local server runs and the app is in
         // front. Released on stop, failure, background, a remote page, and when the activity goes.
         keepScreenOnWhileLocalRuns(
@@ -41,6 +42,7 @@ class MainActivity : ComponentActivity() {
                 auth = get<WebSessionAuthenticator>(),
                 storage = get<SharedStorageController>(),
                 phone = phone,
+                overlay = overlay,
             )
         }
     }
@@ -52,6 +54,14 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         get<io.andchamber.app.phone.android.PhoneIntegration>().onHostResumed()
+        // The native screen is really in front now: the overlay may close. Its notification stays.
+        get<io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator>().onHostVisible()
+    }
+
+    /** The native screen is no longer in front; the overlay may be shown again if the task needs it. */
+    override fun onStop() {
+        super.onStop()
+        get<io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator>().onHostHidden()
     }
 
     /** singleTop: a notification tap while the app is open arrives here instead of onCreate. */

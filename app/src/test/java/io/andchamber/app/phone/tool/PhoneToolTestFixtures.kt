@@ -242,6 +242,8 @@ private fun readResponse(input: InputStream): RawResponse {
 internal class PhoneServerFixture(
     val launchId: Long = 7L,
     requestCapacity: Int = PhoneToolServer.MAX_REQUESTS,
+    val taskEvents: io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler =
+        io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler.Unavailable,
 ) {
     var now: Long = 1_000L
         @Synchronized get
@@ -261,6 +263,7 @@ internal class PhoneServerFixture(
             token = TOKEN,
             controller = controller,
             readyLaunch = { ready },
+            taskEvents = taskEvents,
             requestCapacity = requestCapacity,
         )
     val port: Int = server.start()

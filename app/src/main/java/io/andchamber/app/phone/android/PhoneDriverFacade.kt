@@ -9,6 +9,7 @@ import io.andchamber.app.phone.adb.AdbPairingReceiptStore
 import io.andchamber.app.phone.adb.AdbPhoneDriver
 import io.andchamber.app.phone.adb.AdbPhoneDriverService
 import io.andchamber.app.phone.adb.AdbTransportSecurity
+import io.andchamber.app.phone.android.overlay.PhoneOverlayDriverBridge
 import io.andchamber.app.phone.core.PhoneCapabilities
 import io.andchamber.app.phone.core.PhoneConnection
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
@@ -121,6 +122,12 @@ internal class PhoneDriverFacade(
      * Android I/O on the main thread, because it is called from the lazy engine factory.
      */
     private val pairingReceipts: (AdbIdentity) -> AdbPairingReceiptStore = { AdbPairingReceiptStore() },
+    /**
+     * Production overlay guard. The bridge is lazy: it only reaches the already-built native
+     * coordinator/integration when the driver samples its mode or records a safety loss. The default
+     * null keeps the baseline no-overlay phone behavior and the existing tests unchanged.
+     */
+    private val overlayBridge: PhoneOverlayDriverBridge? = null,
     private val engineFactory: () -> PhoneDriverEngine = {
         // First real driver use: the only place Keystore, identity and receipt persistence run.
         val owner = identity()
@@ -131,6 +138,7 @@ internal class PhoneDriverFacade(
                 pairingReceipts = pairingReceipts(owner),
                 clock = { SystemClock.elapsedRealtime() },
                 platformSupported = platformSupported,
+                overlayBarrier = overlayBridge,
             ),
         )
     },
@@ -166,13 +174,58 @@ internal class PhoneDriverFacade(
         engine.disconnect(deadlineMs)
     }
 
-    override suspend fun observe(deadlineMs: Long): PhoneSnapshot = engine.observe(deadlineMs)
+    override suspend fun observe(deadlineMs: Long): PhoneSnapshot {
+        val guard = overlayBridge?.beginOperation(deadlineMs)
+        return try {
+            engine.observe(deadlineMs)
+        } catch (failure: PhoneDriverException) {
+            notifyOverlayRefused(guard, failure.failure)
+            throw failure
+        }
+    }
 
-    override suspend fun capture(binding: PhoneObservationBinding, deadlineMs: Long): PhoneImage =
-        engine.capture(binding, deadlineMs)
+    override suspend fun capture(binding: PhoneObservationBinding, deadlineMs: Long): PhoneImage {
+        val guard = overlayBridge?.beginOperation(deadlineMs)
+        return try {
+            engine.capture(binding, deadlineMs)
+        } catch (failure: PhoneDriverException) {
+            notifyOverlayRefused(guard, failure.failure)
+            throw failure
+        }
+    }
 
-    override suspend fun dispatch(request: PhoneDispatchRequest, deadlineMs: Long): PhoneDispatchReceipt =
-        engine.dispatch(request, deadlineMs)
+    override suspend fun dispatch(request: PhoneDispatchRequest, deadlineMs: Long): PhoneDispatchReceipt {
+        val guard = overlayBridge?.beginOperation(deadlineMs)
+        val receipt =
+            try {
+                engine.dispatch(request, deadlineMs)
+            } catch (failure: PhoneDriverException) {
+                notifyOverlayRefused(guard, failure.failure)
+                throw failure
+            }
+        // A refused dispatch is a known not-sent result. An Unknown receipt is never treated as a
+        // loss/rollback here: the mutation may have reached the device.
+        if (guard != null &&
+            receipt is PhoneDispatchReceipt.NotSent &&
+            receipt.failure == PhoneDriverFailure.POLICY_DENIED
+        ) {
+            notifyOverlayRefused(guard, PhoneDriverFailure.POLICY_DENIED)
+        }
+        return receipt
+    }
+
+    /**
+     * Only an overlay-required operation's POLICY_DENIED is a possible overlay safety loss. The
+     * bridge re-checks the frozen epoch/display owner on the main thread; a stale operation can never
+     * revoke a newer grant. A failed notification is not an acknowledgement.
+     */
+    private fun notifyOverlayRefused(
+        guard: PhoneOverlayDriverBridge.OperationGuard?,
+        failure: PhoneDriverFailure,
+    ) {
+        if (guard == null || failure != PhoneDriverFailure.POLICY_DENIED) return
+        overlayBridge?.onRefusedWhileRequired(guard)
+    }
 
     /**
      * Closes the previous real transport before an explicit connect.

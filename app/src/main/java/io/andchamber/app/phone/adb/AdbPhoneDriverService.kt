@@ -14,6 +14,7 @@ import io.andchamber.app.phone.core.PhoneDriverFailure
 import io.andchamber.app.phone.core.PhoneImage
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhoneSnapshot
+import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
 import io.github.muntashirakon.adb.AdbPairingException
 import io.github.muntashirakon.adb.AdbPairingFailure
 import java.util.UUID
@@ -48,6 +49,7 @@ class AdbPhoneDriverService(
     private val clock: () -> Long = { SystemClock.elapsedRealtime() },
     private val connectionId: () -> String = { UUID.randomUUID().toString() },
     private val platformSupported: Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+    private val overlayBarrier: PhoneOverlayBarrier? = null,
     private val deviceFactory: (
         AdbIdentity,
         String,
@@ -99,6 +101,7 @@ class AdbPhoneDriverService(
             clock = clock,
             connectionId = connectionId,
             platformSupported = platformSupported,
+            overlayBarrier = overlayBarrier,
         )
         return selected
     }

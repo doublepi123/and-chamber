@@ -12,6 +12,13 @@ import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhonePoint
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneTargetPolicy
+import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
+import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEvent
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
+import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -80,6 +87,8 @@ class PhoneToolServer(
     private val token: String,
     private val controller: PhoneController,
     private val readyLaunch: () -> Long?,
+    /** Native task-event bridge; the default fails closed and never fakes a stop acknowledgement. */
+    private val taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
     /** Shared with the runtime binding; holds at most one native-confirmation proposal. */
     internal val pendingRequests: PhonePendingRequestStore = PhonePendingRequestStore(),
     private val bindAddress: InetAddress = InetAddress.getByName("127.0.0.1"),
@@ -257,6 +266,13 @@ class PhoneToolServer(
             writeJson(socket, requestConfirmation(action, parsed, call, state), 200)
             return
         }
+        if (parsed is PhoneToolAction.Progress ||
+            parsed is PhoneToolAction.NeedUser ||
+            parsed is PhoneToolAction.Finish
+        ) {
+            writeJson(socket, handleTaskEvent(action, parsed, call, state), 200)
+            return
+        }
 
         authorityRefusal(state)?.let { code ->
             writeJson(
@@ -284,11 +300,15 @@ class PhoneToolServer(
             return
         }
 
+        // Native task identity at admission. It is read once and used for both the route-claim
+        // notification and the completed-call callback; a null key means no native progress exists.
+        val nativeTaskKey = taskEvents.currentTask(state.epoch)
         // Routing is a label, not authentication and not a grant. It stops two chats from fighting
         // over one native grant; it can never create or extend authority. A new grant epoch has no
         // route until native code publishes one, so a first action that races the grant is refused.
         val sessionLabel = call.sessionId
-        when (router.claim(state.epoch, sessionLabel)) {
+        val routeClaim = router.claim(state.epoch, sessionLabel)
+        when (routeClaim) {
             PhoneSessionRouter.Claim.ROUTE_NOT_PUBLISHED -> {
                 writeJson(
                     socket,
@@ -315,7 +335,16 @@ class PhoneToolServer(
                 )
                 return
             }
-            PhoneSessionRouter.Claim.CLAIMED -> Unit
+            PhoneSessionRouter.Claim.CLAIMED,
+            PhoneSessionRouter.Claim.CLAIMED_MANUAL,
+            -> Unit
+        }
+        if (routeClaim == PhoneSessionRouter.Claim.CLAIMED_MANUAL && nativeTaskKey != null) {
+            // The router just verified the first action of a native-published manual route. Bind
+            // that exact V2 session synchronously; never use a model phase text as the owner.
+            runCatching {
+                taskEvents.onRouteClaimed(nativeTaskKey, state.epoch, sessionLabel)
+            }
         }
 
         val requestId = PhoneToolProtocol.requestId(call.callId)
@@ -369,12 +398,164 @@ class PhoneToolServer(
         )
         afterAdmissionForTest?.invoke()
         val result = try {
-            execute(action, request)
+            execute(action, request, nativeTaskKey)
         } finally {
             requests.complete(key, job)
         }
         writeJson(socket, result, 200)
     }
+
+    /**
+     * Handles a model progress/need_user/finish event. The request epoch is explicit and frozen at
+     * admission; a regrant after that must be refused by the handler against this same epoch, not
+     * silently adopted. The native handler is the only place that can halt/revoke and acknowledge.
+     */
+    private suspend fun handleTaskEvent(
+        action: String,
+        parsed: PhoneToolAction,
+        call: PhoneToolCall,
+        state: PhoneState,
+    ): String {
+        val epoch = when (parsed) {
+            is PhoneToolAction.Progress -> parsed.epoch
+            is PhoneToolAction.NeedUser -> parsed.epoch
+            is PhoneToolAction.Finish -> parsed.epoch
+            else -> return failure(action, state.epoch, PhoneToolCodes.INVALID_REQUEST)
+        }
+        if (!taskEvents.available) {
+            return failure(action, epoch, PhoneToolCodes.TASK_EVENTS_UNAVAILABLE)
+        }
+        if (epoch != state.epoch) {
+            return failure(action, epoch, PhoneToolCodes.EPOCH_CHANGED)
+        }
+        authorityRefusal(state)?.let { return failure(action, epoch, it) }
+        // Task owner/key is fixed for this epoch. It comes from native state, never from the model.
+        // Resolve it before route claim so a no-task call never takes a session route.
+        val key = taskEvents.currentTask(epoch)
+            ?: return failure(action, epoch, PhoneToolCodes.NO_TASK)
+        val routeClaim = router.claim(epoch, call.sessionId)
+        when (routeClaim) {
+            PhoneSessionRouter.Claim.ROUTE_NOT_PUBLISHED ->
+                return failure(action, epoch, PhoneToolCodes.ROUTE_NOT_PUBLISHED)
+            PhoneSessionRouter.Claim.SESSION_BUSY ->
+                return failure(action, epoch, PhoneToolCodes.SESSION_BUSY)
+            PhoneSessionRouter.Claim.CLAIMED,
+            PhoneSessionRouter.Claim.CLAIMED_MANUAL,
+            -> Unit
+        }
+        if (routeClaim == PhoneSessionRouter.Claim.CLAIMED_MANUAL) {
+            // First action of a native-published manual route. Bind the router-verified V2 session
+            // with the frozen epoch; a model phase/message can never select this owner.
+            runCatching {
+                taskEvents.onRouteClaimed(key, epoch, call.sessionId)
+            }
+        }
+
+        val requestId = PhoneToolProtocol.requestId(call.callId)
+        val keyReq = PhoneToolRequestKey(sessionId = call.sessionId, requestId = requestId)
+        when (requests.claim(keyReq)) {
+            PhoneRequestTracker.Claim.CANCELLED -> return cancelled(action, epoch)
+            PhoneRequestTracker.Claim.DUPLICATE -> return duplicate(action, epoch)
+            PhoneRequestTracker.Claim.CAPACITY -> return capacity(action, epoch)
+            PhoneRequestTracker.Claim.CLAIMED -> Unit
+        }
+        val job = currentCoroutineContext()[Job]
+            ?: return failure(action, epoch, PhoneToolCodes.OUTCOME_UNKNOWN)
+        if (requests.register(keyReq, job) != PhoneRequestTracker.Registration.REGISTERED) {
+            return cancelled(action, epoch)
+        }
+        val event = when (parsed) {
+            is PhoneToolAction.Progress -> PhoneTaskEvent.Progress(requestId, parsed.phase)
+            is PhoneToolAction.NeedUser -> PhoneTaskEvent.NeedUser(requestId, parsed.reason)
+            is PhoneToolAction.Finish -> PhoneTaskEvent.Finish(requestId, parsed.summary)
+            else -> return failure(action, epoch, PhoneToolCodes.INVALID_REQUEST)
+        }
+        afterAdmissionForTest?.invoke()
+        val reply = try {
+            withTimeout(EVENT_HANDLE_TIMEOUT_MS) {
+                taskEvents.handle(key, epoch, call.sessionId, event)
+            }
+        } catch (_: TimeoutCancellationException) {
+            // A timeout is not a stop acknowledgement. waiting/done must not be claimed.
+            return if (parsed is PhoneToolAction.Progress) {
+                failure(action, epoch, PhoneToolCodes.DEADLINE)
+            } else {
+                failure(action, epoch, PhoneToolCodes.STOP_UNCONFIRMED)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return if (parsed is PhoneToolAction.Progress) {
+                failure(action, epoch, PhoneToolCodes.TASK_EVENTS_UNAVAILABLE)
+            } else {
+                failure(action, epoch, PhoneToolCodes.STOP_UNCONFIRMED)
+            }
+        } finally {
+            requests.complete(keyReq, job)
+        }
+        return encodeTaskReply(action, epoch, reply)
+    }
+
+    private fun encodeTaskReply(
+        action: String,
+        epoch: Long,
+        reply: PhoneTaskEventReply,
+    ): String =
+        when (reply) {
+            is PhoneTaskEventReply.Recorded ->
+                PhoneToolProtocol.envelope(
+                    action,
+                    ok = true,
+                    epoch = epoch,
+                    data = buildJsonObject {
+                        put("state", "PROGRESS")
+                        put("seq", reply.seq)
+                        put("source", "MODEL")
+                        put("verified", false)
+                    },
+                )
+            is PhoneTaskEventReply.WaitingForUser ->
+                PhoneToolProtocol.envelope(
+                    action,
+                    ok = true,
+                    epoch = epoch,
+                    data = buildJsonObject {
+                        put("state", "WAITING_USER")
+                        put("seq", reply.seq)
+                        put("verified", false)
+                        put("sentActionsMayStillApply", reply.stop.sentActionsMayStillApply)
+                    },
+                )
+            is PhoneTaskEventReply.EndedPendingCheck ->
+                PhoneToolProtocol.envelope(
+                    action,
+                    ok = true,
+                    epoch = epoch,
+                    data = buildJsonObject {
+                        put("state", "ENDED_PENDING_CHECK")
+                        put("seq", reply.seq)
+                        put("verified", false)
+                        put("sentActionsMayStillApply", reply.stop.sentActionsMayStillApply)
+                    },
+                )
+            is PhoneTaskEventReply.HaltUnconfirmed ->
+                failure(action, epoch, PhoneToolCodes.STOP_UNCONFIRMED)
+            is PhoneTaskEventReply.Refused ->
+                failure(action, epoch, taskErrorCode(reply.code))
+        }
+
+    private fun taskErrorCode(code: PhoneTaskEventError): String =
+        when (code) {
+            PhoneTaskEventError.UNAVAILABLE -> PhoneToolCodes.TASK_EVENTS_UNAVAILABLE
+            PhoneTaskEventError.NO_TASK -> PhoneToolCodes.NO_TASK
+            PhoneTaskEventError.STALE_TASK -> PhoneToolCodes.STALE_TASK
+            PhoneTaskEventError.EPOCH_CHANGED -> PhoneToolCodes.EPOCH_CHANGED
+            PhoneTaskEventError.SESSION_MISMATCH -> PhoneToolCodes.SESSION_BUSY
+            PhoneTaskEventError.DUPLICATE -> PhoneToolCodes.DUPLICATE_CALL
+            PhoneTaskEventError.CAPACITY -> PhoneToolCodes.CAPACITY
+            PhoneTaskEventError.INVALID -> PhoneToolCodes.INVALID_REQUEST
+            PhoneTaskEventError.TASK_NOT_ACTIVE -> PhoneToolCodes.TASK_NOT_ACTIVE
+        }
 
     /**
      * Read-only preparation. It proposes a task for native confirmation and never enables, pairs,
@@ -417,7 +598,8 @@ class PhoneToolServer(
         code: String,
     ): String = PhoneToolProtocol.envelope(action, ok = false, epoch = epoch, code = code)
 
-    private fun authorityRefusal(state: PhoneState): String? {        if (readyLaunch() != launchId) return PhoneToolCodes.RUNTIME_NOT_READY
+    private fun authorityRefusal(state: PhoneState): String? {
+        if (readyLaunch() != launchId) return PhoneToolCodes.RUNTIME_NOT_READY
         if (!state.enabled) return PhoneToolCodes.DISABLED
         if (state.connection != io.andchamber.app.phone.core.PhoneConnectionState.CONNECTED) {
             return PhoneToolCodes.NOT_CONNECTED
@@ -435,10 +617,13 @@ class PhoneToolServer(
     private suspend fun execute(
         action: String,
         request: PhoneAgentRequest,
+        nativeTaskKey: PhoneTaskKey?,
     ): String {
         val result = try {
             withTimeout(PhoneLimits.MAX_CALL_MS + SAFETY_MARGIN_MS) {
-                controller.execute(request, PhoneLimits.DEFAULT_CALL_MS)
+                // Window witnesses plus focus/text revalidation need the existing bounded maximum.
+                // The controller still caps this by the live lease and stop/admission guards.
+                controller.execute(request, PhoneLimits.MAX_CALL_MS)
             }
         } catch (_: TimeoutCancellationException) {
             return PhoneToolProtocol.envelope(
@@ -451,15 +636,47 @@ class PhoneToolServer(
             // The plugin aborted or the launch is stopping; there is no client left to answer.
             throw cancelled
         }
+        if (nativeTaskKey != null) {
+            // Native fact only: no observation/image/input payload leaves this call. The handler
+            // writes it to the store using the admitted key/epoch; stale keys/epochs are rejected.
+            runCatching {
+                taskEvents.onNativeCallCompleted(
+                    key = nativeTaskKey,
+                    admittedEpoch = request.epoch,
+                    requestId = request.requestId,
+                    outcome = nativeCallOutcome(result),
+                )
+            }
+        }
         return encodeResult(action, result)
     }
+
+    private fun nativeCallOutcome(result: PhoneCallResult): PhoneNativeCallOutcome =
+        when (result) {
+            is PhoneCallResult.Observed -> PhoneNativeCallOutcome.Observed(captured = false)
+            is PhoneCallResult.Captured -> PhoneNativeCallOutcome.Observed(captured = true)
+            is PhoneCallResult.Dispatched ->
+                PhoneNativeCallOutcome.Mutation(
+                    when (result.delivery) {
+                        PhoneDelivery.SENT -> PhoneMutationDelivery.SENT
+                        PhoneDelivery.UNKNOWN -> PhoneMutationDelivery.UNKNOWN
+                        PhoneDelivery.NOT_SENT -> PhoneMutationDelivery.NOT_SENT
+                    },
+                )
+            is PhoneCallResult.Refused -> PhoneNativeCallOutcome.Refused
+        }
 
     private fun observationBinding(
         state: PhoneState,
         action: PhoneToolAction,
     ): PhoneObservationBinding? {
         val id = when (action) {
-            PhoneToolAction.Status, PhoneToolAction.Snapshot, is PhoneToolAction.Request -> return null
+            PhoneToolAction.Status,
+            PhoneToolAction.Snapshot,
+            is PhoneToolAction.Request,
+            is PhoneToolAction.Progress,
+            is PhoneToolAction.NeedUser,
+            is PhoneToolAction.Finish -> return null
             is PhoneToolAction.Capture -> action.observationId
             is PhoneToolAction.TapRef -> action.observationId
             is PhoneToolAction.TapPoint -> action.observationId
@@ -485,6 +702,9 @@ class PhoneToolServer(
                 )
             is PhoneToolAction.Input -> PhoneAgentAction.Input(parsed.text, parsed.ref)
             is PhoneToolAction.Back -> PhoneAgentAction.Back
+            is PhoneToolAction.Progress,
+            is PhoneToolAction.NeedUser,
+            is PhoneToolAction.Finish -> error("task events are not driver actions")
         }
 
     private fun encodeResult(
@@ -595,6 +815,8 @@ class PhoneToolServer(
             put("grantedActions", JsonArray(grant?.allowedActions.orEmpty().sortedBy { it.name }.map { JsonPrimitive(it.name) }))
             put("observationAvailable", state.observation != null)
             put("pendingConfirmation", pendingRequests.snapshot() != null)
+            // Minimal: only whether a native task exists. Never its summary, target, key or events.
+            put("taskPresent", taskEvents.available && taskEvents.currentTask(state.epoch) != null)
             put("runtimeReady", readyLaunch() == launchId)
             put("runtimeEpoch", PhoneToolProtocol.serverEpoch(launchId))
             put("capabilities", capabilities?.let { caps ->
@@ -806,7 +1028,10 @@ class PhoneToolServer(
         const val MAX_CONCURRENT_READS = 4
         const val MAX_REQUESTS = 512
         private const val SAFETY_MARGIN_MS = 2_000L
-        private val OBSERVATION_FREE_ACTIONS = setOf("status", "request", "snapshot")
+        private val OBSERVATION_FREE_ACTIONS =
+            setOf("status", "request", "progress", "need_user", "finish", "snapshot")
+
+        private const val EVENT_HANDLE_TIMEOUT_MS = 15_000L
 
         private fun validSessionLabel(label: String): Boolean =
             label.isNotBlank() &&
@@ -931,7 +1156,7 @@ internal class PhoneRequestTracker(
 internal class PhoneSessionRouter {
     enum class Mode { UNPUBLISHED, PINNED, MANUAL }
 
-    enum class Claim { CLAIMED, SESSION_BUSY, ROUTE_NOT_PUBLISHED }
+    enum class Claim { CLAIMED, CLAIMED_MANUAL, SESSION_BUSY, ROUTE_NOT_PUBLISHED }
 
     private val lock = Any()
     private var publishedEpoch: Long? = null
@@ -974,7 +1199,7 @@ internal class PhoneSessionRouter {
                     when {
                         owner == null -> {
                             owner = sessionLabel
-                            Claim.CLAIMED
+                            Claim.CLAIMED_MANUAL
                         }
                         owner == sessionLabel -> Claim.CLAIMED
                         else -> Claim.SESSION_BUSY

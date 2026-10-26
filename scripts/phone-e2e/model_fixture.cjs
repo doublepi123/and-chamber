@@ -26,7 +26,8 @@ const TARGET_PACKAGE = 'io.example.phonefixture';
 const DEFAULT_INPUT_TEXT = 'andchamber-ascii-1';
 const INPUT_ECHO_EMPTY = 'fixture-input-echo-empty';
 const CONFIRM_TEXT = '请在AndChamber手机控制中确认';
-const ACTIONS = ['status', 'request', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'];
+const FINISH_TEXT = '报告结束，待核对';
+const ACTIONS = ['status', 'request', 'progress', 'need_user', 'finish', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'];
 const TOOL_MEDIA_PART_TYPES = new Set([
   'image_url',
   'input_image',
@@ -39,6 +40,7 @@ const TOOL_MEDIA_PART_TYPES = new Set([
 ]);
 const REQUIRED_TOOL_PROPERTIES = [
   'action', 'summary', 'packageName', 'observationId', 'ref', 'x', 'y', 'x2', 'y2', 'durationMs', 'text',
+  'epoch', 'phase', 'message', 'reason',
 ];
 const SENTINEL_RE = /\[\[andchamber-phone-e2e\s+(\{[\s\S]*?\})\]\]/g;
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -53,6 +55,9 @@ const SEQUENCES = Object.freeze({
   swipe: ['status', 'snapshot', 'swipe', 'snapshot'],
   back: ['status', 'snapshot', 'back', 'snapshot'],
   capture: ['status', 'snapshot', 'capture', 'snapshot'],
+  progress: ['status', 'progress'],
+  need_user: ['status', 'need_user'],
+  finish: ['status', 'finish'],
 });
 
 class PlanError extends Error {}
@@ -405,6 +410,19 @@ function snapshotBinding(state) {
 function actionArgs(state, step, value, scenario) {
   if (step === 'status' || step === 'snapshot') return { action: step };
   if (!state.latestStatus || state.latestStatus.ok !== true) planFail('status-missing');
+  if (step === 'progress' || step === 'need_user' || step === 'finish') {
+    if (!isInteger(state.latestStatus.epoch)) planFail('status-epoch-missing');
+    const epoch = state.latestStatus.epoch;
+    const short = (text, fallback) =>
+      typeof text === 'string' && text.length > 0 ? text.slice(0, 120) : fallback;
+    if (step === 'progress') {
+      return { action: 'progress', epoch, phase: short(value.phase || value.message, 'fixture progress') };
+    }
+    if (step === 'need_user') {
+      return { action: 'need_user', epoch, reason: short(value.reason || value.message, 'fixture needs a person') };
+    }
+    return { action: 'finish', epoch, summary: short(value.summary, 'fixture reported the end') };
+  }
   const data = snapshotBinding(state);
   const observationId = data.observationId;
 
@@ -450,6 +468,22 @@ function actionArgs(state, step, value, scenario) {
 }
 
 function verifyScenario(state, scenario, action, value) {
+  if (scenario === 'finish') {
+    const text = state.lastResult && state.lastResult.text;
+    return typeof text === 'string' && text.trim() === FINISH_TEXT
+      ? { ok: true }
+      : { ok: false, reason: 'finish-result-missing' };
+  }
+  if (scenario === 'progress' || scenario === 'need_user') {
+    const parsed = state.lastResult && state.lastResult.parsed;
+    if (!parsed || parsed.ok !== true || !actionMatches(parsed, scenario)) {
+      return { ok: false, reason: `${scenario}-result-missing` };
+    }
+    const expected = scenario === 'progress' ? 'PROGRESS' : 'WAITING_USER';
+    return parsed.data && parsed.data.state === expected && parsed.data.verified === false
+      ? { ok: true }
+      : { ok: false, reason: `${scenario}-state-invalid` };
+  }
   if (scenario === 'status') {
     const data = state.latestStatus && state.latestStatus.data;
     return data && typeof data.enabled === 'boolean' && typeof data.connected === 'boolean'
@@ -545,7 +579,7 @@ function planTurn(body, options = {}) {
   }
   if (state.lastCall && state.lastResult && !state.lastResult.parsed) {
     const lastAction = state.lastCall.args && state.lastCall.args.action;
-    if (lastAction !== 'request') {
+    if (lastAction !== 'request' && lastAction !== 'finish') {
       return textPlan('phone-e2e-fixture: tool result is not an envelope', 'tool-result-invalid');
     }
   }

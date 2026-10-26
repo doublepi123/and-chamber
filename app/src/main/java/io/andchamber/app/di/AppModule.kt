@@ -58,6 +58,14 @@ import io.andchamber.app.runtime.process.PhoneToolBinding
 import io.andchamber.app.runtime.process.PhoneToolHost
 import io.andchamber.app.phone.android.PhoneAgentToolReadiness
 import io.andchamber.app.phone.android.PhoneDriverFacade
+import io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator
+import io.andchamber.app.phone.android.overlay.PhoneOverlayDesignerContent
+import io.andchamber.app.phone.android.overlay.PhoneOverlayDriverBridge
+import io.andchamber.app.phone.android.overlay.PhoneOverlayHolder
+import io.andchamber.app.phone.android.overlay.LazyPhoneTaskEventHandler
+import io.andchamber.app.phone.android.overlay.LazyPhoneTaskNativeFacts
+import io.andchamber.app.phone.android.overlay.PhoneOverlayTaskCoordinator
+import io.andchamber.app.phone.android.overlay.PhoneOverlaySettings
 import io.andchamber.app.phone.android.PhoneGrantRoutePublisher
 import io.andchamber.app.phone.android.PhoneIdentityStore
 import io.andchamber.app.phone.android.PhoneIntegration
@@ -254,6 +262,20 @@ val appModule =
                 // lambda runs at first driver creation (the integration calls that from Dispatchers.IO),
                 // so neither Keystore nor the preferences read happens while this singleton is built.
                 pairingReceipts = { owner -> PhonePairingReceipts.open(context, owner.certificateFingerprint) },
+                overlayBridge = get<PhoneOverlayDriverBridge>(),
+            )
+        }
+
+        // Driver-side overlay guard. The bridge stores only lambdas; it resolves the *already built*
+        // coordinator installed by MainActivity (PhoneOverlayHolder), never constructs it on the
+        // driver's IO thread and never creates a Compose owner/View.
+        single {
+            PhoneOverlayDriverBridge(
+                overlayRequired = { PhoneOverlayHolder.current()?.driverOverlayRequired() ?: true },
+                manager = { PhoneOverlayHolder.current()?.driverOverlayBarrier() },
+                authorityEpoch = { PhoneOverlayHolder.current()?.driverAuthorityEpoch() },
+                displayOwner = { PhoneOverlayHolder.current()?.driverDisplayOwner() },
+                onSafetyLost = { _, _ -> PhoneOverlayHolder.current()?.onDriverOverlayLost() },
             )
         }
 
@@ -271,6 +293,9 @@ val appModule =
             PhoneToolBinding(
                 controller = get<PhoneController>(),
                 readyLaunch = { get<OpenChamberServer>().readyLaunchId() },
+                // Model task events are admitted by the tool route, then handled by the native
+                // progress/task binding. Lazy so the DI graph has no construction cycle.
+                taskEvents = LazyPhoneTaskEventHandler { get<PhoneOverlayTaskCoordinator>() },
             )
         }
 
@@ -306,6 +331,38 @@ val appModule =
             }
         }
 
+        // Overlay surface: default off, permission-gated; the coordinator only decides visibility
+        // and routes stop/return to the native owner. The visual capsule is the designer's composable.
+        single {
+            val context = get<Context>()
+            PhoneOverlaySettings(
+                context = context,
+                prefs = context.getSharedPreferences(PhoneOverlaySettings.FILE, Context.MODE_PRIVATE),
+            )
+        }
+
+        // Native task/progress binding. The tool lane injects this handler where it publishes events;
+        // delivery is not inferred here (it waits for the native-only callback).
+        single { PhoneOverlayTaskCoordinator(get<PhoneIntegration>()) }
+
+        single {
+            val task = get<PhoneOverlayTaskCoordinator>()
+            PhoneOverlayCoordinator(
+                context = get<Context>(),
+                settings = get<PhoneOverlaySettings>(),
+                integration = get<PhoneIntegration>(),
+                content =
+                    PhoneOverlayDesignerContent(
+                        clock = get<PhoneIntegration>().monotonicClock,
+                        progress = task.progress,
+                    ),
+                taskProgress = task.progress,
+                // Exact retained/live native task end; it persists the needs-check record and never
+                // re-grants or touches a newer task.
+                endTask = { key, epoch -> task.endRetainedTask(key, epoch) },
+            )
+        }
+
         single {
             PhoneIntegration(
                 context = get<Context>(),
@@ -315,6 +372,9 @@ val appModule =
                 proposals = get<PhoneProposalSource>(),
                 grantRoutes = get<PhoneGrantRoutePublisher>(),
                 readiness = get<PhoneAgentToolReadiness>(),
+                // Deferred: the coordinator depends on this integration; the sink is only called when
+                // a grant is really confirmed.
+                taskNative = LazyPhoneTaskNativeFacts { get<PhoneOverlayTaskCoordinator>() },
             )
         }
 

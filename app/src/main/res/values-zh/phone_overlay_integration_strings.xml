@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone overlay integration (display service notification). Keep keys in sync with values. -->
+<resources>
+    <string name="phone_overlay_notif_channel">手机控制浮窗</string>
+    <string name="phone_overlay_notif_channel_desc">显示手机控制浮窗及其停止按钮。关闭此通知也会隐藏浮窗，使用浮窗时请保持开启。</string>
+    <string name="phone_overlay_notif_title">手机控制浮窗</string>
+    <string name="phone_overlay_notif_body">打开 AndChamber 核对任务。任务结束后才能关闭浮窗。</string>
+    <string name="phone_overlay_notif_open">打开 AndChamber</string>
+    <string name="phone_overlay_notif_close">关闭浮窗</string>
+</resources>

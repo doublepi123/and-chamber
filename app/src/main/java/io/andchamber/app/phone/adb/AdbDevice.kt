@@ -16,6 +16,13 @@ interface AdbDevice {
 
     fun windowStateText(deadlineMs: Long, maxBytes: Int = AdbWindowStateParser.MAX_BYTES): String
 
+    /** Full state of one window token, including its real `Frames:` line. */
+    fun windowDetailText(
+        windowToken: String,
+        deadlineMs: Long,
+        maxBytes: Int = AdbWindowStateParser.MAX_BYTES,
+    ): String
+
     fun displaySizeText(deadlineMs: Long, maxBytes: Int = MAX_DISPLAY_SIZE_BYTES): String
 
     fun capturePng(deadlineMs: Long, maxBytes: Int = io.andchamber.app.phone.core.PhoneLimits.MAX_CAPTURE_BYTES): ByteArray

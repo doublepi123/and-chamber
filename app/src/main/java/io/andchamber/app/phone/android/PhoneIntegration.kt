@@ -9,6 +9,9 @@ import android.os.SystemClock
 import android.provider.Settings
 import io.andchamber.app.MainActivity
 import io.andchamber.app.phone.adb.AdbDeviceException
+import io.andchamber.app.phone.android.overlay.PhoneTaskIdentity
+import io.andchamber.app.phone.android.overlay.PhoneTaskNativeEndHelper
+import io.andchamber.app.phone.android.overlay.PhoneTaskNativeFacts
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneAgentAction
 import io.andchamber.app.phone.core.PhoneAgentRequest
@@ -23,6 +26,8 @@ import io.andchamber.app.phone.core.PhoneGrant
 import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneState
+import io.andchamber.app.phone.overlay.progress.PhoneProgressReason
+import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
 import io.andchamber.app.ui.phone.PhoneBusy
 import io.andchamber.app.ui.phone.PhoneConnectRequest
 import io.andchamber.app.ui.phone.PhoneControlActions
@@ -76,6 +81,11 @@ internal class PhoneIntegration(
     private val proposals: PhoneProposalSource = NoPhoneProposals,
     /** Native-only: publishes the granted epoch so exactly one chat may claim it. Fail-closed. */
     private val grantRoutes: PhoneGrantRoutePublisher = PhoneGrantRoutePublisher.Unavailable,
+    /**
+     * Native-only task facts. The binding is published before the route becomes claimable, and a
+     * lease drop is reported for exactly the epoch that really ended; never an inferred ack.
+     */
+    private val taskNative: PhoneTaskNativeFacts = PhoneTaskNativeFacts.Unavailable,
     /** Native readiness probes: is the runtime up, and did this launch load the phone tool? */
     private val readiness: PhoneAgentToolReadiness = PhoneAgentToolReadiness.Unavailable,
     private val notifications: PhoneControlNotifications = PhoneControlNotifications(context),
@@ -133,6 +143,40 @@ internal class PhoneIntegration(
      */
     private var taskSession: String? = null
 
+    /**
+     * Stable native task identity. A resume keeps it; a new task, a finished task or a different
+     * runtime gets a new one. Memory only: a restart keeps the needs-check record but no owner.
+     */
+    private val taskIdentity = PhoneTaskIdentity()
+
+    /**
+     * The last grant epoch of the retained task. A person may end that retained task after its lease
+     * was already stopped (takeover/need_user/unknown); the end is allowed only for this exact epoch
+     * and never for a newer grant.
+     */
+    private var retainedTaskEpoch: Long? = null
+
+    /**
+     * Native phone-screen End. Freezing and the exact end path live in [nativeUiEnd]; the model
+     * finish/overlay End flows do not use it, so they never double-record or overwrite a model note.
+     */
+    private val nativeUiEnd =
+        PhoneTaskNativeEndHelper(
+            freeze = ::nativeUiEndBinding,
+            endExact = ::endTaskExact,
+            publish = { binding, ack ->
+                taskNative.onNativeLeaseDropped(
+                    taskId = binding.taskId,
+                    runtimeId = binding.runtimeId,
+                    epoch = binding.epoch,
+                    reason = PhoneProgressReason.USER_REQUESTED,
+                    ended = true,
+                    ack = ack,
+                )
+            },
+            finishWithoutFact = ::finish,
+        )
+
     /** Pairing attempt identity: every cancel/disable/new attempt invalidates late results. */
     private var pairingOperationSeq = 0L
     private var activePairingOperation: Long? = null
@@ -167,7 +211,7 @@ internal class PhoneIntegration(
             onGrant = ::grant,
             onPause = ::pause,
             onTakeOver = ::takeOver,
-            onFinish = ::finish,
+            onFinish = ::finishFromNativeUi,
             onObserve = ::observeTarget,
             onOpenTarget = { packageName -> launchTarget(packageName) },
             onAcknowledgeChecked = ::acknowledgeChecked,
@@ -255,6 +299,163 @@ internal class PhoneIntegration(
         serviceStop()
         openPhone?.invoke()
         return true
+    }
+
+    /**
+     * Overlay light pause: freezes mutations only, exactly like the native Pause. Reads may continue.
+     */
+    fun onOverlayPause() {
+        pause()
+    }
+
+    /**
+     * Overlay takeover. Refuses new actions, revokes the whole lease (cancelling in-flight reads),
+     * keeps the unknown facts for the screen, and stays in the current app: it never launches the
+     * target. The native acknowledgement only means new reads/writes are disabled; commands already
+     * sent are not rolled back.
+     */
+    fun onOverlayTakeOver(): Boolean {
+        invalidateGrantAttempt()
+        val core = controller.state.value
+        if (core.grant == null) return false
+        val binding = overlayTaskBinding()
+        val remembered = lease ?: facts.value.halt?.lease
+        halt(
+            PhoneHaltReason.TakenOver,
+            remembered,
+            actionInFlight = core.inFlightMutation || core.pausing,
+        )
+        controller.revoke()
+        serviceStop()
+        publishTaskStop(binding, PhoneProgressReason.TAKEOVER, ended = false)
+        return true
+    }
+
+    /**
+     * The current native task, for the progress/overlay task adapter. Read-only and bounded: no
+     * page text, no nodes, no coordinates. Null when no lease exists (a retained record is not a task)
+     * or when the native side has not confirmed a task id yet. A manual task has no route session
+     * until the tool server validates its first claim; it is never filled with a placeholder.
+     */
+    fun overlayTaskBinding(): PhoneOverlayTaskBinding? {
+        val core = controller.state.value
+        val grant = core.grant ?: return null
+        val current = lease ?: return null
+        val identity = taskIdentity.current() ?: return null
+        return PhoneOverlayTaskBinding(
+            taskId = identity.first,
+            runtimeId = identity.second,
+            epoch = grant.epoch,
+            routeSession = taskSession,
+            summary = current.summary,
+            packageName = current.target.packageName,
+        )
+    }
+
+    /**
+     * Stops exactly the task/epoch the model asked to hand over. Main thread only. It returns null
+     * when that binding is not the live native owner anymore, so a queued model event can never
+     * revoke a newer grant. [PhoneStopAcknowledgement.confirmed] only says the controller's local
+     * revoke succeeded (new operations and late reads are refused); sent actions may still apply.
+     */
+    internal fun stopTaskExact(
+        binding: PhoneOverlayTaskBinding,
+        reason: PhoneProgressReason,
+    ): PhoneStopAcknowledgement? {
+        if (reason !in TASK_STOP_REASONS) return null
+        val core = controller.state.value
+        val grant = core.grant ?: return null
+        if (grant.epoch != binding.epoch) return null
+        if (!taskIdentity.matches(binding.taskId, binding.runtimeId)) return null
+        invalidateGrantAttempt()
+        halt(
+            PhoneHaltReason.TakenOver,
+            lease,
+            actionInFlight = core.inFlightMutation || core.pausing,
+        )
+        controller.revoke()
+        serviceStop()
+        if (controller.state.value.grant != null) return null
+        return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
+    }
+
+    /**
+     * Ends exactly this task/epoch. Main thread only.
+     *
+     * A live grant for exactly this epoch is ended through the native finish path (revoke + persisted
+     * needs-check record). A task whose lease was already stopped (takeover/need_user/unknown) may
+     * still be ended, but only when it is the retained task at this exact epoch: nothing newer is
+     * touched and no grant is created. The ack only says new operations and late reads are blocked;
+     * sent actions may still apply. A wrong key/epoch returns null and persists nothing.
+     */
+    internal fun endTaskExact(binding: PhoneOverlayTaskBinding): PhoneStopAcknowledgement? {
+        if (!taskIdentity.matches(binding.taskId, binding.runtimeId)) return null
+        val core = controller.state.value
+        val grant = core.grant
+        if (grant != null) {
+            if (grant.epoch != binding.epoch) return null
+            val remembered = lease ?: return null
+            if (remembered.target.packageName != binding.packageName ||
+                remembered.summary != binding.summary
+            ) {
+                return null
+            }
+            finish()
+            if (controller.state.value.grant != null) return null
+            return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
+        }
+        if (binding.epoch != retainedTaskEpoch) return null
+        // The person is ending the retained task: a still-pending confirmation for a new attempt is
+        // superseded and must not later commit over the ended task. A live grant was rejected above.
+        invalidateGrantAttempt()
+        if (!persistRetainedEnd(binding)) return null
+        return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
+    }
+
+    /**
+     * Persists the native result card for a task whose lease is already stopped. No regrant, no
+     * controller epoch change, no unrelated task or halt is touched.
+     */
+    private fun persistRetainedEnd(binding: PhoneOverlayTaskBinding): Boolean {
+        val record = store.task() ?: return false
+        if (record.targetPackage != binding.packageName || record.summary != binding.summary) return false
+        val halt = facts.value.halt
+        store.setTask(
+            record.copy(
+                needsCheck = true,
+                haltReason = halt?.reason?.name ?: record.haltReason,
+                acknowledged = halt?.acknowledged == true || record.acknowledged,
+            ),
+        )
+        taskSession = null
+        retainedTaskEpoch = null
+        mutateFacts {
+            it.copy(
+                halt = null,
+                lease = null,
+                task = store.task(),
+                pending = null,
+                busy = null,
+            )
+        }
+        serviceStop()
+        return true
+    }
+
+    /**
+     * Tool lane callback: the native server validated the first claim of a manual route and this is
+     * the session that claimed it. Main thread only. It only pins routing memory for the exact
+     * current task/epoch; it grants nothing and cannot add a route by itself.
+     */
+    internal fun onTaskRouteAdopted(
+        binding: PhoneOverlayTaskBinding,
+        sessionLabel: String,
+    ) {
+        val core = controller.state.value
+        val grant = core.grant ?: return
+        if (grant.epoch != binding.epoch) return
+        if (!taskIdentity.matches(binding.taskId, binding.runtimeId)) return
+        taskSession = sessionLabel
     }
 
     /** The live lease epoch, or null. The foreground service validates every action against it. */
@@ -718,6 +919,8 @@ internal class PhoneIntegration(
         val haltAtConfirm = facts.value.halt
         val resumingAtConfirm =
             haltAtConfirm != null &&
+                // A different runtime is a new task: an old task must never own the new grant.
+                haltAtConfirm.reason != PhoneHaltReason.RuntimeChanged &&
                 haltAtConfirm.lease.target.packageName == target.packageName &&
                 haltAtConfirm.lease.summary == request.summary.trim().take(PhoneLimits.MAX_NODE_LABEL_CHARS)
         val frozenResumeSession = if (resumingAtConfirm) taskSession else null
@@ -754,6 +957,7 @@ internal class PhoneIntegration(
                         stopChannel = stopChannel,
                         frozenRevision = frozenRevision,
                         frozenResumeSession = frozenResumeSession,
+                        resumedTask = resumingAtConfirm,
                     )
                 }
                 is PhoneGrantResult.Refused -> {
@@ -779,6 +983,8 @@ internal class PhoneIntegration(
         frozenRevision: Long?,
         /** The chat that owned a resumed task, captured at confirmation; null for a new task. */
         frozenResumeSession: String?,
+        /** True when the person confirmed a resume of the retained task, in the same runtime. */
+        resumedTask: Boolean,
     ) {
         if (!grantAttempts.isCurrent(attempt)) return
         val epoch = granted.epoch
@@ -807,7 +1013,32 @@ internal class PhoneIntegration(
                 currentRevision = { facts.value.requestRevision },
                 consume = { proposals.consume(it) },
                 publish = { routeEpoch, label ->
-                    runCatching { grantRoutes.publishGrantRoute(routeEpoch, label) }.getOrDefault(false)
+                    // Publish the native task owner before a chat can claim this route. The first real
+                    // action then resolves the same frozen key synchronously, not after a UI collector.
+                    val runtimeId =
+                        controller.state.value.runtimeId ?: PhoneDriverFacade.FALLBACK_RUNTIME_ID
+                    val ownerReady =
+                        runCatching {
+                            val binding =
+                                taskIdentity.bindOnPublish(
+                                    epoch = routeEpoch,
+                                    resumed = resumedTask,
+                                    runtimeId = runtimeId,
+                                    routeSession = label,
+                                    summary = remembered.summary,
+                                    packageName = target.packageName,
+                                )
+                            taskNative.onTaskBinding(binding)
+                        }.isSuccess
+                    val published =
+                        ownerReady &&
+                            runCatching {
+                                grantRoutes.publishGrantRoute(routeEpoch, label)
+                            }.getOrDefault(false)
+                    if (ownerReady) retainedTaskEpoch = routeEpoch
+                    // A grant whose route could not be published is revoked; it owns no task.
+                    if (!published) runCatching { taskNative.onTaskBinding(null) }
+                    published
                 },
             )
         applyGrantAttemptOutcome(
@@ -926,6 +1157,7 @@ internal class PhoneIntegration(
         val remembered = lease ?: facts.value.halt?.lease
         val plan = takeoverPlan(hasGrant = core.grant != null, rememberedTarget = remembered?.target?.packageName)
         if (plan.revokeGrant) {
+            val binding = overlayTaskBinding()
             halt(
                 PhoneHaltReason.TakenOver,
                 remembered,
@@ -933,13 +1165,49 @@ internal class PhoneIntegration(
             )
             controller.revoke()
             serviceStop()
+            publishTaskStop(binding, PhoneProgressReason.TAKEOVER, ended = false)
         }
         plan.launchTarget?.let { launchTarget(it) }
     }
 
     /**
+     * Native phone screen "End". It freezes the exact current task before any field is cleared,
+     * saves the native needs-check record/revokes through the existing exact-owner end path, then
+     * publishes exactly one native ended fact so an UNKNOWN task becomes ENDED_PENDING_CHECK and its
+     * result card can be shown/closed. The model finish and overlay End keep their own typed flows.
+     */
+    fun finishFromNativeUi() {
+        nativeUiEnd.endFromNativeUi()
+    }
+
+    /**
+     * The exact task for a native End. A live grant wins (its binding carries the route); otherwise
+     * the retained epoch + task identity + persisted/remembered record reconstruct it. Null means
+     * there is no current task to end; the caller then keeps the original cleanup without inventing
+     * a native end.
+     */
+    private fun nativeUiEndBinding(): PhoneOverlayTaskBinding? {
+        overlayTaskBinding()?.let { return it }
+        val epoch = retainedTaskEpoch ?: return null
+        val identity = taskIdentity.current() ?: return null
+        val remembered = lease ?: facts.value.halt?.lease
+        val record = store.task()
+        val summary = remembered?.summary ?: record?.summary ?: return null
+        val packageName = remembered?.target?.packageName ?: record?.targetPackage ?: return null
+        return PhoneOverlayTaskBinding(
+            taskId = identity.first,
+            runtimeId = identity.second,
+            epoch = epoch,
+            routeSession = taskSession,
+            summary = summary,
+            packageName = packageName,
+        )
+    }
+
+    /**
      * Ends the task. The grant is revoked by the controller, so the coordinator keeps the minimal
      * record (target, summary, needs-check) for the result card; it never claims a verified result.
+     * Internal callers do not publish a native end fact here; the native UI entry does that once.
      */
     private fun finish() {
         invalidateGrantAttempt()
@@ -958,6 +1226,7 @@ internal class PhoneIntegration(
         }
         controller.revoke()
         taskSession = null
+        retainedTaskEpoch = null
         mutateFacts {
             it.copy(
                 halt = null,
@@ -985,6 +1254,9 @@ internal class PhoneIntegration(
     private fun dismissResult() {
         store.clearTask()
         taskSession = null
+        taskIdentity.clear()
+        retainedTaskEpoch = null
+        taskNative.onTaskBinding(null)
         mutateFacts { it.copy(task = null) }
     }
 
@@ -1249,6 +1521,12 @@ internal class PhoneIntegration(
                 else -> null
             } ?: return
         halt(reason, remembered, actionInFlight = previous?.inFlightMutation == true)
+        // Exact-owner stop fact for the epoch that was really live and is now gone. The controller's
+        // revoke is synchronous, but this identity still comes from `previous`, not from "no lease now".
+        val droppedEpoch = previous?.grant?.epoch ?: return
+        val identity = taskIdentity.current() ?: return
+        val typed = reason.toProgressStopReason() ?: return
+        publishTaskStop(identity.first, identity.second, droppedEpoch, typed, ended = false)
     }
 
     /** Latches the halt facts: a dispatched action never becomes "nothing happened". */
@@ -1341,8 +1619,63 @@ internal class PhoneIntegration(
 
     private fun closeLease(keepTask: Boolean) {
         lease = null
-        if (!keepTask) store.clearTask()
+        if (!keepTask) {
+            store.clearTask()
+            taskIdentity.clear()
+            retainedTaskEpoch = null
+            taskNative.onTaskBinding(null)
+        }
     }
+
+    /**
+     * Native-only stop receipt for exactly [taskId]/[runtimeId]/[epoch]. Only a revoke that already
+     * completed synchronously reaches here; a late continuation for an old task cannot pass the
+     * adapter's exact key/epoch check. It never claims that sent actions were rolled back.
+     */
+    private fun publishTaskStop(
+        binding: PhoneOverlayTaskBinding?,
+        reason: PhoneProgressReason,
+        ended: Boolean,
+    ) {
+        if (binding == null) return
+        publishTaskStop(binding.taskId, binding.runtimeId, binding.epoch, reason, ended)
+    }
+
+    private fun publishTaskStop(
+        taskId: String,
+        runtimeId: String,
+        epoch: Long,
+        reason: PhoneProgressReason,
+        ended: Boolean,
+    ) {
+        if (controller.state.value.grant != null) return
+        runCatching {
+            taskNative.onNativeLeaseDropped(
+                taskId = taskId,
+                runtimeId = runtimeId,
+                epoch = epoch,
+                reason = reason,
+                ended = ended,
+                ack = PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true),
+            )
+        }
+    }
+
+    private fun PhoneHaltReason.toProgressStopReason(): PhoneProgressReason? =
+        when (this) {
+            PhoneHaltReason.ScreenLocked -> PhoneProgressReason.DEVICE_LOCKED
+            PhoneHaltReason.HostReturned -> PhoneProgressReason.HOST_RETURNED
+            PhoneHaltReason.ConnectionLost -> PhoneProgressReason.CONNECTION_LOST
+            PhoneHaltReason.Expired -> PhoneProgressReason.LEASE_EXPIRED
+            PhoneHaltReason.RuntimeChanged -> PhoneProgressReason.RUNTIME_CHANGED
+            PhoneHaltReason.OutcomeUnknown -> PhoneProgressReason.OUTCOME_UNKNOWN
+            PhoneHaltReason.Paused,
+            PhoneHaltReason.TakenOver,
+            PhoneHaltReason.TargetLeft,
+            PhoneHaltReason.StopChannelLost,
+            PhoneHaltReason.ScreenUncertain,
+            -> null
+        }
 
     private fun guardBusy(): Boolean {
         if (facts.value.pending == null) return false
@@ -1417,6 +1750,19 @@ internal class PhoneIntegration(
         /** Long enough for one handshake, within the pairing entry point's own bound. */
         const val PAIRING_DEADLINE_MS = 60_000L
 
+        /** Stop reasons an agent-requested handoff may carry into the task store. */
+        private val TASK_STOP_REASONS: Set<PhoneProgressReason> =
+            setOf(
+                PhoneProgressReason.USER_REQUESTED,
+                PhoneProgressReason.TAKEOVER,
+                PhoneProgressReason.LEASE_EXPIRED,
+                PhoneProgressReason.HOST_RETURNED,
+                PhoneProgressReason.CONNECTION_LOST,
+                PhoneProgressReason.DEVICE_LOCKED,
+                PhoneProgressReason.RUNTIME_CHANGED,
+                PhoneProgressReason.OUTCOME_UNKNOWN,
+            )
+
         private const val TICK_MS = 1_000L
 
         internal fun launchDefaultApp(context: Context, packageName: String): Boolean =
@@ -1459,3 +1805,18 @@ internal class PhoneIntegration(
 internal object PhonePairNotifications {
     const val PAIRING_ID = PhoneControlNotifications.PAIRING_NOTIFICATION_ID
 }
+
+/**
+ * Bounded identity of the native task shown in the overlay, for the progress adapter only.
+ * It carries the confirmed summary the person already saw; no page text or device content.
+ * [routeSession] is null for a manual native task until the tool server validated the first claim
+ * and told the task adapter about it; it is never a placeholder chat id.
+ */
+data class PhoneOverlayTaskBinding(
+    val taskId: String,
+    val runtimeId: String,
+    val epoch: Long,
+    val routeSession: String?,
+    val summary: String,
+    val packageName: String,
+)

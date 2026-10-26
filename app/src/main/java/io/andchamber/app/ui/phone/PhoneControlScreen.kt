@@ -89,6 +89,10 @@ internal fun PhoneControlScreen(
     actions: PhoneControlActions,
     modifier: Modifier = Modifier,
     clock: () -> Long = System::currentTimeMillis,
+    /** Overlay settings; null (the default) hides the card. Supplied by the integration. */
+    overlaySettings: io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsState? = null,
+    overlaySettingsActions: io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsActions =
+        io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsActions(),
 ) {
     val step = phoneStep(state)
     val now = rememberNow(state.control, clock)
@@ -185,6 +189,16 @@ internal fun PhoneControlScreen(
                             }
                         PhoneStep.Result -> ResultCard(state = state, actions = actions)
                     }
+                }
+
+                // Below the current step, outside it: setting up the overlay is never the step that
+                // needs attention, and it is not offered while the switch is off.
+                if (overlaySettings != null && showsOverlaySettings(step)) {
+                    io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsCard(
+                        state = overlaySettings,
+                        actions = overlaySettingsActions,
+                        modifier = Modifier.padding(top = 20.dp),
+                    )
                 }
 
                 if (step != PhoneStep.Unavailable && step != PhoneStep.Off) {

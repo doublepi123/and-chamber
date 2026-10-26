@@ -21,17 +21,24 @@ const UNAVAILABLE =
 /** Fixed reply for a successful, read-only proposal. The person confirms natively. */
 const CONFIRM_TEXT = "请在AndChamber手机控制中确认";
 
+/** A model finish is only a report; the business result remains pending verification. */
+const FINISH_REPORTED = "报告结束，待核对";
+
 const DESCRIPTION = [
   "Control one app on the user's Android phone through the AndChamber phone-control channel.",
-  'Start with "status": it reports whether phone control is enabled, its phase, epoch, capabilities and runtime readiness, and it needs no grant.',
+  'Start with "status": it reports whether phone control is enabled, its phase, epoch, capabilities, runtime readiness and whether a native task exists, and it needs no grant.',
   'Use "request" to propose a task before any control exists. It is read-only preparation: it only asks the person to confirm in AndChamber phone control and answers with the fixed text 请在AndChamber手机控制中确认. It never enables, pairs, grants, resumes, acknowledges or opens a screen, and it never starts the task itself. The person still chooses the target, duration and actions.',
   'A successful "request" is refused while a grant is active, so the task cannot silently change mid-control. Only one pending task exists; another chat session cannot replace it, and the same session may explicitly update it with a new summary or package before it is confirmed.',
-  'Every action except "status" and "request" requires a native grant the person gives on the phone for one target app and a short lease. This tool can never enable, pair, grant, resume or acknowledge; never claim that it can.',
+  'For an already confirmed native task, "progress", "need_user" and "finish" need the current epoch from "status". They are the agent\'s own report, marked unverified: never native facts and never proof of business success. No event means no progress; do not invent percentages.',
+  '"need_user" asks the person to take over. It only becomes waiting after native control confirms that new operations and late reads are blocked; until then it may fail with STOP_UNCONFIRMED. Native confirmation still does not roll back an action that was already sent.',
+  '"finish" only reports that the agent is done. It answers with 报告结束，待核对 and never means success; the person or native verification must check the result. It also requires native stop/revoke confirmation first.',
+  'A progress/need_user/finish call is refused with NO_TASK when no native task exists, STALE_TASK or TASK_NOT_ACTIVE when the task changed or ended, EPOCH_CHANGED for a stale epoch, and SESSION_BUSY for another chat session. Do not retry a stale epoch or another session\'s task in a loop.',
+  'Every other action except "status" and "request" requires a native grant the person gives on the phone for one target app and a short lease. This tool can never enable, pair, grant, resume, acknowledge or open overlay permission; never claim that it can.',
   'Take "snapshot" first. It returns observationId plus accessibility nodes with refs, roles, labels and bounds in display pixels. Use that observationId for "capture", "tap", "swipe", "input" and "back"; a newer snapshot or any change to the window/geometry makes the old observationId stale, so take a new snapshot instead of guessing.',
   'One action per call. "tap" uses either ref or x/y; "swipe" uses x/y and x2/y2 in display pixels plus optional durationMs; "input" types text into the focused field, or focuses ref first; "back" presses the system back.',
   'Non-ASCII input may be refused with UNICODE_UNSUPPORTED. Do not silently replace it with an approximation.',
   'Only SENT means the driver injected the action; it does not prove the app did what was intended. An OUTCOME_UNKNOWN result does not prove failure. Never repeat the action to find out: take a fresh snapshot if possible, then ask the person to check the phone. Ask the person to resume control on the phone if needed.',
-  'Only one chat session owns a grant epoch. After another session performs a real action, this session is refused with SESSION_BUSY; do not retry in a loop. Ask the person to grant phone control again if this chat should own it. "status" never claims the epoch.',
+  'Only one chat session owns a grant epoch. After another session performs a real action, this session is refused with SESSION_BUSY; do not retry in a loop. Ask the person to grant phone control again if this chat should own it. "status" and task events never claim the epoch by themselves.',
   'A session label is routing only, not authentication; never claim that this tool proves which chat is speaking. Immediately after a native grant, actions may be refused with ROUTE_NOT_PUBLISHED until the phone publishes the confirmed route; wait for the person, do not retry in a loop.',
   '"snapshot", "capture" and "tap" may also fail with NOT_GRANTED, LEASE_EXPIRED, EPOCH_CHANGED, PAUSED, GRANT_ACTIVE, ROUTE_NOT_PUBLISHED, ACTION_NOT_GRANTED, RUNTIME_NOT_READY, DISABLED, NOT_CONNECTED or BUSY. These are fixed refusals, not retry hints.',
 ].join(" ");
@@ -181,14 +188,38 @@ export default {
           properties: {
             action: {
               type: "string",
-              enum: ["status", "request", "snapshot", "capture", "tap", "swipe", "input", "back"],
+              enum: ["status", "request", "progress", "need_user", "finish", "snapshot", "capture", "tap", "swipe", "input", "back"],
               description: "One phone action per call.",
+            },
+            epoch: {
+              type: "integer",
+              minimum: 0,
+              description:
+                'Current grant epoch from the latest "status". Required for "progress", "need_user" and "finish".',
+            },
+            phase: {
+              type: "string",
+              maxLength: 120,
+              description:
+                'Short, non-sensitive progress phase ("progress" only). Always an unverified model self-report.',
+            },
+            message: {
+              type: "string",
+              maxLength: 120,
+              description:
+                'Short, non-sensitive message for "progress" or "need_user". Use either message or phase/reason, not both.',
+            },
+            reason: {
+              type: "string",
+              maxLength: 120,
+              description:
+                'Short, non-sensitive reason for "need_user". It becomes waiting only after native stop confirmation.',
             },
             summary: {
               type: "string",
               maxLength: 200,
               description:
-                'Short task summary shown to the person for native confirmation ("request" only). Do not include secrets or unrelated personal data.',
+                'Task summary for "request" (max 200) shown to the person for native confirmation. For "finish" it is a bounded (max 120) end report, never success.',
             },
             packageName: {
               type: "string",
@@ -243,6 +274,19 @@ export default {
           },
           required: ["action"],
           additionalProperties: false,
+          // Conditional requirement keeps the flat tool schema compatible: only the three task
+          // event actions must carry the epoch read from status.
+          allOf: [
+            {
+              if: {
+                properties: {
+                  action: { enum: ["progress", "need_user", "finish"] },
+                },
+                required: ["action"],
+              },
+              then: { required: ["epoch"] },
+            },
+          ],
         },
         async execute(input, context) {
           const args = input && typeof input === "object" ? input : {};
@@ -309,6 +353,10 @@ export default {
           // The summary is never echoed back by the server, so there is nothing to render here.
           if (payload.ok === true && payload.action === "phone.request") {
             return textResult(CONFIRM_TEXT);
+          }
+          // A successful finish is only the agent's end report; never render it as success.
+          if (payload.ok === true && payload.action === "phone.finish") {
+            return textResult(FINISH_REPORTED);
           }
 
           return toContent(payload);

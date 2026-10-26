@@ -13,4 +13,6 @@
     <item name="fixture_second_title" type="id" />
     <item name="fixture_second_body" type="id" />
     <item name="fixture_back" type="id" />
+    <item name="fixture_overlay_hidden_title" type="id" />
+    <item name="fixture_overlay_hidden_body" type="id" />
 </resources>

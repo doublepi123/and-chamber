@@ -16,6 +16,7 @@ Key constraints:
 - Launch can restore the last used OpenChamber instance, and every instance remembers its own last page, so switching between instances returns to where each one was left. Cloudflare Access handoff stops the old page before reading cookies and logging in, so a late 401 cannot delete the new login cookie.
 - PRoot JNI libraries are compiled from pinned sources with NDK 29.0.14206865. That source build is not a claim that the whole 0.x pre-release is reproducible, and this is not an F-Droid build.
 - Phone control is a separate, default-off Android 11+ experiment for a trusted local runtime, one selected third-party app and a short native grant. Its `andchamber_phone` plugin never authorizes itself. Covered API 35/x86_64 flows passed [emulator acceptance](docs/testing-phone-control.md); physical arm64/vendor behavior is unverified. See [phone control](docs/phone-control.md).
+- Optional system phone-progress overlays have their own permission/demo, bounded display service and real-window execution/capture barrier. Notifications remain independent; task progress separates native facts from unverified model narration. This is distinct from the in-app browser window.
 
 ## System Entry Points
 

@@ -12,4 +12,6 @@
     <string name="fixture_second_title">Second page</string>
     <string name="fixture_second_body">Page two ready</string>
     <string name="fixture_back">Back</string>
+    <string name="fixture_overlay_hidden_title">Overlay hidden target</string>
+    <string name="fixture_overlay_hidden_body">This page calls setHideOverlayWindows(true).</string>
 </resources>

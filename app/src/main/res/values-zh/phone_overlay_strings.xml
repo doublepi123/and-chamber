@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机操控浮窗（实验）。键与 values/phone_overlay_strings.xml 保持一致。 -->
+<resources>
+    <!-- 胶囊 -->
+    <string name="phone_overlay_window_title">手机操控进展</string>
+    <string name="phone_overlay_demo_tag">演示</string>
+    <string name="phone_overlay_take_over">接管</string>
+    <string name="phone_overlay_take_over_cd">接管：代理停止观察和操作</string>
+    <string name="phone_overlay_open_native">回 AndChamber</string>
+    <string name="phone_overlay_look">查看</string>
+    <string name="phone_overlay_expand_cd">展开任务详情</string>
+    <string name="phone_overlay_collapse_cd">收起，继续跟进任务</string>
+    <string name="phone_overlay_drag_cd">移动进展胶囊</string>
+    <string name="phone_overlay_move_left">移到左侧</string>
+    <string name="phone_overlay_move_right">移到右侧</string>
+    <string name="phone_overlay_minutes_left">剩 %1$d 分</string>
+    <string name="phone_overlay_sent_count">已发出 %1$d 个</string>
+    <string name="phone_overlay_waiting_confirm">等待确认</string>
+
+    <!-- 状态：胶囊第一行 / 第二行 -->
+    <string name="phone_overlay_running">代理可操作</string>
+    <string name="phone_overlay_pausing">正在暂停…</string>
+    <string name="phone_overlay_pausing_sub">等待确认 · 仍可接管</string>
+    <string name="phone_overlay_paused">已暂停 · 仍可观察</string>
+    <string name="phone_overlay_paused_sub">不再接受新操作</string>
+    <string name="phone_overlay_taking">正在接管…</string>
+    <string name="phone_overlay_taken">由你操作</string>
+    <string name="phone_overlay_taken_sub">新观察和操作已禁用</string>
+    <string name="phone_overlay_need_user_pending">代理请求你处理</string>
+    <string name="phone_overlay_need_user_pending_sub">正在收回代理权限</string>
+    <string name="phone_overlay_need_user">需要你</string>
+    <string name="phone_overlay_need_user_sub">代理授权已撤销</string>
+    <string name="phone_overlay_unknown">结果未知</string>
+    <string name="phone_overlay_unknown_sub">请先核对</string>
+    <string name="phone_overlay_ending">正在结束…</string>
+    <string name="phone_overlay_ending_sub">等待撤权确认</string>
+    <string name="phone_overlay_ended">已结束 · 待核对</string>
+    <string name="phone_overlay_ended_sub">请在应用中核对结果</string>
+    <string name="phone_overlay_unconfirmed">停止未确认</string>
+    <string name="phone_overlay_unconfirmed_sub">请回 AndChamber</string>
+    <string name="phone_overlay_unavailable">手机操控</string>
+    <string name="phone_overlay_unavailable_sub">这里暂时无法显示实时控制</string>
+
+    <!-- 面板 -->
+    <string name="phone_overlay_section_task">任务</string>
+    <string name="phone_overlay_summary_show">显示任务摘要</string>
+    <string name="phone_overlay_summary_hide">收起任务摘要</string>
+    <string name="phone_overlay_summary_note">只显示你写的摘要，不显示屏幕内容。</string>
+    <string name="phone_overlay_control_agent">%1$s · 代理控制 · %2$s</string>
+    <string name="phone_overlay_control_agent_no_time">%1$s · 代理控制</string>
+    <string name="phone_overlay_control_person">%1$s · 由你控制</string>
+    <string name="phone_overlay_no_renew">代理不会自己延长时间。</string>
+    <string name="phone_overlay_section_recent">最近进展</string>
+    <string name="phone_overlay_no_events">还没有事件。</string>
+    <string name="phone_overlay_section_waiting">在等什么</string>
+    <string name="phone_overlay_waiting_update">等待更新。上次事件在%1$s。</string>
+    <string name="phone_overlay_waiting_update_none">等待更新。</string>
+    <string name="phone_overlay_section_you">你可以做什么</string>
+
+    <!-- 事件来源 -->
+    <string name="phone_overlay_src_observed">原生观察</string>
+    <string name="phone_overlay_src_confirmed">原生确认</string>
+    <string name="phone_overlay_src_sent">已发出 · 不代表完成</string>
+    <string name="phone_overlay_src_sent_unknown">已发出 · 结果不明</string>
+    <string name="phone_overlay_src_agent">代理说明 · 未核验</string>
+    <string name="phone_overlay_just_now">刚刚</string>
+    <string name="phone_overlay_seconds_ago">%1$d 秒前</string>
+    <string name="phone_overlay_minutes_ago">%1$d 分钟前</string>
+
+    <!-- 面板提示 -->
+    <string name="phone_overlay_running_you">暂时不需要你做什么。</string>
+    <string name="phone_overlay_running_foot">暂停只拒绝新操作，代理仍可观察；接管会撤销本次授权。两者都不撤回已发出的操作。</string>
+    <string name="phone_overlay_pausing_notice">确认前，代理可能仍在执行上一操作。不用再点暂停。</string>
+    <string name="phone_overlay_paused_notice">不再接受新操作；上一操作仍需核对。在你接管、回 AndChamber 或结束任务前，代理仍可观察这个应用。</string>
+    <string name="phone_overlay_taking_notice">确认前，上一操作可能仍在生效。不用再点。</string>
+    <string name="phone_overlay_taken_notice">新观察和操作已禁用；上一操作仍需核对。代理不会自己拿回控制。</string>
+    <string name="phone_overlay_need_user_pending_notice">代理请求人工处理（代理说明，未核验）。确认前，请先不要在这里输入敏感内容。</string>
+    <string name="phone_overlay_need_user_notice">由你处理：新观察和操作已禁用；上一操作仍需核对。请自己完成这一步，不要把密码发给代理。</string>
+    <string name="phone_overlay_need_user_foot">这来自代理的请求。AndChamber 不能识别所有登录或敏感页面。</string>
+    <string name="phone_overlay_unknown_notice">操作已发出，但没能确认是否生效，可能已经发生。</string>
+    <string name="phone_overlay_unknown_foot">这里没有“重试”：重复同一操作可能会执行两次。</string>
+    <string name="phone_overlay_unconfirmed_notice">停止请求超时。代理可能仍在执行，上一操作也可能已经生效。请打开 AndChamber；通知里也能回到 AndChamber。</string>
+    <string name="phone_overlay_unconfirmed_foot">再次请求只会要求停手，不会重发任何操作。确认停止前这里会一直保留。</string>
+    <string name="phone_overlay_ending_notice">收到撤权确认前这里会一直保留。上一操作可能仍在生效。</string>
+    <string name="phone_overlay_ended_you">请在应用中确认结果确实存在。</string>
+    <string name="phone_overlay_unavailable_notice">这里暂时无法显示实时控制。请使用 AndChamber 或它的通知。</string>
+    <string name="phone_overlay_continue_foot">要让代理继续，请在 AndChamber 重新确认；它会先重新读取屏幕。浮窗不能授予或延长权限。</string>
+    <string name="phone_overlay_result_native">原生</string>
+    <string name="phone_overlay_result_sent">已发出</string>
+    <string name="phone_overlay_result_agent">代理说明</string>
+
+    <!-- 面板按钮 -->
+    <string name="phone_overlay_btn_take_over">接管（停止观察和操作）</string>
+    <string name="phone_overlay_btn_pause">暂停操作</string>
+    <string name="phone_overlay_btn_open_native">回 AndChamber</string>
+    <string name="phone_overlay_btn_end">结束任务</string>
+    <string name="phone_overlay_btn_collapse">收起</string>
+    <string name="phone_overlay_btn_retry_take_over">再次请求停手</string>
+    <string name="phone_overlay_btn_close_result">关闭结果卡</string>
+
+    <!-- 结束确认 -->
+    <string name="phone_overlay_end_title">结束任务？</string>
+    <string name="phone_overlay_end_body">这会请求撤销代理授权，收到确认前浮窗会保留。已发出的操作不会被撤回，结果留在 AndChamber 待你核对。</string>
+    <string name="phone_overlay_end_cancel">继续跟进</string>
+    <string name="phone_overlay_end_confirm">结束任务</string>
+
+    <!-- 设置卡片 -->
+    <string name="phone_overlay_settings_title">在其他应用上显示进展</string>
+    <string name="phone_overlay_settings_off">关闭 · 只用通知</string>
+    <string name="phone_overlay_settings_on">开启 · 浮窗和通知</string>
+    <string name="phone_overlay_settings_selected_unchecked">已选浮窗 · 尚未重新测试可见性</string>
+    <string name="phone_overlay_settings_selected_unchecked_hint">你选了浮窗，但之后还没有重新测试。请再显示一次演示胶囊，或改为只用通知。</string>
+    <string name="phone_overlay_settings_selected_blocked">已选浮窗 · 目前无法显示</string>
+    <string name="phone_overlay_settings_selected_blocked_hint">浮窗目前未获允许或不可用，无法显示。依赖它的任务会被请求停手；请使用 AndChamber 或它的通知。可以重新允许，或改为只用通知。</string>
+    <string name="phone_overlay_settings_intro">在代理使用的应用上方显示一个小胶囊，不用回到这里也能看进展、接管。通知始终保留。</string>
+    <string name="phone_overlay_settings_stop_kinds">接管会让代理停止观察和操作；暂停只停止新操作，代理仍可观察。</string>
+    <string name="phone_overlay_settings_data">胶囊只显示状态和你写的摘要，只在本机，不发送给模型。代理不能开启它、点按它，也不能借它获得权限。</string>
+    <string name="phone_overlay_settings_unavailable">此版本暂不可用。通知照常工作。</string>
+    <string name="phone_overlay_settings_permission">请先允许 AndChamber“显示在其他应用上层”。Android 11 起，系统可能打开应用列表，请在列表里找到 AndChamber。</string>
+    <string name="phone_overlay_settings_not_granted">仍未允许。你可以继续只用通知。</string>
+    <string name="phone_overlay_settings_open_system">打开系统设置</string>
+    <string name="phone_overlay_settings_recheck">重新检查</string>
+    <string name="phone_overlay_settings_test_body">有权限不代表你看得到。请显示演示胶囊，并点它的“接管”。演示不控制任何东西。</string>
+    <string name="phone_overlay_settings_test_start">显示演示胶囊</string>
+    <string name="phone_overlay_settings_test_showing">已请求显示演示胶囊，请点它的“接管”。</string>
+    <string name="phone_overlay_settings_test_failed">演示没有成功：点按没有送达，或你没有看到。仍可只用通知。</string>
+    <string name="phone_overlay_settings_confirm_q">点按已送达。你看到了演示胶囊，并且是自己点的吗？</string>
+    <string name="phone_overlay_settings_confirm_yes">是，我看到了</string>
+    <string name="phone_overlay_settings_confirm_no">没有</string>
+    <string name="phone_overlay_settings_mode">选择跟进方式</string>
+    <string name="phone_overlay_settings_mode_overlay">浮窗和通知</string>
+    <string name="phone_overlay_settings_mode_notification">只用通知</string>
+    <string name="phone_overlay_settings_test_note">测试只说明刚才可用。之后系统仍可能隐藏浮窗；那时会请求代理停手，通知仍然保留。</string>
+</resources>

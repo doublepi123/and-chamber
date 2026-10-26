@@ -156,6 +156,16 @@ class LibAdbDevice(
         return String(bytes, Charsets.UTF_8)
     }
 
+    override fun windowDetailText(windowToken: String, deadlineMs: Long, maxBytes: Int): String {
+        val bytes = readService(
+            AdbCommandSchema.windowDetailDestination(windowToken),
+            deadlineMs,
+            maxBytes,
+        )
+        if (bytes.isEmpty()) throw AdbDeviceException(AdbDeviceFailure.DRIVER)
+        return String(bytes, Charsets.UTF_8)
+    }
+
     override fun displaySizeText(deadlineMs: Long, maxBytes: Int): String {
         val bytes = readService(AdbCommandSchema.DISPLAY_SIZE_DESTINATION, deadlineMs, maxBytes)
         if (bytes.isEmpty()) throw AdbDeviceException(AdbDeviceFailure.DRIVER)

@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone control overlay (experimental). Keep keys in sync with values-zh/phone_overlay_strings.xml. -->
+<resources>
+    <!-- Capsule -->
+    <string name="phone_overlay_window_title">Phone control progress</string>
+    <string name="phone_overlay_demo_tag">Demo</string>
+    <string name="phone_overlay_take_over">Take over</string>
+    <string name="phone_overlay_take_over_cd">Take over: the agent stops observing and acting</string>
+    <string name="phone_overlay_open_native">Open AndChamber</string>
+    <string name="phone_overlay_look">Details</string>
+    <string name="phone_overlay_expand_cd">Show task details</string>
+    <string name="phone_overlay_collapse_cd">Collapse; keep following the task</string>
+    <string name="phone_overlay_drag_cd">Move the progress capsule</string>
+    <string name="phone_overlay_move_left">Move to left edge</string>
+    <string name="phone_overlay_move_right">Move to right edge</string>
+    <string name="phone_overlay_minutes_left">%1$d min left</string>
+    <string name="phone_overlay_sent_count">%1$d sent</string>
+    <string name="phone_overlay_waiting_confirm">Waiting for confirmation</string>
+
+    <!-- Phases: capsule line 1 / line 2 -->
+    <string name="phone_overlay_running">Agent has control</string>
+    <string name="phone_overlay_pausing">Pausing…</string>
+    <string name="phone_overlay_pausing_sub">Waiting for confirmation · can still take over</string>
+    <string name="phone_overlay_paused">Paused · can still observe</string>
+    <string name="phone_overlay_paused_sub">No new actions accepted</string>
+    <string name="phone_overlay_taking">Taking over…</string>
+    <string name="phone_overlay_taken">You\'re in control</string>
+    <string name="phone_overlay_taken_sub">New observation and actions are off</string>
+    <string name="phone_overlay_need_user_pending">The agent asked for you</string>
+    <string name="phone_overlay_need_user_pending_sub">Revoking the agent\'s access</string>
+    <string name="phone_overlay_need_user">Your turn</string>
+    <string name="phone_overlay_need_user_sub">Agent access revoked</string>
+    <string name="phone_overlay_unknown">Result unknown</string>
+    <string name="phone_overlay_unknown_sub">Check before anything else</string>
+    <string name="phone_overlay_ending">Ending…</string>
+    <string name="phone_overlay_ending_sub">Waiting for access to be revoked</string>
+    <string name="phone_overlay_ended">Ended · needs checking</string>
+    <string name="phone_overlay_ended_sub">Check the result in the app</string>
+    <string name="phone_overlay_unconfirmed">Stop not confirmed</string>
+    <string name="phone_overlay_unconfirmed_sub">Open AndChamber</string>
+    <string name="phone_overlay_unavailable">Phone control</string>
+    <string name="phone_overlay_unavailable_sub">Live controls unavailable here</string>
+
+    <!-- Panel -->
+    <string name="phone_overlay_section_task">Task</string>
+    <string name="phone_overlay_summary_show">Show task summary</string>
+    <string name="phone_overlay_summary_hide">Hide task summary</string>
+    <string name="phone_overlay_summary_note">Only the summary you wrote. Screen content isn\'t shown here.</string>
+    <string name="phone_overlay_control_agent">%1$s · agent in control · %2$s</string>
+    <string name="phone_overlay_control_agent_no_time">%1$s · agent in control</string>
+    <string name="phone_overlay_control_person">%1$s · you\'re in control</string>
+    <string name="phone_overlay_no_renew">It never extends its own time.</string>
+    <string name="phone_overlay_section_recent">Recent</string>
+    <string name="phone_overlay_no_events">No events yet.</string>
+    <string name="phone_overlay_section_waiting">Waiting for</string>
+    <string name="phone_overlay_waiting_update">Waiting for an update. Nothing new since %1$s.</string>
+    <string name="phone_overlay_waiting_update_none">Waiting for an update.</string>
+    <string name="phone_overlay_section_you">What you can do</string>
+
+    <!-- Event sources -->
+    <string name="phone_overlay_src_observed">Native observation</string>
+    <string name="phone_overlay_src_confirmed">Native confirmation</string>
+    <string name="phone_overlay_src_sent">Sent · doesn\'t mean done</string>
+    <string name="phone_overlay_src_sent_unknown">Sent · result unknown</string>
+    <string name="phone_overlay_src_agent">Agent note · not verified</string>
+    <string name="phone_overlay_just_now">just now</string>
+    <string name="phone_overlay_seconds_ago">%1$d s ago</string>
+    <string name="phone_overlay_minutes_ago">%1$d min ago</string>
+
+    <!-- Panel notices -->
+    <string name="phone_overlay_running_you">Nothing needed right now.</string>
+    <string name="phone_overlay_running_foot">Pause only refuses new actions; the agent can still observe. Take over revokes this access. Neither undoes actions already sent.</string>
+    <string name="phone_overlay_pausing_notice">Until confirmed, the agent may still be finishing its last action. No need to press Pause again.</string>
+    <string name="phone_overlay_paused_notice">No new actions are accepted; the last one still needs checking. The agent can still observe this app until you take over, open AndChamber or end the task.</string>
+    <string name="phone_overlay_taking_notice">Until confirmed, the last action may still take effect. No need to press again.</string>
+    <string name="phone_overlay_taken_notice">New observation and actions are off; the last action still needs checking. The agent won\'t take control back by itself.</string>
+    <string name="phone_overlay_need_user_pending_notice">The agent asked for a person (its note isn\'t verified). Until this is confirmed, don\'t type anything sensitive here.</string>
+    <string name="phone_overlay_need_user_notice">Your turn: new observation and actions are off; the last action still needs checking. Do this step yourself, and don\'t send passwords to the agent.</string>
+    <string name="phone_overlay_need_user_foot">This comes from the agent\'s request. AndChamber doesn\'t detect every login or sensitive page.</string>
+    <string name="phone_overlay_unknown_notice">An action was sent, but whether it took effect couldn\'t be confirmed. It may already have happened.</string>
+    <string name="phone_overlay_unknown_foot">There is no retry here: repeating the action could do it twice.</string>
+    <string name="phone_overlay_unconfirmed_notice">The stop request timed out. The agent may still be acting, and the last action may have taken effect. Open AndChamber; the notification also leads there.</string>
+    <string name="phone_overlay_unconfirmed_foot">Asking again only asks it to stop; nothing is re-sent. This stays until the stop is confirmed.</string>
+    <string name="phone_overlay_ending_notice">This stays until access is revoked. The last action may still take effect.</string>
+    <string name="phone_overlay_ended_you">Check in the app that the result is really there.</string>
+    <string name="phone_overlay_unavailable_notice">Live controls can\'t be shown here right now. Use AndChamber or its notification.</string>
+    <string name="phone_overlay_continue_foot">To let the agent continue, confirm again in AndChamber; it reads the screen again first. This overlay can\'t grant or extend access.</string>
+    <string name="phone_overlay_result_native">Native</string>
+    <string name="phone_overlay_result_sent">Sent</string>
+    <string name="phone_overlay_result_agent">Agent notes</string>
+
+    <!-- Panel buttons -->
+    <string name="phone_overlay_btn_take_over">Take over (stop observing and acting)</string>
+    <string name="phone_overlay_btn_pause">Pause actions</string>
+    <string name="phone_overlay_btn_open_native">Open AndChamber</string>
+    <string name="phone_overlay_btn_end">End task</string>
+    <string name="phone_overlay_btn_collapse">Collapse</string>
+    <string name="phone_overlay_btn_retry_take_over">Ask to stop again</string>
+    <string name="phone_overlay_btn_close_result">Close result card</string>
+
+    <!-- End confirmation -->
+    <string name="phone_overlay_end_title">End the task?</string>
+    <string name="phone_overlay_end_body">This asks to revoke the agent\'s access. The overlay stays until that\'s confirmed. Actions already sent aren\'t undone; the result stays in AndChamber for you to check.</string>
+    <string name="phone_overlay_end_cancel">Keep following</string>
+    <string name="phone_overlay_end_confirm">End task</string>
+
+    <!-- Settings card -->
+    <string name="phone_overlay_settings_title">Progress over other apps</string>
+    <string name="phone_overlay_settings_off">Off · notifications only</string>
+    <string name="phone_overlay_settings_on">On · overlay and notifications</string>
+    <string name="phone_overlay_settings_selected_unchecked">Overlay selected · visibility not rechecked</string>
+    <string name="phone_overlay_settings_selected_unchecked_hint">You chose the overlay, but it hasn\'t been tested since. Show the demo capsule again, or switch to notifications only.</string>
+    <string name="phone_overlay_settings_selected_blocked">Overlay selected · can\'t be shown</string>
+    <string name="phone_overlay_settings_selected_blocked_hint">The overlay isn\'t allowed or isn\'t available now, so it can\'t be shown. A task that relies on it is asked to stop; use AndChamber or its notification. Allow it again, or switch to notifications only.</string>
+    <string name="phone_overlay_settings_intro">Shows a small capsule over the app the agent is using, so you can follow progress and take over without coming back here. The notification stays either way.</string>
+    <string name="phone_overlay_settings_stop_kinds">Take over stops the agent observing and acting. Pause only stops new actions; the agent can still observe.</string>
+    <string name="phone_overlay_settings_data">The capsule shows only status and the summary you wrote. It stays on this phone and isn\'t sent to the model. The agent can\'t turn it on, tap it, or use it to get access.</string>
+    <string name="phone_overlay_settings_unavailable">Not available in this build yet. Notifications keep working.</string>
+    <string name="phone_overlay_settings_permission">First allow AndChamber to \"Display over other apps\". On Android 11 and later the system may open the app list; find AndChamber there.</string>
+    <string name="phone_overlay_settings_not_granted">Still not allowed. You can keep using notifications only.</string>
+    <string name="phone_overlay_settings_open_system">Open system setting</string>
+    <string name="phone_overlay_settings_recheck">Check again</string>
+    <string name="phone_overlay_settings_test_body">Permission alone doesn\'t prove you can see it. Show a demo capsule and tap its Take over button. The demo controls nothing.</string>
+    <string name="phone_overlay_settings_test_start">Show demo capsule</string>
+    <string name="phone_overlay_settings_test_showing">Demo capsule requested. Tap its Take over button.</string>
+    <string name="phone_overlay_settings_test_failed">The demo didn\'t work: the tap didn\'t arrive, or you didn\'t see it. Notifications only is still available.</string>
+    <string name="phone_overlay_settings_confirm_q">The tap arrived. Did you see the demo capsule and press it yourself?</string>
+    <string name="phone_overlay_settings_confirm_yes">Yes, I saw it</string>
+    <string name="phone_overlay_settings_confirm_no">No</string>
+    <string name="phone_overlay_settings_mode">Choose how to follow tasks</string>
+    <string name="phone_overlay_settings_mode_overlay">Overlay and notifications</string>
+    <string name="phone_overlay_settings_mode_notification">Notifications only</string>
+    <string name="phone_overlay_settings_test_note">The test shows it worked just now. The system can still hide the overlay later; then the agent is asked to stop and the notification remains.</string>
+</resources>

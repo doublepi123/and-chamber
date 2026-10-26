@@ -175,6 +175,13 @@ internal fun phoneScrollAnchor(state: PhoneScreenState): String {
 }
 
 /**
+ * The overlay settings card sits below the step once phone control is on, but not while the agent
+ * holds a lease: changing how a running task is followed mid-task would be confusing.
+ */
+internal fun showsOverlaySettings(step: PhoneStep): Boolean =
+    step == PhoneStep.Connect || step == PhoneStep.Grant || step == PhoneStep.Halted || step == PhoneStep.Result
+
+/**
  * Whether "continue with the agent" may be offered after a halt. Never while the stop is not
  * confirmed or a dispatched action may still apply (the person checks first), and never without
  * a link and a verified stop entry. Continuing always goes through a fresh grant.

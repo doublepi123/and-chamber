@@ -71,6 +71,50 @@ class PhoneToolProtocolTest {
                 ),
             ),
         )
+        assertEquals(
+            PhoneToolAction.Progress(5L, "checking the form"),
+            action(
+                toolBody(
+                    input = input(
+                        "progress",
+                        extra = mapOf("epoch" to 5L, "phase" to "checking the form"),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(
+            PhoneToolAction.Progress(5L, "checking the form"),
+            action(
+                toolBody(
+                    input = input(
+                        "progress",
+                        extra = mapOf("epoch" to 5L, "message" to "checking the form"),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(
+            PhoneToolAction.NeedUser(5L, "a person must enter the code"),
+            action(
+                toolBody(
+                    input = input(
+                        "need_user",
+                        extra = mapOf("epoch" to 5L, "reason" to "a person must enter the code"),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(
+            PhoneToolAction.Finish(5L, "I have reported the end"),
+            action(
+                toolBody(
+                    input = input(
+                        "finish",
+                        extra = mapOf("epoch" to 5L, "summary" to "I have reported the end"),
+                    ),
+                ),
+            ),
+        )
         assertEquals(PhoneToolAction.Snapshot, action(toolBody(input = input("snapshot"))))
         assertEquals(
             PhoneToolAction.Capture("obs-1"),
@@ -260,6 +304,97 @@ class PhoneToolProtocolTest {
             refused(
                 toolBody(
                     input = input("request", extra = mapOf("summary" to "a\u0001b")),
+                ),
+            ),
+        )
+        assertTrue(
+            "status takes no epoch",
+            refused(toolBody(input = input("status", extra = mapOf("epoch" to 1L)))),
+        )
+        assertTrue(
+            "progress needs an epoch",
+            refused(toolBody(input = input("progress", extra = mapOf("phase" to "x")))),
+        )
+        assertTrue(
+            "progress epoch is non-negative",
+            refused(toolBody(input = input("progress", extra = mapOf("epoch" to -1L, "phase" to "x")))),
+        )
+        assertTrue(
+            "progress takes exactly one of phase/message",
+            refused(
+                toolBody(
+                    input = input(
+                        "progress",
+                        extra = mapOf("epoch" to 5L, "phase" to "a", "message" to "b"),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            "progress needs phase or message",
+            refused(toolBody(input = input("progress", extra = mapOf("epoch" to 5L)))),
+        )
+        assertTrue(
+            "progress text is bounded",
+            refused(
+                toolBody(
+                    input = input(
+                        "progress",
+                        extra = mapOf("epoch" to 5L, "phase" to "x".repeat(121)),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            "progress text has no control characters",
+            refused(
+                toolBody(
+                    input = input(
+                        "progress",
+                        extra = mapOf("epoch" to 5L, "phase" to "bad\u0001text"),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            "progress takes no observation",
+            refused(
+                toolBody(
+                    input = input(
+                        "progress",
+                        observationId = "obs-1",
+                        extra = mapOf("epoch" to 5L, "phase" to "x"),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            "need_user takes exactly one of reason/message",
+            refused(
+                toolBody(
+                    input = input(
+                        "need_user",
+                        extra = mapOf("epoch" to 5L, "reason" to "a", "message" to "b"),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            "need_user needs a reason",
+            refused(toolBody(input = input("need_user", extra = mapOf("epoch" to 5L)))),
+        )
+        assertTrue(
+            "finish needs a summary",
+            refused(toolBody(input = input("finish", extra = mapOf("epoch" to 5L)))),
+        )
+        assertTrue(
+            "finish summary is bounded",
+            refused(
+                toolBody(
+                    input = input(
+                        "finish",
+                        extra = mapOf("epoch" to 5L, "summary" to "x".repeat(121)),
+                    ),
                 ),
             ),
         )

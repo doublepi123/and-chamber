@@ -9,6 +9,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.security.MessageDigest
 
@@ -70,6 +71,24 @@ sealed interface PhoneToolAction {
         val summary: String,
         val packageName: String?,
     ) : PhoneToolAction
+
+    /** Unverified model narration for the current native task. Never a native fact. */
+    data class Progress(
+        val epoch: Long,
+        val phase: String,
+    ) : PhoneToolAction
+
+    /** Asks for the person; only becomes waiting after a native stop/revoke acknowledgement. */
+    data class NeedUser(
+        val epoch: Long,
+        val reason: String,
+    ) : PhoneToolAction
+
+    /** Reports the agent's end; pending verification, never a business success. */
+    data class Finish(
+        val epoch: Long,
+        val summary: String,
+    ) : PhoneToolAction
 }
 
 /**
@@ -96,10 +115,27 @@ object PhoneToolProtocol {
     /** The fixed reply for a successful proposal: the person confirms in the app, not here. */
     const val CONFIRM_IN_APP = "请在AndChamber手机控制中确认"
 
+    /** A successful model finish is only a report; it is not a verified business success. */
+    const val FINISH_REPORTED = "报告结束，待核对"
+
+    const val MAX_EVENT_TEXT_CHARS = 120
+
     /** Placeholder action for a request that failed before its action could be read. */
     const val UNKNOWN_ACTION = "phone.unknown"
 
-    val ACTIONS = setOf("status", "request", "snapshot", "capture", "tap", "swipe", "input", "back")
+    val ACTIONS = setOf(
+        "status",
+        "request",
+        "progress",
+        "need_user",
+        "finish",
+        "snapshot",
+        "capture",
+        "tap",
+        "swipe",
+        "input",
+        "back",
+    )
 
     private val BODY_KEYS = setOf("version", "sessionID", "callID", "messageID", "agent", "input")
 
@@ -165,6 +201,28 @@ object PhoneToolProtocol {
                         return@runCatching null
                     }
                     PhoneToolAction.Request(summary, optionalPackage(input))
+                }
+                "progress" -> {
+                    requireKeys(input, setOf("epoch", "phase", "message"))
+                    val epoch = requiredEpoch(input) ?: return@runCatching null
+                    val phase = optionalEventText(input, "phase")
+                    val message = optionalEventText(input, "message")
+                    if ((phase == null) == (message == null)) return@runCatching null
+                    PhoneToolAction.Progress(epoch, phase ?: message!!)
+                }
+                "need_user" -> {
+                    requireKeys(input, setOf("epoch", "reason", "message"))
+                    val epoch = requiredEpoch(input) ?: return@runCatching null
+                    val reason = optionalEventText(input, "reason")
+                    val message = optionalEventText(input, "message")
+                    if ((reason == null) == (message == null)) return@runCatching null
+                    PhoneToolAction.NeedUser(epoch, reason ?: message!!)
+                }
+                "finish" -> {
+                    requireKeys(input, setOf("epoch", "summary"))
+                    val epoch = requiredEpoch(input) ?: return@runCatching null
+                    val summary = optionalEventText(input, "summary") ?: return@runCatching null
+                    PhoneToolAction.Finish(epoch, summary)
                 }
                 "snapshot" -> {
                     requireKeys(input, emptySet())
@@ -296,6 +354,12 @@ object PhoneToolProtocol {
                 "Another chat session owns phone control for the current request or grant. Ask the person to grant phone control again if this session should have it."
             PhoneToolCodes.ROUTE_NOT_PUBLISHED ->
                 "Phone control is not ready for this grant yet. Do not retry in a loop; the person must confirm the task in AndChamber phone control."
+            PhoneToolCodes.NO_TASK -> "There is no confirmed phone task for this epoch."
+            PhoneToolCodes.STALE_TASK -> "The phone task changed. Use status and the current epoch."
+            PhoneToolCodes.TASK_NOT_ACTIVE -> "The phone task is no longer accepting agent updates."
+            PhoneToolCodes.TASK_EVENTS_UNAVAILABLE -> "Phone task progress is not available."
+            PhoneToolCodes.STOP_UNCONFIRMED ->
+                "The phone has not confirmed that control stopped. Do not claim it stopped; ask the person to check the phone."
             PhoneToolCodes.GRANT_ACTIVE ->
                 "Phone control already has an active grant. Finish or revoke it on the phone before requesting another task."
             PhoneToolCodes.RUNTIME_NOT_READY ->
@@ -379,6 +443,32 @@ object PhoneToolProtocol {
         return requiredInt(input, name) ?: throw Refused()
     }
 
+    private fun requiredEpoch(input: JsonObject): Long? {
+        val raw = input["epoch"] ?: return null
+        val primitive = raw as? JsonPrimitive ?: return null
+        if (primitive.isString) return null
+        val epoch = primitive.longOrNull ?: return null
+        return epoch.takeIf { it >= 0 }
+    }
+
+    private fun optionalEventText(
+        input: JsonObject,
+        name: String,
+    ): String? {
+        val raw = input[name] ?: return null
+        if (raw is JsonNull) return null
+        val primitive = raw as? JsonPrimitive ?: throw Refused()
+        if (!primitive.isString) throw Refused()
+        val text = primitive.content
+        if (text.isBlank() ||
+            text.length > MAX_EVENT_TEXT_CHARS ||
+            text.any(Char::isISOControl)
+        ) {
+            throw Refused()
+        }
+        return text
+    }
+
     private fun requireCoordinate(value: Int) {
         if (value !in 0..MAX_COORDINATE) throw Refused()
     }
@@ -429,6 +519,11 @@ object PhoneToolCodes {
     const val SESSION_BUSY = "SESSION_BUSY"
     const val GRANT_ACTIVE = "GRANT_ACTIVE"
     const val ROUTE_NOT_PUBLISHED = "ROUTE_NOT_PUBLISHED"
+    const val NO_TASK = "NO_TASK"
+    const val STALE_TASK = "STALE_TASK"
+    const val TASK_NOT_ACTIVE = "TASK_NOT_ACTIVE"
+    const val TASK_EVENTS_UNAVAILABLE = "TASK_EVENTS_UNAVAILABLE"
+    const val STOP_UNCONFIRMED = "STOP_UNCONFIRMED"
     const val RUNTIME_NOT_READY = "RUNTIME_NOT_READY"
     const val PHONE_UNAVAILABLE = "PHONE_UNAVAILABLE"
     const val DUPLICATE_CALL = "DUPLICATE_CALL"

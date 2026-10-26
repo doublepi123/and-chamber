@@ -18,6 +18,12 @@ one native-confirmed task/target, a short lease, and a TLS ADB driver. See
 - `android/`: lazy AndroidKeyStore identity, private receipt metadata, native coordinator/foreground
   service, notification pairing replies, target catalogue, discovery, process/epoch intent identities
   and the validating notification Return Activity.
+- `overlay/progress/`: bounded task/event store and native event ports. Task identity is stable across
+  grant epochs; model narration stays unverified. Handoff/end require native stop receipts.
+- `overlay/safety/`: dynamic mode gate, real WindowManager witnesses, geometry-generation policy and
+  point/swipe exclusion. A manager expectation is not proof that the overlay is visible.
+- `android/overlay/`: separate bounded display service, permission/demo flow, manager-owned layout,
+  first-frame-aware read-hide tickets, progress adapters and the lazy driver barrier.
 
 ## Flow
 
@@ -34,6 +40,19 @@ observation as well as mutation; a plain Pause blocks new mutations.
 The controller clock is `elapsedRealtime`, including the native UI countdown. Runtime launch
 identities stay monotonic within the same server instance. Old proposal revisions, grant attempts,
 launch callbacks and PendingIntents cannot publish/clear a newer owner's state.
+
+The optional overlay is not the browser window. Its presentation is `ui/phone/overlay`; native setup
+tests reachability without granting control. Explicit notification-only mode retains the original
+driver path. Selected overlay mode requires real window evidence, temporarily hides its own surface
+for collection and restores only current native authority after a first frame. A short synchronized
+ticket store isolates cancellation, restore timeout and newer owners; stop requests are never
+converted into rollback claims. The overlay can stop/return/end, never grant or renew.
+
+The tool's `progress`, `need_user` and `finish` actions use a frozen explicit epoch and the native
+published route. Native-only completion callbacks carry observation/delivery metadata, not typed
+input or pixels. `PhoneTaskProgressAdapter` projects only the matching task epoch into a display;
+demo surfaces never inherit a real task feed. Native End saves a needs-check record before publishing
+its exact-owner end fact; closing the overlay result leaves that record intact.
 
 ## Driver dependency patches
 

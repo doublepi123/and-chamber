@@ -2,6 +2,17 @@ package io.andchamber.app.phone.tool
 
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
+import io.andchamber.app.phone.core.PhoneDispatchReceipt
+import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
+import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
+import io.andchamber.app.phone.overlay.progress.PhoneProgressApply
+import io.andchamber.app.phone.overlay.progress.PhoneProgressStore
+import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEvent
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
+import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
@@ -491,6 +502,284 @@ class PhoneToolServerTest {
     }
 
     @Test
+    fun `task progress requires the explicit epoch, native route and a task`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key) { PhoneTaskEventReply.Recorded(42) }
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+            val response = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "ev-1",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "checking the form")),
+                ),
+            )
+            assertTrue(response.ok())
+            assertEquals("PROGRESS", response.data()["state"]!!.toString().trim('"'))
+            assertEquals("42", response.data()["seq"].toString())
+            assertEquals("MODEL", response.data()["source"]!!.toString().trim('"'))
+            assertEquals("false", response.data()["verified"].toString())
+            assertEquals(
+                listOf(
+                    HandledTaskEvent(
+                        key,
+                        epoch,
+                        "ses-a",
+                        PhoneTaskEvent.Progress("ev-1", "checking the form"),
+                    ),
+                ),
+                events.handled,
+            )
+
+            val missingEpoch = httpPost(
+                fixture.port,
+                toolBody("ses-a", "ev-0", input("progress", extra = mapOf("phase" to "x"))),
+            )
+            assertEquals(400, missingEpoch.status)
+            assertEquals("INVALID_REQUEST", missingEpoch.code())
+
+            val stale = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "ev-2",
+                    input("progress", extra = mapOf("epoch" to epoch - 1, "phase" to "stale")),
+                ),
+            )
+            assertEquals("EPOCH_CHANGED", stale.code())
+            assertEquals(1, events.handled.size)
+
+            val other = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-b",
+                    "ev-3",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "not mine")),
+                ),
+            )
+            assertEquals("SESSION_BUSY", other.code())
+            assertEquals(1, events.handled.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `task events fail closed when no native task or handler exists`() = runBlocking {
+        val noTask = PhoneServerFixture(taskEvents = RecordingTaskEvents(currentKey = null))
+        try {
+            noTask.granted()
+            val epoch = noTask.controller.state.value.epoch
+            val response = httpPost(
+                noTask.port,
+                toolBody("ses-a", "ev-1", input("progress", extra = mapOf("epoch" to epoch, "phase" to "x"))),
+            )
+            assertEquals("NO_TASK", response.code())
+        } finally {
+            noTask.close()
+        }
+
+        val unavailable = PhoneServerFixture()
+        try {
+            val response = httpPost(
+                unavailable.port,
+                toolBody("ses-a", "ev-2", input("progress", extra = mapOf("epoch" to 1L, "phase" to "x"))),
+            )
+            assertEquals("TASK_EVENTS_UNAVAILABLE", response.code())
+            val status = httpPost(unavailable.port, toolBody("ses-a", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals("false", status.data()["taskPresent"].toString())
+        } finally {
+            unavailable.close()
+        }
+    }
+
+    @Test
+    fun `status reports only a task boolean and never its content`() = runBlocking {
+        val key = PhoneTaskKey("task-secret-id", "runtime-secret-id")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            val status = httpPost(fixture.port, toolBody("ses-a", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals("true", status.data()["taskPresent"].toString())
+            assertFalse(status.body.contains("task-secret-id"))
+            assertFalse(status.body.contains("runtime-secret-id"))
+            assertFalse(status.body.contains("summary"))
+            assertFalse(status.body.contains("packageName"))
+            assertFalse(status.body.contains("events"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `status never reads the native task summary target or events`() = runBlocking {
+        val store = PhoneProgressStore(clock = { 1_000L })
+        val events =
+            object : PhoneTaskEventHandler {
+                override fun currentTask(epoch: Long): PhoneTaskKey? = store.currentTask(epoch)
+
+                override suspend fun handle(
+                    key: PhoneTaskKey,
+                    epoch: Long,
+                    sessionLabel: String,
+                    event: PhoneTaskEvent,
+                ): PhoneTaskEventReply = PhoneTaskEventReply.Refused(PhoneTaskEventError.UNAVAILABLE)
+            }
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+            assertEquals(
+                PhoneProgressApply.ACCEPTED,
+                store.startTask(
+                    eventId = "start",
+                    key = PhoneTaskKey("task-secret-id", "runtime-secret-id"),
+                    epoch = epoch,
+                    routeSession = "ses-a",
+                    summary = "SENSITIVE-TASK-SUMMARY",
+                    packageName = "com.example.secret",
+                ),
+            )
+            val status = httpPost(fixture.port, toolBody("ses-a", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals("true", status.data()["taskPresent"].toString())
+            for (secret in listOf(
+                "SENSITIVE-TASK-SUMMARY",
+                "com.example.secret",
+                "task-secret-id",
+                "runtime-secret-id",
+            )) {
+                assertFalse("status leaked $secret", status.body.contains(secret))
+            }
+            assertFalse(status.body.contains("\"summary\""))
+            assertFalse(status.body.contains("\"packageName\""))
+            assertFalse(status.body.contains("\"events\""))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `need_user and finish map only after a native reply and stay unverified`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val ack = PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+
+            events.reply = { PhoneTaskEventReply.HaltUnconfirmed() }
+            val unconfirmed = httpPost(
+                fixture.port,
+                toolBody("ses-a", "n1", input("need_user", extra = mapOf("epoch" to epoch, "reason" to "help"))),
+            )
+            assertEquals("STOP_UNCONFIRMED", unconfirmed.code())
+
+            events.reply = { PhoneTaskEventReply.WaitingForUser(8, ack) }
+            val waiting = httpPost(
+                fixture.port,
+                toolBody("ses-a", "n2", input("need_user", extra = mapOf("epoch" to epoch, "reason" to "help"))),
+            )
+            assertTrue(waiting.ok())
+            assertEquals("WAITING_USER", waiting.data()["state"]!!.toString().trim('"'))
+            assertEquals("false", waiting.data()["verified"].toString())
+            assertEquals("true", waiting.data()["sentActionsMayStillApply"].toString())
+
+            events.reply = { PhoneTaskEventReply.EndedPendingCheck(9, ack) }
+            val finish = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "f1",
+                    input("finish", extra = mapOf("epoch" to epoch, "summary" to "I reported the end")),
+                ),
+            )
+            assertTrue(finish.ok())
+            assertEquals("ENDED_PENDING_CHECK", finish.data()["state"]!!.toString().trim('"'))
+            assertEquals("false", finish.data()["verified"].toString())
+            assertFalse(finish.body.contains("\"success\""))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `an event admitted under an epoch cannot execute after a regrant`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+            events.expectedEpoch = epoch
+            fixture.server.afterAdmissionForTest = {
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            val pending = executor.submit<RawResponse> {
+                httpPost(
+                    fixture.port,
+                    toolBody("ses-a", "ev-late", input("progress", extra = mapOf("epoch" to epoch, "phase" to "old epoch"))),
+                )
+            }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+            fixture.controller.grant(TARGET, PhoneActionKind.values().toSet(), 60_000L)
+            val newEpoch = fixture.controller.state.value.epoch
+            assertTrue(newEpoch > epoch)
+            assertTrue(fixture.publishRoute("ses-b"))
+            events.expectedEpoch = newEpoch
+
+            release.countDown()
+            val response = pending.get(5, TimeUnit.SECONDS)
+            assertEquals("EPOCH_CHANGED", response.code())
+            assertEquals("the refusal reports the admitted epoch", epoch, response.epoch())
+            assertEquals(epoch, events.handled.single().epoch)
+        } finally {
+            fixture.server.afterAdmissionForTest = null
+            release.countDown()
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a cancel for an event call prevents the native handler from running`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+            val cancelled = httpPost(
+                fixture.port,
+                cancelBody("ses-a", "ev-cancel"),
+                path = PhoneToolEndpoint.CANCEL_PATH,
+            )
+            assertEquals(200, cancelled.status)
+            assertEquals("false", cancelled.json["cancelled"].toString())
+
+            val response = httpPost(
+                fixture.port,
+                toolBody("ses-a", "ev-cancel", input("progress", extra = mapOf("epoch" to epoch, "phase" to "x"))),
+            )
+            assertEquals("CANCELLED", response.code())
+            assertTrue(events.handled.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun `a repeated call id is refused after it was handled`() = runBlocking {
         val fixture = PhoneServerFixture()
         try {
@@ -700,6 +989,252 @@ class PhoneToolServerTest {
             assertNotEquals(first, fixture.controller.state.value.epoch)
         } finally {
             fixture.close()
+        }
+    }
+
+    @Test
+    fun `a manual first claim binds only the verified router session`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted(pinnedSession = null)
+            val epoch = fixture.controller.state.value.epoch
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            assertTrue(snap.ok())
+            assertEquals(listOf(RouteClaim(key, epoch, "ses-a")), events.routeClaims)
+
+            val foreign = httpPost(
+                fixture.port,
+                snapshotBody(session = "ses-b", callId = "b1"),
+            )
+            assertEquals("SESSION_BUSY", foreign.code())
+            assertEquals("the wrong session never emits a route claim", 1, events.routeClaims.size)
+
+            val progress = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "p1",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "ses-b")),
+                ),
+            )
+            assertTrue(progress.ok())
+            assertEquals("a model phase string cannot change the owner", "ses-a", events.routeClaims.last().session)
+            assertEquals("only the first manual claim emits the callback", 1, events.routeClaims.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a manual task may bind its first claim from a task event`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted(pinnedSession = null)
+            val epoch = fixture.controller.state.value.epoch
+            val progress = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "p1",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "starting")),
+                ),
+            )
+            assertTrue(progress.ok())
+            assertEquals(listOf(RouteClaim(key, epoch, "ses-a")), events.routeClaims)
+            val foreign = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-b",
+                    "p2",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "not mine")),
+                ),
+            )
+            assertEquals("SESSION_BUSY", foreign.code())
+            assertEquals(1, events.routeClaims.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a pinned route does not emit a manual route claim`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted(pinnedSession = "ses-a")
+            assertTrue(httpPost(fixture.port, snapshotBody(callId = "s1")).ok())
+            assertTrue("a pinned route was already bound at native start", events.routeClaims.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `real controller results reach the native callback without payload`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+
+            val snap = httpPost(fixture.port, snapshotBody(callId = "s1"))
+            assertTrue(snap.ok())
+            assertEquals(PhoneNativeCallOutcome.Observed(captured = false), events.nativeCalls.last().outcome)
+            assertEquals("s1", events.nativeCalls.last().requestId)
+            assertEquals(key, events.nativeCalls.last().key)
+            assertEquals(epoch, events.nativeCalls.last().epoch)
+
+            val capture = httpPost(
+                fixture.port,
+                toolBody("ses-a", "c1", input("capture", snap.observationId())),
+            )
+            assertTrue(capture.ok())
+            assertEquals(PhoneNativeCallOutcome.Observed(captured = true), events.nativeCalls.last().outcome)
+
+            val snap2 = httpPost(fixture.port, snapshotBody(callId = "s2"))
+            fixture.driver.dispatchReceipt = PhoneDispatchReceipt.Sent
+            val tap = httpPost(fixture.port, tapBody(snap2.observationId(), callId = "t1"))
+            assertTrue(tap.ok())
+            assertEquals(
+                PhoneNativeCallOutcome.Mutation(PhoneMutationDelivery.SENT),
+                events.nativeCalls.last().outcome,
+            )
+
+            val snap3 = httpPost(fixture.port, snapshotBody(callId = "s3"))
+            val unicode = httpPost(
+                fixture.port,
+                toolBody("ses-a", "u1", input("input", snap3.observationId(), mapOf("text" to "你好"))),
+            )
+            assertEquals("UNICODE_UNSUPPORTED", unicode.code())
+            assertEquals(PhoneNativeCallOutcome.Refused, events.nativeCalls.last().outcome)
+
+            val snap4 = httpPost(fixture.port, snapshotBody(callId = "s4"))
+            fixture.driver.dispatchReceipt = PhoneDispatchReceipt.Unknown()
+            val unknown = httpPost(fixture.port, tapBody(snap4.observationId(), callId = "t2"))
+            assertEquals("OUTCOME_UNKNOWN", unknown.code())
+            assertEquals(
+                PhoneNativeCallOutcome.Mutation(PhoneMutationDelivery.UNKNOWN),
+                events.nativeCalls.last().outcome,
+            )
+            assertEquals(
+                "no payload is attached to the callback",
+                listOf("s1", "c1", "s2", "t1", "s3", "u1", "s4", "t2"),
+                events.nativeCalls.map { it.requestId },
+            )
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `an old admitted controller result is reported with its old key and epoch`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(currentKey = key)
+        val fixture = PhoneServerFixture(taskEvents = events)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            fixture.granted()
+            val epoch = fixture.controller.state.value.epoch
+            fixture.server.afterAdmissionForTest = {
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            val pending = executor.submit<RawResponse> {
+                httpPost(fixture.port, snapshotBody(callId = "old"))
+            }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+            fixture.controller.grant(TARGET, PhoneActionKind.values().toSet(), 60_000L)
+            assertTrue(fixture.publishRoute("ses-b"))
+            release.countDown()
+            val response = pending.get(5, TimeUnit.SECONDS)
+            assertEquals("EPOCH_CHANGED", response.code())
+            assertEquals(epoch, response.epoch())
+
+            val call = events.nativeCalls.single()
+            assertEquals(key, call.key)
+            assertEquals(epoch, call.epoch)
+            assertEquals(PhoneNativeCallOutcome.Refused, call.outcome)
+        } finally {
+            fixture.server.afterAdmissionForTest = null
+            release.countDown()
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    private data class HandledTaskEvent(
+        val key: PhoneTaskKey,
+        val epoch: Long,
+        val session: String,
+        val event: PhoneTaskEvent,
+    )
+
+    private data class NativeCall(
+        val key: PhoneTaskKey,
+        val epoch: Long,
+        val requestId: String,
+        val outcome: PhoneNativeCallOutcome,
+    )
+
+    private data class RouteClaim(
+        val key: PhoneTaskKey,
+        val epoch: Long,
+        val session: String,
+    )
+
+    private class RecordingTaskEvents(
+        var currentKey: PhoneTaskKey? = null,
+        var expectedEpoch: Long? = null,
+        var reply: (PhoneTaskEvent) -> PhoneTaskEventReply = { PhoneTaskEventReply.Recorded(1) },
+    ) : PhoneTaskEventHandler {
+        override val available: Boolean = true
+        val handled = mutableListOf<HandledTaskEvent>()
+        val nativeCalls = mutableListOf<NativeCall>()
+        val routeClaims = mutableListOf<RouteClaim>()
+
+        override fun currentTask(epoch: Long): PhoneTaskKey? {
+            val expected = expectedEpoch
+            return if (expected != null && expected != epoch) null else currentKey
+        }
+
+        override suspend fun handle(
+            key: PhoneTaskKey,
+            epoch: Long,
+            sessionLabel: String,
+            event: PhoneTaskEvent,
+        ): PhoneTaskEventReply {
+            handled += HandledTaskEvent(key, epoch, sessionLabel, event)
+            val expected = expectedEpoch
+            if (expected != null && expected != epoch) {
+                return PhoneTaskEventReply.Refused(PhoneTaskEventError.EPOCH_CHANGED)
+            }
+            return reply(event)
+        }
+
+        override fun onNativeCallCompleted(
+            key: PhoneTaskKey,
+            admittedEpoch: Long,
+            requestId: String,
+            outcome: PhoneNativeCallOutcome,
+        ) {
+            nativeCalls += NativeCall(key, admittedEpoch, requestId, outcome)
+        }
+
+        override fun onRouteClaimed(
+            key: PhoneTaskKey,
+            admittedEpoch: Long,
+            sessionLabel: String,
+        ) {
+            routeClaims += RouteClaim(key, admittedEpoch, sessionLabel)
         }
     }
 }

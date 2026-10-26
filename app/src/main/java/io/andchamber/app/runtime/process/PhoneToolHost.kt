@@ -2,6 +2,7 @@ package io.andchamber.app.runtime.process
 
 import io.andchamber.app.phone.core.PhoneController
 import io.andchamber.app.phone.core.PhoneLimits
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.tool.PhonePendingRequest
 import io.andchamber.app.phone.tool.PhonePendingRequestStore
 import io.andchamber.app.phone.tool.PhoneToolEndpoint
@@ -95,6 +96,8 @@ interface PhoneToolHost {
 class PhoneToolBinding(
     private val controller: PhoneController,
     private val readyLaunch: () -> Long?,
+    /** Native task-progress bridge; defaults to fail-closed Unavailable. */
+    private val taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
     /**
      * Shared with the loopback server; holds at most one native-confirmation proposal. Internal so
      * the runtime owner and tests can inspect ownership; UI uses [pendingRequest]/consume/dismiss.
@@ -113,6 +116,7 @@ class PhoneToolBinding(
                 token = token,
                 controller = controller,
                 readyLaunch = readyLaunch,
+                taskEvents = taskEvents,
                 pendingRequests = pendingRequests,
             )
         }

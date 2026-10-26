@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phone overlay integration (display service notification). Keep keys in sync with values-zh. -->
+<resources>
+    <string name="phone_overlay_notif_channel">Phone control overlay</string>
+    <string name="phone_overlay_notif_channel_desc">Shows the phone-control overlay and its stop controls. Turning this off also hides the overlay, so keep it on while the overlay is used.</string>
+    <string name="phone_overlay_notif_title">Phone control overlay</string>
+    <string name="phone_overlay_notif_body">Open AndChamber to check the task. The overlay can be closed once the task has ended.</string>
+    <string name="phone_overlay_notif_open">Open AndChamber</string>
+    <string name="phone_overlay_notif_close">Close overlay</string>
+</resources>

@@ -38,11 +38,26 @@ enum class AdbTextRefusal {
  */
 object AdbCommandSchema {
     const val MAX_INPUT_CHARS: Int = 200
+    const val MAX_WINDOW_TOKEN_CHARS: Int = 16
 
     const val HIERARCHY_DESTINATION: String = "shell:uiautomator dump /dev/tty"
     const val WINDOW_STATE_DESTINATION: String = "shell:dumpsys window"
     const val DISPLAY_SIZE_DESTINATION: String = "shell:wm size"
     const val CAPTURE_DESTINATION: String = "exec:screencap -p"
+
+    /**
+     * `dumpsys window <token>` prints the full state of one window, including its real `Frames:`
+     * line. The full `dumpsys window` list on API 35 omits that frame, so the overlay witness needs
+     * this second, fixed read. Only a bounded hexadecimal window token is accepted; there is still
+     * no agent-supplied command string.
+     */
+    fun windowDetailDestination(windowToken: String): String {
+        require(isWindowToken(windowToken)) { "invalid window token" }
+        return "shell:dumpsys window $windowToken"
+    }
+
+    fun isWindowToken(value: String): Boolean =
+        value.length in 1..MAX_WINDOW_TOKEN_CHARS && value.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
 
     fun textRefusal(text: String): AdbTextRefusal? {
         if (text.isEmpty()) return AdbTextRefusal.EMPTY

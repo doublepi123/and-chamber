@@ -51,6 +51,59 @@ Pause stops new changes; authorized observation can still help inspect an uncert
 these revoke the whole lease, including observation. A model's final sentence is not a native
 control-release acknowledgement; use the native controls or the short lease's expiry.
 
+## Optional system progress overlay
+
+**Progress over other apps** is a separate, default-off native setting. Notifications remain
+available in both modes. A system draw-over permission does not grant device control.
+
+1. Open the system permission screen yourself. Android 11+ may show an app list rather than opening
+   this app's switch directly. Refusing it never prevents selecting **Notifications only**.
+2. Return to AndChamber, show the clearly marked demo capsule, tap **Take over**, then confirm that
+   you saw and pressed it. The demo grants no device lease. Permission or `addView` success alone is
+   not visibility evidence; the demo only establishes reachability at that moment.
+3. Explicitly choose **Overlay and notifications**. New tasks still require native confirmation of
+   target, actions and duration. Enabling an overlay does not resume a stopped task.
+
+The draggable, edge-snapped capsule shows the control phase and dispatch count, not a percentage of
+business completion. Tap its body for the bounded task panel. The confirmed summary is folded by
+default. Events distinguish native observations/confirmations, dispatched actions and unverified
+agent notes. No event means waiting for updates, not fabricated progress.
+
+**Take over** revokes observation and changes while leaving the current target page open. **Pause
+actions** in the panel stops new mutations but can still allow observation. Pending stop requests
+are not displayed as confirmed. Already-sent device commands are never described as rolled back.
+Continuing opens the native confirmation flow; there is no overlay grant or renewal action.
+
+The tool has three additional closed actions, all requiring the published session route and explicit
+current `epoch`: `progress(phase)`, `need_user(reason)` and `finish(summary)`. Their bounded text is
+an unverified agent note, not native evidence. `need_user` revokes first, then displays the handoff;
+`finish` ends control and saves a result needing review, not a verified business success. Ordinary
+model prose has no such authority. Automatic detection of every login/sensitive page is not provided.
+
+The display service follows the task/result rather than the lease and has bounded retention.
+Collapse keeps following. Ending requires confirmation and native revocation; only then can the
+result card be closed. Closing the overlay result does not delete the native needs-check record.
+
+Driver checks bind actual window tokens/frames to the manager's owner and geometry generation.
+Tap/input focus and the entire swipe segment must not intersect the overlay. Move the capsule and
+obtain a fresh observation if it covers the intended target; the agent cannot operate its own control
+surface. A declared overlay mode never silently becomes an unprotected notification-only operation.
+
+For observation/capture, an owner-bound display lease temporarily removes the overlay, independently
+verifies its absence, restores the latest native state and waits for its first frame. Mutations cannot
+run concurrently with that collection. The notification stop path remains independent. Cancelled or
+timed-out restoration cannot silently leave a permanent hidden state or resurrect an older owner.
+Actual WindowManager checks, not `FLAG_SECURE`, establish the supported exclusion behavior.
+
+Known permission/display loss fails closed without automatic resumption. Notifications are a recovery
+path, not proof of delivery or acknowledgement. Window checks cannot detect every OEM/system hiding
+behavior; unsupported/unreliable states are refused rather than presented as continuously visible.
+The native tool-call budget remains bounded by the existing 15-second maximum and by the shorter
+live lease; the extra window/focus checks do not extend authority.
+
+See the [system-overlay verification](testing-phone-overlay.md) for production-window evidence and
+the separate platform probe, regression cases and limitations.
+
 ## Implementation boundaries
 
 | Area | Entry points |
@@ -63,6 +116,9 @@ control-release acknowledgement; use the native controls or the short lease's ex
 | Native ADB identity | `phone/android/PhoneIdentityStore.kt` |
 | Per-launch loopback tool | `phone/tool/PhoneToolServer.kt`, `PhoneToolProtocol.kt`, `runtime/process/PhoneToolHost.kt` |
 | OpenCode plugin and launch overlay | `assets/phone-tool/`, `runtime/process/PhonePluginAssets.kt` |
+| System overlay presentation | `ui/phone/overlay/`, `phone/android/overlay/PhoneOverlayCoordinator.kt` |
+| Task progress and native handoff | `phone/overlay/progress/`, `phone/android/overlay/PhoneTaskProgressAdapter.kt` |
+| Overlay witness and execution exclusion | `phone/overlay/safety/`, `PhoneOverlayDriverBridge.kt`, `PhoneOverlaySurfaceHost.kt` |
 
 The loopback listener has a per-launch bearer token and a private endpoint descriptor. It exposes
 fixed actions, not a shell, arbitrary intents, pairing credentials or the installed-app catalog.

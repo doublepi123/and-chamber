@@ -38,10 +38,14 @@ function toolDefinition() {
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'request', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'],
+            enum: ['status', 'request', 'progress', 'need_user', 'finish', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'],
           },
           summary: { type: 'string' },
           packageName: { type: 'string' },
+          epoch: { type: 'integer' },
+          phase: { type: 'string' },
+          message: { type: 'string' },
+          reason: { type: 'string' },
           observationId: { type: 'string' },
           ref: { type: 'string' },
           x: { type: 'integer' },
@@ -53,6 +57,17 @@ function toolDefinition() {
         },
         required: ['action'],
         additionalProperties: false,
+        allOf: [
+          {
+            if: {
+              properties: {
+                action: { enum: ['progress', 'need_user', 'finish'] },
+              },
+              required: ['action'],
+            },
+            then: { required: ['epoch'] },
+          },
+        ],
       },
     },
   };
@@ -190,6 +205,28 @@ test('missing or malformed andchamber_phone schema is rejected, not faked', () =
   assert.equal(malformed.kind, 'text');
   assert.equal(malformed.case, 'tools-rejected');
   assert.equal(JSON.parse(JSON.stringify(malformed)).toolCall, undefined);
+});
+
+test('progress/need_user/finish carry the status epoch and bounded text', () => {
+  const cases = [
+    ['progress', 'phase', 'fixture progress'],
+    ['need_user', 'reason', 'fixture needs a person'],
+    ['finish', 'summary', 'fixture reported the end'],
+  ];
+  for (const [scenario, field, expected] of cases) {
+    const messages = addToolTurn(
+      [{ role: 'user', content: sentinel({ mode: 'continue', scenario }) }],
+      'call_phone_e2e_1',
+      { action: 'status' },
+      status(),
+    );
+    const plan = fixture.planTurn(body(messages), { callSeq: 2 });
+    assert.equal(plan.kind, 'tool');
+    const args = JSON.parse(plan.toolCall.function.arguments);
+    assert.equal(args.action, scenario);
+    assert.equal(args.epoch, 7);
+    assert.equal(args[field], expected);
+  }
 });
 
 test('request plain ack waits for native confirmation', () => {

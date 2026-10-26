@@ -34,6 +34,7 @@ AndChamber builds an Alpine Linux userland with PRoot inside the app's private s
 - **Remote servers**: add the address of OpenChamber on your computer; plain HTTP needs an explicit confirmation.
 - **Working terminal**: `node-pty` is rebuilt on the device for musl, so OpenChamber's terminal works.
 - **Phone control (experimental, off by default)**: Android 11+ can approve one target app, task and short lease natively, then use the local `andchamber_phone` tool. Includes notification pairing and native pause/takeover; uncertain operations are not replayed. Requires a trusted local runtime and supports only its declared ASCII input subset. See [boundaries](docs/phone-control.md) and [emulator acceptance](docs/testing-phone-control.md).
+- **Optional cross-app progress overlay**: separately allow and test a system overlay, then follow native events and unverified agent notes through an edge-snapped capsule/task panel. Take over without leaving the target; notifications remain, and resuming still needs native confirmation. Overlay permission, pairing and control are separate.
 
 ## Requirements
 

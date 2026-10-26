@@ -11,6 +11,10 @@ import io.andchamber.app.phone.core.PhoneErrorCode
 import io.andchamber.app.phone.core.PhoneGeometry
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhonePoint
+import io.andchamber.app.phone.core.PhoneRect
+import io.andchamber.app.phone.overlay.safety.OverlayPhase
+import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
+import io.andchamber.app.phone.overlay.safety.OverlayExpectation
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -448,6 +452,402 @@ class AdbPhoneDriverTest {
     }
 
     @Test
+    fun overlayVisibleAllowsOutsideActionAndRefusesOwnRects() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val snapshot = driver.observe(5_000)
+        val binding = bindingFor(snapshot)
+        assertTrue(overlay.hiddenCalls >= 1)
+        assertTrue(overlay.restoreCalls >= 1)
+
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
+        )
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(
+                request(
+                    PhoneDriverAction.Swipe(PhonePoint(0, 480), PhonePoint(500, 480), 200),
+                    binding,
+                ),
+                5_000,
+            ),
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(50, 50)), device.injected)
+    }
+
+    @Test
+    fun overlayRevisionChangeInvalidatesTheOldObservation() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        overlay.revision += 1
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun overlayThatBecomesHiddenIsRefusedForObserveAndDispatch() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        overlay.visible = false
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun overlayCaptureHidesTheWindowAndALyingBarrierIsRefused() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        val image = driver.capture(binding, 5_000)
+        assertEquals(1080, image.width)
+        assertEquals(2400, image.height)
+        assertTrue(overlay.hiddenCalls >= 2)
+
+        overlay.honest = false
+        val failure = runCatching { driver.capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun overlayInputFocusInsideItsRectIsRefusedBeforeInjection() = runBlocking {
+        val overlay = FakeOverlay(bounds = PhoneRect(100, 100, 300, 200))
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(
+                request(
+                    PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150)),
+                    binding,
+                ),
+                5_000,
+            ),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun notificationModeKeepsTheOriginalPathEvenWhenTheOverlayIsUnavailable() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            required = false
+            visible = false
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val snapshot = driver.observe(5_000)
+        assertEquals("com.example.app", snapshot.packageName)
+        assertEquals(0, overlay.hiddenCalls)
+        assertEquals(0, overlay.restoreCalls)
+
+        val binding = bindingFor(snapshot)
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(50, 50)), device.injected)
+        assertEquals(1080, driver.capture(binding, 5_000).width)
+        assertEquals(0, overlay.hiddenCalls)
+        assertEquals("notification mode must not read the overlay claim", 0, overlay.expectationCalls)
+    }
+
+    @Test
+    fun overlayModeWithAnUnavailableOverlayRefusesWithoutFallback() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            required = true
+            visible = false
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val observeFailure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (observeFailure as PhoneDriverException).failure,
+        )
+        // A dispatch under overlay mode has no stored observation: refuse, never fall back.
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun modeFlipBeforeInjectionFailsClosedAndDoesInjectsNothing() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            required = false
+            visible = false
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        // Dispatch samples the mode once (false), then the pre-injection re-check flips it (true).
+        val flipAt = overlay.requiredCalls + 2
+        overlay.onRequired = { call -> if (call == flipAt) overlay.required = true }
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue("no injection may happen after a mode change", device.injected.isEmpty())
+    }
+
+    @Test
+    fun anObservationFromOverlayModeTaintsNotificationDispatchUntilFreshObserve() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        device.injected.clear()
+
+        overlay.required = false
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue(device.injected.isEmpty())
+
+        // A fresh notification-mode read clears the overlay binding for that window.
+        driver.observe(5_000)
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+    }
+
+    @Test
+    fun anOverlayReadThatLosesTheModeDiscardsTheSnapshot() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            required = true
+            onRequired = { call -> if (call == 2) required = false }
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(overlay.restoreCalls >= 1)
+    }
+
+    @Test
+    fun aThrowingModeGateIsTreatedAsOverlayRequired() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            requiredThrows = true
+            visible = false
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun aModeFlipWhileReadingDiscardsTheContent() = runBlocking {
+        val overlay = FakeOverlay().apply {
+            required = false
+            visible = false
+            onRequired = { call -> if (call == 2) required = true }
+        }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val observeFailure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (observeFailure as PhoneDriverException).failure,
+        )
+
+        val captureFailure = runCatching { driver.capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (captureFailure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun aRevisionAndMoveAfterTheWitnessReadSendsNothing() = runBlocking {
+        val overlay = FakeOverlay(bounds = PhoneRect(10, 10, 20, 20))
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        var fired = false
+        device.onWindowDetail = {
+            if (!fired) {
+                fired = true
+                // The detail dump already returned the old frame; the manager now moves the overlay
+                // over the tap point and bumps its revision.
+                overlay.revision += 1
+                overlay.bounds = PhoneRect(0, 0, 1080, 2400)
+            }
+        }
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue("the old WM witness must not authorize an injection", device.injected.isEmpty())
+    }
+
+    @Test
+    fun aGenerationChangeAfterTheWitnessReadSendsNothing() = runBlocking {
+        val overlay = FakeOverlay(bounds = PhoneRect(10, 10, 20, 20))
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        var fired = false
+        device.onWindowDetail = {
+            if (!fired) {
+                fired = true
+                overlay.generation += 1
+            }
+        }
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun aRevisionChangeAfterTheFocusTapMakesTheTextStepUnknown() = runBlocking {
+        // Start away from the focus point so the focus tap itself is allowed; the overlay only
+        // moves over the field after that tap, before the text step's final guard.
+        val overlay = FakeOverlay(bounds = PhoneRect(10, 10, 20, 20))
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        var detailCalls = 0
+        device.onWindowDetail = {
+            detailCalls += 1
+            if (detailCalls == 2) {
+                // The text step re-validated against the old frame; the overlay now revises.
+                overlay.revision += 1
+                overlay.bounds = PhoneRect(0, 0, 1080, 2400)
+            }
+        }
+        val receipt = driver.dispatch(
+            request(PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150)), binding),
+            5_000,
+        )
+        assertTrue("expected Unknown after the focus tap, was $receipt", receipt is PhoneDispatchReceipt.Unknown)
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (receipt as PhoneDispatchReceipt.Unknown).failure,
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(150, 150)), device.injected)
+    }
+
+    private fun bindingFor(snapshot: io.andchamber.app.phone.core.PhoneSnapshot) =
+        PhoneObservationBinding(
+            observationId = "obs-overlay",
+            generation = 1,
+            packageName = snapshot.packageName,
+            windowId = snapshot.windowId,
+            rotation = snapshot.geometry.rotation,
+            geometry = snapshot.geometry,
+        )
+
+    private fun overlayDriver(device: FakeDevice, overlay: FakeOverlay) = AdbPhoneDriver(
+        device = device,
+        runtimeId = "runtime-1",
+        clock = { 0L },
+        platformSupported = true,
+        overlayBarrier = overlay,
+    )
+
+    @Test
     fun connectionLossAfterOpenIsUnknownOutcomeNotSent() = runBlocking {
         val device = FakeDevice(
             editableHierarchy.toByteArray(),
@@ -584,6 +984,8 @@ class AdbPhoneDriverTest {
         private val failOnInjection: Int = 0,
         private val windowStates: List<String>? = null,
         private val hierarchies: List<ByteArray>? = null,
+        private val windowStateProvider: (() -> String)? = null,
+        private val windowDetailProvider: ((String) -> String)? = null,
     ) : AdbDevice {
         override var transportSecurity: AdbTransportSecurity = security
             private set
@@ -605,8 +1007,21 @@ class AdbPhoneDriverTest {
         }
 
         override fun windowStateText(deadlineMs: Long, maxBytes: Int): String {
+            windowStateProvider?.let { return it() }
             val values = windowStates ?: listOf(defaultWindowState)
             return values[minOf(windowStateCount++, values.lastIndex)]
+        }
+
+        var onWindowDetail: ((String) -> Unit)? = null
+        var detailCalls: Int = 0
+
+        override fun windowDetailText(windowToken: String, deadlineMs: Long, maxBytes: Int): String {
+            val value = windowDetailProvider?.invoke(windowToken)
+                ?: windowStateProvider?.invoke()
+                ?: (windowStates ?: listOf(defaultWindowState)).last()
+            detailCalls += 1
+            onWindowDetail?.invoke(windowToken)
+            return value
         }
 
         override fun displaySizeText(deadlineMs: Long, maxBytes: Int): String = size
@@ -628,6 +1043,95 @@ class AdbPhoneDriverTest {
                   mCurrentFocus=Window{7068ee4 u0 com.example.app/MainActivity}
                   mFocusedApp=ActivityRecord{312191b u0 com.example.app/MainActivity t16}
             """.trimIndent()
+    }
+
+    private class FakeOverlay(
+        var owner: String = "owner-a",
+        var generation: Long = 3,
+        var revision: Long = 7,
+        var visible: Boolean = true,
+        var honest: Boolean = true,
+        // Production-style manager key: a stable LayoutParams.title, not a binder token.
+        val key: String = "andchamber-phone-overlay:owner-a:3",
+        var bounds: PhoneRect = PhoneRect(100, 400, 260, 560),
+    ) : PhoneOverlayBarrier {
+        var hiddenCalls = 0
+        var restoreCalls = 0
+        var required: Boolean = true
+        var requiredThrows: Boolean = false
+        var expectationCalls: Int = 0
+        var requiredCalls: Int = 0
+        var onRequired: ((Int) -> Unit)? = null
+
+        override fun required(deadlineMs: Long): Boolean {
+            requiredCalls += 1
+            onRequired?.invoke(requiredCalls)
+            if (requiredThrows) throw IllegalStateException("mode unavailable")
+            return required
+        }
+
+        override fun expectation(deadlineMs: Long): OverlayExpectation {
+            expectationCalls += 1
+            return OverlayExpectation(
+                owner = owner,
+                generation = generation,
+                revision = revision,
+                phase = if (visible) OverlayPhase.VISIBLE else OverlayPhase.UNAVAILABLE,
+                windowToken = key,
+                freshnessDeadlineMs = deadlineMs + 60_000L,
+            )
+        }
+
+        override suspend fun <T> withContentHidden(
+            owner: String,
+            generation: Long,
+            revision: Long,
+            phase: OverlayPhase,
+            deadlineMs: Long,
+            block: suspend () -> T,
+        ): T {
+            hiddenCalls += 1
+            val previous = visible
+            if (honest) visible = false
+            try {
+                return block()
+            } finally {
+                visible = previous
+                restoreCalls += 1
+            }
+        }
+
+        /** Full `dumpsys window` list: real API 35 has no frame here. */
+        fun windowState(): String = buildString {
+            append("mCurrentFocus=Window{7068ee4 u0 com.example.app/MainActivity}\n")
+            append("mFocusedApp=ActivityRecord{312191b u0 com.example.app/MainActivity t16}\n")
+            if (visible) append(windowSection(detail = false))
+        }
+
+        /** Targeted `dumpsys window <token>`: carries the real frame. */
+        fun detailState(): String = buildString {
+            append("WINDOW MANAGER WINDOWS (dumpsys window windows)\n")
+            if (visible) append(windowSection(detail = true))
+        }
+
+        private fun windowSection(detail: Boolean): String = buildString {
+            append("  Window #6 Window{abc123 u0 Sys2038:$key}:\n")
+            append("    mDisplayId=0\n")
+            append("    mOwnerUid=10210 showForAllUsers=false package=io.example.overlay appop=SYSTEM_ALERT_WINDOW\n")
+            append("    mAttrs={(0,0)(160x160) gr=TOP START ty=APPLICATION_OVERLAY fmt=TRANSLUCENT\n")
+            append("    Requested w=160 h=160 mLayoutSeq=1\n")
+            append("    mHasSurface=true isReadyForDisplay()=true mWindowRemovalAllowed=false\n")
+            if (detail) {
+                append(
+                    "    Frames: parent=[0,0][1080,2400] display=[0,0][1080,2400] " +
+                        "frame=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}] " +
+                        "last=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]\n",
+                )
+            }
+            append("    mViewVisibility=0x0 mHaveFrame=true mObscured=false\n")
+            append("    isOnScreen=true\n")
+            append("    isVisible=true\n")
+        }
     }
 
     private companion object {

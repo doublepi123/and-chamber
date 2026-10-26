@@ -5,6 +5,10 @@ import io.andchamber.app.phone.core.PhoneConnectionResult
 import io.andchamber.app.phone.core.PhoneConnectionState
 import io.andchamber.app.phone.core.PhoneController
 import io.andchamber.app.phone.core.PhoneGrantResult
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEvent
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
+import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
+import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.tool.FakePhoneDriver
 import io.andchamber.app.phone.tool.PhonePendingProposal
 import io.andchamber.app.phone.tool.PhoneToolEndpoint
@@ -46,6 +50,7 @@ class PhoneToolBindingTest {
         val trustedRoot: File,
         transportFactoryOverride: ((Long, String) -> PhoneToolTransport)? = null,
         useRealTransport: Boolean = false,
+        taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
     ) {
         private val target = "com.example.target"
         var now = 1_000L
@@ -74,6 +79,7 @@ class PhoneToolBindingTest {
             PhoneToolBinding(
                 controller = controller,
                 readyLaunch = { currentLaunch },
+                taskEvents = taskEvents,
                 transportFactory = resolvedFactory,
                 tokenSource = { "%064x".format(tokens.getAndIncrement()) },
                 onUnavailable = { unavailable = it },
@@ -302,6 +308,61 @@ class PhoneToolBindingTest {
             assertFalse("None is never ready", PhoneToolHost.None.isReady())
         } finally {
             scope.binding.stop(2L)
+        }
+    }
+
+    @Test
+    fun `binding forwards task events to the native handler`() = runBlocking {
+        val home = folder.newFolder("home-task-events")
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events = RecordingTaskEvents(key)
+        val scope =
+            PhoneToolTestScope(
+                home,
+                folder.root,
+                useRealTransport = true,
+                taskEvents = events,
+            )
+        try {
+            assertTrue(scope.binding.start(1L, home, folder.root))
+            scope.granted()
+            val epoch = scope.controller.state.value.epoch
+            assertTrue(scope.binding.publishGrantRoute(epoch, "ses-a"))
+            val (port, token) = endpoint(home)
+            val response = httpPost(
+                port,
+                toolBody(
+                    "ses-a",
+                    "ev-1",
+                    input("progress", extra = mapOf("epoch" to epoch, "phase" to "checking")),
+                ),
+                token = token,
+            )
+            assertTrue(response.okBody())
+            assertEquals(
+                listOf<PhoneTaskEvent>(PhoneTaskEvent.Progress("ev-1", "checking")),
+                events.handled,
+            )
+        } finally {
+            scope.binding.stop(1L)
+        }
+    }
+
+    private class RecordingTaskEvents(
+        private val key: PhoneTaskKey,
+    ) : PhoneTaskEventHandler {
+        val handled = mutableListOf<PhoneTaskEvent>()
+
+        override fun currentTask(epoch: Long): PhoneTaskKey? = key
+
+        override suspend fun handle(
+            key: PhoneTaskKey,
+            epoch: Long,
+            sessionLabel: String,
+            event: PhoneTaskEvent,
+        ): PhoneTaskEventReply {
+            handled += event
+            return PhoneTaskEventReply.Recorded(3)
         }
     }
 

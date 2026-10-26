@@ -34,7 +34,7 @@ class PhoneSessionRouterTest {
         val router = PhoneSessionRouter()
         assertTrue(router.publish(epoch = 4L, sessionLabel = null))
 
-        assertEquals(PhoneSessionRouter.Claim.CLAIMED, router.claim(4L, "ses-b"))
+        assertEquals(PhoneSessionRouter.Claim.CLAIMED_MANUAL, router.claim(4L, "ses-b"))
         assertEquals(PhoneSessionRouter.Claim.SESSION_BUSY, router.claim(4L, "ses-a"))
         assertEquals(PhoneSessionRouter.Claim.CLAIMED, router.claim(4L, "ses-b"))
         assertEquals("ses-b", router.currentOwner())
@@ -52,7 +52,7 @@ class PhoneSessionRouterTest {
         // A strictly newer epoch replaces the route; old epochs stay unpublished.
         assertTrue(router.publish(epoch = 6L, sessionLabel = null))
         assertEquals(PhoneSessionRouter.Claim.ROUTE_NOT_PUBLISHED, router.claim(5L, "ses-a"))
-        assertEquals(PhoneSessionRouter.Claim.CLAIMED, router.claim(6L, "ses-d"))
+        assertEquals(PhoneSessionRouter.Claim.CLAIMED_MANUAL, router.claim(6L, "ses-d"))
         assertEquals(PhoneSessionRouter.Claim.SESSION_BUSY, router.claim(6L, "ses-e"))
     }
 

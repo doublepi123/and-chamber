@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机控制浮窗的任务进度标签。键与 values 保持同步。 -->
+<resources>
+    <string name="phone_overlay_progress_event">%1$s · %2$s</string>
+
+    <string name="phone_overlay_progress_kind_task_started">任务已确认</string>
+    <string name="phone_overlay_progress_kind_task_epoch_updated">授权已更新</string>
+    <string name="phone_overlay_progress_kind_observed">已读取屏幕</string>
+    <string name="phone_overlay_progress_kind_mutation_sent">操作已发出</string>
+    <string name="phone_overlay_progress_kind_mutation_not_sent">操作未发出</string>
+    <string name="phone_overlay_progress_kind_mutation_unknown">操作结果未知</string>
+    <string name="phone_overlay_progress_kind_business_result">原生结果</string>
+    <string name="phone_overlay_progress_kind_stop_requested">已请求停止</string>
+    <string name="phone_overlay_progress_kind_stop_acknowledged">新操作与迟到读取已禁用</string>
+    <string name="phone_overlay_progress_kind_task_ended">任务已结束</string>
+    <string name="phone_overlay_progress_kind_model_progress">代理说明</string>
+    <string name="phone_overlay_progress_kind_model_need_user">代理需要你</string>
+    <string name="phone_overlay_progress_kind_model_finish">代理报告已完成</string>
+
+    <string name="phone_overlay_progress_reason_none">未说明</string>
+    <string name="phone_overlay_progress_reason_user_confirmed">由你确认</string>
+    <string name="phone_overlay_progress_reason_grant_updated">新的授权</string>
+    <string name="phone_overlay_progress_reason_observed">已读取</string>
+    <string name="phone_overlay_progress_reason_user_requested">由你请求</string>
+    <string name="phone_overlay_progress_reason_takeover">已接管</string>
+    <string name="phone_overlay_progress_reason_lease_expired">授权已过期</string>
+    <string name="phone_overlay_progress_reason_host_returned">已返回 AndChamber</string>
+    <string name="phone_overlay_progress_reason_connection_lost">连接已断开</string>
+    <string name="phone_overlay_progress_reason_device_locked">设备已锁定</string>
+    <string name="phone_overlay_progress_reason_runtime_changed">运行时已变更</string>
+    <string name="phone_overlay_progress_reason_outcome_unknown">结果未知</string>
+    <string name="phone_overlay_progress_reason_delivery_sent">已发往设备</string>
+    <string name="phone_overlay_progress_reason_delivery_not_sent">未发出</string>
+    <string name="phone_overlay_progress_reason_delivery_unknown">是否发出未知</string>
+    <string name="phone_overlay_progress_reason_verified_done">已核对：完成</string>
+    <string name="phone_overlay_progress_reason_verified_not_done">已核对：未完成</string>
+    <string name="phone_overlay_progress_reason_model_reported">未经核实的报告</string>
+    <string name="phone_overlay_progress_reason_need_user">轮到你处理</string>
+</resources>

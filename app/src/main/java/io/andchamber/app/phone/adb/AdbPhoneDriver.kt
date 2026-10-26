@@ -19,6 +19,14 @@ import io.andchamber.app.phone.core.PhoneNode
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhonePoint
 import io.andchamber.app.phone.core.PhoneSnapshot
+import io.andchamber.app.phone.overlay.safety.OverlayExpectation
+import io.andchamber.app.phone.overlay.safety.OverlayObservation
+import io.andchamber.app.phone.overlay.safety.OverlayPhase
+import io.andchamber.app.phone.overlay.safety.OverlaySafetyPolicy
+import io.andchamber.app.phone.overlay.safety.OverlayWindowStateParser
+import io.andchamber.app.phone.overlay.safety.OverlayWitness
+import io.andchamber.app.phone.overlay.safety.OverlayWitnessReader
+import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +53,7 @@ class AdbPhoneDriver(
     private val maxNodes: Int = PhoneLimits.MAX_NODES,
     private val captureMaxBytes: Int = PhoneLimits.MAX_CAPTURE_BYTES,
     private val platformSupported: Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+    private val overlayBarrier: PhoneOverlayBarrier? = null,
 ) : PhoneDriver {
     init {
         require(runtimeId.isNotBlank() && runtimeId.length <= PhoneLimits.MAX_WINDOW_ID_CHARS)
@@ -52,6 +61,8 @@ class AdbPhoneDriver(
         require(maxNodes in 1..PhoneLimits.MAX_NODES)
         require(captureMaxBytes in 1..PhoneLimits.MAX_CAPTURE_BYTES)
     }
+
+    private val overlayObservations = LinkedHashMap<String, OverlayObservation>()
 
     val transportSecurity: AdbTransportSecurity
         get() = device.transportSecurity
@@ -104,7 +115,11 @@ class AdbPhoneDriver(
     override suspend fun observe(deadlineMs: Long): PhoneSnapshot = withContext(Dispatchers.IO) {
         val started = clock()
         try {
-            readLiveWindow(started, deadlineMs).snapshot
+            if (!overlayRequired(started + deadlineMs)) {
+                observeWithoutOverlay(started, deadlineMs)
+            } else {
+                observeWithOverlay(started, deadlineMs)
+            }
         } catch (failure: AdbDeviceException) {
             throw PhoneDriverException(mapFailure(failure.failure))
         } catch (failure: PhoneDriverException) {
@@ -126,11 +141,90 @@ class AdbPhoneDriver(
     ): PhoneImage = withContext(Dispatchers.IO) {
         val started = clock()
         try {
-            val before = verifyLiveWindow(binding, started, deadlineMs)
-            val bytes = device.capturePng(left(started, deadlineMs), captureMaxBytes)
-            // Re-read the real window after the screenshot. If it changed while pixels were being
-            // copied, discard the image instead of returning another window's content.
-            val after = verifyLiveWindow(binding, started, deadlineMs)
+            if (!overlayRequired(started + deadlineMs)) {
+                val image = captureWithoutOverlay(binding, started, deadlineMs)
+                if (overlayRequired(started + deadlineMs)) {
+                    // The mode became overlay while pixels were copied without hiding it: discard.
+                    throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                }
+                clearOverlayObservation(binding.windowId)
+                image
+            } else {
+                captureWithOverlay(binding, started, deadlineMs)
+            }
+        } catch (failure: AdbDeviceException) {
+            throw PhoneDriverException(mapFailure(failure.failure))
+        } catch (failure: PhoneDriverException) {
+            throw failure
+        } catch (failure: AdbHierarchyException) {
+            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
+        } catch (failure: AdbWindowStateException) {
+            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
+        }
+    }
+
+    private fun captureWithoutOverlay(
+        binding: PhoneObservationBinding,
+        startedAt: Long,
+        deadlineMs: Long,
+    ): PhoneImage {
+        val before = verifyLiveWindow(binding, startedAt, deadlineMs)
+        val bytes = device.capturePng(left(startedAt, deadlineMs), captureMaxBytes)
+        // Re-read the real window after the screenshot. If it changed while pixels were being
+        // copied, discard the image instead of returning another window's content.
+        val after = verifyLiveWindow(binding, startedAt, deadlineMs)
+        if (before.snapshot.windowId != after.snapshot.windowId) {
+            throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
+        }
+        val size = AdbPng.readSize(bytes)
+            ?: throw PhoneDriverException(PhoneDriverFailure.DRIVER)
+        if (size.first != binding.geometry.displayWidth ||
+            size.second != binding.geometry.displayHeight
+        ) {
+            throw PhoneDriverException(PhoneDriverFailure.GEOMETRY_CHANGED)
+        }
+        return PhoneImage(
+            bytes = bytes,
+            mimeType = "image/png",
+            width = size.first,
+            height = size.second,
+        )
+    }
+
+    private suspend fun captureWithOverlay(
+        binding: PhoneObservationBinding,
+        startedAt: Long,
+        deadlineMs: Long,
+    ): PhoneImage {
+        val observation = overlayObservation(binding.windowId)
+            ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        val preExpectation = overlayExpectation(startedAt + deadlineMs)
+        val pre = readOverlayWitness(preExpectation, binding.geometry, startedAt, deadlineMs)
+        if (OverlaySafetyPolicy.identityRefusal(pre, observation, clock()) != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        val image = withOverlayHidden(
+            expectation = preExpectation,
+            phase = OverlayPhase.CAPTURE_HIDDEN,
+            deadlineAtMs = startedAt + deadlineMs,
+        ) {
+            val before = verifyLiveWindow(binding, startedAt, deadlineMs)
+            val hidden = readOverlayWitness(
+                expectation = preExpectation,
+                display = binding.geometry,
+                startedAt = startedAt,
+                deadlineMs = deadlineMs,
+                forcedHiddenPhase = OverlayPhase.CAPTURE_HIDDEN,
+            )
+            if (hidden.phase != OverlayPhase.CAPTURE_HIDDEN) {
+                throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+            }
+            val bytes = device.capturePng(left(startedAt, deadlineMs), captureMaxBytes)
+            val after = verifyLiveWindow(binding, startedAt, deadlineMs)
             if (before.snapshot.windowId != after.snapshot.windowId) {
                 throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
             }
@@ -147,19 +241,17 @@ class AdbPhoneDriver(
                 width = size.first,
                 height = size.second,
             )
-        } catch (failure: AdbDeviceException) {
-            throw PhoneDriverException(mapFailure(failure.failure))
-        } catch (failure: PhoneDriverException) {
-            throw failure
-        } catch (failure: AdbHierarchyException) {
-            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
-        } catch (failure: AdbWindowStateException) {
-            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
         }
+        val postExpectation = overlayExpectation(startedAt + deadlineMs)
+        val post = readOverlayWitness(postExpectation, binding.geometry, startedAt, deadlineMs)
+        if (OverlaySafetyPolicy.identityRefusal(post, observation, clock()) != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        if (!overlayRequired(startedAt + deadlineMs)) {
+            // A mode change after the capture discards the pixels.
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        return image
     }
 
     override suspend fun dispatch(
@@ -188,12 +280,69 @@ class AdbPhoneDriver(
             return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.DRIVER)
         }
 
+        // Freeze the dynamic mode for this mutation. A fresh observation is required when the
+        // overlay mode is on; an observation captured under overlay mode taints a notification-mode
+        // dispatch until the caller observes again (fail closed on a mode change).
+        val overlayMode = overlayRequired(started + deadlineMs)
+        val storedOverlay = if (overlayMode) {
+            overlayObservation(binding.windowId)
+                ?: return@withContext PhoneDispatchReceipt.NotSent(
+                    PhoneDriverFailure.POLICY_DENIED,
+                )
+        } else {
+            if (overlayObservation(binding.windowId) != null) {
+                return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.POLICY_DENIED)
+            }
+            null
+        }
+
+        fun guards(validate: () -> OverlayExpectation?): Pair<() -> Unit, () -> Unit> {
+            // The expectation that produced the validated WM witness, per injection step.
+            val validated = arrayOfNulls<OverlayExpectation>(1)
+            val before = {
+                if (overlayRequired(started + deadlineMs) != overlayMode) {
+                    // Mode changed between the operation start and this injection.
+                    throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                }
+                validated[0] = validate()
+            }
+            val finalGuard = {
+                finalOverlayGuard(
+                    overlayMode = overlayMode,
+                    validated = validated[0],
+                    startedAt = started,
+                    deadlineMs = deadlineMs,
+                )
+            }
+            return before to finalGuard
+        }
+
+        fun overlayStep(
+            command: AdbInputCommand,
+            action: PhoneDriverAction,
+        ): InjectionStep {
+            val (before, finalGuard) = guards {
+                if (overlayMode) {
+                    verifyOverlayAction(
+                        binding = binding,
+                        observation = storedOverlay!!,
+                        action = action,
+                        startedAt = started,
+                        deadlineMs = deadlineMs,
+                    )
+                } else {
+                    null
+                }
+            }
+            return InjectionStep(command, before, finalGuard)
+        }
+
         val steps = when (val action = request.action) {
             is PhoneDriverAction.Tap -> {
                 if (!action.at.isWithin(binding.geometry)) {
                     return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.INVALID_REQUEST)
                 }
-                listOf(InjectionStep(AdbInputCommand.Tap(action.at.x, action.at.y)))
+                listOf(overlayStep(AdbInputCommand.Tap(action.at.x, action.at.y), action))
             }
             is PhoneDriverAction.Swipe -> {
                 if (!action.from.isWithin(binding.geometry) ||
@@ -204,7 +353,7 @@ class AdbPhoneDriver(
                     return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.INVALID_REQUEST)
                 }
                 listOf(
-                    InjectionStep(
+                    overlayStep(
                         AdbInputCommand.Swipe(
                             fromX = action.from.x,
                             fromY = action.from.y,
@@ -212,6 +361,7 @@ class AdbPhoneDriver(
                             toY = action.to.y,
                             durationMs = action.durationMs,
                         ),
+                        action,
                     ),
                 )
             }
@@ -241,13 +391,26 @@ class AdbPhoneDriver(
                             PhoneDriverFailure.UNSUPPORTED,
                         )
                     }
+                    val (textBefore, textFinalGuard) = guards {
+                        // After the focus tap the hierarchy/content has legitimately changed.
+                        // Re-check the real window identity, the actual focus field and the
+                        // current overlay witness before the text injection.
+                        verifyInputFollowup(
+                            binding = binding,
+                            focus = focus,
+                            overlayObservation = storedOverlay,
+                            overlayMode = overlayMode,
+                            startedAt = started,
+                            deadlineMs = deadlineMs,
+                        )
+                    }
                     listOf(
-                        InjectionStep(AdbInputCommand.Tap(focus.x, focus.y)),
-                        InjectionStep(AdbInputCommand.Text(action.text)) {
-                            // After the focus tap the hierarchy/content has legitimately changed.
-                            // Re-check the real window identity and the actual focus field.
-                            verifyInputFollowup(binding, focus, started, deadlineMs)
-                        },
+                        overlayStep(AdbInputCommand.Tap(focus.x, focus.y), action),
+                        InjectionStep(
+                            command = AdbInputCommand.Text(action.text),
+                            before = textBefore,
+                            finalGuard = textFinalGuard,
+                        ),
                     )
                 } else {
                     val focused = live.snapshot.nodes.firstOrNull { node ->
@@ -258,10 +421,11 @@ class AdbPhoneDriver(
                             PhoneDriverFailure.UNSUPPORTED,
                         )
                     }
-                    listOf(InjectionStep(AdbInputCommand.Text(action.text)))
+                    listOf(overlayStep(AdbInputCommand.Text(action.text), action))
                 }
             }
-            PhoneDriverAction.Back -> listOf(InjectionStep(AdbInputCommand.Back))
+            PhoneDriverAction.Back ->
+                listOf(overlayStep(AdbInputCommand.Back, request.action))
         }
 
         var touched = false
@@ -304,6 +468,33 @@ class AdbPhoneDriver(
                     PhoneDispatchReceipt.NotSent(PhoneDriverFailure.ADMISSION_REFUSED)
                 }
             }
+            // Final TOCTOU guard: re-read the non-blocking manager claim right before the real
+            // injection. The WM witness/frame is NOT re-read or retried; a changed mode, owner,
+            // generation, revision, phase, key or a stale deadline refuses this step.
+            try {
+                step.finalGuard?.invoke()
+            } catch (failure: AdbDeviceException) {
+                val mapped = mapFailure(failure.failure)
+                return@withContext if (touched) {
+                    PhoneDispatchReceipt.Unknown(mapped)
+                } else {
+                    PhoneDispatchReceipt.NotSent(mapped)
+                }
+            } catch (failure: PhoneDriverException) {
+                return@withContext if (touched) {
+                    PhoneDispatchReceipt.Unknown(failure.failure)
+                } else {
+                    PhoneDispatchReceipt.NotSent(failure.failure)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@withContext if (touched) {
+                    PhoneDispatchReceipt.Unknown(PhoneDriverFailure.DRIVER)
+                } else {
+                    PhoneDispatchReceipt.NotSent(PhoneDriverFailure.DRIVER)
+                }
+            }
             try {
                 device.inject(step.command, left(started, deadlineMs))
                 touched = true
@@ -326,6 +517,261 @@ class AdbPhoneDriver(
         }
         PhoneDispatchReceipt.Sent
     }
+
+    private fun observeWithoutOverlay(startedAt: Long, deadlineMs: Long): PhoneSnapshot {
+        val snapshot = readLiveWindow(startedAt, deadlineMs).snapshot
+        if (overlayRequired(startedAt + deadlineMs)) {
+            // The mode became overlay while content was read without hiding it: discard.
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        clearOverlayObservation(snapshot.windowId)
+        return snapshot
+    }
+
+    /**
+     * The only dynamic mode gate. A missing barrier means no overlay path at all; a throw from the
+     * manager gate is treated as overlay-required (fail closed).
+     */
+    private fun overlayRequired(deadlineAtMs: Long): Boolean {
+        val barrier = overlayBarrier ?: return false
+        return try {
+            barrier.required(deadlineAtMs)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun clearOverlayObservation(windowId: String) {
+        synchronized(overlayObservations) { overlayObservations.remove(windowId) }
+    }
+
+    private suspend fun observeWithOverlay(
+        startedAt: Long,
+        deadlineMs: Long,
+    ): PhoneSnapshot {
+        val expectation = overlayExpectation(startedAt + deadlineMs)
+        if (expectation.phase != OverlayPhase.VISIBLE || expectation.windowToken == null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        val snapshot = withOverlayHidden(
+            expectation = expectation,
+            phase = OverlayPhase.COLLECTION_HIDDEN,
+            deadlineAtMs = startedAt + deadlineMs,
+        ) {
+            val live = readLiveWindow(startedAt, deadlineMs)
+            val hidden = readOverlayWitness(
+                expectation = expectation,
+                display = live.geometry,
+                startedAt = startedAt,
+                deadlineMs = deadlineMs,
+                forcedHiddenPhase = OverlayPhase.COLLECTION_HIDDEN,
+            )
+            if (hidden.phase != OverlayPhase.COLLECTION_HIDDEN) {
+                throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+            }
+            live.snapshot
+        }
+        val postExpectation = overlayExpectation(startedAt + deadlineMs)
+        val post = readOverlayWitness(
+            expectation = postExpectation,
+            display = snapshot.geometry,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
+        if (OverlaySafetyPolicy.visibleRefusal(post, clock()) != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        if (!overlayRequired(startedAt + deadlineMs)) {
+            // The mode changed while the overlay read was in flight: discard, never return a
+            // snapshot whose final mode is no longer the frozen one.
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        rememberOverlay(snapshot.windowId, post)
+        return snapshot
+    }
+
+    private suspend fun <T> withOverlayHidden(
+        expectation: io.andchamber.app.phone.overlay.safety.OverlayExpectation,
+        phase: OverlayPhase,
+        deadlineAtMs: Long,
+        block: suspend () -> T,
+    ): T {
+        val barrier = overlayBarrier ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        try {
+            return barrier.withContentHidden(
+                owner = expectation.owner,
+                generation = expectation.generation,
+                revision = expectation.revision,
+                phase = phase,
+                deadlineMs = deadlineAtMs,
+                block = block,
+            )
+        } catch (failure: PhoneDriverException) {
+            throw failure
+        } catch (failure: AdbDeviceException) {
+            throw failure
+        } catch (failure: AdbHierarchyException) {
+            throw failure
+        } catch (failure: AdbWindowStateException) {
+            throw failure
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+    }
+
+    private fun overlayExpectation(deadlineAtMs: Long): io.andchamber.app.phone.overlay.safety.OverlayExpectation {
+        val barrier = overlayBarrier ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        return try {
+            barrier.expectation(deadlineAtMs)
+        } catch (_: Exception) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+    }
+
+    private fun readOverlayWitness(
+        expectation: io.andchamber.app.phone.overlay.safety.OverlayExpectation,
+        display: PhoneGeometry,
+        startedAt: Long,
+        deadlineMs: Long,
+        forcedHiddenPhase: OverlayPhase? = null,
+    ): OverlayWitness {
+        val fullScan = try {
+            OverlayWindowStateParser.parse(
+                device.windowStateText(left(startedAt, deadlineMs), AdbWindowStateParser.MAX_BYTES),
+            )
+        } catch (_: Exception) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        // The full API 35 window list has no frame. For a visible overlay, read that one window's
+        // full state so the witness carries the real `Frames:` rectangle instead of the requested
+        // layout params (the two differ by the status-bar inset).
+        val key = expectation.windowToken
+        val scan = if (forcedHiddenPhase == null && key != null) {
+            // The manager supplies a stable `LayoutParams.title`; tests/legacy may supply a binder
+            // token. The binder token needed for the targeted dump is discovered here and never
+            // travels back to the manager.
+            val candidate = OverlayWindowStateParser.findWindow(fullScan, key)
+            if (candidate != null &&
+                candidate.hasSurface &&
+                candidate.visible &&
+                AdbCommandSchema.isWindowToken(candidate.windowHash)
+            ) {
+                val detail = try {
+                    OverlayWindowStateParser.parse(
+                        device.windowDetailText(
+                            windowToken = candidate.windowHash,
+                            deadlineMs = left(startedAt, deadlineMs),
+                            maxBytes = AdbWindowStateParser.MAX_BYTES,
+                        ),
+                    )
+                } catch (_: Exception) {
+                    throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                }
+                if (detail.windows.any { it.windowHash == candidate.windowHash }) {
+                    detail.copy(currentFocusToken = fullScan.currentFocusToken)
+                } else {
+                    fullScan
+                }
+            } else {
+                fullScan
+            }
+        } else {
+            fullScan
+        }
+        return OverlayWitnessReader.read(
+            expectation = expectation,
+            scan = scan,
+            display = display,
+            nowMs = clock(),
+            forcedHiddenPhase = forcedHiddenPhase,
+        )
+    }
+
+    private fun verifyOverlayAction(
+        binding: PhoneObservationBinding,
+        observation: OverlayObservation,
+        action: PhoneDriverAction,
+        startedAt: Long,
+        deadlineMs: Long,
+    ): OverlayExpectation {
+        val expectation = overlayExpectation(startedAt + deadlineMs)
+        val witness = readOverlayWitness(
+            expectation = expectation,
+            display = binding.geometry,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
+        val now = clock()
+        val identity = OverlaySafetyPolicy.identityRefusal(witness, observation, now)
+        val refusal = identity ?: when (action) {
+            is PhoneDriverAction.Tap ->
+                OverlaySafetyPolicy.tapRefusal(witness, action.at, now)
+            is PhoneDriverAction.Swipe ->
+                OverlaySafetyPolicy.swipeRefusal(witness, action.from, action.to, now)
+            is PhoneDriverAction.Input ->
+                OverlaySafetyPolicy.inputFocusRefusal(witness, action.focus, now)
+            PhoneDriverAction.Back ->
+                OverlaySafetyPolicy.backRefusal(witness, now)
+        }
+        if (refusal != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        return expectation
+    }
+
+    /**
+     * The last check before a real injection. It never re-reads the WM frame and never retries a
+     * coordinate. It only re-reads the manager's non-blocking claim and requires the same mode and
+     * the same owner/generation/revision/key/phase that produced the validated witness, still fresh.
+     */
+    private fun finalOverlayGuard(
+        overlayMode: Boolean,
+        validated: OverlayExpectation?,
+        startedAt: Long,
+        deadlineMs: Long,
+    ) {
+        if (overlayRequired(startedAt + deadlineMs) != overlayMode) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        // Notification mode never reads the expectation (original path, no overlay observation).
+        if (!overlayMode) return
+        val expected = validated ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        val fresh = overlayExpectation(startedAt + deadlineMs)
+        val now = clock()
+        val changed = fresh.owner != expected.owner ||
+            fresh.generation != expected.generation ||
+            fresh.revision != expected.revision ||
+            fresh.windowToken != expected.windowToken ||
+            fresh.phase != OverlayPhase.VISIBLE ||
+            fresh.freshnessDeadlineMs <= now
+        if (changed) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        // A mode change while the claim was being read is still a refusal, not a downgrade.
+        if (overlayRequired(startedAt + deadlineMs) != true) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+    }
+
+    private fun rememberOverlay(windowId: String, witness: OverlayWitness) {
+        synchronized(overlayObservations) {
+            overlayObservations[windowId] = OverlayObservation(
+                owner = witness.owner,
+                generation = witness.generation,
+                revision = witness.revision,
+                display = witness.display,
+            )
+            while (overlayObservations.size > MAX_OVERLAY_OBSERVATIONS) {
+                val oldest = overlayObservations.keys.firstOrNull() ?: break
+                overlayObservations.remove(oldest)
+            }
+        }
+    }
+
+    private fun overlayObservation(windowId: String): OverlayObservation? =
+        synchronized(overlayObservations) { overlayObservations[windowId] }
 
     private fun readLiveWindow(startedAt: Long, deadlineMs: Long): LiveWindow {
         val before = readWindowFocus(startedAt, deadlineMs)
@@ -372,9 +818,11 @@ class AdbPhoneDriver(
     private fun verifyInputFollowup(
         binding: PhoneObservationBinding,
         focus: PhonePoint,
+        overlayObservation: OverlayObservation?,
+        overlayMode: Boolean,
         startedAt: Long,
         deadlineMs: Long,
-    ) {
+    ): OverlayExpectation? {
         // A bounded settle for the focus event; never beyond a quarter of the remaining deadline.
         val settle = minOf(FOCUS_SETTLE_MS, left(startedAt, deadlineMs) / 4)
         if (settle > 0L) Thread.sleep(settle)
@@ -399,6 +847,26 @@ class AdbPhoneDriver(
         if (target == null || !target.editable || !target.focused) {
             throw PhoneDriverException(PhoneDriverFailure.UNSUPPORTED)
         }
+        if (overlayRequired(startedAt + deadlineMs) != overlayMode) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        if (!overlayMode) return null
+        val stored = overlayObservation
+            ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        val expectation = overlayExpectation(startedAt + deadlineMs)
+        val witness = readOverlayWitness(
+            expectation = expectation,
+            display = binding.geometry,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
+        val now = clock()
+        val refusal = OverlaySafetyPolicy.identityRefusal(witness, stored, now)
+            ?: OverlaySafetyPolicy.inputFocusRefusal(witness, focus, now)
+        if (refusal != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        return expectation
     }
 
     private fun inputTarget(nodes: List<PhoneNode>, focus: PhonePoint): PhoneNode? =
@@ -456,6 +924,8 @@ class AdbPhoneDriver(
     private data class InjectionStep(
         val command: AdbInputCommand,
         val before: (() -> Unit)? = null,
+        /** Runs after the controller admission guard, immediately before the real injection. */
+        val finalGuard: (() -> Unit)? = null,
     )
 
     companion object {
@@ -475,5 +945,6 @@ class AdbPhoneDriver(
             }
 
         private const val FOCUS_SETTLE_MS = 120L
+        private const val MAX_OVERLAY_OBSERVATIONS = 8
     }
 }

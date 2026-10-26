@@ -170,6 +170,9 @@ test('package.json and tool registration shape', () => {
   assert.deepEqual(tool.input.properties.action.enum, [
     'status',
     'request',
+    'progress',
+    'need_user',
+    'finish',
     'snapshot',
     'capture',
     'tap',
@@ -177,11 +180,21 @@ test('package.json and tool registration shape', () => {
     'input',
     'back',
   ]);
-  for (const key of ['observationId', 'ref', 'text', 'summary', 'packageName']) {
+  for (const key of [
+    'observationId', 'ref', 'text', 'summary', 'packageName',
+    'phase', 'message', 'reason',
+  ]) {
     assert.equal(tool.input.properties[key].type, 'string', key);
   }
   assert.equal(tool.input.properties.summary.maxLength, 200);
   assert.equal(tool.input.properties.packageName.maxLength, 200);
+  for (const key of ['phase', 'message', 'reason']) {
+    assert.equal(tool.input.properties[key].maxLength, 120, key);
+  }
+  assert.equal(tool.input.properties.epoch.type, 'integer');
+  assert.equal(tool.input.properties.epoch.minimum, 0);
+  assert.equal(Array.isArray(tool.input.allOf), true);
+  assert.deepEqual(tool.input.allOf[0].then.required, ['epoch']);
   for (const key of ['x', 'y', 'x2', 'y2', 'durationMs']) {
     assert.equal(tool.input.properties[key].type, 'integer', key);
   }
@@ -202,13 +215,21 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /never enables, pairs, grants, resumes, acknowledges or opens a screen/);
   assert.match(tool.description, /another chat session cannot replace it/);
   assert.match(tool.description, /refused while a grant is active/);
-  assert.match(tool.description, /never enable, pair, grant, resume or acknowledge/);
+  assert.match(tool.description, /never enable, pair, grant, resume, acknowledge/);
   assert.match(tool.description, /Take "snapshot" first/);
   assert.match(tool.description, /observationId/);
   assert.match(tool.description, /One action per call/);
   assert.match(tool.description, /OUTCOME_UNKNOWN/);
   assert.match(tool.description, /Never repeat the action/);
   assert.match(tool.description, /SESSION_BUSY/);
+  assert.match(tool.description, /"progress"/);
+  assert.match(tool.description, /"need_user"/);
+  assert.match(tool.description, /"finish"/);
+  assert.match(tool.description, /报告结束，待核对/);
+  assert.match(tool.description, /STOP_UNCONFIRMED/);
+  assert.match(tool.description, /NO_TASK/);
+  assert.match(tool.description, /TASK_NOT_ACTIVE/);
+  assert.match(tool.description, /unverified/);
   assert.match(tool.description, /GRANT_ACTIVE/);
   assert.match(tool.description, /UNICODE_UNSUPPORTED/);
   assert.match(tool.description, /granted on the phone|native grant/);
@@ -249,6 +270,10 @@ test('sends action-specific fields without adding or dropping input', async (t) 
   const cases = [
     { action: 'request', summary: 'Book a table for two', packageName: 'com.example.target' },
     { action: 'request', summary: 'Book a table for two' },
+    { action: 'progress', epoch: 2, phase: 'checking the form' },
+    { action: 'progress', epoch: 2, message: 'checking the form' },
+    { action: 'need_user', epoch: 2, reason: 'a person must enter the code' },
+    { action: 'finish', epoch: 2, summary: 'I have reported the end' },
     { action: 'snapshot' },
     { action: 'capture', observationId: 'obs-1' },
     { action: 'tap', observationId: 'obs-1', ref: 'n1' },
@@ -330,6 +355,71 @@ test('returns a refused action envelope as text without the token', async (t) =>
   assert.equal(result.content.length, 1);
   assert.deepEqual(JSON.parse(result.content[0].text), payload);
   assertNoEndpoint(result, server);
+});
+
+test('finish answers with the fixed pending-verification text and never success', async (t) => {
+  const payload = {
+    version: 1,
+    ok: true,
+    action: 'phone.finish',
+    epoch: 5,
+    data: { state: 'ENDED_PENDING_CHECK', seq: 9, verified: false, sentActionsMayStillApply: true },
+  };
+  const server = await useServer(t, json(payload));
+  endpointDir(t).write(server);
+
+  const result = await tool.execute(
+    { action: 'finish', epoch: 5, summary: 'I have reported the end' },
+    context(),
+  );
+
+  assert.deepEqual(result, {
+    content: [{ type: 'text', text: '报告结束，待核对' }],
+  });
+  assert.equal(JSON.stringify(result).includes('reported the end'), false);
+  assert.deepEqual(JSON.parse(server.requests[0].body).input, {
+    action: 'finish',
+    epoch: 5,
+    summary: 'I have reported the end',
+  });
+  assertNoEndpoint(result, server);
+});
+
+test('need_user keeps the typed waiting envelope and unconfirmed stops are refused', async (t) => {
+  const waiting = {
+    version: 1,
+    ok: true,
+    action: 'phone.need_user',
+    epoch: 5,
+    data: { state: 'WAITING_USER', seq: 8, verified: false, sentActionsMayStillApply: true },
+  };
+  const server = await useServer(t, json(waiting));
+  endpointDir(t).write(server);
+  const result = await tool.execute(
+    { action: 'need_user', epoch: 5, reason: 'a person must enter the code' },
+    context(),
+  );
+  assert.equal(result.content.length, 1);
+  assert.deepEqual(JSON.parse(result.content[0].text), waiting);
+
+  const refused = {
+    version: 1,
+    ok: false,
+    action: 'phone.need_user',
+    epoch: 5,
+    error: {
+      code: 'STOP_UNCONFIRMED',
+      message:
+        'The phone has not confirmed that control stopped. Do not claim it stopped; ask the person to check the phone.',
+    },
+  };
+  const refusedServer = await useServer(t, json(refused));
+  endpointDir(t).write(refusedServer);
+  const refusedResult = await tool.execute(
+    { action: 'need_user', epoch: 5, reason: 'a person must enter the code' },
+    context(),
+  );
+  assert.deepEqual(JSON.parse(refusedResult.content[0].text), refused);
 });
 
 test('maps a png capture to a file part and keeps base64 out of the text', async (t) => {

@@ -208,6 +208,7 @@ internal fun AndChamberApp(
     auth: WebSessionAuthenticator,
     storage: SharedStorageController,
     phone: PhoneIntegration? = null,
+    overlay: io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator? = null,
 ) {
     AndChamberTheme {
         val nav = rememberNavController()
@@ -221,6 +222,18 @@ internal fun AndChamberApp(
         val pendingRemovalIds = remember { mutableStateMapOf<String, Unit>() }
         val removalScope = rememberCoroutineScope()
         val context = LocalContext.current
+
+        // Overlay settings card on the phone screen. Its state is the coordinator's; it never grants.
+        val overlaySettings =
+            overlay?.let { coordinator ->
+                val state by coordinator.settingsState.collectAsStateWithLifecycle()
+                state
+            }
+        val overlaySettingsActions =
+            remember(overlay) {
+                overlay?.settingsActions()
+                    ?: io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsActions()
+            }
 
         // The session/paired notifications ask for the phone screen; nothing else navigates there.
         val phoneOpenRequests by PhoneOpenRequest.requests.collectAsStateWithLifecycle()
@@ -518,6 +531,8 @@ internal fun AndChamberApp(
                             state = phoneState,
                             actions = phoneActions,
                             clock = target.monotonicClock,
+                            overlaySettings = overlaySettings,
+                            overlaySettingsActions = overlaySettingsActions,
                         )
                     }
 
