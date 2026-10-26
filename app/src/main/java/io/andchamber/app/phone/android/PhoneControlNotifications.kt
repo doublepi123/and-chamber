@@ -275,7 +275,13 @@ internal class PhoneControlNotifications(
     }
 
     fun notifyPairing(id: Int, notification: Notification) {
-        runCatching { manager.notify(id, notification) }
+        try {
+            manager.notify(id, notification)
+        } catch (_: SecurityException) {
+            // Permission can be withdrawn between the native gate and this system call.
+        } catch (_: Exception) {
+            // Posting is best effort, never proof of notification delivery.
+        }
     }
 
     fun cancelPairing() {
