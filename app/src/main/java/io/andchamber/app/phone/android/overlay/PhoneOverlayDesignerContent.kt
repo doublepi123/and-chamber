@@ -63,6 +63,9 @@ internal class PhoneOverlayDesignerContent(
                 expanded = state.expanded,
                 endConfirm = state.endConfirm,
                 side = if (state.side == PhoneOverlaySide.LEFT) OverlaySide.Left else OverlaySide.Right,
+                stopReason = state.stopReason?.toUiStopReason(),
+                retained = state.retained,
+                canContinueInChat = state.canContinueInChat,
                 demo = state.demo,
             )
         val uiActions =
@@ -80,6 +83,8 @@ internal class PhoneOverlayDesignerContent(
                 onMoveRight = actions.onMoveRight,
                 onDragBy = { dx, dy -> actions.onDragBy(dx, dy) },
                 onDragEnd = { actions.onDragEnd() },
+                onOpenChat = actions.onOpenChat,
+                onContinueInChat = actions.onContinueInChat,
             )
         AndChamberTheme {
             PhoneOverlayContent(

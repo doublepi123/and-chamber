@@ -518,10 +518,31 @@ internal fun AndChamberApp(
                         val phoneState by target.state.collectAsStateWithLifecycle()
                         // The screen and the controller share one monotonic clock; never wall time.
                         val phoneActions =
-                            remember(target, nav) {
+                            remember(target, nav, local) {
                                 // Home, always: the phone screen may sit on top of a chat, and the
                                 // runtime notice asks the person to go Home to start/restart it.
-                                target.actions { nav.showHome() }
+                                target.actions(
+                                    onBack = { nav.showHome() },
+                                    onRestartRuntime = local::restart,
+                                    // Navigation only; it never revokes, grants or resumes. With no
+                                    // bound session, offer is a no-op and we reuse the local open
+                                    // path (start/last page) instead of falling back to Home.
+                                    onOpenChat = {
+                                        val session = target.currentTaskSessionId()
+                                        OpenSessionLink.offer(session, null)
+                                        if (session == null) {
+                                            removalScope.launch {
+                                                try {
+                                                    openLocalForLink(runtime, nav, lifecycle, local) {}
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (_: Exception) {
+                                                    // Navigation is best-effort; never revoke or report success.
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
                             }
                         DisposableEffect(target) {
                             target.onScreenOpened()

@@ -18,7 +18,57 @@ internal fun overlayPrimary(phase: OverlayPhase): OverlayPrimary =
     }
 
 /** The panel's buttons, in order of prominence. */
-internal enum class OverlayAction { TakeOver, Pause, OpenNative, End, Collapse, RetryTakeOver, CloseResult }
+internal enum class OverlayAction { TakeOver, Pause, OpenNative, End, Collapse, RetryTakeOver, CloseResult, OpenChat, ContinueInChat }
+
+/**
+ * Panel buttons for a full state. Adds "open chat" while the agent works and, in configure-once
+ * mode, "continue beside the chat" after a confirmed handover. Both are requests: the first doesn't
+ * revoke, the second opens a native confirmation. Neither grants from the overlay.
+ */
+internal fun panelActions(state: PhoneOverlayState): List<OverlayAction> {
+    val base = panelActions(state.phase)
+    if (state.demo) return base
+    val extra = ArrayList<OverlayAction>(2)
+    if (state.canContinueInChat && (state.phase == OverlayPhase.TakenOver || state.phase == OverlayPhase.NeedUser || state.phase == OverlayPhase.Paused)) {
+        extra += OverlayAction.ContinueInChat
+    }
+    // Open chat (no revoke) while the agent works, and as a way back from a retained handover:
+    // taken over, need you, or an unknown result. Never on an ended card.
+    if (state.phase == OverlayPhase.Running || state.phase == OverlayPhase.Paused || isRetainedHandover(state)) {
+        extra += OverlayAction.OpenChat
+    }
+    if (extra.isEmpty()) return base
+    // Continue goes right after the primary; open chat sits before the end action.
+    val out = base.toMutableList()
+    if (OverlayAction.ContinueInChat in extra) out.add(minOf(1, out.size), OverlayAction.ContinueInChat)
+    if (OverlayAction.OpenChat in extra) {
+        val endAt = out.indexOf(OverlayAction.End).takeIf { it >= 0 } ?: out.size
+        out.add(endAt, OverlayAction.OpenChat)
+    }
+    return out
+}
+
+/**
+ * Splits panel buttons into full-width rows and one trailing row for the low-emphasis pair
+ * (Collapse, End). The first full-width button stays the primary. When the primary itself is
+ * Collapse/End (e.g. Unknown: "I'll go look" first), or there is no pair, nothing moves.
+ */
+internal fun panelButtonRows(buttons: List<OverlayAction>): Pair<List<OverlayAction>, List<OverlayAction>> {
+    val low = setOf(OverlayAction.Collapse, OverlayAction.End)
+    val footer = buttons.filter { it in low }
+    val stacked = buttons.filter { it !in low }
+    if (stacked.isEmpty() || footer.size < 2 || buttons.first() in low) return buttons to emptyList()
+    return stacked to footer
+}
+
+/**
+ * A stopped task kept for the person: taken over, need you, or an unknown result whose stop is
+ * settled. Not a finished task, and not while a stop is still pending or unconfirmed.
+ */
+internal fun isRetainedHandover(state: PhoneOverlayState): Boolean =
+    state.retained && state.phase in RETAINED_HANDOVER_PHASES
+
+private val RETAINED_HANDOVER_PHASES = setOf(OverlayPhase.TakenOver, OverlayPhase.NeedUser, OverlayPhase.Unknown)
 
 internal fun panelActions(phase: OverlayPhase): List<OverlayAction> =
     when (phase) {
@@ -167,6 +217,17 @@ internal fun showsModeChooser(state: PhoneOverlaySettingsState): Boolean =
 
 /** "Notifications only" never depends on the permission or the demo; only a running request blocks it. */
 internal fun canChooseNotificationOnly(state: PhoneOverlaySettingsState): Boolean = !state.pending
+
+/**
+ * A short report of what happened to the overlay during the last task, so it never just vanished:
+ * moved to the notification (and why), or nothing to report. Notifications-only by choice is not
+ * reported here (the header already says so).
+ */
+internal fun lastSurfaceReport(state: PhoneOverlaySettingsState): OverlaySurfaceMode? =
+    state.lastSurface?.takeIf { it == OverlaySurfaceMode.MovedToNotification }
+
+/** The last stop reason shows on its own, also when no recovery surface was reported. */
+internal fun lastStopReasonShown(state: PhoneOverlaySettingsState): OverlayStopReason? = state.lastStopReason
 
 /** Overlay mode may be chosen only after a passed visibility test with the permission in place. */
 internal fun canChooseOverlay(state: PhoneOverlaySettingsState): Boolean =

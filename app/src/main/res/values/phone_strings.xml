@@ -242,4 +242,63 @@
     <string name="phone_detail_connection">Connection</string>
     <string name="phone_detail_observed_nodes">Screen items</string>
     <string name="phone_detail_last_error">Last error</string>
+
+    <!-- Configure once, then use from chat -->
+    <string name="phone_target_block_sensitive">Settings, permission, password or payment apps can\'t be chosen.</string>
+    <string name="phone_standing_title">Use the phone from chat</string>
+    <string name="phone_standing_setup_body">Set this up once: choose the apps the agent may use, what it may do, and for how long. Then just ask in the local OpenChamber chat. Requests inside this scope start without asking here each time.</string>
+    <string name="phone_standing_ready_title">Ready: ask in the chat</string>
+    <string name="phone_standing_ready_body">Say what you want in the local OpenChamber chat, for example which app and what to do. You won\'t be sent here to approve each task. Each task still has its own short time and stops when it runs out.</string>
+    <string name="phone_standing_open_chat">Open the chat</string>
+    <string name="phone_standing_restart_title">One restart needed</string>
+    <string name="phone_standing_restart_body">The running OpenChamber started before phone control was set up, so the chat can\'t use the phone yet. Restart it once; your chats are kept.</string>
+    <string name="phone_standing_restart">Restart OpenChamber</string>
+    <string name="phone_standing_restart_confirm_title">Restart OpenChamber?</string>
+    <string name="phone_standing_restart_confirm_body">This stops and starts the local OpenChamber so it loads the phone tool. Your chats are kept, but a reply in progress is interrupted.</string>
+    <string name="phone_standing_restarting_title">Restarting OpenChamber…</string>
+    <string name="phone_standing_restarting_body">The chat can use the phone once the tool is confirmed loaded.</string>
+    <string name="phone_standing_not_running_title">OpenChamber isn\'t running</string>
+    <string name="phone_standing_not_running_body">Start it from Home. Your scope is kept.</string>
+    <string name="phone_standing_unknown_title">Not confirmed yet</string>
+    <string name="phone_standing_unknown_body">It isn\'t confirmed that OpenChamber loaded the phone tool. Until it is, the chat can\'t use the phone.</string>
+    <string name="phone_standing_not_connected_title">Phone not connected</string>
+    <string name="phone_standing_not_connected_body">Your scope is kept, but the agent can\'t act until wireless debugging is connected again.</string>
+    <string name="phone_standing_expired_title">Your scope ended</string>
+    <string name="phone_standing_runtime">Runtime: %1$s</string>
+    <string name="phone_standing_scope">Allowed scope</string>
+    <string name="phone_standing_window_left">Scope ends in %1$d min · each task up to %2$d min</string>
+    <string name="phone_standing_limits_note">Typing passwords, codes or payments is never done for you. If the agent asks for you, it stops and waits.</string>
+    <string name="phone_standing_edit">Change scope</string>
+    <string name="phone_standing_revoke">Turn off chat use</string>
+    <string name="phone_standing_step_apps">Choose apps</string>
+    <string name="phone_standing_apps_body">Up to %1$d apps. Installed apps and ordinary preinstalled ones can be chosen; settings, permission, password and payment apps can\'t.</string>
+    <string name="phone_standing_blocked_hidden">%1$d apps can\'t be chosen and aren\'t listed. Search for one to see why.</string>
+    <string name="phone_standing_too_many">Too many apps. Choose fewer.</string>
+    <string name="phone_standing_window">How long this scope lasts</string>
+    <string name="phone_standing_hours">%1$d h</string>
+    <string name="phone_standing_per_task">Each task\'s time limit</string>
+    <string name="phone_standing_trust">You trust the whole local OpenChamber runtime with this scope, not only one chat. You can turn it off here at any time.</string>
+    <string name="phone_standing_review">Review and allow…</string>
+    <string name="phone_standing_confirm_title">Let chat use these apps?</string>
+    <string name="phone_standing_confirm_time">For %1$d h; each task up to %2$d min.</string>
+    <string name="phone_standing_confirm_body">Chat requests inside this scope start without asking here. Pause, take over and end stay available in the notification and overlay.</string>
+
+    <!-- Continue beside the chat -->
+    <string name="phone_continue_in_chat">Continue beside the chat…</string>
+    <string name="phone_continue_confirm_title">Let the agent continue in %1$s?</string>
+    <string name="phone_continue_confirm_body">The agent looks at the screen again first and continues inside your scope. Nothing it did before is re-sent. The chat is told to carry on.</string>
+    <string name="phone_continue_need_user_title">The agent asked for you</string>
+    <string name="phone_continue_need_user_body">Do that step yourself, then continue here. The agent doesn\'t see what you type.</string>
+    <string name="phone_continue_agent_note">Agent note (not verified): %1$s</string>
+    <string name="phone_continue_sending">Telling the chat to continue…</string>
+    <string name="phone_continue_delivered_title">The chat was told to continue</string>
+    <string name="phone_continue_delivered_body">Follow it in the chat or the overlay.</string>
+    <string name="phone_continue_failed_title">The chat couldn\'t be reached</string>
+    <string name="phone_continue_failed_body">Nothing was re-sent. Open the chat and ask again.</string>
+    <string name="phone_continue_failed_running_body">The task\'s access is active again, but the chat wasn\'t told to continue, and nothing was re-sent. Open the chat to see where it stands, or pause or take over if you don\'t want it to act.</string>
+    <string name="phone_continue_blocked_settling">Available once the stop is confirmed.</string>
+    <string name="phone_continue_blocked_check">Check the last action in the app first.</string>
+    <string name="phone_continue_blocked_not_ready">Available once chat use is ready (see above).</string>
+    <string name="phone_continue_blocked_scope">This app isn\'t in your scope. Change the scope first.</string>
+    <string name="phone_continue_blocked_generic">Not available right now.</string>
 </resources>

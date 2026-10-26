@@ -56,8 +56,8 @@ class PhoneToolProtocolTest {
         fun action(body: String) = PhoneToolProtocol.parseAction(PhoneToolProtocol.parseBody(body)!!)
 
         assertEquals(PhoneToolAction.Status, action(toolBody(input = input("status"))))
-        assertEquals(
-            PhoneToolAction.Request("Book a table", null),
+        assertNull(
+            "a direct request requires the preauthorized package",
             action(toolBody(input = input("request", extra = mapOf("summary" to "Book a table")))),
         )
         assertEquals(
@@ -68,6 +68,15 @@ class PhoneToolProtocolTest {
                         "request",
                         extra = mapOf("summary" to "Book a table", "packageName" to "com.example.target"),
                     ),
+                ),
+            ),
+        )
+        assertEquals(PhoneToolAction.Apps, action(toolBody(input = input("apps"))))
+        assertEquals(
+            PhoneToolAction.OpenApp("com.example.target"),
+            action(
+                toolBody(
+                    input = input("open_app", extra = mapOf("packageName" to "com.example.target")),
                 ),
             ),
         )
@@ -467,5 +476,45 @@ class PhoneToolProtocolTest {
         assertEquals(3L, root["epoch"]!!.toString().toLong())
         assertTrue(root.containsKey("error"))
         assertTrue(!root.containsKey("data"))
+    }
+
+    @Test
+    fun `the plugin ready body is closed and exact`() {
+        val body = """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone"}"""
+        assertTrue(PhoneToolProtocol.isReadyBody(body))
+        // Key order does not matter; the set of keys and the values do.
+        assertTrue(
+            PhoneToolProtocol.isReadyBody(
+                """{"tool":"andchamber_phone","plugin":"andchamber-phone","version":1}""",
+            ),
+        )
+
+        val refused = listOf(
+            "",
+            "not json",
+            """{"version":1,"plugin":"andchamber-phone"}""",
+            """{"version":1,"plugin":"andchamber-phone","tool":"other"}""",
+            """{"version":1,"plugin":"other","tool":"andchamber_phone"}""",
+            """{"version":2,"plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+            """{"version":"1","plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+            """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone","sessionID":"ses-a"}""",
+            """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone","token":"$TOKEN"}""",
+            """[1,2]""",
+        )
+        for (raw in refused) {
+            assertTrue("accepted: $raw", !PhoneToolProtocol.isReadyBody(raw))
+        }
+    }
+
+    @Test
+    fun `the ready ack carries no token, port, session or launch`() {
+        val ack = PhoneToolProtocol.readyAck()
+        val root = kotlinx.serialization.json.Json.parseToJsonElement(ack) as kotlinx.serialization.json.JsonObject
+        assertEquals(setOf("version", "ready"), root.keys)
+        assertEquals(1, root["version"]!!.toString().toInt())
+        assertTrue(root["ready"]!!.toString().toBoolean())
+        assertTrue(!ack.contains(TOKEN))
+        assertTrue(!ack.contains("launch"))
+        assertTrue(!ack.contains("ses-"))
     }
 }

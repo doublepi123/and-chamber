@@ -3,6 +3,18 @@ package io.andchamber.app.phone.android.overlay
 /** Which edge the capsule is docked to. Owned by the manager, not by composition. */
 internal enum class PhoneOverlaySide { LEFT, RIGHT }
 
+/** Why the agent stopped, as a native display fact. Mapped to the designer model at the surface. */
+internal enum class PhoneOverlayStopReason {
+    Expired,
+    NativeOpened,
+    TargetLeft,
+    ScreenLocked,
+    ConnectionLost,
+    RuntimeChanged,
+    OverlayUnreachable,
+    AgentAskedForYou,
+}
+
 /**
  * The overlay's display state, owned by the manager on the main thread.
  *
@@ -25,6 +37,12 @@ internal data class PhoneOverlayWindowState(
     val endConfirm: Boolean = false,
     val side: PhoneOverlaySide = PhoneOverlaySide.RIGHT,
     val offsetY: Int = 0,
+    /** Why the last confirmed stop happened; null for a plain pause/take-over. */
+    val stopReason: PhoneOverlayStopReason? = null,
+    /** A stopped task is kept for the person; this never means the same as ended. */
+    val retained: Boolean = false,
+    /** Offer the configure-once "continue beside the chat" entry (native confirmation only). */
+    val canContinueInChat: Boolean = false,
 ) {
     /** Stable, discoverable window title. The driver may match this against its dumpsys witness. */
     val windowTitle: String get() = overlayWindowTitle(ownerKey, generation)
@@ -64,10 +82,32 @@ internal data class PhoneOverlayWindowState(
             expanded = false,
             endConfirm = false,
             offsetY = 0,
+            stopReason = null,
+            retained = false,
+            canContinueInChat = false,
         )
 
     fun withSide(side: PhoneOverlaySide): PhoneOverlayWindowState =
         if (this.side == side) this else copy(side = side, revision = revision + 1)
+
+    /** Stop reason/retention/chat-continuation facts shown beside the phase; never a grant. */
+    fun withStopFacts(
+        stopReason: PhoneOverlayStopReason?,
+        retained: Boolean,
+        canContinueInChat: Boolean,
+    ): PhoneOverlayWindowState =
+        if (this.stopReason == stopReason && this.retained == retained &&
+            this.canContinueInChat == canContinueInChat
+        ) {
+            this
+        } else {
+            copy(
+                stopReason = stopReason,
+                retained = retained,
+                canContinueInChat = canContinueInChat,
+                revision = revision + 1,
+            )
+        }
 
     fun withDrag(
         side: PhoneOverlaySide,

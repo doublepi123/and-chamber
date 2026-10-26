@@ -15,25 +15,38 @@ const MAX_ENDPOINT_BYTES = 8192;
 const MAX_TOKEN_LENGTH = 512;
 const CANCEL_TIMEOUT_MS = 2000;
 
+// Plugin identity for the pinned v2 registration APIs. The tool name the host lists, and the RPC
+// port the native side probes (POST /api/rpc/andchamber-phone/ready).
+const TOOL_NAME = "andchamber_phone";
+const RPC_ID = "andchamber-phone";
+const RPC_READY = "ready";
+
+// Raw JSON Schemas (no package import): the RPC takes no input and answers with exactly this shape.
+const EMPTY_INPUT_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
+const READY_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: { ok: { const: true }, id: { const: "andchamber_phone" } },
+  required: ["ok", "id"],
+  additionalProperties: false,
+};
+
 const UNAVAILABLE =
   "AndChamber phone control is not available. Open the AndChamber chat screen on the phone and try again.";
-
-/** Fixed reply for a successful, read-only proposal. The person confirms natively. */
-const CONFIRM_TEXT = "请在AndChamber手机控制中确认";
 
 /** A model finish is only a report; the business result remains pending verification. */
 const FINISH_REPORTED = "报告结束，待核对";
 
 const DESCRIPTION = [
   "Control one app on the user's Android phone through the AndChamber phone-control channel.",
-  'Start with "status": it reports whether phone control is enabled, its phase, epoch, capabilities, runtime readiness and whether a native task exists, and it needs no grant.',
-  'Use "request" to propose a task before any control exists. It is read-only preparation: it only asks the person to confirm in AndChamber phone control and answers with the fixed text 请在AndChamber手机控制中确认. It never enables, pairs, grants, resumes, acknowledges or opens a screen, and it never starts the task itself. The person still chooses the target, duration and actions.',
-  'A successful "request" is refused while a grant is active, so the task cannot silently change mid-control. Only one pending task exists; another chat session cannot replace it, and the same session may explicitly update it with a new summary or package before it is confirmed.',
+  'Start with "status": it reports whether phone control is enabled, its phase, epoch, capabilities, runtime readiness, whether a native task exists, and whether the person configured the standing scope. It needs no grant.',
+  'Use "apps" to read only the person-preauthorized app list (label and package). It never exposes the installed-app catalogue and needs no grant.',
+  'Use "request" with a summary (max 200) and one packageName from "apps" to start a task directly inside the person-configured standing scope. The native side checks the scope, creates a new task epoch and launches that allowed app; the reply is state RUNNING/READY (or NEEDS_USER) with the epoch. There is no PENDING_CONFIRMATION step in this mode, and the tool never creates authority itself.',
+  'Use "open_app" with one packageName from "apps" to open that preauthorized app. Other packages are refused; it is not a general opener or command surface.',
   'For an already confirmed native task, "progress", "need_user" and "finish" need the current epoch from "status". They are the agent\'s own report, marked unverified: never native facts and never proof of business success. No event means no progress; do not invent percentages.',
-  '"need_user" asks the person to take over. It only becomes waiting after native control confirms that new operations and late reads are blocked; until then it may fail with STOP_UNCONFIRMED. Native confirmation still does not roll back an action that was already sent.',
+  '"need_user" asks the person to take over. It only becomes waiting after native control confirms that new operations and late reads are blocked; until then it may fail with STOP_UNCONFIRMED. Native confirmation still does not roll back an action that was already sent. A need_user, take-over, unknown outcome, lock, connection loss or runtime change suspends the standing scope until the person resumes it on the phone.',
   '"finish" only reports that the agent is done. It answers with 报告结束，待核对 and never means success; the person or native verification must check the result. It also requires native stop/revoke confirmation first.',
   'A progress/need_user/finish call is refused with NO_TASK when no native task exists, STALE_TASK or TASK_NOT_ACTIVE when the task changed or ended, EPOCH_CHANGED for a stale epoch, and SESSION_BUSY for another chat session. Do not retry a stale epoch or another session\'s task in a loop.',
-  'Every other action except "status" and "request" requires a native grant the person gives on the phone for one target app and a short lease. This tool can never enable, pair, grant, resume, acknowledge or open overlay permission; never claim that it can.',
+  'Every control action except "status", "apps", "request" and "open_app" requires a live task epoch from "request"/"status" and a native grant/lease. This tool can never enable, pair, grant, resume, acknowledge or open overlay permission; never claim that it can.',
   'Take "snapshot" first. It returns observationId plus accessibility nodes with refs, roles, labels and bounds in display pixels. Use that observationId for "capture", "tap", "swipe", "input" and "back"; a newer snapshot or any change to the window/geometry makes the old observationId stale, so take a new snapshot instead of guessing.',
   'One action per call. "tap" uses either ref or x/y; "swipe" uses x/y and x2/y2 in display pixels plus optional durationMs; "input" types text into the focused field, or focuses ref first; "back" presses the system back.',
   'Non-ASCII input may be refused with UNICODE_UNSUPPORTED. Do not silently replace it with an approximation.',
@@ -176,9 +189,10 @@ const toContent = (payload) => {
 export default {
   id: "andchamber-phone",
   setup: async (ctx) => {
+    // 1) Register the tool exactly as before. `transform` resolves once the callback has run.
     await ctx.tool.transform((tools) => {
       tools.add({
-        name: "andchamber_phone",
+        name: TOOL_NAME,
         description: DESCRIPTION,
         // Direct tool, never behind Code Mode: the model must see it in the
         // normal tool list.
@@ -188,14 +202,14 @@ export default {
           properties: {
             action: {
               type: "string",
-              enum: ["status", "request", "progress", "need_user", "finish", "snapshot", "capture", "tap", "swipe", "input", "back"],
+              enum: ["status", "request", "apps", "open_app", "progress", "need_user", "finish", "snapshot", "capture", "tap", "swipe", "input", "back"],
               description: "One phone action per call.",
             },
             epoch: {
               type: "integer",
               minimum: 0,
               description:
-                'Current grant epoch from the latest "status". Required for "progress", "need_user" and "finish".',
+                'Current task epoch from "request" or "status". Required for "progress", "need_user" and "finish".',
             },
             phase: {
               type: "string",
@@ -219,13 +233,13 @@ export default {
               type: "string",
               maxLength: 200,
               description:
-                'Task summary for "request" (max 200) shown to the person for native confirmation. For "finish" it is a bounded (max 120) end report, never success.',
+                'Task summary for "request" (max 200). For "finish" it is a bounded (max 120) end report, never success.',
             },
             packageName: {
               type: "string",
               maxLength: 200,
               description:
-                'Optional target package to preselect for the person ("request" only). The person still chooses the target.',
+                'Exactly one packageName from "apps". Required for "request" and "open_app"; never an arbitrary package.',
             },
             observationId: {
               type: "string",
@@ -285,6 +299,20 @@ export default {
                 required: ["action"],
               },
               then: { required: ["epoch"] },
+            },
+            {
+              if: {
+                properties: { action: { enum: ["request"] } },
+                required: ["action"],
+              },
+              then: { required: ["summary", "packageName"] },
+            },
+            {
+              if: {
+                properties: { action: { enum: ["open_app"] } },
+                required: ["action"],
+              },
+              then: { required: ["packageName"] },
             },
           ],
         },
@@ -349,11 +377,6 @@ export default {
             return textResult("AndChamber phone returned an invalid response.");
           }
 
-          // A successful proposal is a fixed, non-actionable answer; the person confirms natively.
-          // The summary is never echoed back by the server, so there is nothing to render here.
-          if (payload.ok === true && payload.action === "phone.request") {
-            return textResult(CONFIRM_TEXT);
-          }
           // A successful finish is only the agent's end report; never render it as success.
           if (payload.ok === true && payload.action === "phone.finish") {
             return textResult(FINISH_REPORTED);
@@ -363,5 +386,27 @@ export default {
         },
       });
     });
+
+    // 2) The host is the source of truth. A silently dropped add must never look like a working
+    // channel, so the registration is read back and `setup` fails closed without it.
+    const tools = await ctx.tool.list();
+    if (!Array.isArray(tools) || !tools.some((tool) => tool && tool.id === TOOL_NAME)) {
+      throw new Error(`${TOOL_NAME} was not registered`);
+    }
+
+    // 3) Read-only readiness port for the native side. It answers with a fixed body and grants
+    // nothing; the App probes it as POST /api/rpc/andchamber-phone/ready.
+    await ctx.rpc.register(
+      {
+        id: RPC_ID,
+        methods: {
+          [RPC_READY]: { input: EMPTY_INPUT_SCHEMA, output: READY_OUTPUT_SCHEMA },
+        },
+        events: {},
+      },
+      {
+        [RPC_READY]: async () => ({ ok: true, id: TOOL_NAME }),
+      },
+    );
   },
 };

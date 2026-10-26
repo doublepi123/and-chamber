@@ -70,6 +70,16 @@ internal fun PhoneOverlaySettingsCard(
             Body(stringResource(R.string.phone_overlay_settings_stop_kinds))
             Body(stringResource(R.string.phone_overlay_settings_data))
             header.hint()?.let { Body(stringResource(it), if (header == OverlayHeader.OverlayBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant) }
+            // The overlay didn't just vanish: say it moved to the notification, and why if known.
+            // The reason shows whenever native gave one, also when the notification itself wasn't
+            // available (lastSurface null). The "moved to the notification" line only when native said
+            // so; it means the recovery entry was offered, not that the person saw it.
+            if (lastSurfaceReport(state) != null) {
+                Body(stringResource(R.string.phone_overlay_settings_moved_to_notification), MaterialTheme.colorScheme.error)
+            }
+            lastStopReasonShown(state)?.let {
+                Body(stringResource(R.string.phone_overlay_stop_reason, stringResource(stopReasonText(it))))
+            }
 
             when (step) {
                 OverlaySetupStep.Unavailable -> Body(stringResource(R.string.phone_overlay_settings_unavailable))

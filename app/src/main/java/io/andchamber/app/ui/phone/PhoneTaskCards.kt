@@ -335,6 +335,7 @@ private fun TargetRow(
                             TargetBlock.Host -> R.string.phone_target_block_host
                             TargetBlock.System -> R.string.phone_target_block_system
                             TargetBlock.Invalid -> R.string.phone_target_block_invalid
+                            TargetBlock.Sensitive -> R.string.phone_target_block_sensitive
                         },
                     ),
                     style = MaterialTheme.typography.bodySmall,
@@ -495,7 +496,11 @@ internal fun HaltedCard(
                 )
             }
 
-            if (halted.confirmed && !mayApply) {
+            if (usesStanding(state)) {
+                // Configure-once mode: continue beside the chat after a native confirmation; the
+                // reason it waits is shown there. No per-task grant form here.
+                ContinueInChatBlock(state, actions)
+            } else if (halted.confirmed && !mayApply) {
                 HorizontalDivider()
                 StopChannelGate(state.stopChannel, actions)
                 if (state.device.link != PhoneLink.Connected) {

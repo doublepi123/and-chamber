@@ -20,7 +20,23 @@ data class PhoneState(
     val inFlightMutation: Boolean = false,
     /** Pause was requested while a mutation was in flight; it stays until that call settles. */
     val pausing: Boolean = false,
+    /** Standing chat requests are suspended until a native person resume. */
+    val standingBlocked: Boolean = false,
+    val standingBlockReason: PhoneStandingBlockReason? = null,
 )
+
+/**
+ * Why the configure-once standing scope is suspended. Only a native person confirmation clears it;
+ * a model request or a reconnect alone never does. No label, package or page text belongs here.
+ */
+enum class PhoneStandingBlockReason {
+    NEED_USER,
+    TAKEOVER,
+    UNKNOWN_OUTCOME,
+    CONNECTION_LOST,
+    DEVICE_LOCKED,
+    RUNTIME_CHANGED,
+}
 
 enum class PhonePhase {
     DISABLED,
@@ -68,4 +84,6 @@ enum class PhoneEvent {
     OBSERVATION_INVALIDATED,
     OUTCOME_UNKNOWN,
     UNKNOWN_ACKNOWLEDGED,
+    STANDING_BLOCKED,
+    STANDING_RESUMED,
 }

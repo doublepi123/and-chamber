@@ -9,6 +9,12 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEvent
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.standing.PhoneOpenAppResult
+import io.andchamber.app.phone.standing.PhoneStandingApp
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskStartResult
+import io.andchamber.app.phone.standing.PhoneTaskStarter
 import io.andchamber.app.phone.tool.FakePhoneDriver
 import io.andchamber.app.phone.tool.PhonePendingProposal
 import io.andchamber.app.phone.tool.PhoneToolEndpoint
@@ -18,7 +24,10 @@ import io.andchamber.app.phone.tool.TARGET
 import io.andchamber.app.phone.tool.httpPost
 import io.andchamber.app.phone.tool.input
 import io.andchamber.app.phone.tool.toolBody
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -36,6 +45,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.attribute.PosixFilePermissions
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -51,6 +61,8 @@ class PhoneToolBindingTest {
         transportFactoryOverride: ((Long, String) -> PhoneToolTransport)? = null,
         useRealTransport: Boolean = false,
         taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
+        taskStarter: PhoneTaskStarter = PhoneTaskStarter.Unavailable,
+        registrationProbe: PhonePluginRegistrationWaiter = PhonePluginRegistrationWaiter.Unavailable,
     ) {
         private val target = "com.example.target"
         var now = 1_000L
@@ -80,6 +92,8 @@ class PhoneToolBindingTest {
                 controller = controller,
                 readyLaunch = { currentLaunch },
                 taskEvents = taskEvents,
+                taskStarter = taskStarter,
+                registrationProbe = registrationProbe,
                 transportFactory = resolvedFactory,
                 tokenSource = { "%064x".format(tokens.getAndIncrement()) },
                 onUnavailable = { unavailable = it },
@@ -268,18 +282,24 @@ class PhoneToolBindingTest {
     private fun RawResponse.okBody(): Boolean = json["ok"]!!.toString().toBoolean()
 
     @Test
-    fun `isReady follows the current launch without touching authority or the endpoint`() = runBlocking {
+    fun `isReady follows the current launch and needs that launch's plugin handshake`() = runBlocking {
         val home = folder.newFolder("home-ready")
         val scope = PhoneToolTestScope(home, folder.root)
         try {
             assertFalse("no tool is installed yet", scope.binding.isReady())
             assertTrue(scope.binding.start(1L, home, folder.root))
+            assertFalse("a listening server is not readiness", scope.binding.isReady())
+
+            // Only this launch's setup handshake makes it ready.
+            scope.transports[0].pluginReady = true
             assertTrue(scope.binding.isReady())
 
             // A newer ready launch does not make an old active launch ready.
             scope.currentLaunch = 2L
             assertFalse(scope.binding.isReady())
             assertTrue(scope.binding.start(2L, home, folder.root))
+            assertFalse("a new launch never inherits the old handshake", scope.binding.isReady())
+            scope.transports[1].pluginReady = true
             assertTrue(scope.binding.isReady())
 
             scope.granted()
@@ -300,12 +320,67 @@ class PhoneToolBindingTest {
                 PhoneToolEndpoint.hostFile(home).readText(),
             )
 
+            scope.transports[1].pluginReady = false
+            assertFalse("a lost handshake is not ready", scope.binding.isReady())
+            scope.transports[1].pluginReady = true
+
             scope.currentLaunch = null
             assertFalse("a missing ready launch means no tool", scope.binding.isReady())
 
             scope.binding.stop(2L)
             assertFalse(scope.binding.isReady())
             assertFalse("None is never ready", PhoneToolHost.None.isReady())
+        } finally {
+            scope.binding.stop(2L)
+        }
+    }
+
+    @Test
+    fun `the real transport is ready only after the exact ready handshake and not after stop`() = runBlocking {
+        val home = folder.newFolder("home-ready-real")
+        val scope = PhoneToolTestScope(home, folder.root, useRealTransport = true)
+        try {
+            assertTrue(scope.binding.start(1L, home, folder.root))
+            val (port, token) = endpoint(home)
+            assertFalse("the endpoint file alone is not readiness", scope.binding.isReady())
+
+            val wrongBody =
+                """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone","sessionID":"ses-a"}"""
+            val refused = httpPost(
+                port,
+                wrongBody,
+                path = "/v1/ready",
+                token = token,
+            )
+            assertEquals(400, refused.status)
+            assertFalse(scope.binding.isReady())
+
+            val ready = httpPost(
+                port,
+                """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+                path = "/v1/ready",
+                token = token,
+            )
+            assertEquals(200, ready.status)
+            assertTrue(scope.binding.isReady())
+
+            // A stale launch's handshake is refused without changing anything.
+            scope.currentLaunch = null
+            val stale = httpPost(
+                port,
+                """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+                path = "/v1/ready",
+                token = token,
+            )
+            assertEquals(409, stale.status)
+            assertFalse(scope.binding.isReady())
+
+            scope.currentLaunch = 1L
+            assertTrue(scope.binding.isReady())
+            scope.binding.start(2L, home, folder.root)
+            assertFalse("a new launch starts without a handshake", scope.binding.isReady())
+            scope.binding.stop(2L)
+            assertFalse(scope.binding.isReady())
         } finally {
             scope.binding.stop(2L)
         }
@@ -348,6 +423,50 @@ class PhoneToolBindingTest {
         }
     }
 
+    @Test
+    fun `the binding forwards the native standing starter to the loopback server`() = runBlocking {
+        val home = folder.newFolder("home-standing")
+        val starter = object : PhoneTaskStarter {
+            override val available: Boolean = true
+
+            override fun standing(): PhoneStandingView =
+                PhoneStandingView(
+                    apps = listOf(PhoneStandingApp("Fixture", "com.example.target")),
+                    actions = setOf(PhoneActionKind.TAP),
+                    windowEndsAtMs = 10_000_000L,
+                )
+
+            override suspend fun request(
+                sessionId: String,
+                summary: String,
+                packageName: String,
+            ): PhoneTaskStartResult = PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+
+            override suspend fun openApp(
+                sessionId: String,
+                packageName: String,
+            ): PhoneOpenAppResult =
+                PhoneOpenAppResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+
+            override suspend fun abortStarted(
+                epoch: Long,
+                key: PhoneTaskKey,
+            ): Boolean = false
+        }
+        val scope = PhoneToolTestScope(home, folder.root, useRealTransport = true, taskStarter = starter)
+        try {
+            assertTrue(scope.binding.start(1L, home, folder.root))
+            val (port, token) = endpoint(home)
+            val response = httpPost(port, toolBody("ses-a", "a1", input("apps")), token = token)
+            assertTrue(response.okBody())
+            assertTrue(response.body.contains("com.example.target"))
+            assertTrue(response.body.contains("Fixture"))
+            assertFalse(response.body.contains("io.andchamber.app"))
+        } finally {
+            scope.binding.stop(2L)
+        }
+    }
+
     private class RecordingTaskEvents(
         private val key: PhoneTaskKey,
     ) : PhoneTaskEventHandler {
@@ -372,97 +491,93 @@ class PhoneToolBindingTest {
         return java.net.URI(url).port to root["token"]!!.jsonPrimitive.content
     }
 
-    private fun requestBody(
-        summary: String,
-        packageName: String? = null,
-        callId: String = "req-1",
-    ): String {
-        val extra = buildMap<String, Any> {
-            put("summary", summary)
-            packageName?.let { put("packageName", it) }
+
+
+    private class DeferredRegistrationProbe : PhonePluginRegistrationWaiter {
+        override val available: Boolean = true
+        private val calls = ConcurrentHashMap<Long, CompletableDeferred<Unit>>()
+        private val gates = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
+
+        private fun call(launchId: Long): CompletableDeferred<Unit> =
+            calls.getOrPut(launchId) { CompletableDeferred() }
+
+        private fun gate(launchId: Long): CompletableDeferred<Boolean> =
+            gates.getOrPut(launchId) { CompletableDeferred() }
+
+        suspend fun awaitCalled(launchId: Long) {
+            call(launchId).await()
         }
-        return toolBody("ses-a", callId, input("request", extra = extra))
+
+        fun complete(
+            launchId: Long,
+            registered: Boolean,
+        ) {
+            gate(launchId).complete(registered)
+        }
+
+        override suspend fun awaitRegistered(launchId: Long): Boolean {
+            call(launchId).complete(Unit)
+            return gate(launchId).await()
+        }
     }
 
     @Test
-    fun `pendingRequest is exposed to native code and consume clears only what was shown`() = runBlocking {
-        val home = folder.newFolder("home-pending")
-        val scope = PhoneToolTestScope(home, folder.root, useRealTransport = true)
+    fun `isReady needs the exact launch rpc registration and never a legacy transport flag`() = runBlocking {
+        val home = folder.newFolder("home-rpc-ready")
+        val probe = DeferredRegistrationProbe()
+        val scope = PhoneToolTestScope(home, folder.root, registrationProbe = probe)
         try {
             assertTrue(scope.binding.start(1L, home, folder.root))
-            val (port, token) = endpoint(home)
-            val summary = "Book a table for two"
-
-            val response = httpPost(port, requestBody(summary, TARGET), token = token)
-            assertTrue("the proposal was not accepted: ${response.body}", response.body.contains("PENDING_CONFIRMATION"))
-
-            val pending = scope.binding.pendingRequest.value!!
-            assertEquals("ses-a", pending.sessionLabel)
-            assertEquals(summary, pending.summary)
-            assertEquals(TARGET, pending.packageName)
-
-            assertNull(
-                "a stale revision must not consume a newer proposal",
-                scope.binding.consumePendingRequest(pending.revision - 1),
-            )
-            assertNotNull(scope.binding.pendingRequest.value)
-            assertEquals(pending, scope.binding.consumePendingRequest(pending.revision))
-            assertNull(scope.binding.pendingRequest.value)
+            // A legacy setup handshake alone must not claim readiness when the RPC probe is wired.
+            scope.transports.single().pluginReady = true
+            probe.awaitCalled(1L)
+            assertFalse(scope.binding.isReady())
+            probe.complete(1L, registered = true)
+            withTimeout(5_000) {
+                while (!scope.binding.isReady()) delay(10)
+            }
+            assertTrue(scope.binding.isReady())
         } finally {
             scope.binding.stop(1L)
         }
     }
 
     @Test
-    fun `dismiss clears only the displayed revision`() = runBlocking {
-        val home = folder.newFolder("home-dismiss")
-        val scope = PhoneToolTestScope(home, folder.root, useRealTransport = true)
+    fun `stop cancels a pending rpc registration and ignores a late success`() = runBlocking {
+        val home = folder.newFolder("home-rpc-stop")
+        val probe = DeferredRegistrationProbe()
+        val scope = PhoneToolTestScope(home, folder.root, registrationProbe = probe)
         try {
             assertTrue(scope.binding.start(1L, home, folder.root))
-            val (port, token) = endpoint(home)
-            assertTrue(httpPost(port, requestBody("first", callId = "r1"), token = token).body.contains("PENDING_CONFIRMATION"))
-            val first = scope.binding.pendingRequest.value!!
-            assertTrue(httpPost(port, requestBody("second", callId = "r2"), token = token).body.contains("PENDING_CONFIRMATION"))
-            val second = scope.binding.pendingRequest.value!!
-            assertTrue(second.revision > first.revision)
-            assertEquals("second", second.summary)
-
-            assertFalse("a stale dismiss must not clear the update", scope.binding.dismissPendingRequest(first.revision))
-            assertEquals("second", scope.binding.pendingRequest.value!!.summary)
-            assertTrue(scope.binding.dismissPendingRequest(second.revision))
-            assertNull(scope.binding.pendingRequest.value)
+            probe.awaitCalled(1L)
+            scope.binding.stop(1L)
+            probe.complete(1L, registered = true)
+            delay(100)
+            assertFalse("a late registration for a stopped launch is not ready", scope.binding.isReady())
         } finally {
             scope.binding.stop(1L)
         }
     }
 
     @Test
-    fun `a new launch clears the old proposal and an old stop leaves the new one alone`() = runBlocking {
-        val home = folder.newFolder("home-pending-launch")
-        val scope = PhoneToolTestScope(home, folder.root, useRealTransport = true)
+    fun `a new launch never inherits an old rpc registration`() = runBlocking {
+        val home = folder.newFolder("home-rpc-new-launch")
+        val probe = DeferredRegistrationProbe()
+        val scope = PhoneToolTestScope(home, folder.root, registrationProbe = probe)
         try {
             assertTrue(scope.binding.start(1L, home, folder.root))
-            val (firstPort, firstToken) = endpoint(home)
-            assertTrue(
-                httpPost(firstPort, requestBody("first launch"), token = firstToken)
-                    .body.contains("PENDING_CONFIRMATION"),
-            )
-            assertNotNull(scope.binding.pendingRequest.value)
-
-            // A new runtime epoch must not inherit an old proposal.
-            scope.currentLaunch = 2L
+            probe.awaitCalled(1L)
             assertTrue(scope.binding.start(2L, home, folder.root))
-            assertNull(scope.binding.pendingRequest.value)
-
-            val (port, token) = endpoint(home)
-            assertTrue(httpPost(port, requestBody("second launch"), token = token).body.contains("PENDING_CONFIRMATION"))
-            assertNotNull(scope.binding.pendingRequest.value)
-
-            // A delayed stop of the old launch must not clear the new launch's proposal.
-            scope.binding.stop(1L)
-            assertNotNull(scope.binding.pendingRequest.value)
-            scope.binding.stop(2L)
-            assertNull(scope.binding.pendingRequest.value)
+            scope.currentLaunch = 2L
+            probe.awaitCalled(2L)
+            probe.complete(1L, registered = true)
+            delay(100)
+            assertFalse("the new launch must not inherit launch 1's registration", scope.binding.isReady())
+            probe.complete(2L, registered = true)
+            withTimeout(5_000) {
+                while (!scope.binding.isReady()) delay(10)
+            }
+            assertTrue(scope.binding.isReady())
         } finally {
             scope.binding.stop(2L)
         }
@@ -478,6 +593,10 @@ class PhoneToolBindingTest {
         val starts = AtomicInteger(0)
         val stops = AtomicInteger(0)
 
+        /** Test-controlled stand-in for the plugin's `/v1/ready` handshake. */
+        @Volatile
+        override var pluginReady: Boolean = false
+
         override fun start(): Int {
             starts.incrementAndGet()
             startEntered?.countDown()
@@ -486,6 +605,7 @@ class PhoneToolBindingTest {
         }
 
         override fun stop() {
+            pluginReady = false
             stops.incrementAndGet()
             stopEntered?.countDown()
             stopRelease?.await(5, TimeUnit.SECONDS)

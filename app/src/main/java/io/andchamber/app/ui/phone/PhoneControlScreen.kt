@@ -178,7 +178,13 @@ internal fun PhoneControlScreen(
                         PhoneStep.Unavailable -> UnavailableCard()
                         PhoneStep.Off -> EnableCard(state = state, onEnable = actions.onEnable)
                         PhoneStep.Connect -> ConnectCard(state = state, actions = actions)
-                        PhoneStep.Grant -> GrantCard(state = state, actions = actions)
+                        // Configure-once mode: the standing scope replaces the per-task grant form.
+                        PhoneStep.Grant ->
+                            if (usesStanding(state)) {
+                                PhoneStandingCard(state = state, actions = actions, now = now)
+                            } else {
+                                GrantCard(state = state, actions = actions)
+                            }
                         PhoneStep.Running -> RunningCard(state = state, now = now, actions = actions)
                         PhoneStep.Halted ->
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -189,6 +195,12 @@ internal fun PhoneControlScreen(
                             }
                         PhoneStep.Result -> ResultCard(state = state, actions = actions)
                     }
+                }
+
+                // Configure-once mode: the scope and readiness stay visible below a running, stopped
+                // or finished task (the Grant step already shows the card itself).
+                if (showsStandingCard(state) && step != PhoneStep.Grant) {
+                    PhoneStandingCard(state = state, actions = actions, now = now, modifier = Modifier.padding(top = 20.dp))
                 }
 
                 // Below the current step, outside it: setting up the overlay is never the step that
@@ -211,7 +223,7 @@ internal fun PhoneControlScreen(
     }
 }
 
-/** Wall clock, ticking every second in the last minute of a lease and every 15 s otherwise. */
+/** Monotonic time, ticking every second in the last minute of a lease and every 15 s otherwise. */
 @Composable
 private fun rememberNow(
     control: PhoneControl,
@@ -220,11 +232,13 @@ private fun rememberNow(
     val expires = (control as? PhoneControl.Agent)?.lease?.expiresAtMs
     val now by produceState(clock(), expires) {
         value = clock()
-        while (expires != null) {
-            val left = expires - value
-            delay(if (left <= 61_000) 1_000 else 15_000)
+        // Standing scopes also count down while there is no task lease. Keep ticking in that case;
+        // otherwise a screen opened before saving would show a remaining time longer than the scope.
+        while (true) {
+            val left = expires?.minus(value)
+            delay(if (left != null && left <= 61_000) 1_000 else 15_000)
             value = clock()
-            if (value >= expires) break
+            if (expires != null && value >= expires) break
         }
     }
     return now
@@ -661,6 +675,16 @@ internal object PhoneTags {
     const val RESULT = "phone.result"
     const val BUSY = "phone.busy"
     const val ENTRY = "phone.entry"
+    const val STANDING = "phone.standing"
+    const val STANDING_READY = "phone.standingReady"
+    const val OPEN_CHAT = "phone.openChat"
+    const val REVOKE_STANDING = "phone.revokeStanding"
+    const val RESTART_RUNTIME = "phone.restartRuntime"
+    const val RESTART_CONFIRM = "phone.restartConfirm"
+    const val SAVE_STANDING = "phone.saveStanding"
+    const val SAVE_STANDING_CONFIRM = "phone.saveStandingConfirm"
+    const val CONTINUE_IN_CHAT = "phone.continueInChat"
+    const val CONTINUE_DELIVERY = "phone.continueDelivery"
     const val OBSERVE = "phone.observe"
     const val FEEDBACK = "phone.feedback"
     const val RUNTIME_GATE = "phone.runtimeGate"

@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.SystemClock
 import io.andchamber.app.phone.android.PhoneIntegration
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
 import io.andchamber.app.ui.phone.PhoneControl
 import io.andchamber.app.ui.phone.PhoneHaltReason
@@ -12,6 +13,7 @@ import io.andchamber.app.ui.phone.PhonePending
 import io.andchamber.app.ui.phone.PhoneScreenState
 import io.andchamber.app.ui.phone.overlay.OverlayMode
 import io.andchamber.app.ui.phone.overlay.OverlayPermission
+import io.andchamber.app.ui.phone.overlay.OverlaySurfaceMode
 import io.andchamber.app.ui.phone.overlay.OverlayTest
 import io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsActions
 import io.andchamber.app.ui.phone.overlay.PhoneOverlaySettingsState
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Native adapter between the phone controller and the overlay window.
@@ -79,6 +82,11 @@ internal class PhoneOverlayCoordinator(
     private var lastAuthorityAtMs = 0L
     private var pendingStop: PhoneOverlayStopRequest? = null
     private var overlayLostWhileLeased = false
+    /** A failed/unreachable surface is not re-attached by every 15s tick. */
+    private var attachSuppressed = false
+    /** What really happened to the overlay for the settings card; never a visibility claim. */
+    private var lastSurfaceMode: OverlaySurfaceMode? = null
+    private var lastStopReasonValue: PhoneOverlayStopReason? = null
     private var dragDx = 0f
 
     /** Per-rotation user posture. Memory only; never a phase, owner, lease or summary. */
@@ -269,7 +277,7 @@ internal class PhoneOverlayCoordinator(
         if (overlayModeChangeRequiresStop(settings.mode(), target, integration.liveLeaseEpoch() != null)) {
             // Leaving Overlay while a lease is live is a native stop, not a silent detach fallback.
             overlayLostWhileLeased = false
-            failClosedStop()
+            stopForModeChange()
             if (integration.liveLeaseEpoch() != null) {
                 // The revoke did not take effect. Do not persist notification-only and silently
                 // continue without the selected overlay stop entry.
@@ -279,7 +287,10 @@ internal class PhoneOverlayCoordinator(
             }
         }
         settings.setMode(target)
+        attachSuppressed = false
         overlayLostWhileLeased = false
+        lastSurfaceMode =
+            if (target == PhoneOverlayMode.OVERLAY) lastSurfaceMode else OverlaySurfaceMode.NotificationOnly
         publishSettings()
         refresh()
     }
@@ -288,6 +299,8 @@ internal class PhoneOverlayCoordinator(
         if (demoTest == OverlayTest.Seen && settings.gate() != PhoneOverlayGate.READY) {
             demoTest = OverlayTest.NotSeen
         }
+        // The person explicitly revisited the permission: one fresh bounded attach is allowed again.
+        attachSuppressed = false
         publishSettings()
         refresh()
     }
@@ -368,16 +381,70 @@ internal class PhoneOverlayCoordinator(
     internal fun driverAuthorityEpoch(): Long? = integration.liveLeaseEpoch()
 
     /**
-     * Known overlay loss reported by the driver bridge after it froze and re-checked the same
-     * epoch/display owner on the main thread. This is the existing native overlay takeover/revoke
-     * path; it keeps the task/result and does not create or extend a lease.
+     * Bounded Main-thread wait for this epoch's manager surface before the driver's first read.
+     *
+     * Notification-only needs no overlay and returns true. For a selected overlay this only waits
+     * until the manager has attached exactly this epoch's window and its barrier reports VISIBLE; it
+     * never proves visibility, grants, resumes or extends a lease. A changed epoch/owner returns
+     * false immediately, and so does the timeout.
      */
-    internal fun onDriverOverlayLost(): Boolean = integration.onOverlayTakeOver()
+    internal suspend fun awaitDriverSurface(epoch: Long): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (settings.mode() != PhoneOverlayMode.OVERLAY) return@withContext true
+            val startedAtMs = clock()
+            var elapsedMs = 0L
+            while (elapsedMs < SURFACE_WAIT_TIMEOUT_MS) {
+                val gate =
+                    overlayDriverSurfaceGate(
+                        overlaySelected = true,
+                        epoch = epoch,
+                        liveEpoch = integration.liveLeaseEpoch(),
+                        ownerKey = state.ownerKey,
+                        hostVisible = nativeVisible,
+                        surfaceShown = surface.isShown,
+                        hiddenForRead = surface.isHiddenForRead,
+                        phase = surface.expectation(clock()).phase,
+                    )
+                when (gate) {
+                    OverlayDriverSurfaceGate.NOT_REQUIRED,
+                    OverlayDriverSurfaceGate.READY,
+                    -> return@withContext true
+
+                    OverlayDriverSurfaceGate.STALE -> return@withContext false
+                    OverlayDriverSurfaceGate.WAITING -> Unit
+                }
+                delay(minOf(SURFACE_WAIT_POLL_MS, SURFACE_WAIT_TIMEOUT_MS - elapsedMs))
+                elapsedMs = clock() - startedAtMs
+            }
+            false
+        }
+
+    /**
+     * Known overlay loss reported by the driver bridge after it froze and re-checked the same
+     * epoch/display owner on the main thread. This is a visibility failure, not a person's
+     * take-over: it stops the exact lease as `ScreenUncertain`, keeps the task/result and tries one
+     * bounded re-show of the already-stopped state.
+     */
+    internal fun onDriverOverlayLost(): Boolean =
+        handleOverlayFailure(
+            PhoneOverlayFailure.VISIBILITY_UNCONFIRMED,
+            tryShowStopped = true,
+        )
 
     fun onDisplayServiceStarted(owner: String) {
         displayOwner = owner
         displayServiceRequested = true
         serviceEpochOwned = integration.liveLeaseEpoch()
+        if (attachSuppressed &&
+            lastStopReasonValue == PhoneOverlayStopReason.OverlayUnreachable &&
+            lastSurfaceMode == null &&
+            hasVerifiedNotificationFallback()
+        ) {
+            // A display-service owner exists and the stop channel is verified: the recovery entry is
+            // available. This is not evidence that the person can see the notification.
+            lastSurfaceMode = OverlaySurfaceMode.MovedToNotification
+        }
+        publishSettings()
         refresh()
     }
 
@@ -388,9 +455,9 @@ internal class PhoneOverlayCoordinator(
         displayServiceRequested = false
         serviceEpochOwned = null
         surface.detach()
-        // Losing the display service while a lease is live is a failed stop entry: revoke that epoch.
         if (integration.liveLeaseEpoch() != null) {
-            failClosedStop()
+            // Unexpected loss of the only guaranteed stop entry: stop the live lease, keep the task.
+            handleOverlayFailure(PhoneOverlayFailure.DISPLAY_SERVICE_LOST, tryShowStopped = true)
         }
         publishSettings()
     }
@@ -399,7 +466,9 @@ internal class PhoneOverlayCoordinator(
     fun onDisplayPermissionLost(owner: String) {
         if (!PhoneOverlayDisplayOwner.matches(owner, displayOwner)) return
         if (!PhoneOverlayDisplayOwner.hasCurrentNonce(owner)) return
-        if (integration.liveLeaseEpoch() != null) failClosedStop()
+        if (integration.liveLeaseEpoch() != null) {
+            handleOverlayFailure(PhoneOverlayFailure.NOTIFICATION_LOST, tryShowStopped = true)
+        }
         requestStopService()
     }
 
@@ -430,7 +499,7 @@ internal class PhoneOverlayCoordinator(
         demoJob?.cancel()
         demoSurface.detach()
         surface.detach()
-        state = state.withPhase(PhoneOverlayPhase.ENDED)
+        state = state.withPhase(PhoneOverlayPhase.ENDED).withStopFacts(null, false, false)
         publishSettings()
         return true
     }
@@ -463,7 +532,10 @@ internal class PhoneOverlayCoordinator(
         applyState(state.withPhase(PhoneOverlayPhase.STOP_PENDING).withEndConfirm(confirming = false))
         val ended = runCatching { endTask(retained.key, retained.grantEpoch) }.getOrDefault(false)
         pendingStop = null
-        applyState(state.withPhase(if (ended) PhoneOverlayPhase.NEEDS_CHECK else PhoneOverlayPhase.UNKNOWN))
+        applyState(
+            state.withPhase(if (ended) PhoneOverlayPhase.NEEDS_CHECK else PhoneOverlayPhase.UNKNOWN)
+                .withStopFacts(if (ended) null else state.stopReason, false, false),
+        )
         if (ended) lastAuthorityAtMs = clock()
         publishSettings()
         refresh()
@@ -471,10 +543,35 @@ internal class PhoneOverlayCoordinator(
     }
 
     /** Return to AndChamber: revoke first, keep the overlay reachable until Main is really resumed. */
-    fun onReturnToNative(): Boolean {
-        if (integration.liveLeaseEpoch() != null) onTakeOver()
+    fun onReturnToNative(): Boolean = launchEntry(PhoneOverlayEntry.ReturnToNative)
+
+    /** Open the chat for the current/retained task. Never revokes, resumes or extends a lease. */
+    fun onOpenChat(): Boolean {
+        if (!overlayEntryRevokesLease(PhoneOverlayEntry.OpenChat)) {
+            applyState(state.withExpanded(false))
+        }
+        return launchEntry(PhoneOverlayEntry.OpenChat)
+    }
+
+    /** Open the native "continue beside the chat" confirmation; it never resumes from here. */
+    fun onContinueInChat(): Boolean = launchEntry(PhoneOverlayEntry.ContinueInChat)
+
+    private fun launchEntry(entry: PhoneOverlayEntry): Boolean {
+        if (overlayEntryRevokesLease(entry) && integration.liveLeaseEpoch() != null) onTakeOver()
+        val intent =
+            when (entry) {
+                PhoneOverlayEntry.OpenChat ->
+                    PhoneOverlayDisplayService.openChatIntent(
+                        context,
+                        integration.currentTaskSessionId(),
+                    )
+
+                PhoneOverlayEntry.ContinueInChat,
+                PhoneOverlayEntry.ReturnToNative,
+                -> PhoneOverlayDisplayService.openNativeIntent(context)
+            }
         return runCatching {
-            context.startActivity(PhoneOverlayDisplayService.openNativeIntent(context))
+            context.startActivity(intent)
             true
         }.getOrDefault(false)
     }
@@ -498,7 +595,14 @@ internal class PhoneOverlayCoordinator(
         // A closed result card is not reopened by a late unknown/progress emission.
         if (liveEpoch == null && state.phase == PhoneOverlayPhase.ENDED) return
         if (state.phase == phase) return
-        state = state.withPhase(phase)
+        state =
+            state
+                .withPhase(phase)
+                .withStopFacts(
+                    state.stopReason,
+                    overlayTaskIsRetained(snapshot.state) && phase != PhoneOverlayPhase.ENDED,
+                    state.canContinueInChat,
+                )
         lastAuthorityAtMs = clock()
         publishSettings()
         refresh()
@@ -520,6 +624,11 @@ internal class PhoneOverlayCoordinator(
                 state = overlayReflow(state, surface.geometryFor(state))
                 driverOwnerSnapshot = "${state.ownerKey}:${state.generation}"
                 overlayLostWhileLeased = false
+                // A real new authority gets one fresh bounded attach after an earlier unreachable one.
+                attachSuppressed = false
+                // The previous task's fallback/reason no longer describes this one.
+                lastStopReasonValue = null
+                lastSurfaceMode = null
             }
         }
         val lease =
@@ -563,6 +672,29 @@ internal class PhoneOverlayCoordinator(
             }
         val previousPhase = state.phase
         state = state.withPhase(nextPhase, label, summary, endsAt)
+        val mappedStopReason = overlayStopReasonFor(halted?.reason, taskState)
+        // A failure's explanation survives a state emission that has no halt fact of its own; only a
+        // new live authority (handled above) clears it.
+        val stopReason =
+            if (mappedStopReason == null &&
+                liveEpoch == null &&
+                state.stopReason == PhoneOverlayStopReason.OverlayUnreachable &&
+                (nextPhase == PhoneOverlayPhase.UNKNOWN || nextPhase == PhoneOverlayPhase.TAKEN_OVER)
+            ) {
+                PhoneOverlayStopReason.OverlayUnreachable
+            } else {
+                mappedStopReason
+            }
+        val retained =
+            liveEpoch == null &&
+                overlayTaskIsRetained(taskState) &&
+                nextPhase != PhoneOverlayPhase.IDLE &&
+                nextPhase != PhoneOverlayPhase.ENDED &&
+                nextPhase != PhoneOverlayPhase.NEEDS_CHECK
+        val continueInChat =
+            liveEpoch == null && overlayCanContinueInChat(screen, nextPhase)
+        state = state.withStopFacts(stopReason, retained, continueInChat)
+        if (stopReason != null) lastStopReasonValue = stopReason
         if (nextPhase == PhoneOverlayPhase.RUNNING ||
             nextPhase == PhoneOverlayPhase.PAUSING ||
             nextPhase == PhoneOverlayPhase.PAUSED
@@ -585,8 +717,15 @@ internal class PhoneOverlayCoordinator(
         val gate = settings.gate()
         val contentAvailable = content.available
         if (overlayLeaseMustFailClosed(hasLease, mode, contentAvailable, gate)) {
-            // Selected Overlay but permission/content/window lost: an invisible stop entry fails closed.
-            failClosedStop()
+            // Selected Overlay but permission/content/window lost. This is not a take-over: stop the
+            // exact lease as a StopChannelLost/ScreenUncertain failure and keep its real reason.
+            val failure =
+                if (gate != PhoneOverlayGate.READY) {
+                    PhoneOverlayFailure.PERMISSION_REVOKED
+                } else {
+                    PhoneOverlayFailure.VISIBILITY_UNCONFIRMED
+                }
+            handleOverlayFailure(failure, tryShowStopped = false)
             return
         }
         // A driver read owns the window. Keep the host's authority/control state current (Pause,
@@ -606,6 +745,13 @@ internal class PhoneOverlayCoordinator(
             return
         }
         if (!overlayMayAttach(contentAvailable, mode, gate)) {
+            if (surface.isShown) surface.detach()
+            stopServiceIfIdle()
+            return
+        }
+        if (attachSuppressed) {
+            // An earlier failure already tried the bounded stopped display. The tick loop must not
+            // hammer addView; the display-service notification/native recovery stays available.
             if (surface.isShown) surface.detach()
             stopServiceIfIdle()
             return
@@ -635,16 +781,23 @@ internal class PhoneOverlayCoordinator(
             } else {
                 surface.attach(window, liveActions())
             }
-        if (!attached) {
-            if (hasLease) failClosedStop() else surface.detach()
+        if (attached) {
+            if (mode == PhoneOverlayMode.OVERLAY) lastSurfaceMode = OverlaySurfaceMode.Overlay
+            return
+        }
+        if (hasLease) {
+            // Requesting the window failed: stop the exact lease, never claim a take-over.
+            handleOverlayFailure(PhoneOverlayFailure.ATTACH_FAILED, tryShowStopped = false)
+        } else {
+            recordUnreachable(overlayTaskIsRetained(currentTaskSnapshot()?.state))
         }
     }
 
     /**
      * A read-hide restore exceeded its Main scheduling budget. The overlay is genuinely not shown
      * and the ticket is uncertain, not "stopped" or rolled back. Settle only the current owner:
-     * revoke a still-live native lease (fail closed) or safely re-show the current post-stop state.
-     * A timeout from a previous owner never revokes a newer one.
+     * stop a still-live native lease as a visibility failure and try one bounded re-show of the
+     * already-stopped state. A timeout from a previous owner never touches a newer one.
      */
     private fun onReadHideTimedOut(lease: PhoneOverlayReadLease) {
         val liveEpoch = integration.liveLeaseEpoch()
@@ -660,15 +813,113 @@ internal class PhoneOverlayCoordinator(
             refresh()
             return
         }
-        if (liveEpoch != null) {
-            failClosedStop()
-        } else {
-            // No native authority remains: re-show the current already-revoked/result state.
-            refresh()
+        handleOverlayFailure(PhoneOverlayFailure.READ_RESTORE_TIMEOUT, tryShowStopped = true)
+    }
+
+    /**
+     * The one failure path. It first stops the exact lease through the native failure API (never the
+     * take-over API), keeps the real halt reason and the task context, then either shows one bounded
+     * stopped card or records an honest notification fallback. The settings card always says why.
+     */
+    private fun handleOverlayFailure(
+        failure: PhoneOverlayFailure,
+        tryShowStopped: Boolean,
+    ): Boolean {
+        if (overlayLostWhileLeased) return false
+        overlayLostWhileLeased = true
+        // Stop new native actions first. The take-over API is deliberately not used here.
+        val hadLiveLease = integration.liveLeaseEpoch() != null
+        val stopped = integration.onOverlayFailure(phoneHaltReasonFor(failure))
+        surface.detach()
+        val taskState = currentTaskSnapshot()?.state
+        val retainedTask = overlayTaskIsRetained(taskState)
+        val receipt = hadLiveLease && stopped && integration.liveLeaseEpoch() == null
+        val nextPhase = overlayFailurePhase(state.phase, retainedTask, receipt, hadLiveLease)
+        val canContinue =
+            (!hadLiveLease || receipt) && overlayCanContinueInChat(shownState, nextPhase)
+        state =
+            state
+                .withPhase(nextPhase)
+                .withStopFacts(
+                    PhoneOverlayStopReason.OverlayUnreachable,
+                    retainedTask && nextPhase != PhoneOverlayPhase.ENDED,
+                    canContinue,
+                )
+        lastStopReasonValue = PhoneOverlayStopReason.OverlayUnreachable
+        lastAuthorityAtMs = clock()
+        if (tryShowStopped &&
+            overlayFailureMayShowStopped(failure) &&
+            mayAttachNow() &&
+            state.phase != PhoneOverlayPhase.IDLE &&
+            state.phase != PhoneOverlayPhase.ENDED
+        ) {
+            val geometry = surface.geometryFor(state)
+            val reflowed = overlayReflow(state, geometry)
+            if (surface.attach(reflowed, liveActions())) {
+                state = reflowed
+                attachSuppressed = false
+                lastSurfaceMode = OverlaySurfaceMode.Overlay
+                publishSettings()
+                return receipt
+            }
+        }
+        recordUnreachable(retainedTask, failure, receipt, hadLiveLease)
+        return receipt
+    }
+
+    /** No visible stopped card was possible: keep the real notification/native fallback, honestly. */
+    private fun recordUnreachable(
+        retainedTask: Boolean,
+        failure: PhoneOverlayFailure = PhoneOverlayFailure.ATTACH_FAILED,
+        stopReceipt: Boolean = false,
+        hadLiveLease: Boolean = false,
+    ) {
+        surface.detach()
+        attachSuppressed = true
+        val nextPhase = overlayFailurePhase(state.phase, retainedTask, stopReceipt, hadLiveLease)
+        val canContinue =
+            (!hadLiveLease || stopReceipt) && overlayCanContinueInChat(shownState, nextPhase)
+        state =
+            state
+                .withPhase(nextPhase)
+                .withStopFacts(
+                    PhoneOverlayStopReason.OverlayUnreachable,
+                    retainedTask && nextPhase != PhoneOverlayPhase.ENDED,
+                    canContinue,
+                )
+        lastStopReasonValue = PhoneOverlayStopReason.OverlayUnreachable
+        lastSurfaceMode =
+            overlaySurfaceAfterFailure(
+                failure = failure,
+                notificationLive = hasVerifiedNotificationFallback(),
+            )
+        lastAuthorityAtMs = clock()
+        publishSettings()
+    }
+
+    /**
+     * A recovery entry really exists: this display-service owner plus a verified notification stop
+     * channel. `startForeground`/submission alone is not evidence and never claims visibility.
+     */
+    private fun hasVerifiedNotificationFallback(): Boolean =
+        verifiedNotificationFallback(
+            displayOwner = displayOwner,
+            stopChannel = integration.state.value.stopChannel,
+        )
+
+    private fun mayAttachNow(): Boolean =
+        overlayMayAttach(content.available, settings.mode(), settings.gate())
+
+    private fun currentTaskSnapshot(): io.andchamber.app.phone.overlay.progress.PhoneTaskSnapshot? {
+        val snapshot = taskProgress.value?.snapshot ?: return null
+        val liveEpoch = integration.liveLeaseEpoch()
+        return snapshot.takeIf {
+            overlayTaskSnapshotBelongsToDisplay(it.grantEpoch, liveEpoch, state.ownerKey)
         }
     }
 
-    private fun failClosedStop() {
+    /** Deliberate native mode change: a person's stop path, not a visibility failure. */
+    private fun stopForModeChange() {
         if (overlayLostWhileLeased) return
         overlayLostWhileLeased = true
         surface.detach()
@@ -706,6 +957,8 @@ internal class PhoneOverlayCoordinator(
             },
             onDragBy = { dx, dy -> surfaceDrag(dx, dy) },
             onDragEnd = { surfaceDragEnd() },
+            onOpenChat = { onOpenChat() },
+            onContinueInChat = { onContinueInChat() },
         )
 
     private fun applyState(next: PhoneOverlayWindowState) {
@@ -777,7 +1030,7 @@ internal class PhoneOverlayCoordinator(
         demoSurface.detach()
         // A hidden read still owns the window; keep the host's authority state current so a later
         // restore cannot bring back RUNNING after the retention clock ended.
-        applyState(state.withPhase(PhoneOverlayPhase.ENDED))
+        applyState(state.withPhase(PhoneOverlayPhase.ENDED).withStopFacts(null, false, false))
         requestStopService()
     }
 
@@ -809,6 +1062,8 @@ internal class PhoneOverlayCoordinator(
                 },
             test = demoTest,
             pending = pendingStop != null,
+            lastSurface = lastSurfaceMode,
+            lastStopReason = lastStopReasonValue?.toUiStopReason(),
         )
 
     private companion object {
@@ -819,6 +1074,10 @@ internal class PhoneOverlayCoordinator(
 
         /** A demo capsule that nobody taps or confirms disappears on its own. */
         const val DEMO_TIMEOUT_MS = 45_000L
+
+        /** The driver's first read waits this long for the manager to attach the exact epoch. */
+        const val SURFACE_WAIT_TIMEOUT_MS = 5_000L
+        const val SURFACE_WAIT_POLL_MS = 50L
 
         const val OWNER_RETAINED = "retained"
         const val OWNER_DEMO = "demo"

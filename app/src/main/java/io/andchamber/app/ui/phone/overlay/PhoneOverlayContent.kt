@@ -398,7 +398,10 @@ private fun PanelBody(
     now: Long,
 ) {
     val phase = state.phase
+    // Why it stopped, first: the capsule never just changes or vanishes without a reason.
+    state.stopReason?.let { Notice(NoticeTone.Info, stringResource(R.string.phone_overlay_stop_reason, stringResource(stopReasonText(it)))) }
     notice(phase)?.let { (tone, text) -> Notice(tone, stringResource(text)) }
+    if (isRetainedHandover(state)) Foot(stringResource(R.string.phone_overlay_retained_note))
 
     if (phase == OverlayPhase.Running || phase == OverlayPhase.Paused) SummarySection(state.summary)
 
@@ -426,17 +429,42 @@ private fun PanelBody(
         }
     }
 
-    val buttons = panelActions(phase)
+    val buttons = panelActions(state)
     if (buttons.isNotEmpty()) {
         Spacer(Modifier.size(10.dp))
+        // Low-emphasis Collapse and End share one secondary row, so a way back (open chat) doesn't
+        // push the stack taller. Everything else keeps its own full-width row.
+        val (stacked, footer) = panelButtonRows(buttons)
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            buttons.forEachIndexed { index, action -> PanelButton(action, primary = index == 0, actions = actions) }
+            stacked.forEachIndexed { index, action -> PanelButton(action, primary = index == 0, actions = actions) }
+            if (footer.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    footer.forEach { action ->
+                        Box(modifier = Modifier.weight(1f)) {
+                            PanelButton(action, primary = false, actions = actions)
+                        }
+                    }
+                }
+            }
         }
     }
     foot(phase)?.let { Foot(stringResource(it)) }
 }
 
 private enum class NoticeTone { Warn, Error, Info, Ok }
+
+@StringRes
+internal fun stopReasonText(reason: OverlayStopReason): Int =
+    when (reason) {
+        OverlayStopReason.Expired -> R.string.phone_overlay_reason_expired
+        OverlayStopReason.NativeOpened -> R.string.phone_overlay_reason_native_opened
+        OverlayStopReason.TargetLeft -> R.string.phone_overlay_reason_target_left
+        OverlayStopReason.ScreenLocked -> R.string.phone_overlay_reason_screen_locked
+        OverlayStopReason.ConnectionLost -> R.string.phone_overlay_reason_connection_lost
+        OverlayStopReason.RuntimeChanged -> R.string.phone_overlay_reason_runtime_changed
+        OverlayStopReason.OverlayUnreachable -> R.string.phone_overlay_reason_unreachable
+        OverlayStopReason.AgentAskedForYou -> R.string.phone_overlay_reason_agent_asked
+    }
 
 private fun notice(phase: OverlayPhase): Pair<NoticeTone, Int>? =
     when (phase) {
@@ -606,6 +634,8 @@ private fun PanelButton(
             OverlayAction.Collapse -> R.string.phone_overlay_btn_collapse to actions.onCollapse
             OverlayAction.RetryTakeOver -> R.string.phone_overlay_btn_retry_take_over to actions.onTakeOver
             OverlayAction.CloseResult -> R.string.phone_overlay_btn_close_result to actions.onCloseResult
+            OverlayAction.OpenChat -> R.string.phone_overlay_btn_open_chat to actions.onOpenChat
+            OverlayAction.ContinueInChat -> R.string.phone_overlay_btn_continue_in_chat to actions.onContinueInChat
         }
     val mod = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(OverlayTags.button(action))
     when {

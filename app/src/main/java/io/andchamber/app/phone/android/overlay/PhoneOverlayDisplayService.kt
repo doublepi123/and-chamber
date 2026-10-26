@@ -17,6 +17,7 @@ import io.andchamber.app.MainActivity
 import io.andchamber.app.R
 import io.andchamber.app.phone.android.PhoneControlService
 import io.andchamber.app.phone.android.PhoneProcessNonce
+import io.andchamber.app.notify.OpenChamberNotifier
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -221,5 +222,23 @@ class PhoneOverlayDisplayService : Service() {
                 .setData(Uri.parse(PhoneOverlayDisplayOwner.openIntentData(owner)))
                 .putExtra(EXTRA_OWNER, owner)
                 .putExtra(EXTRA_NONCE, PhoneProcessNonce.value)
+
+        /**
+         * The overlay's "open chat": an explicit Activity intent for the current/retained task's
+         * session. A null session still opens the app's local screen. It grants nothing, resumes
+         * nothing and does not revoke the lease.
+         */
+        fun openChatIntent(
+            context: Context,
+            sessionId: String?,
+        ): Intent =
+            Intent(context, MainActivity::class.java)
+                .setAction(OpenChamberNotifier.ACTION_OPEN_SESSION)
+                .apply {
+                    sessionId?.takeIf { it.isNotBlank() }?.let {
+                        putExtra(OpenChamberNotifier.EXTRA_SESSION_ID, it)
+                    }
+                }
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     }
 }

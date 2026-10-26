@@ -9,8 +9,8 @@ This document owns the two assets in `scripts/phone-e2e/`:
 
 They are test support. They do not change production Kotlin, Gradle, the manifest, DI or the
 phone-tool plugin. They do not talk to an emulator, install an APK, start the app, or call the
-phone tool server themselves. The orchestrator runs the real guest, the real native grant and the
-real OpenCode/plugin/native chain.
+phone tool server themselves. The orchestrator runs the real guest, the real standing scope,
+native continuation and the real OpenCode/plugin/native chain.
 
 ## Privacy and repository rules
 
@@ -78,10 +78,12 @@ adb -s <serial> shell am start -n io.example.phonefixture/.MainActivity
 
 The build itself does not invoke adb.
 
-## 2. Provider overlay for OpenCode 2.0.32
+## 2. Provider test config for OpenCode 2.0.32
 
-The guest must use a test-package launch overlay or a dedicated guest test config. Do **not** write
-the user's global `~/.config/opencode/opencode.json(c)`, shared storage, or the normal app profile.
+The provider must be injected into the guest's **inline test config** by the acceptance-only
+launch/config seam. Editing only a normal `~/.config/opencode/opencode.json(c)` is not sufficient and
+is not the supported path: the test launch may overwrite or ignore it. Do **not** write the user's
+global config, shared storage, or the normal app profile.
 
 Exact template: `scripts/phone-e2e/provider-overlay.example.json`.
 
@@ -128,10 +130,11 @@ Notes, checked against `@opencode/schema@2.0.32` and `@opencode/core@2.0.32`:
   capture envelope and exact envelope parsing fails. Declaring image keeps the envelope as the
   only text part and sends the PNG as a later user attachment. The fixture accepts and ignores
   that attachment; it does not decode it, reason over it or claim visual understanding.
-- The app's launch overlay merges `plugins` into `OPENCODE_CONFIG_CONTENT`; put the provider
-  object in that same test-package overlay (or a dedicated guest test config) so the user's config
-  is untouched. Applying this overlay requires restarting guest OpenCode/runtime; restarting only
-  the model fixture server does not reload the guest config.
+- The acceptance harness must inject this provider through its dedicated test-only guest inline
+  config mechanism; the app launch overlay merges `plugins` into `OPENCODE_CONFIG_CONTENT`. Put the
+  provider object in that same test-only config so the user's config is untouched. Simply editing a
+  normal `opencode.json` is not enough. Applying the config requires restarting guest
+  OpenCode/runtime; restarting only the model fixture server does not reload it.
 
 ## 3. Model fixture server
 
@@ -170,8 +173,21 @@ is accepted:
 [[andchamber-phone-e2e {"mode":"action","action":"input","text":"andchamber-ascii-1"}]]
 ```
 
+Native continuation is recognized separately. After the test sentinel, a later user message must be
+exactly the fixed continuation prompt sent by the native `PhoneStandingContinueSender`:
+
+```text
+Continue the previous task. First observe the phone screen again; do not repeat any action that already happened.
+```
+
+That message is not a second sentinel and must not be posted by the acceptance driver as another
+test prompt. The fixture treats it as `mode=continue`, reuses the scenario (or
+`sentinel.resumeScenario`), and resumes with a real observation/action. Tests assert that the
+original session received exactly one such prompt and no extra acceptance-script continuation
+prompt.
+
 The fixture first verifies that the request's `tools` contains `andchamber_phone` with the real
-schema (`action` enum, `observationId`, `ref`, `x`/`y`/`x2`/`y2`, `text`, `additionalProperties:
+schema (`action` enum including `apps`/`open_app`, `observationId`, `ref`, `x`/`y`/`x2`/`y2`, `text`, `additionalProperties:
 false`). If the tool is missing or malformed it returns a fixed text refusal and **no** tool call;
 it never pretends a tool was executed. No network, paid model or real key is involved.
 
@@ -183,20 +199,24 @@ it never pretends a tool was executed. No network, paid model or real key is inv
 request { action:"request", summary:"AndChamber phone E2E <scenario>", packageName:"io.example.phonefixture" }
 ```
 
-The plugin returns the fixed confirmation text. The model then stops with
-`phone-e2e-fixture: request-pending-native-confirmation scenario=<name> epoch=<n>`. The person
-confirms natively in AndChamber phone control (target `io.example.phonefixture`, short lease).
-
-After native confirmation, send a new prompt with `mode=continue` and the same scenario. A
-scenario makes **one** real action:
+`mode=begin` starts the real user story directly: the first call is
 
 ```text
-status -> snapshot -> <action> -> snapshot
+request { action:"request", summary:"AndChamber phone E2E <scenario>", packageName:"io.example.phonefixture" }
 ```
 
-`status` supplies the real grant `epoch`; `snapshot` supplies the real `observationId`, package
-binding, display geometry and node refs. The action arguments use those returned values, never
-guessed ids. The final snapshot is checked before the fixed completion text:
+There is no per-task `PENDING_CONFIRMATION` and no manual "continue" prompt. Only a parsed
+direct-start envelope with `ok:true`, a fresh integer `epoch >= 1` and `data.state` in
+`RUNNING`/`READY`/`NEEDS_USER` continues. The next turn runs the concrete observed scenario, for
+example `status -> snapshot -> <action> -> snapshot`. A plain text acknowledgement, a PENDING reply,
+a stale epoch or a refusal stops with `phone-e2e-fixture: request-not-confirmed`.
+
+`mode=continue` remains available for explicit orchestration and for a new sentinel/continuation
+prompt. The native continuation path is described above and does not need a second sentinel.
+
+`status` supplies the real epoch; `snapshot` supplies the real `observationId`, package binding,
+display geometry and node refs. The action arguments use those returned values, never guessed ids.
+The final snapshot is checked before the fixed completion text:
 
 ```text
 phone-e2e-fixture: e2e-complete scenario=input action=input verify=pass epoch=<n>
@@ -210,14 +230,17 @@ Scenarios:
 
 | scenario | action | final check |
 |---|---|---|
+| `apps` | read-only `apps` | result is ok; every returned app is the preauthorized `io.example.phonefixture` package; no installed catalogue |
+| `open_app` | `open_app` with `io.example.phonefixture`, then `snapshot` | result state is `OPENED`; final snapshot shows the same package in front |
 | `input` | `input` into the editable `fixture-input` node (default ASCII `andchamber-ascii-1`, or sentinel `text`) | first snapshot has the non-editable `fixture-input-echo-empty` marker; final snapshot has a non-editable node with the exact typed value |
 | `tap_save` | `tap` the clickable `Save` node | counter value increased |
 | `tap_next` | `tap` the clickable `Next page` node | final snapshot shows `Second page` |
-| `back` | `back` with the current observationId | final snapshot shows `AndChamber Phone Fixture` and not `Second page`; run this while the second page is current (use `tap_next` first, then a separate `back` prompt under the same grant) |
+| `back` | `back` with the current observationId | final snapshot shows `AndChamber Phone Fixture` and not `Second page`; run this while the second page is current (use `tap_next` first, then a separate `back` prompt under the same task) |
 | `swipe` | `swipe` upward inside the snapshot geometry | final snapshot shows a higher `Fixture row NN` than the first snapshot |
 | `capture` | `capture` the current observationId | capture text envelope is `image/png` with positive width/height; a tool multipart may carry exactly one text part plus known `image_url`/`file` media parts; the following image user attachment is ignored. Base64 is never logged or echoed |
-| `status` | read-only | minimal enabled/connection state; no observation or grant required |
+| `status` | read-only | minimal enabled/connection state; no observation or task required |
 | `snapshot` | read-only | target package remains `io.example.phonefixture` |
+| `need_user` | `status`, then `need_user` | native stop receipt; a later native continuation prompt resumes with a real mutation (default `input`) |
 
 For explicit orchestration, `mode=action` with `action` selects the same sequence; `ref`, `x`/`y`,
 `x2`/`y2`, `durationMs`, `text`, and `label` are optional fixed overrides. Explicit action
@@ -225,34 +248,25 @@ sentinel prompts still go through the real OpenCode tool call.
 
 ### Transcript shape
 
-The server logs only counts, fixed sentinel case, tool name, fixed action and fixed case. Synthetic
-self-test transcript (no prompts, arguments, results or keys):
+The server logs only counts, fixed sentinel case, tool name, fixed action and fixed case. Direct
+`begin` is deterministic: the first turn is `request`, then the scenario turns continue in the same
+conversation (each line is a separate model request):
 
 ```text
-phone-e2e-fixture listen http://127.0.0.1:32123/v1 model=phone pid=<pid> pidFile=/tmp/opencode/andchamber-phone-e2e/model-fixture-32123.pid
-phone-e2e-fixture request seq=1 stream=false messages=1 tools=1 phoneTool=valid sentinel=begin:input call=0 decision=tool tool=andchamber_phone action=request case=call-request
-phone-e2e-fixture request seq=2 stream=true messages=1 tools=1 phoneTool=valid sentinel=none call=0 decision=text tool=- action=- case=ignored
+phone-e2e-fixture request seq=1 stream=true messages=1 tools=1 phoneTool=valid sentinel=begin:input call=0 decision=tool tool=andchamber_phone action=request case=call-request
+phone-e2e-fixture request seq=2 stream=true messages=3 tools=1 phoneTool=valid sentinel=begin:input call=1 decision=tool tool=andchamber_phone action=status case=call-status
+phone-e2e-fixture request seq=3 stream=true messages=5 tools=1 phoneTool=valid sentinel=begin:input call=2 decision=tool tool=andchamber_phone action=snapshot case=call-snapshot
+phone-e2e-fixture request seq=4 stream=true messages=7 tools=1 phoneTool=valid sentinel=begin:input call=3 decision=tool tool=andchamber_phone action=input case=call-input
+phone-e2e-fixture request seq=5 stream=true messages=9 tools=1 phoneTool=valid sentinel=begin:input call=4 decision=tool tool=andchamber_phone action=snapshot case=call-snapshot
+phone-e2e-fixture request seq=6 stream=true messages=11 tools=1 phoneTool=valid sentinel=begin:input call=5 decision=text tool=- action=- case=e2e-complete
 ```
 
-A full synthetic input self-test (unit test) produces the fixed sequence
-`call-status`, `call-snapshot`, `call-input`, `call-snapshot`, `e2e-complete`, ending in:
+The final text is the same fixed `e2e-complete ... verify=pass` line. With the native continuation
+prompt the sentinel remains the original one, but the plan switches to `continue` and a real
+mutation; the acceptance harness separately counts that the original session received exactly one
+fixed prompt.
 
-```text
-phone-e2e-fixture: e2e-complete scenario=input action=input verify=pass epoch=7
-```
-
-Its transcript shape is deterministic too (each line is a separate model request; the
-conversation carries the earlier tool result):
-
-```text
-phone-e2e-fixture request seq=1 stream=true messages=1 tools=1 phoneTool=valid sentinel=continue:input call=0 decision=tool tool=andchamber_phone action=status case=call-status
-phone-e2e-fixture request seq=2 stream=true messages=3 tools=1 phoneTool=valid sentinel=continue:input call=1 decision=tool tool=andchamber_phone action=snapshot case=call-snapshot
-phone-e2e-fixture request seq=3 stream=true messages=5 tools=1 phoneTool=valid sentinel=continue:input call=2 decision=tool tool=andchamber_phone action=input case=call-input
-phone-e2e-fixture request seq=4 stream=true messages=7 tools=1 phoneTool=valid sentinel=continue:input call=3 decision=tool tool=andchamber_phone action=snapshot case=call-snapshot
-phone-e2e-fixture request seq=5 stream=true messages=9 tools=1 phoneTool=valid sentinel=continue:input call=4 decision=text tool=- action=- case=e2e-complete
-```
-
-The epoch in a real run is the native grant epoch returned by the real server, not the fixture's
+The epoch in a real run is the native task epoch returned by the real server, not the fixture's
 unit-test value.
 
 ## 4. Harness calls (real guest, orchestrator-owned)
@@ -263,16 +277,17 @@ OpenCode 2.0.32 endpoints:
 ```text
 POST /api/session?directory=%2Froot
   header: x-opencode-directory: /root
-  body: {}
-  -> session id (ses_...)
+  body: {"model":{"id":"phone","providerID":"fixture"}}
+  -> session id (`<session-id>`)
 
-POST /api/session/<ses_id>/model
-  body: {"model":{"providerID":"fixture","id":"phone"}}
+# optional re-assert on an existing session:
+POST /api/session/<session-id>/model
+  body: {"model":{"id":"phone","providerID":"fixture"}}
 
-POST /api/session/<ses_id>/prompt
+POST /api/session/<session-id>/prompt
   body: {"text":"<sentinel prompt>"}
 
-POST /api/experimental/session/<ses_id>/wait
+POST /api/experimental/session/<session-id>/wait
 GET  /api/plugin
   header: x-opencode-directory: /root
 ```
@@ -280,18 +295,24 @@ GET  /api/plugin
 Suggested handoff:
 
 1. Start the fixture and check `GET /health`.
-2. Launch the test package with the provider overlay above; create the session and switch it to
-   `fixture/phone`.
-3. Prompt `mode=begin`. Wait for `request-pending-native-confirmation`; the person grants the
-   target/actions natively.
-4. Prompt `mode=continue` for one scenario. Wait for `e2e-complete ... verify=pass` and inspect the
-   server transcript.
-5. For the second-page back check, run `tap_next` first, then a separate `back` prompt under the
-   same grant; do not expect two mutations in one scenario.
+2. Launch the test package with the dedicated test-only inline provider config above. In the native
+   phone screen, save the standing scope once. If the runtime was already running without the
+   phone plugin, confirm the native restart and wait for RPC registration (`output.ok=true`,
+   `id=andchamber_phone`) and Ready.
+3. Create the session with `model:{id:"phone",providerID:"fixture"}` and prompt `mode=begin`.
+   The first tool call is the direct `request`; with a fresh epoch and `RUNNING`/`READY` it
+   auto-continues to `e2e-complete ... verify=pass`. There is no per-task PENDING or manual grant.
+4. Open the ordinary local chat; confirm the task stays READY. Then exercise `apps`/`open_app` and
+   independently confirm the same `io.example.phonefixture` foreground.
+5. For native continuation, trigger `need_user`, let the person act, then use the native Continue
+   confirmation. Assert exactly one fixed continuation prompt in the original session, no extra
+   acceptance-script continuation prompt, and `e2e-complete ... verify=pass` after re-observation.
+6. For the second-page back check, run `tap_next` first, then a separate `back` prompt under the
+   same task; do not expect two mutations in one scenario.
 
-`GET /api/plugin` proves the plugin is loaded; OpenCode 2.0.32 exposes no `/api/tool`, so there is
-no fabricated tool-name assertion. The model fixture's tool call and the plugin's real HTTP result
-are the evidence that the tool was present and executed.
+`GET /api/plugin` only proves the plugin is loaded; production readiness is the bounded native RPC
+registration probe above. The model fixture's tool call, the real plugin HTTP result and the
+independent target effects are the evidence that the tool was present and executed.
 
 ## 5. Verification status
 
@@ -305,20 +326,31 @@ This covers:
 
 - JSON and SSE completion rendering;
 - missing/malformed `andchamber_phone` tool schema rejection without a tool call;
+- direct `begin`: `request` first, accepted `RUNNING`/`READY`/`NEEDS_USER` with fresh epoch,
+  auto-continue, and rejection of plain text/PENDING/stale replies;
+- native continuation prompt recognition: exact fixed prompt, no second sentinel, real
+  observation/action, and no acceptance-script continuation prompt;
+- `apps` only returns the preauthorized fixture package; `open_app` returns `OPENED` and a final
+  snapshot proves the same package in front;
 - tool-result envelope parsing, epoch/binding/ref use, one action per scenario, and fixed
   pass/fail completion text;
 - input privacy witness: the non-editable `fixture_input_echo` marker and exact typed value are
   required; an editable label alone is rejected; the password field is never mirrored;
 - capture wire format: one exact text envelope in a tool multipart with known media parts is
   accepted; two text parts or unknown part shapes are rejected; a following image user attachment
-  is ignored; the provider overlay declares image input;
+  is ignored; the test-only provider config declares image input;
 - loopback HTTP server, model listing, transcript count/no-prompt logging;
 - offline target APK build, signature verification, manifest package/label/launchable activity,
   absence of `INTERNET`, `fixture_input_echo` resource presence, and `classes.dex` presence.
 
-Not verified here: installing the target APK, the real guest runtime, native grant handoff, the
-real OpenCode model loop, the real plugin call, real uiautomator/ADB actions, and real captures.
-Those are the orchestrator's run.
+In the full acceptance run, Node totals were **349 tests: 348 passed, one existing
+stock-ChatContainer fixture skipped, no failures**. The local commands above cover only the fixture
+subset; the parent owns the complete suite.
+
+Not verified here: installing the target APK, the real guest runtime, standing save/restart/RPC
+readiness, the real OpenCode model loop, native continuation delivery, real uiautomator/ADB actions,
+and real captures. Those belong to the orchestrator/emulator run. The API 35/x86_64 emulator run is the only device claim; physical
+arm64/OEM, TalkBack and real-model reasoning are not established by these fixtures.
 
 ## 6. Native UI smoke (phone entry / off state)
 
@@ -382,5 +414,7 @@ Locally this lane was compile/packaging checked with:
 ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -Pandchamber.testApplicationId=io.andchamber.phonesmoke
 ```
 
-The instrumentation itself was not run here; it requires the emulator owned by the final
-orchestrator.
+The full API 35/x86_64 acceptance run later executed the device instrumentation lane with **20/20
+passed**. This document's local smoke commands remain compile/packaging checks; the instrumentation
+requires the emulator owned by the final orchestrator. The smoke does not stand in for pairing, the
+tool loop, native continuation or overlay behavior.

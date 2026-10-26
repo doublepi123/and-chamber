@@ -25,9 +25,16 @@ const PHONE_TOOL = 'andchamber_phone';
 const TARGET_PACKAGE = 'io.example.phonefixture';
 const DEFAULT_INPUT_TEXT = 'andchamber-ascii-1';
 const INPUT_ECHO_EMPTY = 'fixture-input-echo-empty';
-const CONFIRM_TEXT = '请在AndChamber手机控制中确认';
 const FINISH_TEXT = '报告结束，待核对';
-const ACTIONS = ['status', 'request', 'progress', 'need_user', 'finish', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'];
+// Must match PhoneStandingContinueSender.STANDING_CONTINUE_PROMPT. This is the real native wake-up,
+// not a second test-sentinel prompt posted by the acceptance driver.
+const NATIVE_CONTINUE_PROMPT = 'Continue the previous task. First observe the phone screen again; do not repeat any action that already happened.';
+// Direct-start states accepted from the native standing starter. There is no PENDING_CONFIRMATION.
+const START_STATES = ['RUNNING', 'READY', 'NEEDS_USER'];
+const ACTIONS = [
+  'status', 'request', 'apps', 'open_app', 'progress', 'need_user', 'finish',
+  'snapshot', 'capture', 'tap', 'swipe', 'input', 'back',
+];
 const TOOL_MEDIA_PART_TYPES = new Set([
   'image_url',
   'input_image',
@@ -47,6 +54,8 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 const SEQUENCES = Object.freeze({
   status: ['status'],
+  apps: ['apps'],
+  open_app: ['open_app', 'snapshot'],
   snapshot: ['snapshot'],
   input: ['status', 'snapshot', 'input', 'snapshot'],
   tap: ['status', 'snapshot', 'tap', 'snapshot'],
@@ -148,6 +157,16 @@ function findSentinel(messages) {
   return null;
 }
 
+function findNativeContinuation(messages, sentinel) {
+  if (!sentinel) return null;
+  for (let index = messages.length - 1; index > sentinel.index; index -= 1) {
+    const message = messages[index];
+    if (!message || message.role !== 'user') continue;
+    if (messageText(message).trim() === NATIVE_CONTINUE_PROMPT) return { index };
+  }
+  return null;
+}
+
 function inspectTools(tools) {
   const list = Array.isArray(tools) ? tools : [];
   let phone = null;
@@ -216,11 +235,13 @@ function actionMatches(envelope, step) {
 function analyzeTurn(body) {
   const messages = normalizeMessages(body);
   const sentinel = findSentinel(messages);
+  const nativeContinuation = findNativeContinuation(messages, sentinel);
   const tools = inspectTools(body && body.tools);
   const calls = [];
   const results = [];
   if (sentinel) {
-    for (let index = sentinel.index + 1; index < messages.length; index += 1) {
+    const callsAfter = nativeContinuation ? nativeContinuation.index : sentinel.index;
+    for (let index = callsAfter + 1; index < messages.length; index += 1) {
       const message = messages[index];
       if (!message || typeof message !== 'object') continue;
       if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
@@ -285,6 +306,7 @@ function analyzeTurn(body) {
   return {
     messages,
     sentinel,
+    nativeContinuation,
     tools,
     calls,
     results,
@@ -296,14 +318,6 @@ function analyzeTurn(body) {
     latestStatus,
     latestCapture,
     error,
-    plainRequestAck: Boolean(
-      lastCall &&
-      lastCall.args &&
-      lastCall.args.action === 'request' &&
-      lastResult &&
-      !lastResult.parsed &&
-      lastResult.text.trim().length > 0
-    ),
   };
 }
 
@@ -408,7 +422,8 @@ function snapshotBinding(state) {
 }
 
 function actionArgs(state, step, value, scenario) {
-  if (step === 'status' || step === 'snapshot') return { action: step };
+  if (step === 'status' || step === 'snapshot' || step === 'apps') return { action: step };
+  if (step === 'open_app') return { action: step, packageName: TARGET_PACKAGE };
   if (!state.latestStatus || state.latestStatus.ok !== true) planFail('status-missing');
   if (step === 'progress' || step === 'need_user' || step === 'finish') {
     if (!isInteger(state.latestStatus.epoch)) planFail('status-epoch-missing');
@@ -489,12 +504,30 @@ function verifyScenario(state, scenario, action, value) {
     return data && typeof data.enabled === 'boolean' && typeof data.connected === 'boolean'
       ? { ok: true } : { ok: false, reason: 'status-missing' };
   }
+  if (scenario === 'apps') {
+    const parsed = state.lastResult && state.lastResult.parsed;
+    const apps = parsed && parsed.data && parsed.data.apps;
+    return parsed && parsed.ok === true && actionMatches(parsed, 'apps') && Array.isArray(apps) &&
+      apps.length > 0 && apps.every((app) => app && app.packageName === TARGET_PACKAGE)
+      ? { ok: true }
+      : { ok: false, reason: 'apps-scope-mismatch' };
+  }
   const first = state.firstSnapshot && state.firstSnapshot.data;
   const last = state.latestSnapshot && state.latestSnapshot.data;
   if (!last || last.packageName !== TARGET_PACKAGE) return { ok: false, reason: 'target-not-foreground' };
   const labels = labelsOf(last);
 
   if (scenario === 'snapshot') return { ok: true };
+  if (scenario === 'open_app') {
+    const opened = state.calls.some((call) => {
+      const parsed = call.result && call.result.parsed;
+      return parsed && parsed.ok === true && actionMatches(parsed, 'open_app') &&
+        parsed.data && parsed.data.state === 'OPENED';
+    });
+    return opened && labels.includes('AndChamber Phone Fixture')
+      ? { ok: true }
+      : { ok: false, reason: 'open-app-not-observed' };
+  }
   if (scenario === 'capture') {
     const capture = state.latestCapture;
     if (!capture || capture.ok !== true || !capture.data || typeof capture.data !== 'object') {
@@ -585,32 +618,42 @@ function planTurn(body, options = {}) {
   }
 
   const value = state.sentinel.value;
-  const mode = typeof value.mode === 'string' ? value.mode : '';
-  const scenario = typeof value.scenario === 'string'
+  let mode = typeof value.mode === 'string' ? value.mode : '';
+  let scenario = typeof value.scenario === 'string'
     ? value.scenario
     : typeof value.action === 'string' ? value.action : 'input';
+  if (state.nativeContinuation) {
+    mode = 'continue';
+    // A need_user scenario first proves the stop, then the real native prompt resumes with a real
+    // mutation. Tests can choose another bounded follow-up explicitly; no second sentinel is posted.
+    scenario = typeof value.resumeScenario === 'string'
+      ? value.resumeScenario
+      : scenario === 'need_user' ? 'input' : scenario;
+  }
 
   let sequence;
-  if (mode === 'begin') sequence = ['request'];
-  else if (mode === 'continue') sequence = sequenceFor(scenario);
+  if (mode === 'begin') {
+    const scenarioSteps = sequenceFor(scenario);
+    sequence = scenarioSteps ? ['request', ...scenarioSteps] : null;
+  } else if (mode === 'continue') sequence = sequenceFor(scenario);
   else if (mode === 'action') sequence = sequenceFor(scenario);
   else return textPlan('phone-e2e-fixture: unsupported sentinel mode', 'sentinel-invalid');
   if (!sequence) return textPlan('phone-e2e-fixture: unsupported scenario', 'sentinel-invalid');
 
-  if (mode === 'begin' && state.callCount >= 1) {
-    const result = state.lastResult;
-    const confirmed = Boolean(
-      result &&
-      (result.text.includes(CONFIRM_TEXT) ||
-        (result.parsed && result.parsed.ok === true && actionMatches(result.parsed, 'request'))),
-    );
-    if (!confirmed) {
+  if (!state.nativeContinuation && mode === 'begin' && state.callCount === 1) {
+    // The begin request is the real chat user story: the local plugin calls "request", the native
+    // standing starter creates a fresh per-task epoch and launches the allowed app. Only a parsed
+    // direct-start envelope continues; a plain text ack or a refusal stops the scenario.
+    const result = state.calls[0] && state.calls[0].result;
+    const parsed = result && result.parsed;
+    const startState = parsed && parsed.ok === true && parsed.data && typeof parsed.data === 'object'
+      ? parsed.data.state
+      : null;
+    if (!parsed || parsed.ok !== true || !isInteger(parsed.epoch) || parsed.epoch < 1 ||
+        !START_STATES.includes(startState)) {
       return textPlan('phone-e2e-fixture: request-not-confirmed', 'request-not-confirmed');
     }
-    return textPlan(
-      `phone-e2e-fixture: request-pending-native-confirmation scenario=${scenario} epoch=${epochOf(state)}`,
-      'request-pending',
-    );
+    // Fall through: the next turn continues the concrete observed scenario (status, snapshot, ...).
   }
 
   if (state.callCount < sequence.length) {
@@ -642,7 +685,9 @@ function planTurn(body, options = {}) {
   const lastAction = state.lastCall && state.lastCall.args && typeof state.lastCall.args.action === 'string'
     ? state.lastCall.args.action
     : 'unknown';
-  const mutationStep = sequence.find((step) => step !== 'status' && step !== 'snapshot') || sequence[sequence.length - 1];
+  const mutationStep =
+    sequence.find((step) => step !== 'status' && step !== 'snapshot' && step !== 'request') ||
+    sequence[sequence.length - 1];
   const verified = verifyScenario(state, scenario, lastAction, value);
   if (!verified.ok) {
     return textPlan(
@@ -946,7 +991,9 @@ function startServer(options = {}) {
     const state = analyzeTurn(body);
     const plan = planTurn(body, { callSeq: sequence });
     if (plan.kind === 'tool') plan.toolCall.id = `${callPrefix}_${sequence}`;
-    const sentinelText = sentinelLabel(state.sentinel);
+    const sentinelText = state.nativeContinuation
+      ? `native-continue:${sentinelLabel(state.sentinel)}`
+      : sentinelLabel(state.sentinel);
     logEvent({
       seq: sequence,
       stream: body.stream === true,

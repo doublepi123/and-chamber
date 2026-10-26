@@ -9,9 +9,11 @@ import android.os.SystemClock
 import android.provider.Settings
 import io.andchamber.app.MainActivity
 import io.andchamber.app.phone.adb.AdbDeviceException
+import io.andchamber.app.phone.android.overlay.PhoneOverlayHolder
 import io.andchamber.app.phone.android.overlay.PhoneTaskIdentity
 import io.andchamber.app.phone.android.overlay.PhoneTaskNativeEndHelper
 import io.andchamber.app.phone.android.overlay.PhoneTaskNativeFacts
+import io.andchamber.app.phone.android.overlay.PhoneTaskProgressView
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneAgentAction
 import io.andchamber.app.phone.core.PhoneAgentRequest
@@ -26,10 +28,25 @@ import io.andchamber.app.phone.core.PhoneGrant
 import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneState
+import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.overlay.progress.PhoneProgressKind
 import io.andchamber.app.phone.overlay.progress.PhoneProgressReason
 import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
+import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.overlay.progress.PhoneTaskState
+import io.andchamber.app.phone.standing.PhoneOpenAppResult
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneStandingResume
+import io.andchamber.app.phone.standing.PhoneStandingScope
+import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskStartResult
+import io.andchamber.app.phone.standing.PhoneTaskStartState
+import io.andchamber.app.notify.OpenSessionLink
 import io.andchamber.app.ui.phone.PhoneBusy
 import io.andchamber.app.ui.phone.PhoneConnectRequest
+import io.andchamber.app.ui.phone.PhoneContinueDelivery
+import io.andchamber.app.ui.phone.PhoneContinuation
+import io.andchamber.app.ui.phone.MAX_STANDING_APPS
 import io.andchamber.app.ui.phone.PhoneControlActions
 import io.andchamber.app.ui.phone.PhoneDiagnosticTokens
 import io.andchamber.app.ui.phone.PhoneDeviceProblem
@@ -41,8 +58,10 @@ import io.andchamber.app.ui.phone.PhonePairRequest
 import io.andchamber.app.ui.phone.PhonePairingNotice
 import io.andchamber.app.ui.phone.PhonePending
 import io.andchamber.app.ui.phone.PhoneScreenState
+import io.andchamber.app.ui.phone.PhoneStandingRequest
 import io.andchamber.app.ui.phone.PhoneStopChannel
 import io.andchamber.app.ui.phone.PhoneTarget
+import io.andchamber.app.ui.phone.PhoneTargetVerdict
 import io.andchamber.app.ui.phone.phoneHaltFacts
 import io.github.muntashirakon.adb.AdbPairingException
 import io.github.muntashirakon.adb.AdbPairingFailure
@@ -88,6 +107,10 @@ internal class PhoneIntegration(
     private val taskNative: PhoneTaskNativeFacts = PhoneTaskNativeFacts.Unavailable,
     /** Native readiness probes: is the runtime up, and did this launch load the phone tool? */
     private val readiness: PhoneAgentToolReadiness = PhoneAgentToolReadiness.Unavailable,
+    /** Native-only one-shot wake-up for the original chat after a confirmed continuation. */
+    private val continueSender: PhoneStandingContinueSender = PhoneStandingContinueSender.Unavailable,
+    /** Read-only projection of the native task progress, for the need-user note. */
+    private val taskProgress: () -> PhoneTaskProgressView? = { null },
     private val notifications: PhoneControlNotifications = PhoneControlNotifications(context),
     private val catalog: PhoneTargetCatalog =
         PhoneTargetCatalog(hostPackage = context.packageName) {
@@ -95,6 +118,7 @@ internal class PhoneIntegration(
         },
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
     private val clock: () -> Long = { SystemClock.elapsedRealtime() },
+    private val wallClock: () -> Long = { System.currentTimeMillis() },
     private val hostPackage: String = context.packageName,
     private val launchTarget: (String) -> Boolean = { launchDefaultApp(context, it) },
     private val openDeveloperSettings: () -> Unit = { openDevelopmentSettings(context) },
@@ -113,6 +137,41 @@ internal class PhoneIntegration(
     /** Freezes one confirmed grant attempt; every stop control invalidates it. */
     private val grantAttempts = PhoneGrantAttemptOwner()
 
+    /**
+     * Saved standing configuration plus its monotonic window end. Configuration is not authority:
+     * the controller still grants each task and the native screen still owns revocation.
+     */
+    private var standingState: PhoneStandingState? =
+        store.standing()?.let { config ->
+            val remaining = config.windowEndsAtWallMs - wallClock()
+            PhoneStandingState(config = config, endsAtElapsedMs = clock() + remaining, expired = remaining <= 0L)
+        }
+
+    /** In-memory binding: a saved scope is bound to the first successful chat session/runtime. */
+    private var standingBinding = PhoneStandingBindingState()
+
+    /** True once a standing task actually bound a runtime/session; only a native new save clears it. */
+    private var standingBindingEverUsed = false
+
+    /** Any save/revoke invalidates continuations that were frozen against the previous revision. */
+    private var standingRevision = 0L
+
+    /** A confirmed restart is in progress; the runtime is never called Ready while this is true. */
+    private var standingRestarting = false
+    private var standingRestartDeadlineMs = 0L
+    private var standingRestartRevision: Long? = null
+    private var standingRestartFromRuntimeId: String? = null
+
+    /** Thread-safe projection for the tool's non-suspend `apps` call. Updated on the main thread. */
+    @Volatile
+    private var standingViewCache: PhoneStandingView? = null
+
+    private var continuationDelivery = PhoneContinueDelivery.Idle
+    private var continuationInFlight = false
+
+    /** Bumped whenever the real native phone screen opens; a queued chat start must not proceed. */
+    private var phoneScreenGeneration = 0L
+
     private val facts =
         MutableStateFlow(
             PhoneScreenFacts(
@@ -121,10 +180,12 @@ internal class PhoneIntegration(
                 enabled = available && store.enabled(),
                 task = store.task(),
                 stopChannel = notifications.stopChannelState(),
+                standingEnabled = available,
+                standingState = standingState,
             ),
         )
 
-    private val mutableState = MutableStateFlow(phoneScreenState(controller.state.value, facts.value))
+    private val mutableState = MutableStateFlow(phoneScreenState(controller.state.value, facts.value, clock()))
     val state: StateFlow<PhoneScreenState> = mutableState.asStateFlow()
 
     /**
@@ -191,12 +252,22 @@ internal class PhoneIntegration(
         observeFacts()
         observeProposals()
         startTicker()
+        refreshStandingProjection()
+        refreshAgentToolBlocker()
     }
 
     // --- screen callbacks -------------------------------------------------------------------
 
-    /** Builds the callback surface. [onBack] is navigation, owned by the UI route. */
-    fun actions(onBack: () -> Unit): PhoneControlActions =
+    /**
+     * Builds the callback surface. [onBack] is navigation, owned by the UI route.
+     * [onRestartRuntime] is the person-confirmed local runtime restart from Home. [onOpenChat] only
+     * navigates; it never revokes, grants or resumes by itself.
+     */
+    fun actions(
+        onBack: () -> Unit,
+        onRestartRuntime: () -> Unit = {},
+        onOpenChat: () -> Unit = { openChat() },
+    ): PhoneControlActions =
         PhoneControlActions(
             onBack = onBack,
             onEnable = ::setEnabled,
@@ -216,16 +287,39 @@ internal class PhoneIntegration(
             onOpenTarget = { packageName -> launchTarget(packageName) },
             onAcknowledgeChecked = ::acknowledgeChecked,
             onDismissResult = ::dismissResult,
+            onSaveStanding = ::saveStanding,
+            onRevokeStanding = ::revokeStanding,
+            onRestartRuntime = {
+                standingRestarting = true
+                standingRestartDeadlineMs = clock() + RESTART_PROBE_TIMEOUT_MS
+                standingRestartRevision = standingRevision
+                standingRestartFromRuntimeId = controller.state.value.runtimeId
+                onRestartRuntime()
+                refreshAgentToolBlocker()
+            },
+            onRecheckRuntime = {
+                finishConfirmedRestartIfReady()
+                refreshAgentToolBlocker()
+            },
+            onOpenChat = onOpenChat,
+            onContinueInChat = ::continueInChat,
         )
 
     /** Called when the native screen appears: refresh the picker and the stop entry, find ports. */
     fun onScreenOpened() {
+        // The real native phone screen is in front: apply the old host-return stop exactly here,
+        // not merely because the Activity resumed on the chat screen. Bump the generation first so
+        // a queued chat start can never launch after this point.
+        phoneScreenGeneration += 1
+        onHostResumed()
         if (!facts.value.available) return
         recheckStopChannel()
         refreshAgentToolBlocker()
+        finishConfirmedRestartIfReady()
         loadTargets()
         refreshPairingState()
         startDiscovery()
+        refreshStandingProjection()
     }
 
     fun onScreenClosed() {
@@ -235,8 +329,9 @@ internal class PhoneIntegration(
     // --- lifecycle from the activity/service ------------------------------------------------
 
     /**
-     * Returning to AndChamber drops the lease. This is a separate stop path from the notification
-     * and it is never a pause: the grant is revoked, so nothing can act while the host is in front.
+     * The native phone screen really came to the front (called from [onScreenOpened], not from a
+     * plain Activity resume). It drops the lease as a separate stop path from the notification; it
+     * is never a pause. Merely reading the local chat keeps the standing scope intact.
      */
     fun onHostResumed() {
         invalidateGrantAttempt()
@@ -326,8 +421,10 @@ internal class PhoneIntegration(
             actionInFlight = core.inFlightMutation || core.pausing,
         )
         controller.revoke()
+        controller.blockStanding(PhoneStandingBlockReason.TAKEOVER)
         serviceStop()
         publishTaskStop(binding, PhoneProgressReason.TAKEOVER, ended = false)
+        refreshContinuation()
         return true
     }
 
@@ -374,7 +471,10 @@ internal class PhoneIntegration(
             actionInFlight = core.inFlightMutation || core.pausing,
         )
         controller.revoke()
+        // A model need_user hand-off is a native stop: the standing scope waits for the person.
+        controller.blockStanding(PhoneStandingBlockReason.NEED_USER)
         serviceStop()
+        refreshContinuation()
         if (controller.state.value.grant != null) return null
         return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
     }
@@ -458,6 +558,877 @@ internal class PhoneIntegration(
         taskSession = sessionLabel
     }
 
+    // --- configure once: standing scope -------------------------------------------------------
+
+    /** Thread-safe, non-suspend projection for the tool's `apps` action. Never authority. */
+    fun standingViewSnapshot(): PhoneStandingView? = standingViewCache
+
+    /**
+     * One direct chat request inside the person's saved standing scope. Main thread only.
+     *
+     * Order is part of the guarantee: native session/runtime/task checks, core grant with a fresh
+     * epoch, foreground stop entry, native task binding/lease facts, launch the allowed package,
+     * and only then a real Observe of the target. Any failure rolls back exactly the new epoch and
+     * leaves no task the person cannot stop.
+     */
+    internal suspend fun startStandingTask(
+        sessionId: String,
+        summary: String,
+        packageName: String,
+    ): PhoneTaskStartResult {
+        val state = standingState ?: return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+        val revision = standingRevision
+        val screenGeneration = phoneScreenGeneration
+        val core = controller.state.value
+        val hasLiveTask = core.grant != null
+        val hasRetainedTask = facts.value.halt != null || retainedTaskEpoch != null || facts.value.lease != null
+        val refusal =
+            standingRequestRefusal(
+                config = state.config,
+                nowWallMs = wallClock(),
+                runtimeId = core.runtimeId,
+                sessionId = sessionId,
+                binding = standingBinding,
+                hasLiveTask = hasLiveTask,
+                hasRetainedTask = hasRetainedTask,
+                blocked = core.standingBlocked || core.blocked != null,
+            )
+        if (refusal != null) return PhoneTaskStartResult.Refused(refusal)
+        if (state.config.apps.none { it.packageName == packageName }) {
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+        // The person must have a reachable stop entry before any new lease is created.
+        val stopChannel = notifications.stopChannelState()
+        if (stopChannel != PhoneStopChannel.Verified) {
+            mutateFacts { it.copy(stopChannel = stopChannel) }
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.STANDING_BLOCKED)
+        }
+        val runtimeId = core.runtimeId ?: return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONNECTED)
+        // A queued legacy per-task confirmation must not commit over this new standing task.
+        invalidateGrantAttempt()
+        val target = standingTarget(packageName)
+        val boundedSummary = summary.trim().take(PhoneLimits.MAX_NODE_LABEL_CHARS)
+        if (boundedSummary.isEmpty()) return PhoneTaskStartResult.Refused(PhoneStandingRefusal.INVALID)
+        val prospectiveBinding =
+            if (standingBinding.runtimeId == null && standingBinding.sessionLabel == null) {
+                PhoneStandingBindingState(runtimeId = runtimeId, sessionLabel = sessionId)
+            } else {
+                standingBinding
+            }
+        val scope =
+            PhoneStandingScope(
+                runtimeId = runtimeId,
+                sessionLabel = sessionId,
+                allowedPackages = state.config.apps.map { it.packageName },
+                allowedActions = state.config.actions,
+                windowEndsMs = state.endsAtElapsedMs,
+                perTaskMs = state.config.perTaskMs,
+                taskRevision = revision,
+            )
+        val granted =
+            when (val result = controller.grantFromPreauthorization(scope, packageName)) {
+                is io.andchamber.app.phone.standing.PhoneStandingGrantResult.Granted -> result.grant
+                is io.andchamber.app.phone.standing.PhoneStandingGrantResult.Refused ->
+                    return PhoneTaskStartResult.Refused(result.refusal)
+            }
+        val epoch = granted.epoch
+        // A new save/revoke during admission invalidates this start; revoke only its exact epoch.
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            state !== standingState
+        ) {
+            revokeEpochIfCurrent(epoch)
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        // The foreground service builds its notification from this remembered lease. Old
+        // completeGrant did the same before serviceStart; setting it only after the service is up
+        // leaves serviceNotificationFor() null and the service can miss its startForeground deadline.
+        val rememberedLease = PhoneLeaseFacts(target, boundedSummary, actionScopes(state.config.actions))
+        lease = rememberedLease
+        if (!startStopEntry(epoch)) {
+            if (lease === rememberedLease) lease = null
+            rollbackStandingStart(epoch, key = null)
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        // A stop control may have run while the stop entry was being proven.
+        val afterStopEntry = controller.state.value
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            afterStopEntry.grant?.epoch != epoch ||
+            afterStopEntry.paused ||
+            afterStopEntry.standingBlocked ||
+            afterStopEntry.blocked != null
+        ) {
+            if (lease === rememberedLease) lease = null
+            rollbackStandingStart(epoch, key = null)
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        val binding =
+            runCatching { bindStandingTask(epoch, runtimeId, sessionId, boundedSummary, packageName) }
+                .getOrElse {
+                    if (lease === rememberedLease) lease = null
+                    rollbackStandingStart(epoch, key = null)
+                    return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+                }
+        taskSession = sessionId
+        retainedTaskEpoch = epoch
+        runCatching {
+            store.setTask(PhoneTaskRecord(targetPackage = packageName, summary = boundedSummary, needsCheck = true))
+            mutateFacts {
+                it.copy(
+                    lease = lease,
+                    task = store.task(),
+                    halt = null,
+                    request = null,
+                    continuation = PhoneContinuation(),
+                    diagnostics = it.diagnostics.copy(lastError = null),
+                )
+            }
+        }.onFailure {
+            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        continuationDelivery = PhoneContinueDelivery.Idle
+        val launched = runCatching { launchTarget(packageName) }.getOrDefault(false)
+        if (!launched) {
+            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        // Only a real foreground observation of the allowed package may answer Started.
+        if (!observeStandingTarget(epoch, sessionId, packageName)) {
+            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        // A pause/take-over/save during the observation must not leave a task reported as running.
+        val after = controller.state.value
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            after.grant?.epoch != epoch ||
+            after.paused ||
+            after.standingBlocked ||
+            after.blocked != null
+        ) {
+            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        standingBinding = prospectiveBinding
+        standingBindingEverUsed = true
+        refreshStandingProjection()
+        return PhoneTaskStartResult.Started(
+            epoch = epoch,
+            key = PhoneTaskKey(binding.taskId, binding.runtimeId),
+            state = PhoneTaskStartState.RUNNING,
+        )
+    }
+
+    /**
+     * Brings the already-running task's exact target back to the foreground. It never switches to
+     * another app, creates an epoch or publishes a route.
+     */
+    internal suspend fun openStandingApp(
+        sessionId: String,
+        packageName: String,
+    ): PhoneOpenAppResult {
+        val state = standingState ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+        if (!state.config.isActive(wallClock()) ||
+            state.expired ||
+            state.endsAtElapsedMs <= clock() ||
+            state.config.revoked
+        ) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.EXPIRED)
+        }
+        val core = controller.state.value
+        if (core.standingBlocked || core.blocked != null) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.STANDING_BLOCKED)
+        }
+        if (core.paused) return PhoneOpenAppResult.Refused(PhoneStandingRefusal.PAUSED)
+        val grant = core.grant ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.INVALID)
+        val currentSession = taskSession ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.INVALID)
+        if (currentSession != sessionId) return PhoneOpenAppResult.Refused(PhoneStandingRefusal.SESSION_MISMATCH)
+        val current = lease ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.INVALID)
+        if (current.target.packageName != packageName ||
+            grant.targetPackage != packageName
+        ) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+        val epoch = grant.epoch
+        if (!runCatching { launchTarget(packageName) }.getOrDefault(false)) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        // A successful startActivity is not proof. Only a real Observe of this exact epoch/session
+        // showing the same package may answer Opened; a pause/stop/newer epoch invalidates it.
+        if (!observeStandingTarget(epoch, sessionId, packageName)) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        val after = controller.state.value
+        if (after.grant?.epoch != epoch ||
+            after.paused ||
+            after.standingBlocked ||
+            after.blocked != null ||
+            facts.value.halt != null ||
+            lease?.target?.packageName != packageName
+        ) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
+        }
+        return PhoneOpenAppResult.Opened
+    }
+
+    /**
+     * Tool-lane rollback for a direct start it must refuse (stale epoch / unpublished route). Only
+     * the exact epoch + task identity is revoked; an older or newer owner is never touched.
+     */
+    internal fun abortStandingTask(
+        epoch: Long,
+        key: PhoneTaskKey,
+    ): Boolean {
+        val identity = taskIdentity.current()
+        val matches = identity != null && identity.first == key.taskId && identity.second == key.runtimeId
+        val identityOwnedByNewerTask = identity != null && !matches
+        if (!standingExactLiveOwner(
+                requestedEpoch = epoch,
+                liveEpoch = controller.state.value.grant?.epoch,
+                identityMatchesRequestedKey = matches,
+                identityOwnedByNewerTask = identityOwnedByNewerTask,
+            )
+        ) {
+            // Superseded or already stopped: leave every newer owner/fact untouched.
+            return false
+        }
+        controller.revoke()
+        serviceStop()
+        closeLease(keepTask = false)
+        taskSession = null
+        continuationDelivery = PhoneContinueDelivery.Idle
+        mutateFacts {
+            it.copy(
+                lease = null,
+                halt = null,
+                task = null,
+                pending = null,
+                busy = null,
+                continuation = PhoneContinuation(),
+            )
+        }
+        refreshStandingProjection()
+        return controller.state.value.grant == null
+    }
+
+    /**
+     * Overlay stop-entry/visibility failure. Stops new reads/writes and revokes the exact lease like
+     * take-over, but keeps the real failure reason: it never claims the person took over. The saved
+     * standing scope stays, suspended until the person resumes it natively.
+     */
+    fun onOverlayFailure(reason: PhoneHaltReason): Boolean {
+        if (reason != PhoneHaltReason.StopChannelLost && reason != PhoneHaltReason.ScreenUncertain) {
+            return false
+        }
+        invalidateGrantAttempt()
+        val core = controller.state.value
+        if (core.grant == null) return false
+        val binding = overlayTaskBinding()
+        halt(reason, lease, actionInFlight = core.inFlightMutation || core.pausing)
+        controller.revoke()
+        controller.blockStanding(
+            if (reason == PhoneHaltReason.StopChannelLost) {
+                PhoneStandingBlockReason.CONNECTION_LOST
+            } else {
+                PhoneStandingBlockReason.UNKNOWN_OUTCOME
+            },
+        )
+        serviceStop()
+        publishTaskStop(
+            binding,
+            if (reason == PhoneHaltReason.StopChannelLost) {
+                PhoneProgressReason.CONNECTION_LOST
+            } else {
+                PhoneProgressReason.OUTCOME_UNKNOWN
+            },
+            ended = false,
+        )
+        continuationDelivery = PhoneContinueDelivery.Idle
+        refreshContinuation()
+        return controller.state.value.grant == null
+    }
+
+    /**
+     * Read-only routing hint for the overlay/notification. It is not authentication: a retained
+     * task's session, else the saved standing binding. Null when neither is known.
+     */
+    fun currentTaskSessionId(): String? {
+        taskSession?.let { return it }
+        val hasTask =
+            controller.state.value.grant != null ||
+                retainedTaskEpoch != null ||
+                facts.value.halt != null ||
+                facts.value.lease != null
+        // A live/retained task without a validated route must not borrow the standing binding.
+        return if (hasTask) null else standingBinding.sessionLabel
+    }
+
+    // --- standing configuration / continuation -------------------------------------------------
+
+    private fun saveStanding(request: PhoneStandingRequest) {
+        if (guardBusy()) return
+        // An unchecked unknown outcome or an unsettled action must be acknowledged/settled on the
+        // native result card before a new configuration can replace the task facts that carry it.
+        val currentCore = controller.state.value
+        val unresolved = facts.value.halt
+        if (currentCore.blocked != null ||
+            currentCore.inFlightMutation ||
+            currentCore.pausing ||
+            (unresolved != null && unresolved.lastAction == PhoneLastAction.MayStillApply && !unresolved.acknowledged)
+        ) {
+            mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
+            return
+        }
+        val apps =
+            request.apps
+                .distinctBy { it.packageName }
+                .filter { PhoneTargetCatalog.verdictFor(it.packageName, hostPackage) == PhoneTargetVerdict.Allowed }
+                .take(MAX_STANDING_APPS)
+        val kinds = actionKinds(request.actions)
+        if (apps.isEmpty() ||
+            kinds.isEmpty() ||
+            !validStandingBounds(request.windowMs, request.perTaskMs)
+        ) {
+            mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
+            return
+        }
+        val priorRuntime = controller.state.value.runtimeId
+        val priorSession = standingBinding.sessionLabel ?: taskSession
+        detachStandingTask()
+        // Saving is a fresh native confirmation: clear an old standing block/pause for the exact
+        // runtime. An unchecked unknown outcome still refuses, so it cannot be erased this way.
+        if (priorRuntime != null) {
+            controller.resumeStandingForPerson(
+                PhoneStandingResume(priorRuntime, priorSession ?: "standing", standingRevision),
+            )
+        }
+        standingRevision += 1
+        val known = facts.value.targets.associateBy { it.packageName }
+        val config =
+            PhoneStandingConfig(
+                apps = apps.map { target ->
+                    val label = known[target.packageName]?.label ?: target.label
+                    io.andchamber.app.phone.standing.PhoneStandingApp(label, target.packageName)
+                },
+                actions = kinds,
+                windowEndsAtWallMs = wallClock() + request.windowMs,
+                perTaskMs = request.perTaskMs,
+            )
+        standingState = PhoneStandingState(config = config, endsAtElapsedMs = clock() + request.windowMs)
+        standingBinding = PhoneStandingBindingState()
+        standingBindingEverUsed = false
+        continuationDelivery = PhoneContinueDelivery.Idle
+        store.setStanding(config)
+        mutateFacts {
+            it.copy(
+                standingState = standingState,
+                standingEnabled = available,
+                continuation = PhoneContinuation(),
+                busy = null,
+                problem = null,
+                diagnostics = it.diagnostics.copy(lastError = null),
+            )
+        }
+        refreshStandingProjection()
+        refreshAgentToolBlocker()
+    }
+
+    private fun revokeStanding() {
+        if (guardBusy()) return
+        val current = standingState ?: return
+        val core = controller.state.value
+        val unresolved = facts.value.halt
+        if (core.blocked != null ||
+            core.inFlightMutation ||
+            core.pausing ||
+            (unresolved != null && unresolved.lastAction == PhoneLastAction.MayStillApply && !unresolved.acknowledged)
+        ) {
+            mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
+            return
+        }
+        detachStandingTask()
+        standingRevision += 1
+        continuationDelivery = PhoneContinueDelivery.Idle
+        val revoked = current.config.copy(revoked = true)
+        standingState = current.copy(config = revoked, expired = false)
+        standingBinding = PhoneStandingBindingState()
+        standingBindingEverUsed = false
+        store.setStanding(revoked)
+        mutateFacts {
+            it.copy(
+                standingState = standingState,
+                continuation = PhoneContinuation(),
+                busy = null,
+            )
+        }
+        refreshStandingProjection()
+    }
+
+    /** Stop any live/retained native task but keep the saved configuration. Save/revoke use this. */
+    private fun detachStandingTask() {
+        invalidateGrantAttempt()
+        if (controller.state.value.grant != null) controller.revoke()
+        serviceStop()
+        closeLease(keepTask = false)
+        taskSession = null
+        retainedTaskEpoch = null
+        standingBinding = PhoneStandingBindingState()
+        mutateFacts {
+            it.copy(
+                lease = null,
+                halt = null,
+                task = null,
+                pending = null,
+                busy = null,
+                continuation = PhoneContinuation(),
+            )
+        }
+    }
+
+    private fun openChat() {
+        // Navigation only. It never revokes, resumes or extends anything.
+        OpenSessionLink.offer(currentTaskSessionId(), null)
+    }
+
+    /**
+     * Person-confirmed continuation beside the chat. It is offered only after a settled stop in the
+     * same task/session/runtime; it creates one fresh epoch, re-observes the target, then wakes the
+     * original chat exactly once with a fixed prompt. A failed wake does not roll back the lease.
+     */
+    private fun continueInChat() {
+        if (continuationInFlight || continuationDelivery != PhoneContinueDelivery.Idle) return
+        val state = standingState ?: return
+        val halt = facts.value.halt ?: return
+        val core = controller.state.value
+        val runtimeId = core.runtimeId ?: return
+        val session = taskSession ?: standingBinding.sessionLabel ?: return
+        if (standingBinding.runtimeId != runtimeId || standingBinding.sessionLabel != session) return
+        if (!halt.confirmed || halt.lastAction == PhoneLastAction.MayStillApply) return
+        if (facts.value.pending != null || core.inFlightMutation || core.pausing) return
+        if (core.blocked != null) return
+        if (state.config.revoked ||
+            state.expired ||
+            state.endsAtElapsedMs <= clock() ||
+            !state.config.isActive(wallClock())
+        ) {
+            return
+        }
+        if (state.config.apps.none { it.packageName == halt.lease.target.packageName }) return
+        if (facts.value.runtimeStatus.tool != io.andchamber.app.ui.phone.PhoneToolStatus.Ready) return
+        if (facts.value.stopChannel != PhoneStopChannel.Verified) return
+        continuationInFlight = true
+        continuationDelivery = PhoneContinueDelivery.Sending
+        refreshContinuation()
+        val revision = standingRevision
+        scope.launch {
+            try {
+                performContinuation(
+                    state = state,
+                    halt = halt,
+                    runtimeId = runtimeId,
+                    session = session,
+                    revision = revision,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (continuationDelivery == PhoneContinueDelivery.Sending) {
+                    // A newer stop owns the state now; only neutral cleanup. Otherwise this attempt
+                    // itself failed and may be reported as Failed.
+                    continuationDelivery =
+                        if (facts.value.halt != null && facts.value.halt !== halt) {
+                            PhoneContinueDelivery.Idle
+                        } else {
+                            PhoneContinueDelivery.Failed
+                        }
+                    refreshContinuation()
+                }
+            } finally {
+                continuationInFlight = false
+            }
+        }
+    }
+
+    private suspend fun performContinuation(
+        state: PhoneStandingState,
+        halt: PhoneHaltSnapshot,
+        runtimeId: String,
+        session: String,
+        revision: Long,
+    ) {
+        val target = halt.lease.target
+        val previousRetainedEpoch = retainedTaskEpoch
+        val screenGeneration = phoneScreenGeneration
+        fun clearSendingWhenSuperseded() {
+            if (continuationDelivery == PhoneContinueDelivery.Sending) {
+                // Neutral cleanup only: never write this old attempt's failure/halt over a newer owner.
+                continuationDelivery = PhoneContinueDelivery.Idle
+                refreshContinuation()
+            }
+        }
+        fun supersededBeforeGrant(): Boolean {
+            val liveEpoch = controller.state.value.grant?.epoch
+            return revision != standingRevision ||
+                screenGeneration != phoneScreenGeneration ||
+                facts.value.halt !== halt ||
+                retainedTaskEpoch != previousRetainedEpoch ||
+                (liveEpoch != null && liveEpoch != previousRetainedEpoch)
+        }
+        invalidateGrantAttempt()
+        if (!controller.resumeStandingForPerson(PhoneStandingResume(runtimeId, session, revision))) {
+            if (supersededBeforeGrant()) {
+                clearSendingWhenSuperseded()
+            } else {
+                continuationDelivery = PhoneContinueDelivery.Failed
+                refreshContinuation()
+            }
+            return
+        }
+        if (supersededBeforeGrant()) {
+            // A save/revoke/screen/new task already owns the newer state. Do not re-block it or
+            // overwrite its continuation delivery with this old attempt's failure.
+            clearSendingWhenSuperseded()
+            return
+        }
+        val scope =
+            PhoneStandingScope(
+                runtimeId = runtimeId,
+                sessionLabel = session,
+                allowedPackages = state.config.apps.map { it.packageName },
+                allowedActions = state.config.actions,
+                windowEndsMs = state.endsAtElapsedMs,
+                perTaskMs = state.config.perTaskMs,
+                taskRevision = revision,
+            )
+        val granted =
+            when (val result = controller.grantFromPreauthorization(scope, target.packageName)) {
+                is io.andchamber.app.phone.standing.PhoneStandingGrantResult.Granted -> result.grant
+                is io.andchamber.app.phone.standing.PhoneStandingGrantResult.Refused -> {
+                    if (supersededBeforeGrant()) {
+                        clearSendingWhenSuperseded()
+                    } else {
+                        if (result.refusal != PhoneStandingRefusal.EXPIRED) {
+                            controller.blockStanding(
+                                when (halt.reason) {
+                                    PhoneHaltReason.TakenOver -> PhoneStandingBlockReason.NEED_USER
+                                    PhoneHaltReason.OutcomeUnknown,
+                                    PhoneHaltReason.ScreenUncertain,
+                                    -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
+                                    PhoneHaltReason.ConnectionLost,
+                                    PhoneHaltReason.StopChannelLost,
+                                    -> PhoneStandingBlockReason.CONNECTION_LOST
+                                    PhoneHaltReason.ScreenLocked -> PhoneStandingBlockReason.DEVICE_LOCKED
+                                    PhoneHaltReason.RuntimeChanged -> PhoneStandingBlockReason.RUNTIME_CHANGED
+                                    else -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
+                                },
+                            )
+                        }
+                        continuationDelivery = PhoneContinueDelivery.Failed
+                        refreshContinuation()
+                    }
+                    return
+                }
+            }
+        val epoch = granted.epoch
+        var continuationKey: PhoneTaskKey? = null
+        fun fail() {
+            if (rollbackContinuation(epoch, continuationKey, session, previousRetainedEpoch, halt)) {
+                continuationDelivery = PhoneContinueDelivery.Failed
+                refreshContinuation()
+            } else {
+                clearSendingWhenSuperseded()
+            }
+        }
+        // The foreground service builds its notification from this lease; it must already be
+        // non-null before serviceStart, exactly like the first start path.
+        lease = halt.lease
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            !startStopEntry(epoch)
+        ) {
+            fail()
+            return
+        }
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            controller.state.value.grant?.epoch != epoch ||
+            controller.state.value.paused ||
+            controller.state.value.standingBlocked ||
+            controller.state.value.blocked != null
+        ) {
+            fail()
+            return
+        }
+        taskSession = session
+        val continuationBinding =
+            runCatching {
+                taskIdentity.bindOnPublish(
+                    epoch = epoch,
+                    resumed = true,
+                    runtimeId = runtimeId,
+                    routeSession = session,
+                    summary = halt.lease.summary,
+                    packageName = target.packageName,
+                ).also { taskNative.onTaskBinding(it) }
+            }.getOrNull()
+        if (continuationBinding == null) {
+            fail()
+            return
+        }
+        continuationKey = PhoneTaskKey(continuationBinding.taskId, continuationBinding.runtimeId)
+        retainedTaskEpoch = epoch
+        if (!runCatching { grantRoutes.publishGrantRoute(epoch, session) }.getOrDefault(false)) {
+            fail()
+            return
+        }
+        val launched = runCatching { launchTarget(target.packageName) }.getOrDefault(false)
+        if (!launched || !observeStandingTarget(epoch, session, target.packageName)) {
+            fail()
+            return
+        }
+        val after = controller.state.value
+        if (revision != standingRevision ||
+            screenGeneration != phoneScreenGeneration ||
+            after.grant?.epoch != epoch ||
+            after.paused ||
+            after.standingBlocked ||
+            after.blocked != null
+        ) {
+            fail()
+            return
+        }
+        runCatching {
+            store.setTask(
+                PhoneTaskRecord(
+                    targetPackage = target.packageName,
+                    summary = halt.lease.summary,
+                    needsCheck = true,
+                ),
+            )
+            mutateFacts {
+                it.copy(
+                    halt = null,
+                    lease = halt.lease,
+                    task = store.task(),
+                    pending = null,
+                    busy = null,
+                    continuation = PhoneContinuation(delivery = PhoneContinueDelivery.Sending),
+                    diagnostics = it.diagnostics.copy(lastError = null),
+                )
+            }
+        }.onFailure {
+            fail()
+            return
+        }
+        // A stop during the launch/observe window supersedes the continuation: do not wake the chat
+        // into a task that is already stopped, and do not overwrite the newer halt/delivery state.
+        if (controller.state.value.grant?.epoch != epoch || facts.value.halt != null) {
+            clearSendingWhenSuperseded()
+            return
+        }
+        val delivered = runCatching { continueSender.send(session, STANDING_CONTINUE_PROMPT) }.getOrDefault(false)
+        val identity = taskIdentity.current()
+        val keyMatches =
+            continuationKey != null &&
+                identity != null &&
+                identity.first == continuationKey!!.taskId &&
+                identity.second == continuationKey!!.runtimeId
+        val stillOurs =
+            standingExactLiveOwner(
+                requestedEpoch = epoch,
+                liveEpoch = controller.state.value.grant?.epoch,
+                identityMatchesRequestedKey = keyMatches,
+                identityOwnedByNewerTask = identity != null && !keyMatches,
+            ) && facts.value.halt == null
+        if (stillOurs) {
+            continuationDelivery = if (delivered) PhoneContinueDelivery.Delivered else PhoneContinueDelivery.Failed
+            refreshContinuation()
+        } else {
+            clearSendingWhenSuperseded()
+        }
+    }
+
+    /**
+     * Exact-owner rollback for a continuation. It only runs when the live epoch is still the one
+     * this attempt created and its task identity was not superseded. A stop/save/new task that owns
+     * the newer state makes this return false and leaves every newer fact, binding, service and
+     * delivery untouched.
+     */
+    private fun rollbackContinuation(
+        epoch: Long,
+        key: PhoneTaskKey?,
+        session: String,
+        previousRetainedEpoch: Long?,
+        halt: PhoneHaltSnapshot,
+    ): Boolean {
+        val identity = taskIdentity.current()
+        val keyMatches =
+            key != null &&
+                identity != null &&
+                identity.first == key.taskId &&
+                identity.second == key.runtimeId
+        val identityOwnedByNewerTask = key != null && identity != null && !keyMatches
+        if (!standingExactLiveOwner(
+                requestedEpoch = epoch,
+                liveEpoch = controller.state.value.grant?.epoch,
+                identityMatchesRequestedKey = keyMatches,
+                identityOwnedByNewerTask = identityOwnedByNewerTask,
+                requireIdentity = key != null,
+            )
+        ) {
+            return false
+        }
+        controller.revoke()
+        serviceStop()
+        if (keyMatches) taskNative.onTaskBinding(null)
+        retainedTaskEpoch = previousRetainedEpoch
+        taskSession = session
+        lease = null
+        controller.blockStanding(
+            when (halt.reason) {
+                PhoneHaltReason.TakenOver -> PhoneStandingBlockReason.NEED_USER
+                PhoneHaltReason.OutcomeUnknown,
+                PhoneHaltReason.ScreenUncertain,
+                -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
+                PhoneHaltReason.ConnectionLost,
+                PhoneHaltReason.StopChannelLost,
+                -> PhoneStandingBlockReason.CONNECTION_LOST
+                PhoneHaltReason.ScreenLocked -> PhoneStandingBlockReason.DEVICE_LOCKED
+                PhoneHaltReason.RuntimeChanged -> PhoneStandingBlockReason.RUNTIME_CHANGED
+                else -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
+            },
+        )
+        mutateFacts {
+            it.copy(
+                lease = null,
+                halt = halt,
+                task = store.task(),
+                pending = null,
+                busy = null,
+                continuation = PhoneContinuation(delivery = PhoneContinueDelivery.Failed),
+            )
+        }
+        return true
+    }
+
+    private fun standingTarget(packageName: String): PhoneTarget =
+        facts.value.targets.firstOrNull { it.packageName == packageName }
+            ?: PhoneTarget(
+                label = packageName,
+                packageName = packageName,
+                verdict = PhoneTargetVerdict.Allowed,
+            )
+
+    private suspend fun startStopEntry(epoch: Long): Boolean =
+        runCatching { serviceStart(epoch) && serviceAwaitReady(epoch) }.getOrDefault(false)
+
+    private fun bindStandingTask(
+        epoch: Long,
+        runtimeId: String,
+        sessionId: String,
+        summary: String,
+        packageName: String,
+    ): PhoneOverlayTaskBinding {
+        val binding =
+            taskIdentity.bindOnPublish(
+                epoch = epoch,
+                resumed = false,
+                runtimeId = runtimeId,
+                routeSession = sessionId,
+                summary = summary,
+                packageName = packageName,
+            )
+        taskNative.onTaskBinding(binding)
+        return binding
+    }
+
+    private suspend fun observeStandingTarget(
+        epoch: Long,
+        sessionId: String,
+        packageName: String,
+    ): Boolean {
+        // With the overlay selected, the first real driver read must wait until the current epoch's
+        // surface is attached and its real window witness is available. Notification-only or no
+        // coordinator keeps the original path. Wait exactly once, before the bounded observe loop;
+        // the loop below still performs the same real driver/window validation on every attempt.
+        val surfaceReady = PhoneOverlayHolder.current()?.awaitDriverSurface(epoch) ?: true
+        if (!surfaceReady) return false
+        repeat(START_OBSERVE_ATTEMPTS) { attempt ->
+            if (attempt > 0) delay(START_OBSERVE_RETRY_MS)
+            val core = controller.state.value
+            if (core.grant?.epoch != epoch || core.paused || core.standingBlocked || core.blocked != null) {
+                return false
+            }
+            val request =
+                PhoneAgentRequest(
+                    requestId = "standing-" + UUID.randomUUID(),
+                    epoch = epoch,
+                    sessionLabel = sessionId,
+                    action = PhoneAgentAction.Observe,
+                )
+            val observed =
+                runCatching { controller.execute(request, PhoneLimits.DEFAULT_CALL_MS) }
+                    .getOrNull() as? PhoneCallResult.Observed
+                    ?: return@repeat
+            if (observed.observation.binding.packageName == packageName) return true
+        }
+        return false
+    }
+
+    private fun rollbackStandingStart(
+        epoch: Long,
+        key: PhoneTaskKey?,
+    ) {
+        val identity = taskIdentity.current()
+        val keyMatches = key != null && identity != null && identity.first == key.taskId && identity.second == key.runtimeId
+        val identityOwnedByNewerTask = key != null && identity != null && !keyMatches
+        val retainedBefore = retainedTaskEpoch
+        val exact =
+            standingRollbackTargets(
+                requestedEpoch = epoch,
+                liveEpoch = controller.state.value.grant?.epoch,
+                retainedEpoch = retainedBefore,
+                identityMatchesRequestedKey = keyMatches,
+                identityOwnedByNewerTask = identityOwnedByNewerTask,
+            )
+        if (!exact) {
+            // A newer live task or a newer identity owns the state now. Do not revoke, stop the
+            // service, clear the binding or overwrite facts for the old start.
+            return
+        }
+        revokeEpochIfCurrent(epoch)
+        serviceStop()
+        // Facts/identity belong to this start only after its own binding was published.
+        val ownsFacts = keyMatches || retainedBefore == epoch
+        if (ownsFacts) {
+            if (keyMatches) {
+                taskNative.onTaskBinding(null)
+                taskIdentity.clear()
+            }
+            lease = null
+            taskSession = null
+            retainedTaskEpoch = null
+            if (facts.value.halt == null) store.clearTask()
+            mutateFacts {
+                it.copy(
+                    lease = null,
+                    halt = it.halt,
+                    task = if (it.halt == null) null else store.task(),
+                    pending = null,
+                    busy = null,
+                    continuation = PhoneContinuation(),
+                )
+            }
+            refreshStandingProjection()
+        }
+    }
+
+    private fun revokeEpochIfCurrent(epoch: Long) {
+        if (controller.state.value.grant?.epoch == epoch) controller.revoke()
+    }
+
     /** The live lease epoch, or null. The foreground service validates every action against it. */
     fun liveLeaseEpoch(): Long? = controller.state.value.grant?.epoch
 
@@ -491,7 +1462,9 @@ internal class PhoneIntegration(
         invalidateGrantAttempt()
         halt(PhoneHaltReason.StopChannelLost, actionInFlight = core.inFlightMutation)
         controller.revoke()
+        controller.blockStanding(PhoneStandingBlockReason.CONNECTION_LOST)
         serviceStop()
+        refreshContinuation()
         mutateFacts { it.copy(stopChannel = notifications.stopChannelState()) }
     }
 
@@ -1164,8 +2137,10 @@ internal class PhoneIntegration(
                 actionInFlight = core.inFlightMutation || core.pausing,
             )
             controller.revoke()
+            controller.blockStanding(PhoneStandingBlockReason.TAKEOVER)
             serviceStop()
             publishTaskStop(binding, PhoneProgressReason.TAKEOVER, ended = false)
+            refreshContinuation()
         }
         plan.launchTarget?.let { launchTarget(it) }
     }
@@ -1249,6 +2224,7 @@ internal class PhoneIntegration(
             )
         }
         store.task()?.let { store.setTask(it.copy(acknowledged = true)) }
+        refreshContinuation()
     }
 
     private fun dismissResult() {
@@ -1306,7 +2282,9 @@ internal class PhoneIntegration(
                 if (stopReason != null) {
                     halt(stopReason, actionInFlight = false)
                     controller.pause()
+                    controller.blockStanding(PhoneStandingBlockReason.UNKNOWN_OUTCOME)
                     runCatching { serviceStart(controller.state.value.epoch) }
+                    refreshContinuation()
                 }
             }
             mutateFacts {
@@ -1338,6 +2316,8 @@ internal class PhoneIntegration(
             loadTargets()
             refreshPairingState()
             startDiscovery()
+            refreshStandingProjection()
+            refreshContinuation()
         } else {
             store.setEnabled(false)
             invalidateGrantAttempt()
@@ -1346,6 +2326,10 @@ internal class PhoneIntegration(
             scope.launch { runCatching { controller.disconnect() } }
             closeLease(keepTask = false)
             taskSession = null
+            retainedTaskEpoch = null
+            standingBinding = PhoneStandingBindingState()
+            standingBindingEverUsed = false
+            continuationDelivery = PhoneContinueDelivery.Idle
             serviceStop()
             notifications.cancelPairing()
             mutateFacts { it.copy(agentToolBlocker = null) }
@@ -1359,11 +2343,13 @@ internal class PhoneIntegration(
                     request = null,
                     pending = null,
                     busy = null,
+                    continuation = PhoneContinuation(),
                     pairingNotice = PhonePairingNotice.Idle,
                     hints = PhoneEndpointHints(host = it.hints.host),
                 )
             }
             stopDiscovery()
+            refreshStandingProjection()
         }
     }
 
@@ -1376,16 +2362,153 @@ internal class PhoneIntegration(
      * runtime is never restarted here and no grant is created or extended.
      */
     private fun refreshAgentToolBlocker(): PhoneAgentToolBlocker? {
+        val presence = runCatching { readiness.runtimePresence() }.getOrDefault(PhoneRuntimePresence.UNKNOWN)
+        val toolReady = runCatching { readiness.toolReady() }.getOrNull()
         val blocker =
             runCatching {
                 agentToolBlocker(
                     enabled = facts.value.enabled,
-                    presence = readiness.runtimePresence(),
-                    toolReady = readiness.toolReady(),
+                    presence = presence,
+                    toolReady = toolReady,
                 )
             }.getOrNull()
-        mutateFacts { if (it.agentToolBlocker == blocker) it else it.copy(agentToolBlocker = blocker) }
+        val runtime = phoneRuntimeStatus(presence, toolReady, standingRestarting)
+        mutateFacts {
+            if (it.agentToolBlocker == blocker && it.runtimeStatus == runtime) {
+                it
+            } else {
+                it.copy(agentToolBlocker = blocker, runtimeStatus = runtime)
+            }
+        }
         return blocker
+    }
+
+    /**
+     * One explicit, narrow restart completion. It only clears a `RUNTIME_CHANGED` standing block
+     * for the first, never-bound configuration with no task owner, after the new runtime is really
+     * running and the tool handshake is ready. It uses the strict `resumeStanding`, never the
+     * person-continuation primitive, so pause/unknown are untouched.
+     */
+    private fun finishConfirmedRestartIfReady() {
+        if (!standingRestarting) return
+        val presence = runCatching { readiness.runtimePresence() }.getOrDefault(PhoneRuntimePresence.UNKNOWN)
+        val toolReady = runCatching { readiness.toolReady() }.getOrNull()
+        if (presence != PhoneRuntimePresence.RUNNING || toolReady != true) {
+            if (clock() >= standingRestartDeadlineMs) completeConfirmedRestart()
+            return
+        }
+        val core = controller.state.value
+        val runtimeId = core.runtimeId
+        // Only a different runtime identity proves the confirmed restart happened. A still-old
+        // runtime (or an unknown handshake) must never trigger an early completion.
+        val newRuntime = runtimeId != null && runtimeId != standingRestartFromRuntimeId
+        if (!newRuntime) {
+            if (clock() >= standingRestartDeadlineMs) completeConfirmedRestart()
+            return
+        }
+        val state = standingState
+        val nowElapsed = clock()
+        val nowWall = wallClock()
+        val active =
+            state != null &&
+                !state.config.revoked &&
+                state.config.isActive(nowWall) &&
+                !state.expired &&
+                state.endsAtElapsedMs > nowElapsed
+        val mayClear =
+            confirmedRestartMayClearRuntimeBlock(
+                restartConfirmed = standingRestarting,
+                restartRevision = standingRestartRevision,
+                currentRevision = standingRevision,
+                configActive = active,
+                bindingNeverBound =
+                    !standingBindingEverUsed &&
+                        standingBinding.runtimeId == null &&
+                        standingBinding.sessionLabel == null,
+                standingBlocked = core.standingBlocked,
+                standingBlockReason = core.standingBlockReason,
+                controllerEnabled = core.enabled,
+                controllerPaused = core.paused,
+                controllerUnknownBlocked = core.blocked != null,
+                runtimeId = runtimeId,
+                runtimeRunning = presence == PhoneRuntimePresence.RUNNING,
+                toolReady = toolReady == true,
+                hasLiveGrant = core.grant != null,
+                hasHalt = facts.value.halt != null,
+                hasRetainedTask = retainedTaskEpoch != null,
+                hasLease = facts.value.lease != null,
+                hasTaskOwner = facts.value.task != null || taskIdentity.current() != null,
+            )
+        if (mayClear && runtimeId != null) {
+            controller.resumeStanding(
+                PhoneStandingResume(
+                    runtimeId = runtimeId,
+                    sessionLabel = "",
+                    taskRevision = standingRevision,
+                ),
+            )
+        }
+        // The confirmed restart itself is complete once the new runtime is up and the handshake is
+        // ready. If the gate refused, the standing block stays and the person must re-save/continue.
+        completeConfirmedRestart()
+    }
+
+    /** Ends the restarting UI state without touching any authority; the gate above owns the block. */
+    private fun completeConfirmedRestart() {
+        standingRestarting = false
+        standingRestartDeadlineMs = 0L
+        standingRestartRevision = null
+        standingRestartFromRuntimeId = null
+        refreshAgentToolBlocker()
+    }
+
+    private fun refreshStandingProjection() {
+        val nowElapsed = clock()
+        val nowWall = wallClock()
+        val state = standingState
+        val expired =
+            state != null &&
+                (state.expired || state.endsAtElapsedMs <= nowElapsed || state.config.windowEndsAtWallMs <= nowWall)
+        if (state != null && expired != state.expired) {
+            standingState = state.copy(expired = expired)
+        }
+        val current = standingState
+        standingViewCache =
+            current
+                ?.takeIf {
+                    !it.expired &&
+                        !it.config.revoked &&
+                        it.endsAtElapsedMs > nowElapsed &&
+                        it.config.isActive(nowWall)
+                }
+                ?.let { PhoneStandingView(apps = it.config.apps, actions = it.config.actions, windowEndsAtMs = it.endsAtElapsedMs) }
+        mutateFacts {
+            if (it.standingEnabled == available && it.standingState == standingState) {
+                it
+            } else {
+                it.copy(standingEnabled = available, standingState = standingState)
+            }
+        }
+    }
+
+    private fun refreshContinuation() {
+        val snapshot = runCatching { taskProgress()?.snapshot }.getOrNull()
+        val session = taskSession
+        val belongs =
+            snapshot != null &&
+                (session == null || snapshot.routeSession == null || snapshot.routeSession == session)
+        val needUser = belongs && snapshot?.state == PhoneTaskState.WAITING_USER
+        val note =
+            if (needUser) {
+                snapshot?.events
+                    ?.lastOrNull { it.kind == PhoneProgressKind.MODEL_NEED_USER }
+                    ?.text
+                    ?.take(PhoneLimits.MAX_NODE_LABEL_CHARS)
+            } else {
+                null
+            }
+        val next = PhoneContinuation(needUser = needUser, agentNote = note, delivery = continuationDelivery)
+        mutateFacts { if (it.continuation == next) it else it.copy(continuation = next) }
     }
 
     private fun loadTargets() {
@@ -1435,6 +2558,15 @@ internal class PhoneIntegration(
                     deriveHalt(previous, core)
                     surfaceUnknownOutcome(core)
                     settleHalt(core)
+                    // A different local runtime cannot continue the old task/session binding. A new
+                    // request may bind the saved scope to the new runtime only after the retained
+                    // task is ended/checked natively.
+                    if (core.runtimeId != null &&
+                        standingBinding.runtimeId != null &&
+                        core.runtimeId != standingBinding.runtimeId
+                    ) {
+                        standingBinding = PhoneStandingBindingState()
+                    }
                     previous = core
                     publish()
                 }
@@ -1486,8 +2618,12 @@ internal class PhoneIntegration(
             scope.launch {
                 while (isActive) {
                     delay(TICK_MS)
-                    // Cheap read-only probes: the notice appears/clears without any user action.
+                    // Probe first, then the one explicit restart gate, then the normal read-only
+                    // status refresh. The gate is separate from the probe.
                     refreshAgentToolBlocker()
+                    finishConfirmedRestartIfReady()
+                    refreshStandingProjection()
+                    refreshContinuation()
                     val core = controller.state.value
                     if (core.grant != null) controller.refresh()
                     if (core.grant == null) continue
@@ -1596,6 +2732,9 @@ internal class PhoneIntegration(
         lastAction: PhoneLastAction,
         acknowledged: Boolean,
     ) {
+        // A genuinely new stop may be continued once; a re-settle of the same halt must not erase
+        // the one-shot delivery result.
+        if (facts.value.halt == null) continuationDelivery = PhoneContinueDelivery.Idle
         mutateFacts {
             it.copy(
                 halt =
@@ -1615,6 +2754,7 @@ internal class PhoneIntegration(
                 acknowledged = acknowledged,
             ),
         )
+        refreshContinuation()
     }
 
     private fun closeLease(keepTask: Boolean) {
@@ -1684,7 +2824,7 @@ internal class PhoneIntegration(
     }
 
     private fun publish() {
-        mutableState.value = phoneScreenState(controller.state.value, facts.value)
+        mutableState.value = phoneScreenState(controller.state.value, facts.value, controller.nowMs())
     }
 
     private fun mutateFacts(transform: (PhoneScreenFacts) -> PhoneScreenFacts) {
@@ -1764,6 +2904,13 @@ internal class PhoneIntegration(
             )
 
         private const val TICK_MS = 1_000L
+
+        /** A restart must either show a non-ready probe or finish within this bound. */
+        private const val RESTART_PROBE_TIMEOUT_MS = 60_000L
+
+        /** Bounded settle window for the target launch before a start is called a failure. */
+        private const val START_OBSERVE_ATTEMPTS = 6
+        private const val START_OBSERVE_RETRY_MS = 500L
 
         internal fun launchDefaultApp(context: Context, packageName: String): Boolean =
             runCatching {

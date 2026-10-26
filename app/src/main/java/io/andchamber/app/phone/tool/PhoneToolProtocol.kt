@@ -63,14 +63,21 @@ sealed interface PhoneToolAction {
     data class Back(val observationId: String) : PhoneToolAction
 
     /**
-     * Read-only preparation: proposes a task to the person. It never enables, pairs, grants or
-     * starts anything; the native screen decides. [summary] and [packageName] are untrusted text
-     * and stay only in the in-memory pending store.
+     * Direct start inside the native standing scope. The native [PhoneTaskStarter] checks the
+     * person-confirmed apps/actions/window, creates the per-task grant and launches the allowed app;
+     * this tool never treats the model's text as authority. The old pending-confirmation proposal
+     * path is not used for this primary mode.
      */
     data class Request(
         val summary: String,
-        val packageName: String?,
+        val packageName: String,
     ) : PhoneToolAction
+
+    /** Read-only list of only the person-preauthorized apps. Never the installed-app catalogue. */
+    data object Apps : PhoneToolAction
+
+    /** Opens exactly one preauthorized package; the starter checks its scope and launches. */
+    data class OpenApp(val packageName: String) : PhoneToolAction
 
     /** Unverified model narration for the current native task. Never a native fact. */
     data class Progress(
@@ -101,6 +108,15 @@ sealed interface PhoneToolAction {
 object PhoneToolProtocol {
     const val VERSION = 1
     const val MAX_BODY_BYTES = 65_536
+
+    /**
+     * The plugin's setup handshake path. It is written by the plugin itself, not by the endpoint
+     * file, and it exists only to prove that this launch's plugin `setup`/tool-transform finished and
+     * reached this exact native launch. It grants nothing.
+     */
+    const val READY_PATH = "/v1/ready"
+    const val READY_PLUGIN_ID = "andchamber-phone"
+    const val READY_TOOL_NAME = "andchamber_phone"
     const val MAX_SESSION_CHARS = 128
     const val MAX_CALL_ID_CHARS = 256
     const val MAX_MESSAGE_CHARS = 256
@@ -126,6 +142,8 @@ object PhoneToolProtocol {
     val ACTIONS = setOf(
         "status",
         "request",
+        "apps",
+        "open_app",
         "progress",
         "need_user",
         "finish",
@@ -139,6 +157,9 @@ object PhoneToolProtocol {
 
     private val BODY_KEYS = setOf("version", "sessionID", "callID", "messageID", "agent", "input")
 
+    /** The ready body is closed: exactly these three keys, nothing session/task/text related. */
+    private val READY_BODY_KEYS = setOf("version", "plugin", "tool")
+
     private val REQUEST_ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,128}$")
     private val REF_PATTERN = Regex("^[A-Za-z0-9:_-]{1,64}$")
     private val OBSERVATION_ID_PATTERN = Regex("^[A-Za-z0-9_-]{1,128}$")
@@ -146,6 +167,32 @@ object PhoneToolProtocol {
     private val json = Json { ignoreUnknownKeys = false }
 
     fun serverEpoch(launchId: Long): String = "launch-$launchId"
+
+    /**
+     * Exact, closed readiness body: `{version:1,plugin:"andchamber-phone",tool:"andchamber_phone"}`.
+     * Any extra or missing key, a string version, a different plugin/tool name, or any session,
+     * task, text or token field is refused. The handshake never carries identity or content.
+     */
+    fun isReadyBody(raw: String): Boolean =
+        runCatching {
+            val root = json.parseToJsonElement(raw).jsonObject
+            if (root.keys != READY_BODY_KEYS) return@runCatching false
+            val version = root["version"] as? JsonPrimitive ?: return@runCatching false
+            if (version.isString) return@runCatching false
+            version.intOrNull == VERSION &&
+                root.readyString("plugin") == READY_PLUGIN_ID &&
+                root.readyString("tool") == READY_TOOL_NAME
+        }.getOrDefault(false)
+
+    private fun JsonObject.readyString(name: String): String? =
+        (this[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+    /** Bounded ack for a successful handshake: no port, token, session or launch detail. */
+    fun readyAck(): String =
+        buildJsonObject {
+            put("version", VERSION)
+            put("ready", true)
+        }.toString()
 
     /** A callID that is already a safe request id is kept; anything else becomes a digest. */
     fun requestId(callId: String): String =
@@ -200,7 +247,17 @@ object PhoneToolProtocol {
                     ) {
                         return@runCatching null
                     }
-                    PhoneToolAction.Request(summary, optionalPackage(input))
+                    val packageName = requiredPackage(input) ?: return@runCatching null
+                    PhoneToolAction.Request(summary, packageName)
+                }
+                "apps" -> {
+                    requireKeys(input, emptySet())
+                    PhoneToolAction.Apps
+                }
+                "open_app" -> {
+                    requireKeys(input, setOf("packageName"))
+                    val packageName = requiredPackage(input) ?: return@runCatching null
+                    PhoneToolAction.OpenApp(packageName)
                 }
                 "progress" -> {
                     requireKeys(input, setOf("epoch", "phase", "message"))
@@ -366,6 +423,14 @@ object PhoneToolProtocol {
                 "The local runtime is not ready. Open the AndChamber chat screen on the phone and try again."
             PhoneToolCodes.PHONE_UNAVAILABLE ->
                 "AndChamber phone control is not available. Open the AndChamber chat screen on the phone and try again."
+            PhoneToolCodes.STANDING_UNAVAILABLE ->
+                "Phone control is not configured for direct chat requests. Ask the person to set up the standing scope on the phone."
+            PhoneToolCodes.STANDING_BLOCKED ->
+                "Phone control is waiting for the person to confirm on the phone. Do not retry in a loop."
+            PhoneToolCodes.STANDING_EXPIRED ->
+                "The phone-control standing scope expired. Ask the person to set it up again on the phone."
+            PhoneToolCodes.START_FAILED, PhoneToolCodes.TARGET_LAUNCH_FAILED ->
+                "The phone task could not be started. Nothing is running; ask the person to check the phone before trying again."
             PhoneToolCodes.UNAUTHORIZED -> "Unauthorized."
             PhoneToolCodes.FORBIDDEN -> "Forbidden."
             PhoneToolCodes.NOT_FOUND -> "Not found."
@@ -422,6 +487,9 @@ object PhoneToolProtocol {
         }
         return packageName
     }
+
+    /** The direct standing request requires an explicit target from the native preauthorized list. */
+    private fun requiredPackage(input: JsonObject): String? = optionalPackage(input)
 
     private fun requiredInt(
         input: JsonObject,
@@ -526,6 +594,19 @@ object PhoneToolCodes {
     const val STOP_UNCONFIRMED = "STOP_UNCONFIRMED"
     const val RUNTIME_NOT_READY = "RUNTIME_NOT_READY"
     const val PHONE_UNAVAILABLE = "PHONE_UNAVAILABLE"
+    const val STANDING_UNAVAILABLE = "STANDING_UNAVAILABLE"
+    const val STANDING_BLOCKED = "STANDING_BLOCKED"
+    const val STANDING_EXPIRED = "STANDING_EXPIRED"
+
+    /**
+     * A native start that the tool had already admitted could not be kept executable. The native
+     * writer maps PhoneStandingRefusal.START_FAILED here; the start was rolled back, so the chat must
+     * never treat the call as a running task.
+     */
+    const val START_FAILED = "START_FAILED"
+
+    /** Alias used by the native launch path when the allowed app could not be launched at all. */
+    const val TARGET_LAUNCH_FAILED = "TARGET_LAUNCH_FAILED"
     const val DUPLICATE_CALL = "DUPLICATE_CALL"
     const val UNAUTHORIZED = "UNAUTHORIZED"
     const val FORBIDDEN = "FORBIDDEN"

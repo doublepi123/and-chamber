@@ -41,7 +41,7 @@ internal fun phoneStep(state: PhoneScreenState): PhoneStep =
     }
 
 /** Why an app can't be chosen. Mirrors the controller's refusal list; the controller still decides. */
-internal enum class TargetBlock { Host, System, Invalid }
+internal enum class TargetBlock { Host, System, Invalid, Sensitive }
 
 private val PACKAGE_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
 private val SYSTEM_PACKAGES =
@@ -61,6 +61,15 @@ internal fun targetBlock(
     when {
         target.packageName == hostPackage || target.packageName.startsWith("$hostPackage.") -> TargetBlock.Host
         target.packageName.isBlank() || target.packageName.length > 200 -> TargetBlock.Invalid
+        // Core platform/settings packages are refused whatever a verdict says.
+        target.packageName in SYSTEM_PACKAGES -> TargetBlock.System
+        !PACKAGE_PATTERN.matches(target.packageName) -> TargetBlock.Invalid
+        // The native policy decides when it gave a verdict: it may allow ordinary preinstalled apps.
+        target.verdict == PhoneTargetVerdict.Allowed -> null
+        target.verdict == PhoneTargetVerdict.Host -> TargetBlock.Host
+        target.verdict == PhoneTargetVerdict.System -> TargetBlock.System
+        target.verdict == PhoneTargetVerdict.Sensitive -> TargetBlock.Sensitive
+        // Without a verdict, the screen's conservative fallback applies.
         target.system || target.packageName in SYSTEM_PACKAGES -> TargetBlock.System
         SYSTEM_PREFIXES.any { target.packageName.startsWith(it) } -> TargetBlock.System
         !PACKAGE_PATTERN.matches(target.packageName) -> TargetBlock.Invalid
@@ -415,3 +424,137 @@ internal fun preselectedTarget(state: PhoneScreenState): PhoneTarget? {
 }
 
 internal val DEFAULT_ACTIONS: Set<PhoneActionScope> = setOf(PhoneActionScope.Tap, PhoneActionScope.Swipe, PhoneActionScope.Back)
+
+// ---- configure once, then use from chat ----------------------------------------------------------
+
+/** Standing windows offered, in hours. Bounded on purpose; the person can revoke at any time. */
+internal val STANDING_WINDOW_HOURS: List<Int> = listOf(1, 4, 8)
+internal const val DEFAULT_STANDING_WINDOW_HOURS = 4
+
+/** At most this many apps in one standing scope, so the scope stays reviewable. */
+internal const val MAX_STANDING_APPS = 8
+
+/** What the standing card says about whether chat can use the phone right now. */
+internal enum class StandingReadiness {
+    /** No standing scope: the per-task flow applies. */
+    NotSet,
+
+    /** In effect and the runtime loaded the tool: chat requests start directly. */
+    Ready,
+
+    /** In effect, but the running OpenChamber started without the tool. One confirmed restart. */
+    NeedsRestart,
+
+    Restarting,
+
+    /** In effect, but the local OpenChamber isn't running. */
+    RuntimeNotRunning,
+
+    /** In effect, but whether the tool is loaded isn't known; not claimed as ready. */
+    ToolUnknown,
+
+    /** The scope is saved but phone control can't act: switch off or the device isn't connected. */
+    NotConnected,
+
+    Expired,
+    Revoked,
+}
+
+internal fun standingReadiness(state: PhoneScreenState): StandingReadiness {
+    val standing = state.standing ?: return StandingReadiness.NotSet
+    return when (standing.status) {
+        PhoneStandingStatus.NotSet -> StandingReadiness.NotSet
+        PhoneStandingStatus.Expired -> StandingReadiness.Expired
+        PhoneStandingStatus.Revoked -> StandingReadiness.Revoked
+        is PhoneStandingStatus.Active ->
+            when {
+                !state.available || !state.enabled || state.device.link != PhoneLink.Connected -> StandingReadiness.NotConnected
+                else ->
+                    when (standing.runtime.tool) {
+                        PhoneToolStatus.Ready -> StandingReadiness.Ready
+                        PhoneToolStatus.NeedsRestart -> StandingReadiness.NeedsRestart
+                        PhoneToolStatus.Restarting -> StandingReadiness.Restarting
+                        PhoneToolStatus.RuntimeNotRunning -> StandingReadiness.RuntimeNotRunning
+                        PhoneToolStatus.Unknown -> StandingReadiness.ToolUnknown
+                    }
+            }
+    }
+}
+
+/**
+ * The continue-delivery state to show on the standing card. The stopped card shows it itself, so
+ * it appears here only when the control isn't Halted, and never for Idle.
+ */
+internal fun standingDeliveryNotice(state: PhoneScreenState): PhoneContinueDelivery? {
+    val delivery = state.standing?.continuation?.delivery ?: return null
+    if (delivery == PhoneContinueDelivery.Idle) return null
+    if (state.control is PhoneControl.Halted) return null
+    return delivery
+}
+
+/** Only this state may say "say it in chat now". */
+internal fun chatCanUsePhone(state: PhoneScreenState): Boolean = standingReadiness(state) == StandingReadiness.Ready
+
+/** The first reason a standing scope can't be saved. */
+internal enum class StandingBlock { NotConnected, StopChannel, NoApps, TooManyApps, AppNotAllowed, NoActions, Busy }
+
+internal fun standingBlock(
+    state: PhoneScreenState,
+    apps: List<PhoneTarget>,
+    actions: Set<PhoneActionScope>,
+): StandingBlock? =
+    when {
+        state.device.link != PhoneLink.Connected -> StandingBlock.NotConnected
+        state.stopChannel != PhoneStopChannel.Verified -> StandingBlock.StopChannel
+        apps.isEmpty() -> StandingBlock.NoApps
+        apps.size > MAX_STANDING_APPS -> StandingBlock.TooManyApps
+        apps.any { targetBlock(it, state.hostPackage) != null } -> StandingBlock.AppNotAllowed
+        actions.isEmpty() -> StandingBlock.NoActions
+        state.pending != null -> StandingBlock.Busy
+        else -> null
+    }
+
+/**
+ * "Continue beside the chat" after a stop: offered only inside an active standing scope with the
+ * tool ready, once the stop is confirmed and nothing may still apply. It never resumes by itself.
+ */
+internal fun canContinueInChat(state: PhoneScreenState): Boolean {
+    val halted = state.control as? PhoneControl.Halted ?: return false
+    val standing = state.standing ?: return false
+    return chatCanUsePhone(state) &&
+        halted.confirmed &&
+        halted.lastAction != PhoneLastAction.MayStillApply &&
+        state.stopChannel == PhoneStopChannel.Verified &&
+        state.pending == null &&
+        standing.continuation.delivery != PhoneContinueDelivery.Sending &&
+        halted.target() in standing.apps.map { it.packageName }
+}
+
+private fun PhoneControl.Halted.target(): String = lease.target.packageName
+
+/**
+ * In configure-once mode the per-task grant form isn't the step: the standing card is. The grant
+ * form stays for per-task mode (no standing scope).
+ */
+internal fun usesStanding(state: PhoneScreenState): Boolean = state.standing != null
+
+/** The standing card shows once the device is connected, and while stopped or after a result. */
+internal fun showsStandingCard(state: PhoneScreenState): Boolean =
+    usesStanding(state) &&
+        when (phoneStep(state)) {
+            PhoneStep.Grant, PhoneStep.Result, PhoneStep.Halted, PhoneStep.Running -> true
+            PhoneStep.Unavailable, PhoneStep.Off, PhoneStep.Connect -> false
+        }
+
+/** Allowed apps only, in the order given, at most [MAX_STANDING_APPS]. */
+internal fun sanitizeStandingApps(
+    apps: List<PhoneTarget>,
+    hostPackage: String,
+): List<PhoneTarget> =
+    apps.distinctBy { it.packageName }.filter { targetBlock(it, hostPackage) == null }.take(MAX_STANDING_APPS)
+
+/** A standing window still running; minutes left rounded up, or null. */
+internal fun standingMinutesLeft(
+    status: PhoneStandingStatus,
+    nowMs: Long,
+): Int? = (status as? PhoneStandingStatus.Active)?.let { minutesLeft(it.endsAtMs, nowMs) }

@@ -3,13 +3,20 @@ package io.andchamber.app.runtime.process
 import io.andchamber.app.phone.core.PhoneController
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
+import io.andchamber.app.phone.standing.PhoneTaskStarter
 import io.andchamber.app.phone.tool.PhonePendingRequest
 import io.andchamber.app.phone.tool.PhonePendingRequestStore
 import io.andchamber.app.phone.tool.PhoneToolEndpoint
 import io.andchamber.app.phone.tool.PhoneToolProtocol
 import io.andchamber.app.phone.tool.PhoneToolServer
 import io.andchamber.app.phone.tool.PhoneToolTransport
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import java.io.File
 
 /**
@@ -48,10 +55,14 @@ interface PhoneToolHost {
     ): Boolean
 
     /**
-     * Read-only. True only while this launch has an installed tool and the injected [readyLaunch]
-     * reports that same launch. It performs no authorization change and exposes no token or port;
-     * it never infers readiness from the endpoint file. `None` is false, so native UI can prompt for
-     * a manual restart instead of letting the person pair/confirm only to fail a later publish.
+     * Read-only. True only while this launch has an installed tool, the injected [readyLaunch]
+     * reports that same launch, and readiness was proved for that exact launch. Production uses the
+     * native RPC registration probe (`andchamber-phone/ready`, only after the plugin's tool transform
+     * and `ctx.tool.list`); the legacy transport `/v1/ready` handshake remains only for tests/non-local
+     * launches when no RPC probe is wired. An endpoint file, a live port, an active launch or a
+     * permission grant is never readiness by itself. It performs no authorization change and exposes
+     * no token or port. `None` is false, so native UI can prompt for a manual restart instead of
+     * letting the person pair/confirm only to fail a later publish.
      */
     fun isReady(): Boolean = false
 
@@ -98,6 +109,13 @@ class PhoneToolBinding(
     private val readyLaunch: () -> Long?,
     /** Native task-progress bridge; defaults to fail-closed Unavailable. */
     private val taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
+    /** Native standing starter for direct chat requests; defaults to fail-closed Unavailable. */
+    private val taskStarter: PhoneTaskStarter = PhoneTaskStarter.Unavailable,
+    /**
+     * Production RPC registration gate. Default Unavailable keeps the legacy transport handshake
+     * path for tests/non-local runtimes; the real probe runs off Main and is bounded.
+     */
+    private val registrationProbe: PhonePluginRegistrationWaiter = PhonePluginRegistrationWaiter.Unavailable,
     /**
      * Shared with the loopback server; holds at most one native-confirmation proposal. Internal so
      * the runtime owner and tests can inspect ownership; UI uses [pendingRequest]/consume/dismiss.
@@ -117,6 +135,7 @@ class PhoneToolBinding(
                 controller = controller,
                 readyLaunch = readyLaunch,
                 taskEvents = taskEvents,
+                taskStarter = taskStarter,
                 pendingRequests = pendingRequests,
             )
         }
@@ -168,6 +187,14 @@ class PhoneToolBinding(
      */
     private var endpointOwner: EndpointOwner? = null
 
+    /** Owns bounded RPC registration waits off Main; one job per current launch only. */
+    private val registrationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Guarded by [lock]: invalidates late registration results after stop/new launch. */
+    private var registrationGeneration = 0L
+    private var registrationJob: Job? = null
+    private var registeredLaunch: Long? = null
+
     private data class EndpointOwner(
         val launchId: Long,
         val file: File,
@@ -193,6 +220,12 @@ class PhoneToolBinding(
                 return false
             }
             pending = launchId
+            // A new launch owns readiness now: cancel and invalidate the previous probe before any
+            // start/install work, so a late success for the old launch can never publish.
+            registrationGeneration += 1
+            registrationJob?.cancel()
+            registrationJob = null
+            registeredLaunch = null
             val detached = active.also {
                 active = null
                 discardEndpointLocked(it?.launchId)
@@ -242,7 +275,10 @@ class PhoneToolBinding(
         return when (val installed = synchronized(lock) {
             installLocked(launchId, home, trustedRoot, port, token, transport)
         }) {
-            is Install.Installed -> true
+            is Install.Installed -> {
+                beginRegistrationProbe(installed.active.launchId)
+                true
+            }
             Install.Aborted -> {
                 runCatching { transport.stop() }
                 false
@@ -270,6 +306,13 @@ class PhoneToolBinding(
                 current
             } else {
                 null
+            }
+            if (detached != null) {
+                // Stop cancels this launch's registration wait; a newer launch's state is untouched.
+                registrationGeneration += 1
+                registrationJob?.cancel()
+                registrationJob = null
+                registeredLaunch = null
             }
             if ((detached != null || pendingWasThis) && launchId > authorityRevokedThrough) {
                 // Same critical section as the ownership checks. While this lock is held no newer
@@ -304,15 +347,68 @@ class PhoneToolBinding(
 
     /**
      * Read-only readiness for native UI. True only when the installed tool's launch id equals the
-     * injected ready launch. No grant, pending, endpoint or controller state is read or changed
-     * here; the endpoint file is never used to infer this.
+     * injected ready launch *and* that exact launch proved plugin registration: either the wired
+     * native RPC probe succeeded, or (only when no probe is available) the legacy transport setup
+     * handshake arrived. A server that is merely listening, an active endpoint file or an old
+     * launch's success is never enough. No grant, pending, endpoint or controller state is read or
+     * changed here.
      */
     override fun isReady(): Boolean =
         synchronized(lock) {
             val current = active ?: return false
             val ready = readyLaunch() ?: return false
-            current.launchId == ready
+            if (current.launchId != ready) return false
+            if (registrationProbe.available) {
+                // Production: the exact launch must have registered its read-only RPC. Active,
+                // endpoint or a legacy transport flag alone is never readiness.
+                return registeredLaunch == current.launchId
+            }
+            // Backward-compatible path for tests/non-local launches without the RPC probe.
+            runCatching { current.transport.pluginReady }.getOrDefault(false)
         }
+
+    /**
+     * Starts one bounded registration wait after install. It is fully asynchronous on IO, so
+     * `start()` never blocks. A generation token plus the active launch check makes a late result
+     * from a stopped/replaced launch harmless.
+     */
+    private fun beginRegistrationProbe(launchId: Long) {
+        if (!registrationProbe.available) return
+        val generation = synchronized(lock) {
+            if (active?.launchId != launchId || launchId <= revokedThrough) return
+            registrationGeneration += 1
+            registrationJob?.cancel()
+            registeredLaunch = null
+            registrationGeneration
+        }
+        val job =
+            registrationScope.launch {
+                val registered =
+                    try {
+                        registrationProbe.awaitRegistered(launchId)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
+                    }
+                if (!registered) return@launch
+                synchronized(lock) {
+                    if (registrationGeneration == generation &&
+                        active?.launchId == launchId &&
+                        launchId > revokedThrough
+                    ) {
+                        registeredLaunch = launchId
+                    }
+                }
+            }
+        synchronized(lock) {
+            if (registrationGeneration == generation && active?.launchId == launchId) {
+                registrationJob = job
+            } else {
+                job.cancel()
+            }
+        }
+    }
 
     /**
      * Native UI only, immediately after a successful `controller.grant`. It relays the route to the

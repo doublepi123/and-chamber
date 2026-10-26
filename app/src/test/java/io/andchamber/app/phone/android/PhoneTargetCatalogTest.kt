@@ -1,5 +1,6 @@
 package io.andchamber.app.phone.android
 
+import io.andchamber.app.ui.phone.PhoneTargetVerdict
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -65,5 +66,29 @@ class PhoneTargetCatalogTest {
             )
         assertEquals(1, entries.size)
         assertEquals("Notes", entries.single().label)
+    }
+
+    @Test
+    fun `ordinary preinstalled apps are allowed while authorization surfaces stay blocked`() {
+        val raw =
+            listOf(
+                RawLauncherTarget("Notes", "com.example.notes", system = false),
+                RawLauncherTarget("Maps", "com.google.android.apps.maps", system = true),
+                RawLauncherTarget("Documents", "com.android.documentsui", system = true),
+                RawLauncherTarget("Settings", "com.android.settings", system = true),
+                RawLauncherTarget("System UI", "com.android.systemui", system = true),
+                RawLauncherTarget("Installer", "com.android.packageinstaller", system = true),
+                RawLauncherTarget("Lock screen", "com.android.keyguard", system = true),
+                RawLauncherTarget("AndChamber", "io.andchamber.app", system = false),
+            )
+        val verdicts = PhoneTargetCatalog.entries(raw, limit = 50).associate { it.packageName to it.verdict }
+        assertEquals(PhoneTargetVerdict.Allowed, verdicts["com.example.notes"])
+        assertEquals(PhoneTargetVerdict.Allowed, verdicts["com.google.android.apps.maps"])
+        assertEquals(PhoneTargetVerdict.Allowed, verdicts["com.android.documentsui"])
+        assertEquals(PhoneTargetVerdict.Sensitive, verdicts["com.android.settings"])
+        assertEquals(PhoneTargetVerdict.Sensitive, verdicts["com.android.systemui"])
+        assertEquals(PhoneTargetVerdict.Sensitive, verdicts["com.android.packageinstaller"])
+        assertEquals(PhoneTargetVerdict.Sensitive, verdicts["com.android.keyguard"])
+        assertEquals(PhoneTargetVerdict.Host, verdicts["io.andchamber.app"])
     }
 }

@@ -4,7 +4,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
+import io.andchamber.app.phone.core.PhoneErrorCode
+import io.andchamber.app.phone.core.PhoneTargetPolicy
 import io.andchamber.app.ui.phone.PhoneTarget
+import io.andchamber.app.ui.phone.PhoneTargetVerdict
 
 /** One launcher entry as the platform reports it, before any policy is applied. */
 internal data class RawLauncherTarget(
@@ -24,25 +27,70 @@ internal data class RawLauncherTarget(
 internal class PhoneTargetCatalog(
     private val hostPackage: String,
     private val limit: Int = MAX_TARGETS,
+    private val policy: PhoneTargetPolicy = PhoneTargetPolicy(hostPackage),
     private val query: () -> List<RawLauncherTarget>,
 ) {
-    fun load(): List<PhoneTarget> = entries(query(), limit)
+    fun load(): List<PhoneTarget> = entries(query(), limit, hostPackage, policy)
 
     companion object {
         const val MAX_TARGETS = 400
 
+        /** Authorization surfaces stay refused even for an ordinary preinstalled brand. */
+        private val SENSITIVE_PACKAGES =
+            setOf(
+                "android",
+                "com.android.systemui",
+                "com.android.settings",
+                "com.android.permissioncontroller",
+                "com.android.packageinstaller",
+                "com.android.keyguard",
+                "com.google.android.settings",
+                "com.google.android.permissioncontroller",
+                "com.google.android.packageinstaller",
+            )
+
         /**
          * Deduplicates by package, keeps the host package visible (the screen explains why it is
-         * blocked), sorts by label and bounds the result.
+         * blocked), sorts by label and bounds the result. The native verdict allows ordinary
+         * preinstalled apps, including `com.android.*` / `com.google.android.*`, while the host and
+         * authorization surfaces remain blocked.
          */
-        fun entries(raw: List<RawLauncherTarget>, limit: Int = MAX_TARGETS): List<PhoneTarget> =
+        fun entries(
+            raw: List<RawLauncherTarget>,
+            limit: Int = MAX_TARGETS,
+            hostPackage: String = "io.andchamber.app",
+            policy: PhoneTargetPolicy = PhoneTargetPolicy(hostPackage),
+        ): List<PhoneTarget> =
             raw.asSequence()
                 .filter { it.packageName.isNotBlank() }
                 .distinctBy { it.packageName }
                 .sortedWith(compareBy({ it.label.lowercase() }, { it.packageName }))
                 .take(limit.coerceIn(1, MAX_TARGETS))
-                .map { PhoneTarget(label = it.label.ifBlank { it.packageName }, packageName = it.packageName, system = it.system) }
+                .map { target ->
+                    PhoneTarget(
+                        label = target.label.ifBlank { target.packageName },
+                        packageName = target.packageName,
+                        system = target.system,
+                        verdict = verdictFor(target.packageName, hostPackage, policy),
+                    )
+                }
                 .toList()
+
+        /** Native picker verdict. It does not grant; the controller still enforces its own policy. */
+        internal fun verdictFor(
+            packageName: String,
+            hostPackage: String,
+            policy: PhoneTargetPolicy = PhoneTargetPolicy(hostPackage),
+        ): PhoneTargetVerdict =
+            when {
+                packageName == hostPackage || packageName.startsWith("$hostPackage.") ->
+                    PhoneTargetVerdict.Host
+                packageName in SENSITIVE_PACKAGES -> PhoneTargetVerdict.Sensitive
+                policy.refusal(packageName) == PhoneErrorCode.INVALID_REQUEST ->
+                    PhoneTargetVerdict.Sensitive
+                policy.refusal(packageName) != null -> PhoneTargetVerdict.System
+                else -> PhoneTargetVerdict.Allowed
+            }
 
         /** Reads launcher activities from the platform. Never called for the model. */
         fun androidQuery(

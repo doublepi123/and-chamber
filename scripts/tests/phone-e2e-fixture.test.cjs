@@ -19,6 +19,7 @@ const providerOverlay = require('../phone-e2e/provider-overlay.example.json');
 
 const PACKAGE = 'io.example.phonefixture';
 const TEST_TEXT = 'andchamber-ascii-1';
+const NATIVE_CONTINUE_PROMPT = 'Continue the previous task. First observe the phone screen again; do not repeat any action that already happened.';
 
 test('provider overlay declares text and image input for the capture attachment', () => {
   assert.deepEqual(
@@ -38,7 +39,7 @@ function toolDefinition() {
         properties: {
           action: {
             type: 'string',
-            enum: ['status', 'request', 'progress', 'need_user', 'finish', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'],
+            enum: ['status', 'request', 'apps', 'open_app', 'progress', 'need_user', 'finish', 'snapshot', 'capture', 'tap', 'swipe', 'input', 'back'],
           },
           summary: { type: 'string' },
           packageName: { type: 'string' },
@@ -66,6 +67,20 @@ function toolDefinition() {
               required: ['action'],
             },
             then: { required: ['epoch'] },
+          },
+          {
+            if: {
+              properties: { action: { enum: ['request'] } },
+              required: ['action'],
+            },
+            then: { required: ['summary', 'packageName'] },
+          },
+          {
+            if: {
+              properties: { action: { enum: ['open_app'] } },
+              required: ['action'],
+            },
+            then: { required: ['packageName'] },
           },
         ],
       },
@@ -229,17 +244,150 @@ test('progress/need_user/finish carry the status epoch and bounded text', () => 
   }
 });
 
-test('request plain ack waits for native confirmation', () => {
+test('an accepted direct start continues the observed scenario without PENDING', () => {
+  const messages = addToolTurn(
+    [{ role: 'user', content: sentinel({ mode: 'begin', scenario: 'status' }) }],
+    'call_phone_e2e_1',
+    { action: 'request', summary: 'x', packageName: PACKAGE },
+    envelope('phone.request', { state: 'RUNNING' }),
+  );
+  const plan = fixture.planTurn(body(messages), { callSeq: 2 });
+  assert.equal(plan.kind, 'tool');
+  assert.equal(plan.action, 'status');
+  assert.equal(plan.scenario, 'status');
+  assert.equal(plan.case, 'call-status');
+});
+
+test('begin=input starts directly, then runs the observed input scenario without PENDING', () => {
+  let messages = [{ role: 'user', content: sentinel({ mode: 'begin', scenario: 'input' }) }];
+  let plan = fixture.planTurn(body(messages), { callSeq: 1 });
+  assert.equal(plan.kind, 'tool');
+  assert.equal(plan.action, 'request');
+  assert.doesNotMatch(JSON.stringify(plan), /PENDING/);
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'request', summary: 'x', packageName: PACKAGE },
+    envelope('phone.request', { state: 'RUNNING' }),
+  );
+
+  plan = fixture.planTurn(body(messages), { callSeq: 2 });
+  assert.equal(plan.action, 'status');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'status' }, status());
+
+  plan = fixture.planTurn(body(messages), { callSeq: 3 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'snapshot' }, snapshot('obs-1', mainNodes()));
+
+  plan = fixture.planTurn(body(messages), { callSeq: 4 });
+  assert.equal(plan.action, 'input');
+  const inputArgs = JSON.parse(plan.toolCall.function.arguments);
+  assert.equal(inputArgs.observationId, 'obs-1');
+  assert.equal(inputArgs.text, TEST_TEXT);
+  messages = addToolTurn(messages, plan.toolCall.id, inputArgs, envelope('phone.input'));
+
+  plan = fixture.planTurn(body(messages), { callSeq: 5 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'snapshot' },
+    snapshot('obs-2', mainNodes({ nodes: [node('n21', TEST_TEXT, { role: 'TextView' })] })),
+  );
+
+  plan = fixture.planTurn(body(messages), { callSeq: 6 });
+  assert.equal(plan.kind, 'text');
+  assert.equal(plan.case, 'e2e-complete');
+  assert.match(plan.text, /scenario=input action=input verify=pass epoch=7/);
+});
+
+test('the real native continuation resumes the original need_user task without a second sentinel', () => {
+  let messages = [{ role: 'user', content: sentinel({ mode: 'begin', scenario: 'need_user' }) }];
+  let plan = fixture.planTurn(body(messages), { callSeq: 1 });
+  assert.equal(plan.action, 'request');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'request', summary: 'x', packageName: PACKAGE },
+    envelope('phone.request', { state: 'RUNNING' }),
+  );
+
+  plan = fixture.planTurn(body(messages), { callSeq: 2 });
+  assert.equal(plan.action, 'status');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'status' }, status());
+  plan = fixture.planTurn(body(messages), { callSeq: 3 });
+  assert.equal(plan.action, 'need_user');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    JSON.parse(plan.toolCall.function.arguments),
+    envelope('phone.need_user', { state: 'WAITING_USER', verified: false }),
+  );
+  assert.equal(fixture.planTurn(body(messages), { callSeq: 4 }).case, 'e2e-complete');
+
+  // This is the production native prompt, not another acceptance-driver scenario POST.
+  messages = [...messages, { role: 'user', content: NATIVE_CONTINUE_PROMPT }];
+  assert.equal(messages.filter((message) => message.role === 'user' && message.content.includes('[[andchamber-phone-e2e')).length, 1);
+  plan = fixture.planTurn(body(messages), { callSeq: 5 });
+  assert.equal(plan.action, 'status');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'status' }, status());
+
+  plan = fixture.planTurn(body(messages), { callSeq: 6 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'snapshot' }, snapshot('obs-resume-1', mainNodes()));
+  plan = fixture.planTurn(body(messages), { callSeq: 7 });
+  assert.equal(plan.action, 'input');
+  const inputArgs = JSON.parse(plan.toolCall.function.arguments);
+  assert.equal(inputArgs.observationId, 'obs-resume-1');
+  messages = addToolTurn(messages, plan.toolCall.id, inputArgs, envelope('phone.input'));
+
+  plan = fixture.planTurn(body(messages), { callSeq: 8 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'snapshot' },
+    snapshot('obs-resume-2', mainNodes({ nodes: [node('n30', TEST_TEXT, { role: 'TextView' })] })),
+  );
+  plan = fixture.planTurn(body(messages), { callSeq: 9 });
+  assert.equal(plan.kind, 'text');
+  assert.equal(plan.case, 'e2e-complete');
+  assert.match(plan.text, /scenario=input action=input verify=pass/);
+});
+
+test('the native continuation alone is not a synthetic task sentinel', () => {
+  const plan = fixture.planTurn(body([{ role: 'user', content: NATIVE_CONTINUE_PROMPT }]), { callSeq: 1 });
+  assert.equal(plan.kind, 'text');
+  assert.equal(plan.case, 'ignored');
+});
+
+test('a plain text acknowledgement is not a direct start', () => {
   const messages = addToolTurn(
     [{ role: 'user', content: sentinel({ mode: 'begin', scenario: 'input' }) }],
     'call_phone_e2e_1',
     { action: 'request', summary: 'x', packageName: PACKAGE },
-    '请在AndChamber手机控制中确认',
+    'request accepted',
   );
   const plan = fixture.planTurn(body(messages), { callSeq: 2 });
   assert.equal(plan.kind, 'text');
-  assert.equal(plan.case, 'request-pending');
-  assert.match(plan.text, /request-pending-native-confirmation/);
+  assert.equal(plan.case, 'request-not-confirmed');
+});
+
+test('a direct-start envelope with PENDING or a stale epoch does not continue', () => {
+  for (const reply of [
+    envelope('phone.request', { state: 'PENDING_CONFIRMATION' }),
+    { version: 1, ok: true, action: 'phone.request', epoch: 0, data: { state: 'RUNNING' } },
+  ]) {
+    const messages = addToolTurn(
+      [{ role: 'user', content: sentinel({ mode: 'begin', scenario: 'input' }) }],
+      'call_phone_e2e_1',
+      { action: 'request', summary: 'x', packageName: PACKAGE },
+      reply,
+    );
+    const plan = fixture.planTurn(body(messages), { callSeq: 2 });
+    assert.equal(plan.kind, 'text');
+    assert.equal(plan.case, 'request-not-confirmed');
+  }
 });
 
 test('an unavailable plain request result is not reported as pending confirmation', () => {
@@ -260,6 +408,37 @@ test('status verifies minimal information without requiring a screen observation
     'status-only', { action: 'status' }, status(),
   );
   assert.match(fixture.planTurn(body(messages), { callSeq: 2 }).text, /scenario=status action=status verify=pass/);
+});
+
+test('apps returns only the preauthorized fixture list', () => {
+  let messages = [{ role: 'user', content: sentinel({ mode: 'action', action: 'apps' }) }];
+  const plan = fixture.planTurn(body(messages), { callSeq: 1 });
+  assert.equal(plan.action, 'apps');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'apps' },
+    envelope('phone.apps', { apps: [{ label: 'Fixture', packageName: PACKAGE }], actions: ['INPUT'] }),
+  );
+  assert.match(fixture.planTurn(body(messages), { callSeq: 2 }).text, /scenario=apps action=apps verify=pass/);
+});
+
+test('open_app requires both the Opened reply and a real foreground observation', () => {
+  let messages = [{ role: 'user', content: sentinel({ mode: 'action', action: 'open_app' }) }];
+  let plan = fixture.planTurn(body(messages), { callSeq: 1 });
+  assert.deepEqual(JSON.parse(plan.toolCall.function.arguments), { action: 'open_app', packageName: PACKAGE });
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'open_app', packageName: PACKAGE },
+    envelope('phone.open_app', { state: 'OPENED' }),
+  );
+  plan = fixture.planTurn(body(messages), { callSeq: 2 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'snapshot' }, snapshot('obs-opened', mainNodes()));
+  plan = fixture.planTurn(body(messages), { callSeq: 3 });
+  assert.equal(plan.kind, 'text');
+  assert.match(plan.text, /scenario=open_app action=open_app verify=pass/);
 });
 
 test('input scenario runs status, snapshot, input, snapshot and verifies the text', () => {

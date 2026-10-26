@@ -1,6 +1,11 @@
 package io.andchamber.app.phone.core
 
 import java.util.UUID
+import io.andchamber.app.phone.standing.PhoneStandingGrantResult
+import io.andchamber.app.phone.standing.PhoneStandingPolicy
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneStandingResume
+import io.andchamber.app.phone.standing.PhoneStandingScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -49,6 +54,12 @@ class PhoneController(
     private val mutableState = MutableStateFlow(PhoneState())
     val state: StateFlow<PhoneState> = mutableState.asStateFlow()
 
+    /**
+     * Native-only: a stop/handover suspends standing chat requests until a native person resume.
+     * It is not a lease and never grants; the existing grant/pause/unknown fields remain independent.
+     */
+    private var standingBlock: PhoneStandingBlockReason? = null
+
     /** (epoch, requestId). A refused call is never retried under the same key. */
     private val requestRecords = LinkedHashSet<PhoneRequestKey>()
 
@@ -79,6 +90,7 @@ class PhoneController(
             requestRecords.clear()
             lastExpiryEpoch = null
             currentObservation = null
+            standingBlock = null
             publishLocked(PhoneEvent.DISABLED) {
                 it.copy(
                     enabled = false,
@@ -143,6 +155,114 @@ class PhoneController(
         return PhoneGrantResult.Granted(grant)
     }
 
+    /**
+     * Native-only chat entry: create a per-task grant inside the person's preauthorized standing
+     * scope. The model/tool surface cannot create a [PhoneStandingScope]; it reaches the native
+     * starter port instead. The scope check and the grant happen under one lock, so a request can
+     * never slip past a just-set pause, unknown block, standing standby or runtime change, and it
+     * never clears those locks. Every call creates a new epoch; the lease is bounded by the scope's
+     * per-task duration and the remaining standing window.
+     */
+    fun grantFromPreauthorization(
+        scope: PhoneStandingScope,
+        targetPackage: String,
+    ): PhoneStandingGrantResult {
+        val now = clock()
+        var open: ActiveCall? = null
+        val result =
+            synchronized(lock) {
+                val current = mutableState.value
+                val refusal = PhoneStandingPolicy.refusal(scope, targetPackage, now, current, targetPolicy)
+                if (refusal != null) return@synchronized PhoneStandingGrantResult.Refused(refusal)
+                val ttl =
+                    PhoneStandingPolicy.perTaskTtl(scope, now)
+                        ?: return@synchronized PhoneStandingGrantResult.Refused(PhoneStandingRefusal.EXPIRED)
+                val epoch = current.epoch + 1
+                val grant =
+                    PhoneGrant(
+                        epoch = epoch,
+                        targetPackage = targetPackage,
+                        allowedActions = scope.allowedActions.toSet(),
+                        grantedAtMs = now,
+                        expiresAtMs = now + ttl,
+                    )
+                open = activeCall
+                requestRecords.clear()
+                lastExpiryEpoch = null
+                currentObservation = null
+                // The policy just proved paused/blocked/standing standby are clear. This grant must
+                // not clear them for a racing native stop.
+                publishLocked(PhoneEvent.GRANTED) {
+                    it.copy(
+                        epoch = epoch,
+                        grant = grant,
+                        observation = null,
+                        pausing = false,
+                    )
+                }
+                PhoneStandingGrantResult.Granted(grant)
+            }
+        if (result is PhoneStandingGrantResult.Granted) {
+            cancelCall(open, PhoneErrorCode.EPOCH_CHANGED)
+        }
+        return result
+    }
+
+    /**
+     * Native integration only: a need_user/takeover stop suspends standing chat requests until a
+     * native person resume. It does not revoke or change the current grant; the caller's stop path
+     * does that. Keeping the first reason prevents a late event from rewriting the person-facing
+     * reason of the stop that actually happened.
+     */
+    fun blockStanding(reason: PhoneStandingBlockReason) {
+        synchronized(lock) {
+            if (standingBlock != null) return
+            standingBlock = reason
+            publishLocked(PhoneEvent.STANDING_BLOCKED) { it }
+        }
+    }
+
+    /**
+     * Native person resume of the standing scope. The caller has already verified the native
+     * confirmation; this only clears the standby block for the current runtime. It does not
+     * un-pause, acknowledge an unknown outcome or create a grant: the next request still passes the
+     * standing policy and the normal admission. A different runtime is refused.
+     */
+    fun resumeStanding(resume: PhoneStandingResume): Boolean =
+        synchronized(lock) {
+            val current = mutableState.value
+            if (!current.enabled || current.runtimeId != resume.runtimeId) return@synchronized false
+            if (standingBlock == null) return@synchronized true
+            standingBlock = null
+            publishLocked(PhoneEvent.STANDING_RESUMED) { it }
+            true
+        }
+
+    /** Read-only native/UI fact: standing chat requests are suspended until a native resume. */
+    fun standingBlocked(): Boolean = synchronized(lock) { standingBlock != null }
+
+    /**
+     * Native-only person continuation after a confirmed stop. Unlike [resumeStanding], this also
+     * clears the ordinary pause in the same lock/publish, because the person just confirmed the
+     * resume from the native screen. It never clears an unknown-outcome block: the person must first
+     * mark that outcome checked, so a continuation cannot silently assert that a dispatched action
+     * had no effect. A different runtime/disabled controller is refused and nothing is changed.
+     *
+     * This does not grant or replay anything; the caller still creates a fresh epoch through
+     * [grantFromPreauthorization] and re-observes the target before waking the chat.
+     */
+    fun resumeStandingForPerson(resume: PhoneStandingResume): Boolean =
+        synchronized(lock) {
+            val current = mutableState.value
+            if (!current.enabled || current.runtimeId != resume.runtimeId) return@synchronized false
+            // Unknown outcomes stay blocked until the person explicitly checks the device.
+            if (current.blocked != null) return@synchronized false
+            if (standingBlock == null && !current.paused) return@synchronized true
+            standingBlock = null
+            publishLocked(PhoneEvent.STANDING_RESUMED) { it.copy(paused = false) }
+            true
+        }
+
     /** Native UI only. Stops accepting new mutations immediately and cancels cancellable calls. */
     fun pause() {
         val calls = synchronized(lock) {
@@ -184,14 +304,18 @@ class PhoneController(
     fun revoke() = revokeFor(PhoneEvent.REVOKED)
 
     /** Native UI/service only. A locked device drops the lease without disconnecting. */
-    fun onDeviceLocked() = revokeFor(PhoneEvent.LOCKED)
+    fun onDeviceLocked() {
+        synchronized(lock) { if (standingBlock == null) standingBlock = PhoneStandingBlockReason.DEVICE_LOCKED }
+        revokeFor(PhoneEvent.LOCKED)
+    }
 
     /** Native UI/service only. Returning to the host app drops the lease. */
     fun onHostReturned() = revokeFor(PhoneEvent.HOST_RETURNED)
 
-    /** Service only. A lost device connection always drops the lease. */
+    /** Service only. A lost device connection always drops the lease and suspends standing requests. */
     fun onConnectionLost() {
         val calls = synchronized(lock) {
+            if (standingBlock == null) standingBlock = PhoneStandingBlockReason.CONNECTION_LOST
             revokeLocked(PhoneEvent.CONNECTION_LOST, disconnect = true)
         }
         cancelCall(calls, PhoneErrorCode.NOT_CONNECTED)
@@ -209,6 +333,7 @@ class PhoneController(
                 publishLocked(PhoneEvent.RUNTIME_CHANGED) { it.copy(runtimeId = runtimeId) }
                 null
             } else {
+                if (standingBlock == null) standingBlock = PhoneStandingBlockReason.RUNTIME_CHANGED
                 revokeLocked(
                     PhoneEvent.RUNTIME_CHANGED,
                     disconnect = true,
@@ -895,6 +1020,7 @@ class PhoneController(
             if (state.epoch != epoch || state.grant == null) return
             controlEpoch += 1
             currentObservation = null
+            if (standingBlock == null) standingBlock = PhoneStandingBlockReason.UNKNOWN_OUTCOME
             publishLocked(PhoneEvent.OUTCOME_UNKNOWN) {
                 it.copy(
                     blocked = PhoneBlockReason.UNKNOWN_OUTCOME,
@@ -970,7 +1096,10 @@ class PhoneController(
 
     private fun publishLocked(event: PhoneEvent, mutate: (PhoneState) -> PhoneState) {
         val current = mutableState.value
-        val next = mutate(current)
+        val next = mutate(current).copy(
+            standingBlocked = standingBlock != null,
+            standingBlockReason = standingBlock,
+        )
         mutableState.value = next.copy(
             sequence = current.sequence + 1,
             lastEvent = event,

@@ -165,6 +165,99 @@ class PhoneOverlayLogicTest {
     }
 
     @Test
+    fun `open chat keeps the agent going, continue appears only after a handover in standing mode`() {
+        val running = PhoneOverlayState(phase = OverlayPhase.Running)
+        assertTrue(OverlayAction.OpenChat in panelActions(running))
+        assertEquals(OverlayAction.TakeOver, panelActions(running).first())
+        assertFalse(OverlayAction.ContinueInChat in panelActions(running.copy(canContinueInChat = true)))
+        val taken = PhoneOverlayState(phase = OverlayPhase.TakenOver, canContinueInChat = true)
+        assertEquals(OverlayAction.ContinueInChat, panelActions(taken)[1])
+        assertFalse(OverlayAction.ContinueInChat in panelActions(taken.copy(canContinueInChat = false)))
+        // Never while a stop is pending, for an unknown result, after the end, or on the demo.
+        listOf(OverlayPhase.Taking, OverlayPhase.Unknown, OverlayPhase.Ended, OverlayPhase.StopUnconfirmed).forEach {
+            assertFalse(it.name, OverlayAction.ContinueInChat in panelActions(taken.copy(phase = it)))
+        }
+        assertFalse(OverlayAction.OpenChat in panelActions(running.copy(demo = true)))
+        // Per-phase rules are unchanged.
+        assertEquals(panelActions(OverlayPhase.Unknown), panelActions(PhoneOverlayState(phase = OverlayPhase.Unknown)))
+    }
+
+    @Test
+    fun `a retained handover is not a finished task`() {
+        assertTrue(isRetainedHandover(PhoneOverlayState(phase = OverlayPhase.TakenOver, retained = true)))
+        assertTrue(isRetainedHandover(PhoneOverlayState(phase = OverlayPhase.Unknown, retained = true)))
+        assertFalse(isRetainedHandover(PhoneOverlayState(phase = OverlayPhase.Ended, retained = true)))
+        assertFalse(isRetainedHandover(PhoneOverlayState(phase = OverlayPhase.TakenOver)))
+    }
+
+    @Test
+    fun `the settings card reports an overlay that moved to the notification, not a chosen notification mode`() {
+        val base = PhoneOverlaySettingsState(available = true)
+        assertEquals(OverlaySurfaceMode.MovedToNotification, lastSurfaceReport(base.copy(lastSurface = OverlaySurfaceMode.MovedToNotification)))
+        assertNull(lastSurfaceReport(base.copy(lastSurface = OverlaySurfaceMode.NotificationOnly)))
+        assertNull(lastSurfaceReport(base.copy(lastSurface = OverlaySurfaceMode.Overlay)))
+        assertNull(lastSurfaceReport(base))
+    }
+
+    @Test
+    fun `the stop reason shows even when no recovery surface was reported`() {
+        val base = PhoneOverlaySettingsState(available = true, lastStopReason = OverlayStopReason.OverlayUnreachable)
+        assertNull(lastSurfaceReport(base))
+        assertEquals(OverlayStopReason.OverlayUnreachable, lastStopReasonShown(base))
+        val moved = base.copy(lastSurface = OverlaySurfaceMode.MovedToNotification)
+        assertEquals(OverlaySurfaceMode.MovedToNotification, lastSurfaceReport(moved))
+        assertEquals(OverlayStopReason.OverlayUnreachable, lastStopReasonShown(moved))
+        assertNull(lastStopReasonShown(PhoneOverlaySettingsState(available = true)))
+    }
+
+    @Test
+    fun `retained handover cards offer a way back to chat, the ended card doesn't`() {
+        listOf(OverlayPhase.TakenOver, OverlayPhase.NeedUser, OverlayPhase.Unknown).forEach { phase ->
+            val retained = PhoneOverlayState(phase = phase, retained = true)
+            assertTrue(phase.name, isRetainedHandover(retained))
+            assertTrue(phase.name, OverlayAction.OpenChat in panelActions(retained))
+            // Not retained: per-phase buttons only.
+            assertFalse(phase.name, OverlayAction.OpenChat in panelActions(retained.copy(retained = false)))
+        }
+        // Ended, pending and unconfirmed never pose as a retained handover.
+        listOf(OverlayPhase.Ended, OverlayPhase.Taking, OverlayPhase.Ending, OverlayPhase.StopUnconfirmed, OverlayPhase.Unavailable).forEach { phase ->
+            val s = PhoneOverlayState(phase = phase, retained = true)
+            assertFalse(phase.name, isRetainedHandover(s))
+            assertFalse(phase.name, OverlayAction.OpenChat in panelActions(s))
+        }
+        // Unknown keeps "go look" first; no continue for an unknown result.
+        val unknown = PhoneOverlayState(phase = OverlayPhase.Unknown, retained = true, canContinueInChat = true)
+        assertEquals(OverlayAction.Collapse, panelActions(unknown).first())
+        assertFalse(OverlayAction.ContinueInChat in panelActions(unknown))
+        // Taken over in standing mode: continue and open chat, no grant action.
+        val taken = PhoneOverlayState(phase = OverlayPhase.TakenOver, retained = true, canContinueInChat = true)
+        assertEquals(
+            listOf(OverlayAction.OpenNative, OverlayAction.ContinueInChat, OverlayAction.Collapse, OverlayAction.OpenChat, OverlayAction.End),
+            panelActions(taken),
+        )
+    }
+
+    @Test
+    fun `collapse and end share one row only when the primary stays first`() {
+        val taken = panelActions(PhoneOverlayState(phase = OverlayPhase.TakenOver, retained = true, canContinueInChat = true))
+        val (stacked, footer) = panelButtonRows(taken)
+        assertEquals(listOf(OverlayAction.OpenNative, OverlayAction.ContinueInChat, OverlayAction.OpenChat), stacked)
+        assertEquals(listOf(OverlayAction.Collapse, OverlayAction.End), footer)
+        // Unknown: "go look" (Collapse) is the primary, so nothing moves.
+        val unknown = panelActions(PhoneOverlayState(phase = OverlayPhase.Unknown, retained = true))
+        assertEquals(unknown to emptyList<OverlayAction>(), panelButtonRows(unknown))
+        // Running has only End among the pair: unchanged.
+        val running = panelActions(PhoneOverlayState(phase = OverlayPhase.Running))
+        assertEquals(running to emptyList<OverlayAction>(), panelButtonRows(running))
+    }
+
+    @Test
+    fun `every stop reason has its own text`() {
+        val ids = OverlayStopReason.entries.map { stopReasonText(it) }
+        assertEquals(ids.size, ids.toSet().size)
+    }
+
+    @Test
     fun `settings card stays out of the way while off or while the agent acts`() {
         assertFalse(showsOverlaySettings(PhoneStep.Unavailable))
         assertFalse(showsOverlaySettings(PhoneStep.Off))

@@ -55,6 +55,10 @@ class PhoneOverlayStringsTest {
         listOf("%%", "已自动暂停", "automatically paused", "检测到密码", "detects every", "一键重试", "proves").forEach {
             assertTrue("found '$it'", !all.contains(it, ignoreCase = true))
         }
+        // Unreachable is neutral: it doesn't claim the notification took over or was seen.
+        assertTrue(!english.getValue("phone_overlay_reason_unreachable").contains("notification", ignoreCase = true))
+        assertTrue(!chinese.getValue("phone_overlay_reason_unreachable").contains("通知"))
+        assertTrue(chinese.getValue("phone_overlay_settings_moved_to_notification").contains("请检查通知栏"))
         // The take-over result says what is off, not that everything stopped or was undone.
         assertTrue(chinese.getValue("phone_overlay_taken_notice").contains("新观察和操作已禁用；上一操作仍需核对"))
     }

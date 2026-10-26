@@ -3,6 +3,7 @@ package io.andchamber.app.phone.tool
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
+import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
 import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
 import io.andchamber.app.phone.overlay.progress.PhoneProgressApply
@@ -13,11 +14,15 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.standing.PhoneTaskStartResult
+import io.andchamber.app.phone.standing.PhoneTaskStartState
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -246,35 +251,31 @@ class PhoneToolServerTest {
     }
 
     @Test
-    fun `request proposes one task without enabling or granting and status keeps it private`() = runBlocking {
+    fun `request starts a task in the standing scope and status never leaks it or claims PENDING`() = runBlocking {
         val fixture = PhoneServerFixture()
         try {
+            fixture.standingReady()
             val summary = "Book a table for two at 19:00"
-            val proposed = httpPost(fixture.port, requestBody(summary, TARGET))
-            assertEquals(200, proposed.status)
-            assertTrue(proposed.ok())
-            assertEquals("phone.request", proposed.action())
-            assertEquals(
-                PhoneToolProtocol.CONFIRM_IN_APP,
-                proposed.data()["confirmation"]!!.toString().trim('"'),
-            )
-            assertEquals("PENDING_CONFIRMATION", proposed.data()["state"]!!.toString().trim('"'))
+            val started = httpPost(fixture.port, requestBody(summary, TARGET))
+            assertEquals(200, started.status)
+            assertTrue(started.ok())
+            assertEquals("phone.request", started.action())
+            val state = started.data()["state"]!!.toString().trim('"')
+            assertTrue("state was $state", state == "RUNNING" || state == "READY")
+            assertFalse("PENDING must not be a primary-mode reply", state == "PENDING_CONFIRMATION")
+            val epoch = started.json["epoch"]!!.toString().toLongOrNull()
+            assertNotNull(epoch)
+            assertEquals(fixture.controller.state.value.grant!!.epoch, epoch)
+            assertEquals(1, fixture.taskStarter.requests.size)
+            assertEquals("ses-a", fixture.taskStarter.requests.single().first)
+            assertEquals(summary, fixture.taskStarter.requests.single().second)
+            assertEquals(TARGET, fixture.taskStarter.requests.single().third)
+            assertEquals(TARGET, fixture.controller.state.value.grant!!.targetPackage)
 
-            // A proposal creates no authority of any kind.
-            assertFalse(fixture.controller.state.value.enabled)
-            assertNull(fixture.controller.state.value.grant)
-
-            val pending = fixture.server.pendingRequests.snapshot()!!
-            assertEquals("ses-a", pending.sessionLabel)
-            assertEquals(summary, pending.summary)
-            assertEquals(TARGET, pending.packageName)
-            assertFalse("toString must not leak the task text", pending.toString().contains(summary))
-            assertFalse("toString must not leak the target", pending.toString().contains(TARGET))
-
-            // status exposes only a boolean; the summary and package never leave native memory.
             val status = httpPost(fixture.port, toolBody("ses-b", "s1", input("status")))
             assertTrue(status.ok())
-            assertEquals("true", status.data()["pendingConfirmation"].toString())
+            assertEquals("false", status.data()["pendingConfirmation"].toString())
+            assertEquals("true", status.data()["standingConfigured"].toString())
             assertFalse("status leaked the summary", status.body.contains(summary))
             assertFalse("status leaked the target package", status.body.contains(TARGET))
         } finally {
@@ -283,61 +284,117 @@ class PhoneToolServerTest {
     }
 
     @Test
-    fun `one session owns the pending request and may explicitly update it`() = runBlocking {
+    fun `apps exposes only the preauthorized app list and needs no grant`() = runBlocking {
         val fixture = PhoneServerFixture()
         try {
-            val first = httpPost(fixture.port, requestBody("first task", session = "ses-a", callId = "r1"))
-            assertTrue(first.ok())
-            val firstRevision = fixture.server.pendingRequests.snapshot()!!.revision
-
-            val updated = httpPost(
-                fixture.port,
-                requestBody("second task", TARGET, session = "ses-a", callId = "r2"),
+            fixture.standingReady()
+            val response = httpPost(fixture.port, toolBody("ses-a", "a1", input("apps")))
+            assertTrue(response.ok())
+            assertEquals("phone.apps", response.action())
+            val apps = response.data()["apps"] as JsonArray
+            assertEquals(1, apps.size)
+            assertTrue(response.body.contains(TARGET))
+            assertTrue(response.body.contains("Fixture"))
+            assertFalse("the installed catalogue must not leak", response.body.contains("com.android.settings"))
+            assertEquals(
+                setOf("TAP", "SWIPE", "INPUT", "BACK"),
+                (response.data()["actions"] as JsonArray).map { it.toString().trim('"') }.toSet(),
             )
-            assertTrue(updated.ok())
-            val afterUpdate = fixture.server.pendingRequests.snapshot()!!
-            assertEquals("second task", afterUpdate.summary)
-            assertEquals(TARGET, afterUpdate.packageName)
-            assertTrue(afterUpdate.revision > firstRevision)
-            assertEquals("ses-a", afterUpdate.sessionLabel)
 
-            val foreign = httpPost(fixture.port, requestBody("stolen task", session = "ses-b", callId = "r3"))
-            assertFalse(foreign.ok())
-            assertEquals("SESSION_BUSY", foreign.code())
-            val unchanged = fixture.server.pendingRequests.snapshot()!!
-            assertEquals("second task", unchanged.summary)
-            assertEquals("ses-a", unchanged.sessionLabel)
-
-            // A status call from another session is still harmless and does not take the request.
-            assertTrue(httpPost(fixture.port, toolBody("ses-b", "s1", input("status"))).ok())
+            val status = httpPost(fixture.port, toolBody("ses-b", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals("true", status.data()["standingConfigured"].toString())
+            assertEquals("false", status.data()["nativeTaskEvents"].toString())
+            assertEquals("true", status.data()["runtimeReady"].toString())
         } finally {
             fixture.close()
         }
     }
 
     @Test
-    fun `an active grant refuses a new task request`() = runBlocking {
+    fun `open_app delegates only a preauthorized package and never launches another`() = runBlocking {
         val fixture = PhoneServerFixture()
         try {
-            fixture.granted()
-            val refused = httpPost(fixture.port, requestBody("another task"))
-            assertFalse(refused.ok())
-            assertEquals("GRANT_ACTIVE", refused.code())
-            assertNull(fixture.server.pendingRequests.snapshot())
+            fixture.standingReady()
+            val opened = httpPost(
+                fixture.port,
+                toolBody("ses-a", "o1", input("open_app", extra = mapOf("packageName" to TARGET))),
+            )
+            assertTrue(opened.ok())
+            assertEquals("OPENED", opened.data()["state"]!!.toString().trim('"'))
+            assertEquals(listOf(TARGET), fixture.taskStarter.opened)
+
+            val denied = httpPost(
+                fixture.port,
+                toolBody("ses-a", "o2", input("open_app", extra = mapOf("packageName" to "com.android.settings"))),
+            )
+            assertEquals("TARGET_FORBIDDEN", denied.code())
+            assertEquals(listOf(TARGET), fixture.taskStarter.opened)
+
+            val missing = httpPost(fixture.port, toolBody("ses-a", "o3", input("open_app")))
+            assertEquals(400, missing.status)
+            assertEquals("INVALID_REQUEST", missing.code())
+
+            fixture.taskStarter.availableFlag = false
+            val unavailable = httpPost(
+                fixture.port,
+                toolBody("ses-a", "o4", input("open_app", extra = mapOf("packageName" to TARGET))),
+            )
+            assertEquals("STANDING_UNAVAILABLE", unavailable.code())
         } finally {
             fixture.close()
         }
     }
 
     @Test
-    fun `request enforces the runtime, target policy and fixed schema`() = runBlocking {
+    fun `a direct start publishes the route for that chat and refuses another session`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            assertTrue(
+                httpPost(fixture.port, requestBody("first task", TARGET, session = "ses-a", callId = "r1")).ok(),
+            )
+            assertTrue(httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "s1")).ok())
+            assertEquals(
+                "SESSION_BUSY",
+                httpPost(fixture.port, snapshotBody(session = "ses-b", callId = "b1")).code(),
+            )
+            // A status call from another session is still harmless and does not take the route.
+            assertTrue(httpPost(fixture.port, toolBody("ses-b", "s2", input("status"))).ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a direct request after a previous task creates a fresh epoch`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            val first = httpPost(fixture.port, requestBody("first task", TARGET, callId = "r1"))
+            assertTrue(first.ok())
+            val firstEpoch = first.json["epoch"]!!.toString().toLong()
+            val second = httpPost(fixture.port, requestBody("second task", TARGET, callId = "r2"))
+            assertTrue(second.ok())
+            val secondEpoch = second.json["epoch"]!!.toString().toLong()
+
+            assertTrue("every task must have a new epoch", secondEpoch > firstEpoch)
+            assertEquals(secondEpoch, fixture.controller.state.value.grant!!.epoch)
+            assertEquals(2, fixture.taskStarter.requests.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `request enforces the runtime, standing apps, blockers and fixed schema`() = runBlocking {
         val fixture = PhoneServerFixture()
         try {
             fixture.ready = null
-            assertEquals("RUNTIME_NOT_READY", httpPost(fixture.port, requestBody("book")).code())
-            assertNull(fixture.server.pendingRequests.snapshot())
+            assertEquals("RUNTIME_NOT_READY", httpPost(fixture.port, requestBody("book", TARGET)).code())
 
             fixture.ready = fixture.launchId
+            fixture.standingReady()
             assertEquals(
                 "TARGET_FORBIDDEN",
                 httpPost(fixture.port, requestBody("book", "io.andchamber.app")).code(),
@@ -346,18 +403,222 @@ class PhoneToolServerTest {
                 "TARGET_FORBIDDEN",
                 httpPost(fixture.port, requestBody("book", "com.android.settings")).code(),
             )
-            assertNull(fixture.server.pendingRequests.snapshot())
+            assertEquals(0, fixture.taskStarter.requests.size)
 
-            val blank = httpPost(fixture.port, requestBody("   "))
+            val blank = httpPost(fixture.port, requestBody("   ", TARGET))
             assertEquals(400, blank.status)
             assertEquals("INVALID_REQUEST", blank.code())
+            val missingPackage = httpPost(fixture.port, requestBody("book"))
+            assertEquals(400, missingPackage.status)
+            assertEquals("INVALID_REQUEST", missingPackage.code())
             val extra = httpPost(
                 fixture.port,
-                toolBody("ses-a", "r9", input("request", extra = mapOf("summary" to "book", "ref" to "n1"))),
+                toolBody(
+                    "ses-a",
+                    "r9",
+                    input("request", extra = mapOf("summary" to "book", "packageName" to TARGET, "ref" to "n1")),
+                ),
             )
             assertEquals(400, extra.status)
             assertEquals("INVALID_REQUEST", extra.code())
-            assertNull(fixture.server.pendingRequests.snapshot())
+
+            fixture.taskStarter.availableFlag = false
+            assertEquals("STANDING_UNAVAILABLE", httpPost(fixture.port, requestBody("book", TARGET, callId = "r3")).code())
+            fixture.taskStarter.availableFlag = true
+
+            fixture.controller.blockStanding(PhoneStandingBlockReason.TAKEOVER)
+            assertEquals("STANDING_BLOCKED", httpPost(fixture.port, requestBody("book", TARGET, callId = "r4")).code())
+            val blocked = httpPost(fixture.port, toolBody("ses-b", "s2", input("status")))
+            assertTrue(blocked.ok())
+            assertEquals("true", blocked.data()["standingBlocked"].toString())
+            assertEquals("TAKEOVER", blocked.data()["standingBlockReason"]!!.toString().trim('"'))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a stale Started result is rolled back for its exact epoch and never answered as success`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            val staleKey = PhoneTaskKey("task-stale", "runtime-1")
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Started(epoch = 0L, key = staleKey, state = PhoneTaskStartState.RUNNING)
+
+            val stale = httpPost(fixture.port, requestBody("book", TARGET, callId = "r1"))
+            assertFalse(stale.ok())
+            assertEquals("EPOCH_CHANGED", stale.code())
+            assertEquals("the exact stale epoch is rolled back once", listOf(0L to staleKey), fixture.taskStarter.aborted)
+            assertNull("a failed start leaves no grant", fixture.controller.state.value.grant)
+
+            // A real start afterwards still works and never aborts a different epoch.
+            fixture.taskStarter.startOverride = null
+            val started = httpPost(fixture.port, requestBody("book", TARGET, callId = "r2"))
+            assertTrue(started.ok())
+            assertEquals(1, fixture.taskStarter.aborted.size)
+            assertEquals(started.epoch(), fixture.controller.state.value.grant!!.epoch)
+            assertEquals("ses-a", fixture.server.router.currentOwner())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a start whose route cannot be published is rolled back exactly once`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            // Another epoch already owns the route, so this fresh task can never publish one.
+            assertTrue(fixture.server.router.publish(50L, "ses-other"))
+            val key = PhoneTaskKey("task-1", "runtime-1")
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Started(epoch = 1L, key = key, state = PhoneTaskStartState.RUNNING)
+
+            val response = httpPost(fixture.port, requestBody("book", TARGET))
+            assertFalse(response.ok())
+            assertEquals("ROUTE_NOT_PUBLISHED", response.code())
+            assertEquals(1L, response.epoch())
+            assertEquals(listOf(1L to key), fixture.taskStarter.aborted)
+            assertEquals("the unrelated route is untouched", "ses-other", fixture.server.router.currentOwner())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a failed rollback still answers failure and never claims a running task`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            val key = PhoneTaskKey("task-1", "runtime-1")
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Started(epoch = 0L, key = key, state = PhoneTaskStartState.RUNNING)
+            fixture.taskStarter.abortResult = false
+            fixture.taskStarter.abortFailure = IllegalStateException("no rollback")
+
+            val response = httpPost(fixture.port, requestBody("book", TARGET))
+            assertEquals(200, response.status)
+            assertFalse(response.ok())
+            assertEquals("EPOCH_CHANGED", response.code())
+            assertEquals(listOf(0L to key), fixture.taskStarter.aborted)
+            assertFalse(response.body.contains("RUNNING"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a failed start never rolls back the newer live task`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            assertTrue(httpPost(fixture.port, requestBody("first", TARGET, callId = "r1")).ok())
+            val live = fixture.controller.state.value.grant!!.epoch
+            val staleKey = PhoneTaskKey("task-old", "runtime-1")
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Started(epoch = live, key = staleKey, state = PhoneTaskStartState.RUNNING)
+
+            val stale = httpPost(fixture.port, requestBody("second", TARGET, callId = "r2"))
+            assertFalse(stale.ok())
+            assertEquals("EPOCH_CHANGED", stale.code())
+            assertEquals(listOf(live to staleKey), fixture.taskStarter.aborted)
+            assertEquals("the live grant is untouched", live, fixture.controller.state.value.grant!!.epoch)
+            assertEquals("ses-a", fixture.server.router.currentOwner())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a successful start publishes its route once and never aborts`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            val started = httpPost(fixture.port, requestBody("book", TARGET))
+            assertTrue(started.ok())
+            assertEquals(emptyList<Pair<Long, PhoneTaskKey>>(), fixture.taskStarter.aborted)
+            assertEquals("ses-a", fixture.server.router.currentOwner())
+            assertEquals(started.epoch(), fixture.controller.state.value.grant!!.epoch)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `the plugin ready handshake marks only this launch and clears on stop`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            assertFalse(fixture.server.pluginReady)
+
+            // A launch that is no longer the ready one is refused and marks nothing.
+            fixture.ready = null
+            val stale = fixture.postReady()
+            assertEquals(409, stale.status)
+            assertFalse(fixture.server.pluginReady)
+
+            fixture.ready = fixture.launchId
+            val ready = fixture.postReady()
+            assertEquals(200, ready.status)
+            assertTrue(ready.json["ready"]!!.toString().toBoolean())
+            assertFalse("the ack carries no token", ready.body.contains(TOKEN))
+            assertTrue(fixture.server.pluginReady)
+
+            // Handshaking is idempotent and creates no grant or epoch.
+            assertEquals(200, fixture.postReady().status)
+            assertTrue(fixture.server.pluginReady)
+            assertNull(fixture.controller.state.value.grant)
+            assertEquals(0L, fixture.controller.state.value.epoch)
+
+            fixture.server.stop()
+            assertFalse("stop clears readiness", fixture.server.pluginReady)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `the ready handshake refuses a wrong token, body, launch or method`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            assertEquals(401, fixture.postReady(token = "0".repeat(64)).status)
+            assertEquals(401, fixture.postReady(token = null).status)
+
+            val wrongBodies = listOf(
+                """{"version":1,"plugin":"andchamber-phone"}""",
+                """{"version":1,"plugin":"andchamber-phone","tool":"other_tool"}""",
+                """{"version":1,"plugin":"other","tool":"andchamber_phone"}""",
+                """{"version":2,"plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+                """{"version":"1","plugin":"andchamber-phone","tool":"andchamber_phone"}""",
+                """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone","sessionID":"ses-a"}""",
+                """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone","token":"$TOKEN"}""",
+            )
+            for (body in wrongBodies) {
+                assertEquals(400, fixture.postReady(body).status)
+            }
+
+            assertEquals(
+                403,
+                fixture.postReady(extraHeaders = listOf("Origin" to "http://127.0.0.1")).status,
+            )
+            assertEquals(
+                403,
+                httpPost(fixture.port, fixture.readyBody, path = PhoneToolProtocol.READY_PATH, host = "localhost:${fixture.port}").status,
+            )
+            assertEquals(
+                404,
+                httpPost(
+                    fixture.port,
+                    fixture.readyBody,
+                    path = PhoneToolProtocol.READY_PATH,
+                    method = "GET",
+                ).status,
+            )
+            assertFalse(fixture.server.pluginReady)
+
+            // Only the exact fixed handshake with this launch's token marks ready.
+            assertEquals(200, fixture.postReady().status)
+            assertTrue(fixture.server.pluginReady)
         } finally {
             fixture.close()
         }

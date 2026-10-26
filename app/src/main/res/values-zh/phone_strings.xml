@@ -242,4 +242,63 @@
     <string name="phone_detail_connection">连接</string>
     <string name="phone_detail_observed_nodes">屏幕元素</string>
     <string name="phone_detail_last_error">最近的错误</string>
+
+    <!-- 配置一次，之后在聊天里用 -->
+    <string name="phone_target_block_sensitive">不能选择设置、权限、密码或支付类应用。</string>
+    <string name="phone_standing_title">在聊天里使用手机</string>
+    <string name="phone_standing_setup_body">只需设置一次：选好代理能用的应用、能做的动作和有效时长。之后直接在本机 OpenChamber 聊天里说就行，范围内的请求不会每次都跳到这里确认。</string>
+    <string name="phone_standing_ready_title">已就绪：去聊天里说</string>
+    <string name="phone_standing_ready_body">在本机 OpenChamber 聊天里说你要做的事，比如用哪个应用、做什么。不会每个任务都跳到这里授权。每个任务仍有自己的短时限，到时自动停。</string>
+    <string name="phone_standing_open_chat">打开聊天</string>
+    <string name="phone_standing_restart_title">需要重启一次</string>
+    <string name="phone_standing_restart_body">正在运行的 OpenChamber 是在设置手机操控之前启动的，聊天暂时用不了手机。重启一次即可，聊天记录会保留。</string>
+    <string name="phone_standing_restart">重启 OpenChamber</string>
+    <string name="phone_standing_restart_confirm_title">重启 OpenChamber？</string>
+    <string name="phone_standing_restart_confirm_body">这会停止并重新启动本机 OpenChamber，让它加载手机操控工具。聊天会保留，但正在生成的回复会被打断。</string>
+    <string name="phone_standing_restarting_title">正在重启 OpenChamber…</string>
+    <string name="phone_standing_restarting_body">确认工具加载后，聊天才能使用手机。</string>
+    <string name="phone_standing_not_running_title">OpenChamber 没有运行</string>
+    <string name="phone_standing_not_running_body">请在首页启动它。你的设置会保留。</string>
+    <string name="phone_standing_unknown_title">尚未确认</string>
+    <string name="phone_standing_unknown_body">还没确认 OpenChamber 已加载手机操控工具。确认之前，聊天不能使用手机。</string>
+    <string name="phone_standing_not_connected_title">手机未连接</string>
+    <string name="phone_standing_not_connected_body">设置会保留，但无线调试重新连接之前，代理无法操作。</string>
+    <string name="phone_standing_expired_title">授权范围已到期</string>
+    <string name="phone_standing_runtime">运行环境：%1$s</string>
+    <string name="phone_standing_scope">允许的范围</string>
+    <string name="phone_standing_window_left">%1$d 分钟后到期 · 每个任务最多 %2$d 分钟</string>
+    <string name="phone_standing_limits_note">不会替你输入密码、验证码或付款。代理请求你处理时，会停下来等你。</string>
+    <string name="phone_standing_edit">修改范围</string>
+    <string name="phone_standing_revoke">关闭聊天使用</string>
+    <string name="phone_standing_step_apps">选择应用</string>
+    <string name="phone_standing_apps_body">最多 %1$d 个。可以选已安装的应用和普通预装应用；不能选设置、权限、密码和支付类应用。</string>
+    <string name="phone_standing_blocked_hidden">另有 %1$d 个应用不可选，未列出。搜索应用名可查看原因。</string>
+    <string name="phone_standing_too_many">选的应用太多了，请少选几个。</string>
+    <string name="phone_standing_window">这个范围的有效时长</string>
+    <string name="phone_standing_hours">%1$d 小时</string>
+    <string name="phone_standing_per_task">每个任务的时限</string>
+    <string name="phone_standing_trust">你信任的是整个本机 OpenChamber 运行环境，而不只是某一个对话。你可以随时在这里关闭。</string>
+    <string name="phone_standing_review">检查并允许…</string>
+    <string name="phone_standing_confirm_title">允许聊天使用这些应用？</string>
+    <string name="phone_standing_confirm_time">有效 %1$d 小时；每个任务最多 %2$d 分钟。</string>
+    <string name="phone_standing_confirm_body">范围内的聊天请求会直接开始，不再到这里确认。暂停、接管、结束仍可在通知和浮窗里使用。</string>
+
+    <!-- 在聊天旁继续 -->
+    <string name="phone_continue_in_chat">在聊天旁继续…</string>
+    <string name="phone_continue_confirm_title">让代理在 %1$s 中继续？</string>
+    <string name="phone_continue_confirm_body">代理会先重新查看屏幕，再在你设定的范围内继续。之前做过的操作不会重发。会通知聊天继续。</string>
+    <string name="phone_continue_need_user_title">代理请求你处理</string>
+    <string name="phone_continue_need_user_body">请自己完成这一步，再回这里继续。代理看不到你输入的内容。</string>
+    <string name="phone_continue_agent_note">代理说明（未核验）：%1$s</string>
+    <string name="phone_continue_sending">正在通知聊天继续…</string>
+    <string name="phone_continue_delivered_title">已通知聊天继续</string>
+    <string name="phone_continue_delivered_body">可以在聊天或浮窗里看进展。</string>
+    <string name="phone_continue_failed_title">没能联系到聊天</string>
+    <string name="phone_continue_failed_body">没有重发任何操作。请打开聊天再说一次。</string>
+    <string name="phone_continue_failed_running_body">任务的权限已经恢复，但没能通知聊天继续，也没有重发任何操作。请打开聊天看看现在的情况；如果不想让它操作，可以暂停或接管。</string>
+    <string name="phone_continue_blocked_settling">停止确认后才能继续。</string>
+    <string name="phone_continue_blocked_check">请先在应用里核对上一操作。</string>
+    <string name="phone_continue_blocked_not_ready">聊天使用就绪后才能继续（见上方）。</string>
+    <string name="phone_continue_blocked_scope">这个应用不在你的范围里，请先修改范围。</string>
+    <string name="phone_continue_blocked_generic">现在不能继续。</string>
 </resources>

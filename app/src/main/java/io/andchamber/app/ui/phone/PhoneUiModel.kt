@@ -51,6 +51,83 @@ internal data class PhoneScreenState(
      */
     val busy: PhoneBusy? = null,
     val diagnostics: PhoneDiagnostics = PhoneDiagnostics(),
+    /**
+     * Configure-once mode: a standing scope within which chat requests start directly. Null keeps
+     * the per-task native grant flow.
+     */
+    val standing: PhoneStanding? = null,
+)
+
+// ---- configure once, then use from chat ----------------------------------------------------------
+
+/** Whether the running local OpenChamber really loaded the phone tool. A reachable port isn't enough. */
+internal enum class PhoneToolStatus {
+    /** The native side confirmed this launch loaded the tool. */
+    Ready,
+
+    /** The runtime runs, but started without the tool: one confirmed restart is needed. */
+    NeedsRestart,
+
+    /** The confirmed restart is in progress. */
+    Restarting,
+
+    /** The local OpenChamber isn't running. */
+    RuntimeNotRunning,
+
+    /** Not known yet. Treated as not ready. */
+    Unknown,
+}
+
+@Immutable
+internal data class PhoneRuntimeStatus(
+    val tool: PhoneToolStatus = PhoneToolStatus.Unknown,
+    /** A short label for the runtime, e.g. "OpenChamber 2.4.0 on this phone". */
+    val label: String? = null,
+)
+
+internal sealed interface PhoneStandingStatus {
+    data object NotSet : PhoneStandingStatus
+
+    /** In effect until [endsAtMs] (same clock as the screen's `clock`). */
+    data class Active(val endsAtMs: Long) : PhoneStandingStatus
+
+    data object Expired : PhoneStandingStatus
+
+    data object Revoked : PhoneStandingStatus
+}
+
+/** Whether a request to wake the chat after a stop reached it. Never a replay of an action. */
+internal enum class PhoneContinueDelivery { Idle, Sending, Delivered, Failed }
+
+/** The "continue beside the chat" entry after take over / need you / unknown. */
+@Immutable
+internal data class PhoneContinuation(
+    /** The agent explicitly asked for a person (a real need_user event, not inferred). */
+    val needUser: Boolean = false,
+    /** The agent's own words for that request. Not verified. */
+    val agentNote: String? = null,
+    val delivery: PhoneContinueDelivery = PhoneContinueDelivery.Idle,
+)
+
+/** The standing scope. Chat requests inside it start without a per-task native grant. */
+@Immutable
+internal data class PhoneStanding(
+    val status: PhoneStandingStatus = PhoneStandingStatus.NotSet,
+    val apps: List<PhoneTarget> = emptyList(),
+    val actions: Set<PhoneActionScope> = emptySet(),
+    /** Each task's own lease, inside the standing window. */
+    val perTaskMinutes: Int = PhoneUiLimits.DEFAULT_DURATION_MIN,
+    val runtime: PhoneRuntimeStatus = PhoneRuntimeStatus(),
+    val continuation: PhoneContinuation = PhoneContinuation(),
+)
+
+/** What the person confirmed natively for the standing scope. */
+@Immutable
+internal data class PhoneStandingRequest(
+    val apps: List<PhoneTarget>,
+    val actions: Set<PhoneActionScope>,
+    val windowMs: Long,
+    val perTaskMs: Long,
 )
 
 /** Device connection (wireless debugging), separate from who controls and from the task. */
@@ -105,13 +182,22 @@ internal enum class PhoneStopChannel {
     Unknown,
 }
 
-/** An app the person can choose. [system] marks apps the outer layer knows are system apps. */
+/**
+ * An app the person can choose. [system] marks apps the outer layer knows are system apps.
+ * [verdict], when the native policy supplies it, decides instead of the screen's fallback rules, so
+ * ordinary preinstalled or Google apps can be allowed while settings/permission/password apps stay
+ * refused. The host app is always refused.
+ */
 @Immutable
 internal data class PhoneTarget(
     val label: String,
     val packageName: String,
     val system: Boolean = false,
+    val verdict: PhoneTargetVerdict? = null,
 )
+
+/** The native policy's decision for one app. */
+internal enum class PhoneTargetVerdict { Allowed, Host, System, Sensitive }
 
 internal enum class PhoneActionScope { Tap, Swipe, Input, Back }
 
@@ -303,4 +389,19 @@ internal class PhoneControlActions(
     /** The person says they checked an uncertain action. Never a retry. */
     val onAcknowledgeChecked: () -> Unit = {},
     val onDismissResult: () -> Unit = {},
+    // ---- configure once (all optional; unused while `standing` is null) ----
+    /** Save the standing scope the person confirmed. Replaces any previous one. */
+    val onSaveStanding: (PhoneStandingRequest) -> Unit = {},
+    val onRevokeStanding: () -> Unit = {},
+    /** Restart the local OpenChamber so it loads the phone tool. Only after the person confirmed. */
+    val onRestartRuntime: () -> Unit = {},
+    /** Re-read whether the tool is loaded. */
+    val onRecheckRuntime: () -> Unit = {},
+    /** Open the local chat. Doesn't revoke anything by itself. */
+    val onOpenChat: () -> Unit = {},
+    /**
+     * After the person confirmed: let the stopped task continue inside the standing scope and wake
+     * the chat. The agent observes again first; nothing earlier is re-sent.
+     */
+    val onContinueInChat: () -> Unit = {},
 )

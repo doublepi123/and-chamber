@@ -98,6 +98,20 @@
     <string name="phone_overlay_btn_retry_take_over">Ask to stop again</string>
     <string name="phone_overlay_btn_close_result">Close result card</string>
 
+    <!-- Why it stopped / retained / chat -->
+    <string name="phone_overlay_stop_reason">Agent stopped: %1$s</string>
+    <string name="phone_overlay_reason_expired">time ran out</string>
+    <string name="phone_overlay_reason_native_opened">you opened AndChamber\'s phone page</string>
+    <string name="phone_overlay_reason_target_left">the app left the screen</string>
+    <string name="phone_overlay_reason_screen_locked">the screen locked</string>
+    <string name="phone_overlay_reason_connection_lost">the connection dropped</string>
+    <string name="phone_overlay_reason_runtime_changed">OpenChamber restarted</string>
+    <string name="phone_overlay_reason_unreachable">this overlay\'s visibility couldn\'t be confirmed</string>
+    <string name="phone_overlay_reason_agent_asked">the agent asked for you</string>
+    <string name="phone_overlay_retained_note">Kept here until you handle it. Ending the task is separate.</string>
+    <string name="phone_overlay_btn_open_chat">Open chat (keeps the agent going)</string>
+    <string name="phone_overlay_btn_continue_in_chat">Continue beside the chat…</string>
+
     <!-- End confirmation -->
     <string name="phone_overlay_end_title">End the task?</string>
     <string name="phone_overlay_end_body">This asks to revoke the agent\'s access. The overlay stays until that\'s confirmed. Actions already sent aren\'t undone; the result stays in AndChamber for you to check.</string>
@@ -130,5 +144,6 @@
     <string name="phone_overlay_settings_mode">Choose how to follow tasks</string>
     <string name="phone_overlay_settings_mode_overlay">Overlay and notifications</string>
     <string name="phone_overlay_settings_mode_notification">Notifications only</string>
+    <string name="phone_overlay_settings_moved_to_notification">During the last task the overlay couldn\'t be shown, so its controls moved to the notification. Please check your notification shade.</string>
     <string name="phone_overlay_settings_test_note">The test shows it worked just now. The system can still hide the overlay later; then the agent is asked to stop and the notification remains.</string>
 </resources>

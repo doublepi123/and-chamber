@@ -195,6 +195,47 @@ class PhoneScreenStateMapperTest {
     }
 
     @Test
+    fun `standing projection is active only inside its monotonic window and never after revoke`() {
+        val config =
+            PhoneStandingConfig(
+                apps = listOf(io.andchamber.app.phone.standing.PhoneStandingApp(target.label, target.packageName)),
+                actions = setOf(io.andchamber.app.phone.core.PhoneActionKind.TAP),
+                windowEndsAtWallMs = 10_000L,
+                perTaskMs = 60_000L,
+            )
+        val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
+        val active =
+            phoneScreenState(
+                core,
+                facts().copy(
+                    standingEnabled = true,
+                    standingState = PhoneStandingState(config, endsAtElapsedMs = 5_000L),
+                    runtimeStatus = io.andchamber.app.ui.phone.PhoneRuntimeStatus(io.andchamber.app.ui.phone.PhoneToolStatus.Ready),
+                ),
+                nowElapsedMs = 4_999L,
+            )
+        assertEquals(io.andchamber.app.ui.phone.PhoneStandingStatus.Active(5_000L), active.standing?.status)
+        assertEquals(listOf(target.packageName), active.standing?.apps?.map { it.packageName })
+        assertEquals(setOf(PhoneActionScope.Tap), active.standing?.actions)
+
+        val expired = phoneScreenState(core, facts().copy(standingEnabled = true, standingState = PhoneStandingState(config, 5_000L)), nowElapsedMs = 5_000L)
+        assertEquals(io.andchamber.app.ui.phone.PhoneStandingStatus.Expired, expired.standing?.status)
+
+        val revoked = phoneScreenState(core, facts().copy(standingEnabled = true, standingState = PhoneStandingState(config.copy(revoked = true), 5_000L)), nowElapsedMs = 1L)
+        assertEquals(io.andchamber.app.ui.phone.PhoneStandingStatus.Revoked, revoked.standing?.status)
+    }
+
+    @Test
+    fun `standing surface is opt-in so the legacy per-task flow stays untouched`() {
+        val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
+        assertNull(phoneScreenState(core, facts()).standing)
+        assertEquals(
+            io.andchamber.app.ui.phone.PhoneStandingStatus.NotSet,
+            phoneScreenState(core, facts().copy(standingEnabled = true)).standing?.status,
+        )
+    }
+
+    @Test
     fun `observation summary comes from the controller, never node labels`() {
         val binding =
             PhoneObservationBinding(

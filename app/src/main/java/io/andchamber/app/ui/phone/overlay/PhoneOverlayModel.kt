@@ -100,7 +100,45 @@ internal data class PhoneOverlayState(
     val side: OverlaySide = OverlaySide.Right,
     /** The test capsule from the settings card: marked as a demo, controls nothing real. */
     val demo: Boolean = false,
+    /** Why the agent stopped, when it did. Null for a plain pause/take over the person pressed. */
+    val stopReason: OverlayStopReason? = null,
+    /**
+     * Retained after the lease ended (take over, need you, unknown): the card stays until the person
+     * handles it. Distinguishes "handed over, retained" from a finished task.
+     */
+    val retained: Boolean = false,
+    /** Configure-once mode: offer "continue beside the chat" (opens the native confirmation). */
+    val canContinueInChat: Boolean = false,
 )
+
+/** Why the agent stopped. Shown so the capsule never just "disappears" without a reason. */
+internal enum class OverlayStopReason {
+    /** The lease time ran out. */
+    Expired,
+
+    /** The person came back to AndChamber's native phone page. */
+    NativeOpened,
+
+    /** The target app left the screen. */
+    TargetLeft,
+
+    ScreenLocked,
+    ConnectionLost,
+    RuntimeChanged,
+
+    /** The overlay itself couldn't be confirmed reachable; the stop entry moved to the notification. */
+    OverlayUnreachable,
+
+    /** The agent explicitly asked for a person. */
+    AgentAskedForYou,
+}
+
+/**
+ * What the integration does with the window right now. The overlay never claims to be visible:
+ * [NotificationOnly] means the person chose notifications; [MovedToNotification] means the overlay
+ * couldn't be shown and the stop entry moved to the notification; both are explained, not silent.
+ */
+internal enum class OverlaySurfaceMode { Overlay, NotificationOnly, MovedToNotification }
 
 /**
  * Requests from the overlay. Each one is a request; the overlay shows the outcome only through the
@@ -129,6 +167,13 @@ internal class PhoneOverlayActions(
     val onDragBy: (dx: Float, dy: Float) -> Unit = { _, _ -> },
     /** The drag ended; the manager snaps, or calls [onRequestEnd] for a drop on its end zone. */
     val onDragEnd: () -> Unit = {},
+    /**
+     * Open the local chat. Doesn't revoke (the chat is not the native grant page); the overlay
+     * collapses and keeps following.
+     */
+    val onOpenChat: () -> Unit = {},
+    /** Configure-once: open the native "continue beside the chat" confirmation. Never resumes here. */
+    val onContinueInChat: () -> Unit = {},
 )
 
 // ---- settings card ---------------------------------------------------------------------------
@@ -176,6 +221,13 @@ internal data class PhoneOverlaySettingsState(
     val test: OverlayTest = OverlayTest.NotRun,
     /** A request is in progress (checking, adding the test window…). */
     val pending: Boolean = false,
+    /**
+     * What happened to the overlay during the last task: kept showing, notifications by choice, or
+     * moved to the notification because it couldn't be shown. Null when nothing to report.
+     */
+    val lastSurface: OverlaySurfaceMode? = null,
+    /** Why the last task's agent stopped, when known. */
+    val lastStopReason: OverlayStopReason? = null,
 )
 
 @Immutable

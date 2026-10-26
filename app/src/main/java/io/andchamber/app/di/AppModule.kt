@@ -11,7 +11,9 @@ import io.andchamber.app.data.LocalReadiness
 import io.andchamber.app.data.LocalApiClient
 import io.andchamber.app.data.WebSessionProfiles
 import io.andchamber.app.R
+import io.andchamber.app.notify.ApiRequest
 import io.andchamber.app.notify.NotificationBootstrapStore
+import io.andchamber.app.notify.NotificationActions
 import io.andchamber.app.notify.RuntimeErrorWatch
 import io.andchamber.app.notify.NotificationObserver
 import io.andchamber.app.notify.NotificationSettingsBootstrap
@@ -54,8 +56,10 @@ import io.andchamber.app.runtime.process.HealthProbe
 import io.andchamber.app.runtime.process.LocalBrowserProviderBinding
 import io.andchamber.app.runtime.process.ProotOpenChamberServer
 import io.andchamber.app.runtime.process.PhonePluginAssets
+import io.andchamber.app.runtime.process.PhonePluginRegistrationProbe
 import io.andchamber.app.runtime.process.PhoneToolBinding
 import io.andchamber.app.runtime.process.PhoneToolHost
+import io.andchamber.app.runtime.process.phonePluginRegistrationAccepted
 import io.andchamber.app.phone.android.PhoneAgentToolReadiness
 import io.andchamber.app.phone.android.PhoneDriverFacade
 import io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator
@@ -69,6 +73,9 @@ import io.andchamber.app.phone.android.overlay.PhoneOverlaySettings
 import io.andchamber.app.phone.android.PhoneGrantRoutePublisher
 import io.andchamber.app.phone.android.PhoneIdentityStore
 import io.andchamber.app.phone.android.PhoneIntegration
+import io.andchamber.app.phone.android.PhoneIntegrationTaskStarter
+import io.andchamber.app.phone.android.PhoneStandingContinueSender
+import io.andchamber.app.phone.standing.PhoneTaskStarter
 import io.andchamber.app.phone.android.PhoneIntegrationStore
 import io.andchamber.app.phone.android.PhonePairingReceipts
 import io.andchamber.app.phone.android.PhoneProposalSource
@@ -85,6 +92,8 @@ import io.andchamber.app.runtime.process.ProotStaleServerCleaner
 import io.andchamber.app.service.RuntimeService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.OkHttpClient
 import org.koin.dsl.module
@@ -289,6 +298,12 @@ val appModule =
             )
         }
 
+        // Deferred native standing adapter: it resolves the already-built integration at call time,
+        // so PhoneToolBinding can be constructed first without a DI cycle.
+        single<PhoneTaskStarter> {
+            PhoneIntegrationTaskStarter(owner = { get<PhoneIntegration>() })
+        }
+
         single {
             PhoneToolBinding(
                 controller = get<PhoneController>(),
@@ -296,6 +311,25 @@ val appModule =
                 // Model task events are admitted by the tool route, then handled by the native
                 // progress/task binding. Lazy so the DI graph has no construction cycle.
                 taskEvents = LazyPhoneTaskEventHandler { get<PhoneOverlayTaskCoordinator>() },
+                // Direct chat requests delegate to the native standing scope, fail-closed by default.
+                taskStarter = get<PhoneTaskStarter>(),
+                // Read-only native RPC gate, off Main. LocalApiClient validates the launch and
+                // keeps the session cookie; this callback only maps the exact response to a boolean.
+                registrationProbe =
+                    PhonePluginRegistrationProbe(
+                        attempt = {
+                            val result =
+                                get<LocalApiClient>().send(
+                                    ApiRequest(
+                                        method = "POST",
+                                        path = "/api/rpc/andchamber-phone/ready",
+                                        body = buildJsonObject { put("input", buildJsonObject { }) },
+                                    ),
+                                    directory = "/root",
+                                )
+                            phonePluginRegistrationAccepted(result.status, result.body)
+                        },
+                    ),
             )
         }
 
@@ -375,6 +409,14 @@ val appModule =
                 // Deferred: the coordinator depends on this integration; the sink is only called when
                 // a grant is really confirmed.
                 taskNative = LazyPhoneTaskNativeFacts { get<PhoneOverlayTaskCoordinator>() },
+                // One fixed wake-up of the original chat, reusing the same authenticated loopback
+                // client as notification replies. 2xx only; never a session log or a retry loop.
+                continueSender = PhoneStandingContinueSender { sessionId, text ->
+                    get<LocalApiClient>().send(NotificationActions.sendReply(sessionId, text)).ok
+                },
+                // Read-only need-user projection; the coordinator depends on this integration, so
+                // resolve it lazily at read time.
+                taskProgress = { get<PhoneOverlayTaskCoordinator>().progress.value },
             )
         }
 

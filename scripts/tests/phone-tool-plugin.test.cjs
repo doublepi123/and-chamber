@@ -17,23 +17,32 @@ const PNG_BASE64 =
 
 let plugin;
 let tool;
+let rpc;
 
 test.before(async () => {
   plugin = (await import(pathToFileURL(PLUGIN_PATH).href)).default;
-  let added;
+  const added = [];
   const fakeContext = {
     tool: {
       transform: async (fn) => {
         await fn({
           add: (definition) => {
-            added = definition;
+            added.push(definition);
           },
         });
+        return { dispose: async () => {} };
+      },
+      list: async () => added.map((definition) => ({ ...definition, id: definition.name })),
+    },
+    rpc: {
+      register: async (definition, handlers) => {
+        rpc = { definition, handlers };
+        return { dispose: async () => {} };
       },
     },
   };
   await plugin.setup(fakeContext);
-  tool = added;
+  tool = added[0];
 });
 
 function startServer(respond) {
@@ -148,6 +157,77 @@ function waitFor(predicate, timeoutMs = 2000) {
   });
 }
 
+const EMPTY_INPUT_SCHEMA = { type: 'object', properties: {}, additionalProperties: false };
+const READY_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { ok: { const: true }, id: { const: 'andchamber_phone' } },
+  required: ['ok', 'id'],
+  additionalProperties: false,
+};
+
+/**
+ * Stand-in for the pinned v2 plugin context. It records the order the real host uses
+ * (transform, then list, then rpc.register) and lets one test replace any single step.
+ */
+async function setupPlugin(options = {}) {
+  const order = [];
+  const added = [];
+  const registrations = [];
+  const transform = async (callback) => {
+    await callback({
+      add: (definition) => {
+        added.push(definition);
+      },
+    });
+    return { dispose: async () => {} };
+  };
+  let error = null;
+  try {
+    await plugin.setup({
+      tool: {
+        transform: async (callback) => {
+          order.push('transform');
+          return (options.transform ?? transform)(callback);
+        },
+        list: async () => {
+          order.push('list');
+          if (options.list) return options.list(added);
+          return added.map((definition) => ({ ...definition, id: definition.name }));
+        },
+      },
+      rpc: {
+        register: async (definition, handlers) => {
+          order.push('register');
+          if (options.register) return options.register(definition, handlers);
+          registrations.push({ definition, handlers });
+          return { dispose: async () => {} };
+        },
+      },
+    });
+  } catch (failure) {
+    error = failure;
+  }
+  return { order, added, registrations, error, tool: added[0] };
+}
+
+/** Minimal JSON Schema check for the two closed schemas this plugin declares. */
+function schemaAccepts(schema, value) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (schema.type !== 'object') return false;
+  const keys = Object.keys(value);
+  if (schema.additionalProperties === false && keys.some((key) => !(key in schema.properties))) return false;
+  if ((schema.required ?? []).some((key) => !(key in value))) return false;
+  for (const [key, property] of Object.entries(schema.properties)) {
+    if (!(key in value)) continue;
+    if ('const' in property && value[key] !== property.const) return false;
+  }
+  return true;
+}
+
+function toolRequests(server) {
+  return server.requests.filter((request) => request.url === '/v1/tool');
+}
+
 test('package.json and tool registration shape', () => {
   const pkg = JSON.parse(fs.readFileSync(PACKAGE_PATH, 'utf8'));
   assert.deepEqual(pkg, {
@@ -170,6 +250,8 @@ test('package.json and tool registration shape', () => {
   assert.deepEqual(tool.input.properties.action.enum, [
     'status',
     'request',
+    'apps',
+    'open_app',
     'progress',
     'need_user',
     'finish',
@@ -195,6 +277,8 @@ test('package.json and tool registration shape', () => {
   assert.equal(tool.input.properties.epoch.minimum, 0);
   assert.equal(Array.isArray(tool.input.allOf), true);
   assert.deepEqual(tool.input.allOf[0].then.required, ['epoch']);
+  assert.deepEqual(tool.input.allOf[1].then.required, ['summary', 'packageName']);
+  assert.deepEqual(tool.input.allOf[2].then.required, ['packageName']);
   for (const key of ['x', 'y', 'x2', 'y2', 'durationMs']) {
     assert.equal(tool.input.properties[key].type, 'integer', key);
   }
@@ -210,12 +294,12 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /status/);
   assert.match(tool.description, /needs no grant/);
   assert.match(tool.description, /"request"/);
-  assert.match(tool.description, /请在AndChamber手机控制中确认/);
-  assert.match(tool.description, /read-only preparation/);
-  assert.match(tool.description, /never enables, pairs, grants, resumes, acknowledges or opens a screen/);
-  assert.match(tool.description, /another chat session cannot replace it/);
-  assert.match(tool.description, /refused while a grant is active/);
-  assert.match(tool.description, /never enable, pair, grant, resume, acknowledge/);
+  assert.match(tool.description, /"apps"/);
+  assert.match(tool.description, /"open_app"/);
+  assert.match(tool.description, /standing scope/);
+  assert.match(tool.description, /There is no PENDING_CONFIRMATION step/);
+  assert.match(tool.description, /never exposes the installed-app catalogue/);
+  assert.match(tool.description, /never enable, pair, grant, resume, acknowledge or open overlay permission/);
   assert.match(tool.description, /Take "snapshot" first/);
   assert.match(tool.description, /observationId/);
   assert.match(tool.description, /One action per call/);
@@ -244,8 +328,9 @@ test('posts client identity from the V2 context and never a model-chosen session
   const result = await tool.execute({ action: 'status' }, context());
 
   assert.deepEqual(result, { content: [{ type: 'text', text: JSON.stringify(payload) }] });
-  assert.equal(server.requests.length, 1);
-  const request = server.requests[0];
+  const calls = toolRequests(server);
+  assert.equal(calls.length, 1);
+  const request = calls[0];
   assert.equal(request.method, 'POST');
   assert.equal(request.url, '/v1/tool');
   assert.equal(request.headers.authorization, `Bearer ${server.token}`);
@@ -284,18 +369,18 @@ test('sends action-specific fields without adding or dropping input', async (t) 
   ];
   for (const [index, input] of cases.entries()) {
     await tool.execute(input, context({ id: `call_${index}` }));
-    assert.deepEqual(JSON.parse(server.requests.at(-1).body).input, input);
+    assert.deepEqual(JSON.parse(toolRequests(server).at(-1).body).input, input);
   }
-  assert.equal(server.requests.length, cases.length);
+  assert.equal(toolRequests(server).length, cases.length);
 });
 
-test('a successful request returns the fixed native-confirmation text only', async (t) => {
+test('a successful request returns the direct-start envelope without PENDING', async (t) => {
   const payload = {
     version: 1,
     ok: true,
     action: 'phone.request',
     epoch: 3,
-    data: { state: 'PENDING_CONFIRMATION', confirmation: '请在AndChamber手机控制中确认' },
+    data: { state: 'RUNNING' },
   };
   const server = await useServer(t, json(payload));
   endpointDir(t).write(server);
@@ -305,12 +390,16 @@ test('a successful request returns the fixed native-confirmation text only', asy
     context(),
   );
 
-  assert.deepEqual(result, {
-    content: [{ type: 'text', text: '请在AndChamber手机控制中确认' }],
-  });
+  const envelope = JSON.parse(result.content[0].text);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.action, 'phone.request');
+  assert.equal(envelope.epoch, 3);
+  assert.equal(envelope.data.state, 'RUNNING');
+  assert.equal(JSON.stringify(result).includes('PENDING'), false);
+  assert.equal(JSON.stringify(result).includes('请在AndChamber手机控制中确认'), false);
   assert.equal(JSON.stringify(result).includes('Order groceries'), false);
   assertNoEndpoint(result, server);
-  assert.deepEqual(JSON.parse(server.requests[0].body).input, {
+  assert.deepEqual(JSON.parse(toolRequests(server)[0].body).input, {
     action: 'request',
     summary: 'Order groceries',
     packageName: 'com.example.target',
@@ -377,7 +466,7 @@ test('finish answers with the fixed pending-verification text and never success'
     content: [{ type: 'text', text: '报告结束，待核对' }],
   });
   assert.equal(JSON.stringify(result).includes('reported the end'), false);
-  assert.deepEqual(JSON.parse(server.requests[0].body).input, {
+  assert.deepEqual(JSON.parse(toolRequests(server)[0].body).input, {
     action: 'finish',
     epoch: 5,
     summary: 'I have reported the end',
@@ -508,13 +597,13 @@ test('aborting posts a cancel for this session and call only', { timeout: 10000 
     context({ signal: controller.signal }),
   );
 
-  await waitFor(() => server.requests.length === 1);
+  await waitFor(() => toolRequests(server).length === 1);
   controller.abort();
   const result = await pending;
 
   assert.deepEqual(result, { content: [{ type: 'text', text: 'Cancelled.' }] });
-  await waitFor(() => server.requests.length === 2);
-  const cancel = server.requests[1];
+  await waitFor(() => server.requests.some((request) => request.url === '/v1/cancel'));
+  const cancel = server.requests.find((request) => request.url === '/v1/cancel');
   assert.equal(cancel.method, 'POST');
   assert.equal(cancel.url, '/v1/cancel');
   assert.equal(cancel.headers.authorization, `Bearer ${server.token}`);
@@ -654,13 +743,13 @@ test('re-reads the endpoint file on every call so a launch rotation is picked up
   dirs.write(first);
   const firstResult = await tool.execute({ action: 'status' }, context());
   assert.deepEqual(JSON.parse(firstResult.content[0].text).data, { n: 1 });
-  assert.equal(first.requests[0].headers.authorization, `Bearer ${first.token}`);
+  assert.equal(toolRequests(first)[0].headers.authorization, `Bearer ${first.token}`);
 
   dirs.write(second, 'rotated.json');
   const secondResult = await tool.execute({ action: 'status' }, context());
   assert.deepEqual(JSON.parse(secondResult.content[0].text).data, { n: 2 });
-  assert.equal(second.requests[0].headers.authorization, `Bearer ${second.token}`);
-  assert.equal(first.requests.length, 1);
+  assert.equal(toolRequests(second)[0].headers.authorization, `Bearer ${second.token}`);
+  assert.equal(toolRequests(first).length, 1);
   assertNoEndpoint(firstResult, first);
   assertNoEndpoint(secondResult, second);
 });
@@ -670,4 +759,109 @@ test('never enables, grants or resumes through the tool input schema', () => {
   for (const forbidden of ['enable', 'grant', 'pair', 'resume', 'acknowledge', 'targetPackage', 'package', 'shell', 'intent']) {
     assert.equal(properties.includes(forbidden), false, forbidden);
   }
+});
+
+// Pinned v2 registration: transform -> list -> rpc.register. Readiness is the RPC probe itself now;
+// there is no `/v1/ready` handshake, no retry window and no announcement in execute().
+
+test('setup registers the tool, verifies the host list, then declares the ready RPC', async () => {
+  const run = await setupPlugin();
+
+  assert.equal(run.error, null);
+  assert.deepEqual(run.order, ['transform', 'list', 'register']);
+  assert.equal(run.added.length, 1);
+  assert.equal(run.added[0].name, 'andchamber_phone');
+  assert.equal(run.registrations.length, 1);
+
+  const { definition, handlers } = run.registrations[0];
+  assert.equal(definition.id, 'andchamber-phone');
+  assert.deepEqual(definition.events, {});
+  assert.deepEqual(Object.keys(definition.methods), ['ready']);
+  assert.deepEqual(definition.methods.ready.input, EMPTY_INPUT_SCHEMA);
+  assert.deepEqual(definition.methods.ready.output, READY_OUTPUT_SCHEMA);
+
+  // Raw JSON Schema only: no package-provided schema or codec wrapper travels with the plugin.
+  for (const schema of [definition.methods.ready.input, definition.methods.ready.output]) {
+    assert.equal(Array.isArray(schema), false);
+    assert.equal('~standard' in schema, false);
+    assert.equal('_tag' in schema, false);
+    assert.deepEqual(Object.keys(schema).filter((key) => !['type', 'properties', 'required', 'additionalProperties'].includes(key)), []);
+  }
+
+  const output = await handlers.ready({}, { signal: new AbortController().signal });
+  assert.deepEqual(output, { ok: true, id: 'andchamber_phone' });
+  assert.deepEqual(Object.keys(output), ['ok', 'id']);
+});
+
+test('the ready RPC takes no input and answers with exactly the declared output', async () => {
+  // POST /api/rpc/andchamber-phone/ready carries {"input":{}} and returns {"output":{...}}.
+  assert.equal(schemaAccepts(EMPTY_INPUT_SCHEMA, {}), true);
+  assert.equal(schemaAccepts(EMPTY_INPUT_SCHEMA, { action: 'status' }), false);
+  assert.equal(schemaAccepts(EMPTY_INPUT_SCHEMA, { input: {} }), false);
+  assert.equal(schemaAccepts(EMPTY_INPUT_SCHEMA, { sessionID: 'ses-a' }), false);
+
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, { ok: true, id: 'andchamber_phone' }), true);
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, { ok: false, id: 'andchamber_phone' }), false);
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, { ok: true }), false);
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, { ok: true, id: 'other_tool' }), false);
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, { ok: true, id: 'andchamber_phone', extra: 1 }), false);
+
+  const output = await rpc.handlers.ready({}, { signal: new AbortController().signal });
+  assert.deepEqual(JSON.parse(JSON.stringify({ output })), {
+    output: { ok: true, id: 'andchamber_phone' },
+  });
+  assert.equal(schemaAccepts(READY_OUTPUT_SCHEMA, output), true);
+});
+
+test('setup fails closed when the host does not list the registered tool', async () => {
+  for (const list of [() => [], () => [{ id: 'other_tool' }]]) {
+    const run = await setupPlugin({ list });
+    assert.notEqual(run.error, null);
+    assert.match(run.error.message, /andchamber_phone was not registered/);
+    assert.deepEqual(run.order, ['transform', 'list']);
+    assert.equal(run.registrations.length, 0, 'a missing tool must not get a ready RPC');
+  }
+});
+
+test('setup fails closed when the ready RPC registration fails', async () => {
+  const run = await setupPlugin({
+    register: () => {
+      throw new Error('rpc refused');
+    },
+  });
+  assert.notEqual(run.error, null);
+  assert.equal(run.error.message, 'rpc refused');
+  assert.deepEqual(run.order, ['transform', 'list', 'register']);
+  assert.equal(run.registrations.length, 0, 'a failed RPC must never look ready');
+});
+
+test('a failed tool registration never reaches the list or the ready RPC', async () => {
+  const run = await setupPlugin({
+    transform: async (callback) => {
+      await callback({
+        add: () => {
+          throw new Error('registration refused');
+        },
+      });
+    },
+  });
+  assert.notEqual(run.error, null);
+  assert.equal(run.error.message, 'registration refused');
+  assert.deepEqual(run.order, ['transform']);
+  assert.equal(run.registrations.length, 0);
+});
+
+test('setup completes without an endpoint file and the tool still answers unavailable', async (t) => {
+  const dirs = endpointDir(t);
+  process.env[ENV] = path.join(dirs.dir, 'phone-tool.json'); // deliberately not written
+
+  const run = await setupPlugin();
+  assert.equal(run.error, null);
+  assert.deepEqual(run.order, ['transform', 'list', 'register']);
+  assert.equal(run.tool.name, 'andchamber_phone');
+
+  const result = await run.tool.execute({ action: 'status' }, context());
+  assert.equal(result.content.length, 1);
+  assert.match(result.content[0].text, /not available/);
+  assert.equal(JSON.stringify(result).includes(dirs.dir), false);
 });

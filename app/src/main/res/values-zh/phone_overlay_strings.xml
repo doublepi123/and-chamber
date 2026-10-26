@@ -98,6 +98,20 @@
     <string name="phone_overlay_btn_retry_take_over">再次请求停手</string>
     <string name="phone_overlay_btn_close_result">关闭结果卡</string>
 
+    <!-- 停手原因 / 保留 / 聊天 -->
+    <string name="phone_overlay_stop_reason">代理已停下：%1$s</string>
+    <string name="phone_overlay_reason_expired">时间到了</string>
+    <string name="phone_overlay_reason_native_opened">你打开了 AndChamber 的手机操控页</string>
+    <string name="phone_overlay_reason_target_left">应用离开了屏幕</string>
+    <string name="phone_overlay_reason_screen_locked">屏幕已锁定</string>
+    <string name="phone_overlay_reason_connection_lost">连接断开了</string>
+    <string name="phone_overlay_reason_runtime_changed">OpenChamber 重启了</string>
+    <string name="phone_overlay_reason_unreachable">浮窗可见性无法确认</string>
+    <string name="phone_overlay_reason_agent_asked">代理请求你处理</string>
+    <string name="phone_overlay_retained_note">会一直留在这里，直到你处理。结束任务是另一个操作。</string>
+    <string name="phone_overlay_btn_open_chat">打开聊天（代理继续工作）</string>
+    <string name="phone_overlay_btn_continue_in_chat">在聊天旁继续…</string>
+
     <!-- 结束确认 -->
     <string name="phone_overlay_end_title">结束任务？</string>
     <string name="phone_overlay_end_body">这会请求撤销代理授权，收到确认前浮窗会保留。已发出的操作不会被撤回，结果留在 AndChamber 待你核对。</string>
@@ -130,5 +144,6 @@
     <string name="phone_overlay_settings_mode">选择跟进方式</string>
     <string name="phone_overlay_settings_mode_overlay">浮窗和通知</string>
     <string name="phone_overlay_settings_mode_notification">只用通知</string>
+    <string name="phone_overlay_settings_moved_to_notification">上次任务中浮窗没能显示，所以它的控制改到了通知里。请检查通知栏。</string>
     <string name="phone_overlay_settings_test_note">测试只说明刚才可用。之后系统仍可能隐藏浮窗；那时会请求代理停手，通知仍然保留。</string>
 </resources>

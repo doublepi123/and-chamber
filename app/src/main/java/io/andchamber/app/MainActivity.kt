@@ -48,12 +48,12 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Coming back to the host is a stop path for phone control: while an agent holds a lease, showing
-     * AndChamber again revokes it (the controller does the revoking; the coordinator keeps the facts).
+     * Coming back to the app is not a phone-control stop while the person is reading the chat.
+     * The native phone screen itself applies the host-return stop from `onScreenOpened`, exactly
+     * when the person really opens it.
      */
     override fun onResume() {
         super.onResume()
-        get<io.andchamber.app.phone.android.PhoneIntegration>().onHostResumed()
         // The native screen is really in front now: the overlay may close. Its notification stays.
         get<io.andchamber.app.phone.android.overlay.PhoneOverlayCoordinator>().onHostVisible()
     }

@@ -44,6 +44,16 @@ class PhoneStringsTest {
     }
 
     @Test
+    fun `a failed wake-up while running says the chat wasn't told and nothing was re-sent`() {
+        val zh = chinese.getValue("phone_continue_failed_running_body")
+        assertTrue(zh.contains("没能通知聊天继续") && zh.contains("没有重发任何操作"))
+        val en = english.getValue("phone_continue_failed_running_body")
+        // Raw XML keeps Android's \' escape, so match words without the apostrophe.
+        assertTrue(en.contains("told to continue") && en.contains("nothing was re-sent"))
+        assertTrue(chinese.getValue("phone_continue_failed_title").contains("没能联系到聊天"))
+    }
+
+    @Test
     fun `copy never claims a confirmation proves a person`() {
         val all = (english.values + chinese.values).joinToString("\n").lowercase()
         listOf("proves you", "verified human", "证明是你", "确认是本人").forEach { assertTrue("found '$it'", it !in all) }

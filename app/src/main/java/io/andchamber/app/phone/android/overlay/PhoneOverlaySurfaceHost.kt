@@ -49,6 +49,12 @@ internal data class PhoneOverlaySurfaceState(
     val canTakeOver: Boolean = false,
     val canEnd: Boolean = false,
     val canReturnToNative: Boolean = true,
+    /** Why the agent stopped; null for a plain pause/take-over. */
+    val stopReason: PhoneOverlayStopReason? = null,
+    /** A stopped task kept for the person; not the same as an ended task. */
+    val retained: Boolean = false,
+    /** Configure-once entry: opens the native confirmation, never resumes from the overlay. */
+    val canContinueInChat: Boolean = false,
     val demo: Boolean = false,
 )
 
@@ -70,6 +76,10 @@ internal class PhoneOverlaySurfaceActions(
     val onMoveRight: () -> Unit = {},
     val onDragBy: (dx: Float, dy: Float) -> Unit = { _, _ -> },
     val onDragEnd: () -> Unit = {},
+    /** Open the local chat for this task; never revokes or resumes the lease. */
+    val onOpenChat: () -> Unit = {},
+    /** Open the native "continue beside the chat" confirmation; never resumes from here. */
+    val onContinueInChat: () -> Unit = {},
 )
 
 /** The designer's overlay composable. Absent means overlay mode cannot run (never an empty window). */
@@ -612,6 +622,9 @@ internal class PhoneOverlaySurfaceHost(
                     next.phase == PhoneOverlayPhase.PAUSED ||
                     next.phase == PhoneOverlayPhase.TAKEN_OVER ||
                     next.phase == PhoneOverlayPhase.NEEDS_CHECK,
+                stopReason = next.stopReason,
+                retained = next.retained,
+                canContinueInChat = next.canContinueInChat,
                 demo = demo,
             )
         current.setContent { content.Content(surface, nextActions) }

@@ -1,7 +1,9 @@
 package io.andchamber.app.phone.tool
 
+import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneCapabilities
 import io.andchamber.app.phone.core.PhoneConnection
+import io.andchamber.app.phone.core.PhoneController
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
 import io.andchamber.app.phone.core.PhoneDispatchRequest
 import io.andchamber.app.phone.core.PhoneDriver
@@ -9,11 +11,22 @@ import io.andchamber.app.phone.core.PhoneDriverAction
 import io.andchamber.app.phone.core.PhoneDriverException
 import io.andchamber.app.phone.core.PhoneDriverFailure
 import io.andchamber.app.phone.core.PhoneGeometry
+import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.core.PhoneImage
 import io.andchamber.app.phone.core.PhoneNode
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.core.PhoneSnapshot
+import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.standing.PhoneOpenAppResult
+import io.andchamber.app.phone.standing.PhoneStandingApp
+import io.andchamber.app.phone.standing.PhoneStandingGrantResult
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneStandingScope
+import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskStartResult
+import io.andchamber.app.phone.standing.PhoneTaskStartState
+import io.andchamber.app.phone.standing.PhoneTaskStarter
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -239,6 +252,86 @@ private fun readResponse(input: InputStream): RawResponse {
 }
 
 /** Per-test loopback server; call [close] in a finally block. */
+internal class FakeTaskStarter(
+    private val controller: PhoneController,
+) : PhoneTaskStarter {
+    var availableFlag = true
+    var apps: List<PhoneStandingApp> = listOf(PhoneStandingApp("Fixture", TARGET))
+    var actions: Set<PhoneActionKind> = PhoneActionKind.values().toSet()
+    var windowEndsMs: Long = 10_000_000L
+    var perTaskMs: Long = 60_000L
+    var startState: PhoneTaskStartState = PhoneTaskStartState.RUNNING
+
+    /** When set, [request] returns it verbatim (used to exercise stale/odd native results). */
+    var startOverride: PhoneTaskStartResult? = null
+    val requests = mutableListOf<Triple<String, String, String>>()
+    val opened = mutableListOf<String>()
+    val aborted = mutableListOf<Pair<Long, PhoneTaskKey>>()
+    var abortResult: Boolean = true
+    var abortFailure: Exception? = null
+
+    override val available: Boolean get() = availableFlag
+
+    override fun standing(): PhoneStandingView? =
+        if (!availableFlag) null else PhoneStandingView(apps, actions, windowEndsMs)
+
+    override suspend fun request(
+        sessionId: String,
+        summary: String,
+        packageName: String,
+    ): PhoneTaskStartResult {
+        requests += Triple(sessionId, summary, packageName)
+        startOverride?.let { return it }
+        if (!availableFlag) return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+        if (apps.none { it.packageName == packageName }) {
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+        val runtimeId = controller.state.value.runtimeId
+            ?: return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONNECTED)
+        val scope =
+            PhoneStandingScope(
+                runtimeId = runtimeId,
+                sessionLabel = sessionId,
+                allowedPackages = apps.map { it.packageName },
+                allowedActions = actions,
+                windowEndsMs = windowEndsMs,
+                perTaskMs = perTaskMs,
+            )
+        return when (val result = controller.grantFromPreauthorization(scope, packageName)) {
+            is PhoneStandingGrantResult.Granted ->
+                PhoneTaskStartResult.Started(
+                    epoch = result.grant.epoch,
+                    key = PhoneTaskKey(taskId = "task-${result.grant.epoch}", runtimeId = runtimeId),
+                    state = startState,
+                )
+            is PhoneStandingGrantResult.Refused ->
+                PhoneTaskStartResult.Refused(result.refusal)
+        }
+    }
+
+    override suspend fun openApp(
+        sessionId: String,
+        packageName: String,
+    ): PhoneOpenAppResult {
+        opened += packageName
+        if (!availableFlag) return PhoneOpenAppResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
+        return if (apps.any { it.packageName == packageName }) {
+            PhoneOpenAppResult.Opened
+        } else {
+            PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+    }
+
+    override suspend fun abortStarted(
+        epoch: Long,
+        key: PhoneTaskKey,
+    ): Boolean {
+        aborted += epoch to key
+        abortFailure?.let { throw it }
+        return abortResult
+    }
+}
+
 internal class PhoneServerFixture(
     val launchId: Long = 7L,
     requestCapacity: Int = PhoneToolServer.MAX_REQUESTS,
@@ -257,6 +350,7 @@ internal class PhoneServerFixture(
             clock = { now },
             newObservationId = { "obs-" + observations.incrementAndGet() },
         )
+    val taskStarter = FakeTaskStarter(controller)
     val server =
         PhoneToolServer(
             launchId = launchId,
@@ -264,9 +358,26 @@ internal class PhoneServerFixture(
             controller = controller,
             readyLaunch = { ready },
             taskEvents = taskEvents,
+            taskStarter = taskStarter,
             requestCapacity = requestCapacity,
         )
     val port: Int = server.start()
+
+    /** The exact ready handshake body; anything else must be refused. */
+    val readyBody: String =
+        """{"version":1,"plugin":"andchamber-phone","tool":"andchamber_phone"}"""
+
+    fun postReady(
+        body: String = readyBody,
+        token: String? = TOKEN,
+        path: String = PhoneToolProtocol.READY_PATH,
+        extraHeaders: List<Pair<String, String>> = emptyList(),
+    ): RawResponse = httpPost(port, body, path = path, token = token, extraHeaders = extraHeaders)
+
+    suspend fun standingReady() {
+        controller.enable()
+        check(controller.connect() is io.andchamber.app.phone.core.PhoneConnectionResult.Connected)
+    }
 
     suspend fun granted(
         actions: Set<io.andchamber.app.phone.core.PhoneActionKind> =

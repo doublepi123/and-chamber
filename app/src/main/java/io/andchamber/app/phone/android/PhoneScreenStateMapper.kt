@@ -19,11 +19,16 @@ import io.andchamber.app.ui.phone.PhoneLink
 import io.andchamber.app.ui.phone.PhonePairingNotice
 import io.andchamber.app.ui.phone.PhonePending
 import io.andchamber.app.ui.phone.PhoneResultItem
+import io.andchamber.app.ui.phone.PhoneRuntimeStatus
 import io.andchamber.app.ui.phone.PhoneScreenState
+import io.andchamber.app.ui.phone.PhoneStanding
+import io.andchamber.app.ui.phone.PhoneStandingStatus
 import io.andchamber.app.ui.phone.PhoneStopChannel
 import io.andchamber.app.ui.phone.PhoneTarget
+import io.andchamber.app.ui.phone.PhoneTargetVerdict
 import io.andchamber.app.ui.phone.PhoneTask
 import io.andchamber.app.ui.phone.PhoneTaskResult
+import io.andchamber.app.ui.phone.PhoneContinuation
 import io.andchamber.app.ui.phone.phoneHaltFacts
 
 /**
@@ -56,6 +61,14 @@ internal data class PhoneScreenFacts(
     val halt: PhoneHaltSnapshot? = null,
     val task: PhoneTaskRecord? = null,
     val diagnostics: PhoneDiagnostics = PhoneDiagnostics(),
+    /** Enable the configure-once surface; false keeps the legacy per-task flow (tests/older UI). */
+    val standingEnabled: Boolean = false,
+    /** The saved configuration, if any. It is not authority. */
+    val standingState: PhoneStandingState? = null,
+    /** Truthful runtime/tool projection, separate from the local endpoint being reachable. */
+    val runtimeStatus: PhoneRuntimeStatus = PhoneRuntimeStatus(),
+    /** Native continuation facts after a stop. */
+    val continuation: PhoneContinuation = PhoneContinuation(),
 )
 
 internal data class PhoneLeaseFacts(
@@ -89,12 +102,15 @@ internal data class PhoneHaltSnapshot(
 internal fun phoneScreenState(
     core: PhoneState,
     facts: PhoneScreenFacts,
+    nowElapsedMs: Long = 0L,
 ): PhoneScreenState {
     val halt = facts.halt
     val record = facts.task
     // A remembered halt keeps its own lease, so the reason survives the controller clearing its grant.
     val lease = halt?.lease?.toLease(core) ?: facts.lease?.toLease(core)
     val outcomeUnknown = core.blocked == PhoneBlockReason.UNKNOWN_OUTCOME
+
+    val standing = standingProjection(facts, nowElapsedMs)
 
     val control: PhoneControl =
         when {
@@ -178,6 +194,46 @@ internal fun phoneScreenState(
                 observedAtMs = core.observation?.observedAtMs ?: facts.diagnostics.observedAtMs,
                 observedNodes = core.observation?.nodeCount ?: facts.diagnostics.observedNodes,
             ),
+        standing = standing,
+    )
+}
+
+/**
+ * The standing card is enabled by [PhoneScreenFacts.standingEnabled]; with no saved configuration it
+ * still projects `NotSet` so the person can configure it once. A wall-clock/elapsed expiration or a
+ * revoke is reflected truthfully and never as an active authority.
+ */
+private fun standingProjection(
+    facts: PhoneScreenFacts,
+    nowElapsedMs: Long,
+): PhoneStanding? {
+    if (!facts.standingEnabled) return null
+    val state = facts.standingState
+    val status =
+        when {
+            state == null -> PhoneStandingStatus.NotSet
+            state.config.revoked -> PhoneStandingStatus.Revoked
+            state.expired || state.endsAtElapsedMs <= nowElapsedMs -> PhoneStandingStatus.Expired
+            else -> PhoneStandingStatus.Active(state.endsAtElapsedMs)
+        }
+    val apps =
+        state?.config?.apps.orEmpty().map { app ->
+            PhoneTarget(
+                label = app.label,
+                packageName = app.packageName,
+                verdict = PhoneTargetVerdict.Allowed,
+            )
+        }
+    return PhoneStanding(
+        status = status,
+        apps = apps,
+        actions = state?.config?.let { actionScopes(it.actions) }.orEmpty(),
+        perTaskMinutes =
+            state?.config?.perTaskMs
+                ?.let { (it / 60_000L).toInt().coerceAtLeast(1) }
+                ?: 5,
+        runtime = facts.runtimeStatus,
+        continuation = facts.continuation,
     )
 }
 

@@ -19,6 +19,10 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.standing.PhoneOpenAppResult
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneTaskStartResult
+import io.andchamber.app.phone.standing.PhoneTaskStarter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +63,14 @@ interface PhoneToolTransport {
     fun stop()
 
     /**
+     * Read-only. True only after this transport's current launch received the plugin's one bounded
+     * setup handshake (`POST /v1/ready`). It is proof that the plugin `setup`/tool transform finished
+     * and reached this native launch; it is not a grant, not a permission check and not proof that
+     * the port is merely alive. Defaults to false (fail-closed) and is cleared on stop/new launch.
+     */
+    val pluginReady: Boolean get() = false
+
+    /**
      * Native-only. Publishes the session route for a newly granted epoch. Returns false when this
      * transport cannot publish (the default, so an unmodified transport is fail-closed). A route is
      * routing, not authentication.
@@ -71,8 +83,8 @@ interface PhoneToolTransport {
 
 /**
  * Loopback-only tool server for the phone plugin. Binds `127.0.0.1` on an ephemeral port and accepts
- * only `POST /v1/tool` or `/v1/cancel` with `Authorization: Bearer <token>`, no Origin, and Host
- * exactly `127.0.0.1:<bound port>`.
+ * only `POST /v1/tool`, `/v1/cancel` or `/v1/ready` with `Authorization: Bearer <token>`, no Origin,
+ * and Host exactly `127.0.0.1:<bound port>`.
  *
  * The token lives only in this object and the 0600 endpoint file. It is never logged and never
  * echoed in a response.
@@ -89,6 +101,8 @@ class PhoneToolServer(
     private val readyLaunch: () -> Long?,
     /** Native task-event bridge; the default fails closed and never fakes a stop acknowledgement. */
     private val taskEvents: PhoneTaskEventHandler = PhoneTaskEventHandler.Unavailable,
+    /** Native standing starter; the default fails closed: no apps, no direct start, no launch. */
+    private val taskStarter: PhoneTaskStarter = PhoneTaskStarter.Unavailable,
     /** Shared with the runtime binding; holds at most one native-confirmation proposal. */
     internal val pendingRequests: PhonePendingRequestStore = PhonePendingRequestStore(),
     private val bindAddress: InetAddress = InetAddress.getByName("127.0.0.1"),
@@ -106,6 +120,12 @@ class PhoneToolServer(
 
     private var server: ServerSocket? = null
     private val clients = Collections.synchronizedSet(mutableSetOf<Socket>())
+
+    /** Set only by the current launch's exact `/v1/ready` handshake; cleared by [stop]. */
+    @Volatile
+    private var readyHandshake = false
+
+    override val pluginReady: Boolean get() = readyHandshake
 
     /** Claims, cancel tombstones and in-flight jobs share one bounded per-launch state. */
     internal val requests = PhoneRequestTracker(requestCapacity)
@@ -165,6 +185,9 @@ class PhoneToolServer(
     }
 
     override fun stop() {
+        // Cleared before and after teardown: a handshake racing the stop can never leave a stale
+        // ready flag on a dead launch.
+        readyHandshake = false
         requests.clear()
         router.clear()
         val open = synchronized(clients) { clients.toList() }
@@ -173,6 +196,7 @@ class PhoneToolServer(
         runCatching { server?.close() }
         server = null
         scope.cancel()
+        readyHandshake = false
     }
 
     internal fun activeConnectionCount(): Int = synchronized(clients) { clients.size }
@@ -215,9 +239,32 @@ class PhoneToolServer(
             when (exchange.path) {
                 PhoneToolEndpoint.TOOL_PATH -> handleTool(socket, exchange)
                 PhoneToolEndpoint.CANCEL_PATH -> handleCancel(socket, exchange)
+                PhoneToolProtocol.READY_PATH -> handleReady(socket, exchange)
                 else -> writeJson(socket, PhoneToolProtocol.errorBody(PhoneToolCodes.NOT_FOUND), 404)
             }
         }
+    }
+
+    /**
+     * The plugin's bounded setup handshake. It marks this transport ready only when the body is the
+     * exact fixed document and this exact launch is still the current ready launch; an old token is
+     * already refused by the Bearer check above, and a stale launch is refused here without touching
+     * the flag. Nothing about authority, the grant, a session or a task is read or changed.
+     */
+    private fun handleReady(
+        socket: Socket,
+        exchange: Exchange,
+    ) {
+        if (server == null || readyLaunch() != launchId) {
+            writeJson(socket, PhoneToolProtocol.errorBody(PhoneToolCodes.RUNTIME_NOT_READY), 409)
+            return
+        }
+        if (!PhoneToolProtocol.isReadyBody(exchange.body)) {
+            writeJson(socket, PhoneToolProtocol.errorBody(PhoneToolCodes.INVALID_REQUEST), 400)
+            return
+        }
+        readyHandshake = true
+        writeJson(socket, PhoneToolProtocol.readyAck(), 200)
     }
 
     private suspend fun handleTool(
@@ -262,8 +309,16 @@ class PhoneToolServer(
             writeJson(socket, PhoneToolProtocol.envelope(action, true, state.epoch, statusData(state)), 200)
             return
         }
+        if (parsed is PhoneToolAction.Apps) {
+            writeJson(socket, standingApps(action, state), 200)
+            return
+        }
+        if (parsed is PhoneToolAction.OpenApp) {
+            writeJson(socket, openStandingApp(action, parsed, call, state), 200)
+            return
+        }
         if (parsed is PhoneToolAction.Request) {
-            writeJson(socket, requestConfirmation(action, parsed, call, state), 200)
+            writeJson(socket, startStandingTask(action, parsed, call, state), 200)
             return
         }
         if (parsed is PhoneToolAction.Progress ||
@@ -557,40 +612,138 @@ class PhoneToolServer(
             PhoneTaskEventError.TASK_NOT_ACTIVE -> PhoneToolCodes.TASK_NOT_ACTIVE
         }
 
+    /** Read-only: only the person-preauthorized apps; never the installed-app catalogue. */
+    private fun standingApps(
+        action: String,
+        state: PhoneState,
+    ): String {
+        if (readyLaunch() != launchId) return failure(action, state.epoch, PhoneToolCodes.RUNTIME_NOT_READY)
+        val standing = taskStarter.takeIf { it.available }?.standing()
+            ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
+        val data =
+            buildJsonObject {
+                put(
+                    "apps",
+                    JsonArray(
+                        standing.apps.map { app ->
+                            buildJsonObject {
+                                put("label", app.label)
+                                put("packageName", app.packageName)
+                            }
+                        },
+                    ),
+                )
+                put("actions", JsonArray(standing.actions.sortedBy { it.name }.map { JsonPrimitive(it.name) }))
+            }
+        return PhoneToolProtocol.envelope(action, true, state.epoch, data)
+    }
+
     /**
-     * Read-only preparation. It proposes a task for native confirmation and never enables, pairs,
-     * grants, resumes or launches anything. The summary lives only in the in-memory store; the
-     * response carries the fixed confirmation phrase, not the text back.
+     * Direct start inside the standing scope. The native starter creates the per-task grant and
+     * launches the allowed app; this server only forwards the verified session + bounded summary and
+     * maps the typed native result. There is no PENDING_CONFIRMATION reply.
      */
-    private fun requestConfirmation(
+    private suspend fun startStandingTask(
         action: String,
         request: PhoneToolAction.Request,
         call: PhoneToolCall,
         state: PhoneState,
     ): String {
         if (readyLaunch() != launchId) return failure(action, state.epoch, PhoneToolCodes.RUNTIME_NOT_READY)
-        val grant = state.grant
-        if (grant != null && controller.nowMs() < grant.expiresAtMs) {
-            return failure(action, state.epoch, PhoneToolCodes.GRANT_ACTIVE)
+        val standing = taskStarter.takeIf { it.available }?.standing()
+            ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
+        if (standing.apps.none { it.packageName == request.packageName }) {
+            return failure(action, state.epoch, PhoneToolCodes.TARGET_FORBIDDEN)
         }
-        request.packageName?.let { packageName ->
-            targetPolicy.refusal(packageName)?.let { return failure(action, state.epoch, it.name) }
-        }
-        return when (pendingRequests.propose(call.sessionId, request.summary, request.packageName)) {
-            PhonePendingProposal.SESSION_BUSY ->
-                failure(action, state.epoch, PhoneToolCodes.SESSION_BUSY)
-            PhonePendingProposal.CREATED, PhonePendingProposal.UPDATED ->
-                PhoneToolProtocol.envelope(
-                    action,
-                    ok = true,
-                    epoch = state.epoch,
-                    data = buildJsonObject {
-                        put("state", "PENDING_CONFIRMATION")
-                        put("confirmation", PhoneToolProtocol.CONFIRM_IN_APP)
-                    },
-                )
+        return when (val result = taskStarter.request(call.sessionId, request.summary, request.packageName)) {
+            is PhoneTaskStartResult.Started -> {
+                // A live lease was created natively. If this request may not use it, the exact new
+                // epoch is rolled back instead of leaving an unreachable task running (and instead
+                // of answering success with an epoch nobody can act on).
+                if (result.epoch < 1L || result.epoch <= state.epoch) {
+                    // A preauthorized request must create a fresh task epoch; never ride a stale one.
+                    abortStarted(result.epoch, result.key)
+                    return failure(action, state.epoch, PhoneToolCodes.EPOCH_CHANGED)
+                }
+                // Exactly one publish. A false result means this epoch has no route (an older or
+                // unrelated route was already published): the chat would get a task it can never
+                // use, so roll the exact epoch back and report a failure.
+                if (!router.publish(result.epoch, call.sessionId)) {
+                    abortStarted(result.epoch, result.key)
+                    return failure(action, result.epoch, PhoneToolCodes.ROUTE_NOT_PUBLISHED)
+                }
+                val data =
+                    buildJsonObject {
+                        put("state", result.state.name)
+                        result.message
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { put("message", it.take(PhoneToolProtocol.MAX_EVENT_TEXT_CHARS)) }
+                    }
+                PhoneToolProtocol.envelope(action, true, result.epoch, data)
+            }
+            is PhoneTaskStartResult.Refused ->
+                failure(action, state.epoch, standingCode(result.refusal))
         }
     }
+
+    /**
+     * Rolls back exactly the task this adapter created and failed to keep. It is bounded to one
+     * call, never touches an older/newer epoch, and never turns the failure reply into a success:
+     * a native abort failure is swallowed because the caller must still receive a failure (there is
+     * no verified success to report either way).
+     */
+    private suspend fun abortStarted(
+        epoch: Long,
+        key: PhoneTaskKey,
+    ) {
+        try {
+            taskStarter.abortStarted(epoch, key)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Nothing to report: the reply is already a failure, and a claim of success is banned.
+        }
+    }
+
+    /** Open exactly one package from the preauthorized list; the native starter checks and launches. */
+    private suspend fun openStandingApp(
+        action: String,
+        request: PhoneToolAction.OpenApp,
+        call: PhoneToolCall,
+        state: PhoneState,
+    ): String {
+        if (readyLaunch() != launchId) return failure(action, state.epoch, PhoneToolCodes.RUNTIME_NOT_READY)
+        val standing = taskStarter.takeIf { it.available }?.standing()
+            ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
+        if (standing.apps.none { it.packageName == request.packageName }) {
+            return failure(action, state.epoch, PhoneToolCodes.TARGET_FORBIDDEN)
+        }
+        return when (val result = taskStarter.openApp(call.sessionId, request.packageName)) {
+            PhoneOpenAppResult.Opened ->
+                PhoneToolProtocol.envelope(action, true, state.epoch, buildJsonObject { put("state", "OPENED") })
+            is PhoneOpenAppResult.Refused ->
+                failure(action, state.epoch, standingCode(result.refusal))
+        }
+    }
+
+    private fun standingCode(refusal: PhoneStandingRefusal): String =
+        when (refusal) {
+            PhoneStandingRefusal.NOT_CONFIGURED -> PhoneToolCodes.STANDING_UNAVAILABLE
+            PhoneStandingRefusal.INVALID -> PhoneToolCodes.INVALID_REQUEST
+            PhoneStandingRefusal.EXPIRED -> PhoneToolCodes.STANDING_EXPIRED
+            PhoneStandingRefusal.DISABLED -> PhoneToolCodes.DISABLED
+            PhoneStandingRefusal.NOT_CONNECTED -> PhoneToolCodes.NOT_CONNECTED
+            PhoneStandingRefusal.RUNTIME_CHANGED,
+            PhoneStandingRefusal.STANDING_BLOCKED,
+            -> PhoneToolCodes.STANDING_BLOCKED
+            PhoneStandingRefusal.PAUSED -> PhoneToolCodes.PAUSED
+            PhoneStandingRefusal.UNKNOWN_OUTCOME -> PhoneToolCodes.OUTCOME_UNKNOWN
+            PhoneStandingRefusal.TARGET_NOT_ALLOWED -> PhoneToolCodes.TARGET_FORBIDDEN
+            PhoneStandingRefusal.ACTION_NOT_ALLOWED -> PhoneToolCodes.ACTION_NOT_GRANTED
+            PhoneStandingRefusal.SESSION_MISMATCH -> PhoneToolCodes.SESSION_BUSY
+            PhoneStandingRefusal.TASK_ACTIVE -> PhoneToolCodes.BUSY
+            PhoneStandingRefusal.START_FAILED -> PhoneToolCodes.START_FAILED
+        }
 
     private fun failure(
         action: String,
@@ -673,7 +826,9 @@ class PhoneToolServer(
         val id = when (action) {
             PhoneToolAction.Status,
             PhoneToolAction.Snapshot,
+            PhoneToolAction.Apps,
             is PhoneToolAction.Request,
+            is PhoneToolAction.OpenApp,
             is PhoneToolAction.Progress,
             is PhoneToolAction.NeedUser,
             is PhoneToolAction.Finish -> return null
@@ -690,7 +845,11 @@ class PhoneToolServer(
 
     private fun agentAction(parsed: PhoneToolAction): PhoneAgentAction =
         when (parsed) {
-            PhoneToolAction.Status, PhoneToolAction.Snapshot, is PhoneToolAction.Request -> PhoneAgentAction.Observe
+            PhoneToolAction.Status,
+            PhoneToolAction.Snapshot,
+            PhoneToolAction.Apps,
+            is PhoneToolAction.Request,
+            is PhoneToolAction.OpenApp -> PhoneAgentAction.Observe
             is PhoneToolAction.Capture -> PhoneAgentAction.Capture
             is PhoneToolAction.TapRef -> PhoneAgentAction.TapRef(parsed.ref)
             is PhoneToolAction.TapPoint -> PhoneAgentAction.TapPoint(PhonePoint(parsed.x, parsed.y))
@@ -803,6 +962,7 @@ class PhoneToolServer(
     private fun statusData(state: PhoneState): JsonObject {
         val grant = state.grant
         val capabilities = state.capabilities
+        val standing = taskStarter.takeIf { it.available }?.standing()
         return buildJsonObject {
             put("enabled", state.enabled)
             put("phase", state.phase.name)
@@ -817,6 +977,12 @@ class PhoneToolServer(
             put("pendingConfirmation", pendingRequests.snapshot() != null)
             // Minimal: only whether a native task exists. Never its summary, target, key or events.
             put("taskPresent", taskEvents.available && taskEvents.currentTask(state.epoch) != null)
+            // Native facts, separate from runtimeReady (the loopback endpoint's launch). This does not
+            // claim that the plugin was loaded; it only says which native bridges are installed.
+            put("nativeTaskEvents", taskEvents.available)
+            put("standingConfigured", standing != null)
+            put("standingBlocked", state.standingBlocked)
+            put("standingBlockReason", state.standingBlockReason?.name)
             put("runtimeReady", readyLaunch() == launchId)
             put("runtimeEpoch", PhoneToolProtocol.serverEpoch(launchId))
             put("capabilities", capabilities?.let { caps ->
@@ -895,7 +1061,10 @@ class PhoneToolServer(
         val method = requestLine[0]
         val path = requestLine[1]
         if (method != "POST") throw Rejected(404, PhoneToolCodes.NOT_FOUND)
-        if (path != PhoneToolEndpoint.TOOL_PATH && path != PhoneToolEndpoint.CANCEL_PATH) {
+        if (path != PhoneToolEndpoint.TOOL_PATH &&
+            path != PhoneToolEndpoint.CANCEL_PATH &&
+            path != PhoneToolProtocol.READY_PATH
+        ) {
             throw Rejected(404, PhoneToolCodes.NOT_FOUND)
         }
         if (requestLine[2] != "HTTP/1.1" && requestLine[2] != "HTTP/1.0") {
@@ -1001,6 +1170,7 @@ class PhoneToolServer(
             403 -> "Forbidden"
             404 -> "Not Found"
             408 -> "Request Timeout"
+            409 -> "Conflict"
             413 -> "Payload Too Large"
             429 -> "Too Many Requests"
             431 -> "Request Header Fields Too Large"
@@ -1029,7 +1199,7 @@ class PhoneToolServer(
         const val MAX_REQUESTS = 512
         private const val SAFETY_MARGIN_MS = 2_000L
         private val OBSERVATION_FREE_ACTIONS =
-            setOf("status", "request", "progress", "need_user", "finish", "snapshot")
+            setOf("status", "request", "apps", "open_app", "progress", "need_user", "finish", "snapshot")
 
         private const val EVENT_HANDLE_TIMEOUT_MS = 15_000L
 

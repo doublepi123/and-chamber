@@ -1,8 +1,11 @@
 package io.andchamber.app.phone.core
 
 /**
- * The first version drives only one selected third-party package. The host app, Android itself and
- * the usual system/Google packages are refused even if the person names them.
+ * The first version drives one selected target at a time. The host app, Android itself and the
+ * system/authorization surfaces (system UI, settings, permission controller, package installer,
+ * keyguard) are refused even if the person names them. Ordinary preinstalled packages, including
+ * `com.android.*` and `com.google.android.*`, are not refused by brand prefix alone: the native
+ * standing/preauthorization allow-list is the second gate.
  */
 class PhoneTargetPolicy(
     private val hostPackage: String = "io.andchamber.app",
@@ -12,7 +15,7 @@ class PhoneTargetPolicy(
             PhoneErrorCode.INVALID_REQUEST
         packageName == hostPackage -> PhoneErrorCode.TARGET_FORBIDDEN
         packageName in SYSTEM_PACKAGES -> PhoneErrorCode.TARGET_FORBIDDEN
-        SYSTEM_PREFIXES.any { packageName.startsWith(it) } -> PhoneErrorCode.TARGET_FORBIDDEN
+        packageName.startsWith(SYSTEM_PREFIX) -> PhoneErrorCode.TARGET_FORBIDDEN
         !PACKAGE_PATTERN.matches(packageName) -> PhoneErrorCode.INVALID_REQUEST
         else -> null
     }
@@ -22,18 +25,19 @@ class PhoneTargetPolicy(
     private companion object {
         val PACKAGE_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
 
+        const val SYSTEM_PREFIX = "android."
+
+        /** Authorization/system surfaces only; brand prefixes are deliberately not blacklisted. */
         val SYSTEM_PACKAGES = setOf(
             "android",
             "com.android.systemui",
             "com.android.settings",
             "com.android.permissioncontroller",
             "com.android.packageinstaller",
-        )
-
-        val SYSTEM_PREFIXES = listOf(
-            "android.",
-            "com.android.",
-            "com.google.android.",
+            "com.android.keyguard",
+            "com.google.android.settings",
+            "com.google.android.permissioncontroller",
+            "com.google.android.packageinstaller",
         )
     }
 }
