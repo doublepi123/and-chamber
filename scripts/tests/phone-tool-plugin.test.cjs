@@ -317,11 +317,95 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /GRANT_ACTIVE/);
   assert.match(tool.description, /UNICODE_UNSUPPORTED/);
   assert.match(tool.description, /granted on the phone|native grant/);
+  // need_user is limited to real human-only steps, never transient page/observation noise.
+  assert.match(tool.description, /"need_user" is only for a real human-only step/);
+  assert.match(tool.description, /signing in/);
+  assert.match(tool.description, /verification code/);
+  assert.match(tool.description, /payment or other confirmation/);
+  assert.match(tool.description, /permission decision/);
+  assert.match(tool.description, /input the device cannot type/);
+  assert.match(tool.description, /choice that belongs to the person/);
+  assert.match(tool.description, /Ordinary chat questions and answer choices use the normal question\/form interaction/);
+  assert.match(tool.description, /Do not call "need_user" merely while waiting for a chat answer or an OpenCode permission reply/);
+  assert.match(tool.description, /Do not call it for page loading/);
+  assert.match(tool.description, /brief focus or window change/);
+  assert.match(tool.description, /stale observation/);
+  assert.match(tool.description, /ordinary HIERARCHY_NOT_IDLE/);
+  assert.match(tool.description, /do not revoke an existing task or the saved scope/);
+
+  // Copy assertions only: they lock the wording, not real model compliance.
+  assert.match(tool.description, /taskPresent means a task is bound to the live epoch/);
+  assert.match(tool.description, /taskRetained may be true while no grant exists/);
+  assert.match(tool.description, /taskState is the current PhoneTaskState name or null/);
+  assert.match(
+    tool.description,
+    /continuationState is IDLE, SENDING, DELIVERED, FAILED, NOT_RESUMED or null/,
+  );
+  assert.match(tool.description, /continuationFailure is a fixed enum or null/);
+  assert.match(tool.description, /A missing grant \(NO_GRANT\) is not a lost standing configuration/);
+  assert.match(tool.description, /saved scope and a retained waiting task may still exist/);
+  assert.match(tool.description, /When taskState is WAITING_USER,/);
+  assert.match(tool.description, /taskRetained alone does not mean waiting/);
+  assert.match(tool.description, /ACTIVE task with a live grant may continue and finish normally/);
+  assert.match(tool.description, /do not send a new "request" to replace that task/);
+  assert.match(tool.description, /do not "finish" it/);
+  assert.match(tool.description, /native Continue entry/);
+  assert.match(tool.description, /new current epoch/);
+  assert.match(tool.description, /fresh snapshot and continue from that fresh observation/);
+  assert.match(tool.description, /cannot press Continue, wake, resume or roll back/);
+  assert.match(
+    tool.description,
+    /NOT_RESUMED means a technical failure happened before a wake, with either no recovery grant created or an exact rollback confirmed/,
+  );
+  assert.match(tool.description, /person may confirm Continue again/);
+  assert.match(tool.description, /FAILED means the wake is unconfirmed/);
+  assert.match(tool.description, /never resend automatically/);
+  assert.match(tool.description, /do not assume a retry is safe merely because there is currently no grant/);
+  assert.match(tool.description, /Neither state runs or resumes the task automatically/);
+
+  // A transient read-only busy state keeps the task and uses bounded new observations only.
+  assert.match(tool.description, /and the live grant is still present/);
+  assert.match(tool.description, /do not call "need_user" for this/);
+  assert.match(
+    tool.description,
+    /If a start already failed and no grant remains, do not fake a grant with "snapshot" or resume in place/,
+  );
+  assert.match(tool.description, /keep the same live task/);
+  assert.match(tool.description, /waiting for the page to stabilize/);
+  assert.match(tool.description, /small bounded number of NEW snapshots/);
+  assert.match(tool.description, /Only those fixed read-only refusals get this treatment/);
+  assert.match(tool.description, /READ_TIMEOUT, OUTCOME_UNKNOWN and security refusals are not ordinary busy states/);
+  assert.match(tool.description, /A read-only BUSY follows the bounded observation rules above only while the same live grant remains/);
+  assert.match(tool.description, /unbounded busy loop/);
+  assert.match(tool.description, /reuse old refs/);
+  assert.match(tool.description, /failed capture as success/);
+  assert.match(tool.description, /resend a SENT\/UNKNOWN mutating action/);
+  assert.match(tool.description, /15-second per-call hard timeout/);
+  assert.match(tool.description, /technical limitation honestly/);
+
+  // HIERARCHY_NOT_IDLE is not NeedUser and never becomes a manual new-task demand.
   assert.match(tool.description, /HIERARCHY_NOT_IDLE/);
   assert.match(tool.description, /does not mean the connection is down/);
+  assert.match(tool.description, /does not by itself revoke an existing task/);
+  assert.match(tool.description, /not a reason to call "need_user"/);
+  assert.match(
+    tool.description,
+    /Use "status" to tell whether the original task is still live or a startup was rolled back/,
+  );
+  assert.match(tool.description, /do not fake a grant with "snapshot" or resume in place/);
+  assert.match(tool.description, /never authorises automatic recovery of stopped control/);
+  assert.match(tool.description, /retries are bounded/);
+  assert.doesNotMatch(tool.description, /ask the person for a new explicit request/);
+  assert.doesNotMatch(tool.description, /native control will wait and continue/);
+
+  // Unknown outcomes never invite a repeat or an automatic resume/clear.
+  assert.match(tool.description, /Never repeat the action to find out/);
+  assert.match(tool.description, /do not auto-resume or clear a standing block or unknown/);
+
+  // READ_TIMEOUT keeps the explicit reconnect hard stop; it is not an automatic recovery.
   assert.match(tool.description, /READ_TIMEOUT/);
   assert.match(tool.description, /reconnect explicitly/);
-  assert.match(tool.description, /never grant automatic recovery/);
+  assert.match(tool.description, /cannot recover it automatically/);
   assert.doesNotMatch(tool.description, /shell|intent|package list/i);
 });
 
@@ -483,6 +567,32 @@ test('a typed start failure keeps its structured error and fixed stage, and HTTP
   });
   assert.equal(JSON.stringify(failed).includes('4111-secret'), false);
   assertNoEndpoint(failed, echo);
+});
+
+test('a hierarchy refusal stays a snapshot refusal and never becomes need_user', async (t) => {
+  // Fixed example only: this locks the wire copy, not real LLM behaviour.
+  const payload = {
+    version: 1,
+    ok: false,
+    action: 'phone.snapshot',
+    epoch: 4,
+    error: {
+      code: 'HIERARCHY_NOT_IDLE',
+      message:
+        'The phone did not provide a valid hierarchy or page. This does not mean the connection is down, and it does not by itself revoke an existing task. Do not call need_user for this.',
+    },
+  };
+  const server = await useServer(t, json(payload));
+  endpointDir(t).write(server);
+
+  const result = await tool.execute({ action: 'snapshot' }, context());
+
+  assert.equal(result.content.length, 1);
+  assert.deepEqual(JSON.parse(result.content[0].text), payload);
+  assert.equal(JSON.parse(result.content[0].text).action, 'phone.snapshot');
+  assert.equal(JSON.parse(result.content[0].text).error.code, 'HIERARCHY_NOT_IDLE');
+  assert.equal(result.content[0].text.includes('phone.need_user'), false);
+  assertNoEndpoint(result, server);
 });
 
 test('returns a refused action envelope as text without the token', async (t) => {

@@ -986,6 +986,10 @@ class PhoneToolServer(
         val grant = state.grant
         val capabilities = state.capabilities
         val standing = taskStarter.takeIf { it.available }?.standing()
+        // Typed read-only ports. Both are display facts only: they cannot grant, resume or widen a
+        // saved scope, and the continuation snapshot is not proof that access came back.
+        val retainedState = taskEvents.takeIf { it.available }?.retainedTaskState()
+        val continuation = taskStarter.takeIf { it.available }?.continuation()
         return buildJsonObject {
             put("enabled", state.enabled)
             put("phase", state.phase.name)
@@ -1001,8 +1005,18 @@ class PhoneToolServer(
             put("grantedActions", JsonArray(grant?.allowedActions.orEmpty().sortedBy { it.name }.map { JsonPrimitive(it.name) }))
             put("observationAvailable", state.observation != null)
             put("pendingConfirmation", pendingRequests.snapshot() != null)
-            // Minimal: only whether a native task exists. Never its summary, target, key or events.
+            // Minimal: only whether a task exists for the *current live* epoch. This keeps its old
+            // meaning: false does not mean no task is retained. Never its summary, target, key or
+            // events. Use taskRetained/taskState for the retained task after a need_user stop.
             put("taskPresent", taskEvents.available && taskEvents.currentTask(state.epoch) != null)
+            // Retained native task (same binding/snapshot the overlay shows). This is not admission:
+            // operations and events still require the live epoch.
+            put("taskRetained", retainedState != null)
+            put("taskState", retainedState?.name)
+            // A continuation snapshot is reporting only; it does not make the task grantable and
+            // never resumes automatically. Core epoch/grantedActions above remain the authority.
+            put("continuationState", continuation?.state?.name)
+            put("continuationFailure", continuation?.failure?.name)
             // Native facts, separate from runtimeReady (the loopback endpoint's launch). This does not
             // claim that the plugin was loaded; it only says which native bridges are installed.
             put("nativeTaskEvents", taskEvents.available)

@@ -449,7 +449,15 @@ internal fun HaltedCard(
     ChamberCard {
         Column(modifier = Modifier.padding(PhoneCardPadding), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             val mayApply = halted.lastAction == PhoneLastAction.MayStillApply
+            val continueFirst = haltContinueFirst(state)
+            val notResumed = continueFirst && state.standing?.continuation?.delivery == PhoneContinueDelivery.NotResumed
             when {
+                // A confirmed continue didn't resume: lead with that (task kept + the fixed technical
+                // reason), not with the original "do this step yourself" again.
+                notResumed -> {
+                    val continuation = state.standing!!.continuation
+                    ContinueDeliveryNotice(continuation.delivery, running = false, failure = continuation.failure)
+                }
                 !halted.confirmed ->
                     PhoneNotice(
                         tone = NoticeTone.Warning,
@@ -463,6 +471,16 @@ internal fun HaltedCard(
                         icon = Icons.Rounded.WarningAmber,
                         title = stringResource(R.string.phone_halt_title, reason),
                         body = stringResource(R.string.phone_halt_may_apply, lease.target.label),
+                    )
+                // The agent asked for the person: say it is waiting for them and why, not
+                // "you took over". Only after a confirmed stop with nothing left to check.
+                haltWaitsForPerson(state) ->
+                    PhoneNotice(
+                        tone = NoticeTone.Warning,
+                        icon = Icons.Rounded.PauseCircle,
+                        title = stringResource(R.string.phone_halt_need_user_title),
+                        body = stringResource(R.string.phone_halt_need_user_body, lease.target.label),
+                        modifier = Modifier.testTag(PhoneTags.HALT_NEED_USER),
                     )
                 halted.lastAction == PhoneLastAction.UserChecked ->
                     PhoneNotice(
@@ -479,6 +497,8 @@ internal fun HaltedCard(
                         body = stringResource(R.string.phone_halt_none_in_flight),
                     )
             }
+            // Continue right below the reason; the task details and the agent's note follow.
+            if (continueFirst) ContinueInChatBlock(state, actions, lead = true)
             Text(
                 stringResource(R.string.phone_halt_task, lease.target.label),
                 style = MaterialTheme.typography.bodyMedium,
@@ -502,7 +522,10 @@ internal fun HaltedCard(
                 )
             }
 
-            if (usesStanding(state)) {
+            if (continueFirst) {
+                // Already offered above; only the agent's own (unverified) note stays here.
+                ContinueAgentNote(state)
+            } else if (usesStanding(state)) {
                 // Configure-once mode: continue beside the chat after a native confirmation; the
                 // reason it waits is shown there. No per-task grant form here.
                 ContinueInChatBlock(state, actions)

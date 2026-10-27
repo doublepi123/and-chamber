@@ -457,24 +457,36 @@ class PhoneToolProtocolTest {
     }
 
     @Test
-    fun `hierarchy and read-timeout refusals have distinct fixed non-network messages`() {
+    fun `hierarchy refusal keeps a live task and never demands a manual restart or reconnect`() {
         val hierarchy = PhoneToolProtocol.fixedMessage(PhoneToolCodes.HIERARCHY_NOT_IDLE)
         val readTimeout = PhoneToolProtocol.fixedMessage(PhoneToolCodes.READ_TIMEOUT)
 
         assertNotEquals("The phone action failed.", hierarchy)
         assertNotEquals("The phone action failed.", readTimeout)
         assertNotEquals(hierarchy, readTimeout)
-        // A read-only observation refusal must not claim there is no task or that the link dropped.
+        // A read-only observation refusal is not a connection-loss or manual-step instruction.
         assertTrue(hierarchy.contains("does not mean the connection is down"))
-        assertTrue(hierarchy.contains("Do not retry in a loop"))
-        assertTrue(hierarchy.contains("new request"))
+        assertTrue(hierarchy.contains("does not by itself revoke an existing task"))
+        assertTrue(hierarchy.contains("Do not call need_user"))
+        assertTrue(hierarchy.contains("Use status"))
+        assertTrue(hierarchy.contains("still live or a start was rolled back"))
+        assertTrue(hierarchy.contains("do not fake a grant"))
+        assertTrue(hierarchy.contains("never authorises automatic recovery of stopped control"))
+        assertTrue(hierarchy.contains("retries are bounded"))
+        assertTrue(!hierarchy.contains("Ask the person", ignoreCase = true))
+        assertTrue(!hierarchy.contains("reconnect", ignoreCase = true))
         assertTrue(!hierarchy.contains("There is no confirmed phone task"))
+        assertTrue("must not claim missing XML support", !hierarchy.contains("XML"))
         // READ_TIMEOUT abandons the connection, but it is not proof of a network/socket close and
         // must not become an automatic reconnect instruction.
         assertTrue(readTimeout.contains("no longer used"))
         assertTrue(readTimeout.contains("does not prove the network is down"))
         assertTrue(readTimeout.contains("reconnect explicitly"))
+        assertTrue(readTimeout.contains("cannot recover it automatically"))
         assertTrue(!readTimeout.contains("There is no confirmed phone task"))
+        assertTrue(!readTimeout.contains("need_user", ignoreCase = true))
+        assertTrue(!readTimeout.contains("hierarchy", ignoreCase = true))
+        assertTrue("must not claim missing XML support", !readTimeout.contains("XML"))
 
         val secret = "com.example.secret label"
         for (message in listOf(hierarchy, readTimeout)) {
@@ -483,6 +495,34 @@ class PhoneToolProtocolTest {
             assertTrue("message leaked an exception", !message.contains("Exception"))
             assertTrue("message leaked a site", !message.contains("example.test"))
         }
+    }
+
+    @Test
+    fun `standing refusals point at the saved scope and native continue entry`() {
+        val notGranted = PhoneToolProtocol.fixedMessage(PhoneToolCodes.NOT_GRANTED)
+        val blocked = PhoneToolProtocol.fixedMessage(PhoneToolCodes.STANDING_BLOCKED)
+
+        for (message in listOf(notGranted, blocked)) {
+            assertTrue(message.contains("saved standing scope may still exist"))
+            assertTrue(message.contains("Do not re-pair"))
+            assertTrue(!message.contains("will recover automatically"))
+            assertTrue(!message.contains("will resume automatically"))
+        }
+        assertTrue(notGranted.contains("waiting task"))
+        assertTrue(notGranted.contains("native continue entry"))
+        assertTrue(!notGranted.contains("Ask the person to grant it on the phone."))
+        assertTrue(blocked.contains("native waiting/continue entry"))
+        assertTrue(blocked.contains("Only the person can clear the block"))
+        assertTrue(blocked.contains("cannot resume or recover it automatically"))
+    }
+
+    @Test
+    fun `unknown outcome stays non-repeatable and never auto-resumes`() {
+        val message = PhoneToolProtocol.fixedMessage(PhoneToolCodes.OUTCOME_UNKNOWN)
+        assertTrue(message.contains("Do not repeat"))
+        assertTrue(!message.contains("retry", ignoreCase = true))
+        assertTrue(!message.contains("clear", ignoreCase = true))
+        assertTrue(!message.contains("resume automatically", ignoreCase = true))
     }
 
     @Test

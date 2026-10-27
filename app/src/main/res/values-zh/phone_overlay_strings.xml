@@ -128,6 +128,7 @@
     <string name="phone_overlay_retained_note">会一直留在这里，直到你处理。结束任务是另一个操作。</string>
     <string name="phone_overlay_btn_open_chat">打开聊天（代理继续工作）</string>
     <string name="phone_overlay_btn_continue_in_chat">在聊天旁继续…</string>
+    <string name="phone_overlay_btn_continue_after_need_user">我处理好了，让代理继续…</string>
 
     <!-- 结束确认 -->
     <string name="phone_overlay_end_title">结束任务？</string>

@@ -128,6 +128,7 @@
     <string name="phone_overlay_retained_note">Kept here until you handle it. Ending the task is separate.</string>
     <string name="phone_overlay_btn_open_chat">Open chat (keeps the agent going)</string>
     <string name="phone_overlay_btn_continue_in_chat">Continue beside the chat…</string>
+    <string name="phone_overlay_btn_continue_after_need_user">I\'m done, let the agent continue…</string>
 
     <!-- End confirmation -->
     <string name="phone_overlay_end_title">End the task?</string>

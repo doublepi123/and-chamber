@@ -41,6 +41,9 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   the fail-closed standing pause projection and fresh-gated person resume coordinator, the shared
   startup/continuation observation loop (one 15 s budget, only explicit window transitions retried,
   first typed failure retained), the lazy tool starter adapter and the one-shot continuation sender.
+  A failed continuation keeps the same task identity/binding and latest attempted epoch, publishes a
+  native stop receipt instead of abandoning the key, and the status getter projects the same
+  immutable screen facts (`taskRetained`, `taskState`, continuation state/failure) read-only.
 - `overlay/progress/`: bounded task/event store and native event ports. Task identity is stable across
   grant epochs; model narration stays unverified. Handoff/end require native stop receipts.
 - `overlay/safety/`: dynamic mode gate, real WindowManager witnesses, geometry-generation policy and
@@ -101,6 +104,20 @@ person confirmation may continue: the same retained task/session/runtime gets a 
 observation and exactly one fixed wake-up prompt through the launch-guarded `LocalApiClient` to the
 original session. A failed send is not retried and does not roll back an established task; no model
 or tool text is treated as business success.
+
+The handoff separates `NeedUser` from a person `TakenOver`. A model `need_user` keeps the original
+task retained (`taskRetained`, `taskState=WAITING_USER`) without a live grant; the native title says
+the agent is waiting and the mapper keeps a halted task Active even when a needs-check record exists.
+A transient busy snapshot is `HIERARCHY_NOT_IDLE` but remains READY on the same grant/task and does
+not become a need-user handoff. A pre-wake failure with no recovery grant, or an exactly rolled-back
+attempt, records `NOT_RESUMED` plus a fixed failure reason while keeping the same task key/history
+and latest attempted epoch/native stop receipt; the store may project STOPPING, but the task is not
+abandoned and a fresh person confirmation may create a new grant/Observe. After a real recovery, the
+one fixed wake is either `DELIVERED` or conservatively `FAILED`; `FAILED` is never re-sent and never
+becomes retryable merely because no grant is live. The overlay phase takes the explicit NeedUser
+halt fact before a stale `WAITING_USER` projection; explicit TakenOver is not relabelled by that
+projection, and unknown/closed/Ended/new-live-grant facts keep their priority. The read-only status
+fields never authorize, and no tool action/schema/permission/overlay grant is added.
 
 A standing block with no retained task is projected as a pause, not as Ready. The mapper maps all six
 native reasons exhaustively, fails closed to `OutcomeUnknown` when a block lost its reason, and does
@@ -169,10 +186,14 @@ save/restart with the real lease flag, and the real built-in single-choice quest
 model turn, Save count exactly one, first unknown not positioned/not resent, two clean end-to-end
 runs) are API 35/x86_64 emulator evidence only. The paused standing recovery (permanent fixture-only
 scope after runtime restart/reconnect, no chat prompt on resume, unchanged scope/epoch, fresh
-`RUNNING` request) is also API 35/x86_64 emulator evidence only. A separate regression on the same
-lane covered a stopped task's existing **Continue** path after a new-task `need_user` pause: one
-fixed wake-up, same-session fixture input and an independent target read-back; the new no-task
-resume does not replace it. A separate API 37/arm64 tablet follow-up covered direct input, overlay
+`RUNNING` request) is also API 35/x86_64 emulator evidence only. The handoff follow-up on the same
+lane covered a real need-user retained task, the busy-first-confirmation `NOT_RESUMED` retry, a
+successful fresh second confirmation with exactly one original-session wake, transient busy remaining
+READY, a second stop plus isolated wake-fault `FAILED` without resend, and explicit End/dismiss. It is
+API 35 emulator evidence only and does not extend the tablet or real-model claims. A separate
+regression on the same lane covered a stopped task's existing **Continue** path after a new-task
+`need_user` pause: one fixed wake-up, same-session fixture input and an independent target read-back;
+the new no-task resume does not replace it. A separate API 37/arm64 tablet follow-up covered direct input, overlay
 handoff/continuation, capture and consecutive task ownership; it does not cover these newer features.
 Broad OEM behavior, TalkBack, API 37 new-feature behaviour and real-model reasoning quality are not
 established by that evidence. No new device instrumentation was executed for the paused-recovery

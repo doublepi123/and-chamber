@@ -3,6 +3,7 @@ package io.andchamber.app.phone.android
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.standing.PhoneOpenAppResult
 import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskContinuationStatus
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStarter
 import kotlinx.coroutines.CoroutineDispatcher
@@ -26,6 +27,9 @@ internal class PhoneIntegrationTaskStarter(
     override val available: Boolean = true
 
     override fun standing(): PhoneStandingView? = owner().standingViewSnapshot()
+
+    /** Same lazy provider pattern: the native integration publishes a volatile redacted snapshot. */
+    override fun continuation(): PhoneTaskContinuationStatus? = owner().continuationViewSnapshot()
 
     override suspend fun request(
         sessionId: String,

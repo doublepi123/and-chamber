@@ -18,12 +18,14 @@ import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.core.PhoneSnapshot
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import io.andchamber.app.phone.standing.PhoneOpenAppResult
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingGrantResult
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.phone.standing.PhoneStandingScope
 import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskContinuationStatus
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
 import io.andchamber.app.phone.standing.PhoneTaskStarter
@@ -264,6 +266,9 @@ internal class FakeTaskStarter(
 
     /** When set, [request] returns it verbatim (used to exercise stale/odd native results). */
     var startOverride: PhoneTaskStartResult? = null
+
+    /** Read-only continuation projection; null by default like an older backend. */
+    var continuationStatus: PhoneTaskContinuationStatus? = null
     val requests = mutableListOf<Triple<String, String, String>>()
     val opened = mutableListOf<String>()
     val aborted = mutableListOf<Pair<Long, PhoneTaskKey>>()
@@ -274,6 +279,9 @@ internal class FakeTaskStarter(
 
     override fun standing(): PhoneStandingView? =
         if (!availableFlag) null else PhoneStandingView(apps, actions, windowEndsMs)
+
+    override fun continuation(): PhoneTaskContinuationStatus? =
+        if (!availableFlag) null else continuationStatus
 
     override suspend fun request(
         sessionId: String,

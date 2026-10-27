@@ -73,6 +73,33 @@ are preserved unchanged, the question/notice text stays bounded, and all prompt 
 notice kinds use exhaustive `when` branches rather than runtime string lookup. A future native state
 therefore requires a compile-time mapping update.
 
+## Need-you handoff and continue layout follow-up (API 35 / x86_64)
+
+A later API 35 / x86_64 follow-up re-checked the "agent asked for you" handoff after the panel and
+native stopped-card layout changed. It used an independent debug package, the synthetic fixture
+app, the real native controller and the production overlay; the final runs used an APK built from
+the final layout source. Model decisions still came from the deterministic fixture. An observer
+reviewed the two latest screenshots of the final layout; raw screenshots and traces stay outside
+this repository.
+
+| Case | Evidence |
+|---|---|
+| Continue is visible without scrolling | Expanded **Your turn** panel after a real `need_user`: the pinned **I'm done, let the agent continue…** button is fully visible on the first screen. The chat's plain notice and **Recent** scroll in the body below and do not push it away. |
+| The overlay entry is navigation only | Tapping it opens the native confirmation. Before that confirmation, epoch, no-grant state and the original chat context are unchanged; the overlay grants nothing. |
+| A busy first continue is not resumed | A first person confirmation while the fixture page was busy returned `NOT_RESUMED` with `SCREEN_NOT_IDLE`: task still retained, no grant, no chat wake-up. The overlay kept showing **Your turn** (`WAITING_USER`), not a false unknown result. |
+| Not resumed screen leads with the real cause | The native screen showed, in order: the status strip, **Not resumed yet, task kept** with the fixed technical cause, a fully visible **Confirm continue again…** button, then task details and open-app. It did not repeat the original manual-step request and showed no ended or "you took over" title. |
+| A second confirmation continues the same task | After the page settled, a second person confirmation created a fresh grant and observation, woke the same chat once and the fixture recorded Save once. No new request replaced the original task. |
+| Unsafe states stay closed | JVM UI/native policy regressions verify that an unknown outcome, an unconfirmed stop, an expired scope or a not-ready state still disables continue. No new forced-device unknown or permission-revoke run is claimed here. The overlay never grants directly. |
+| Stop controls are not demoted while a continue runs | UI ordering tests verify that only an idle or not-resumed settled stop moves continue above the task details (and take over / end right below the card). While a continue is sending, delivered or failed, take over / end stay at the top. Reordering does not change continue eligibility or the single chat wake-up. |
+
+The full flow was repeated on the APK built from the final layout source and passed. This evidence
+covers the default English text at the current phone viewport only. Large font, landscape, TalkBack,
+physical devices and API 37 were not re-checked for the new layout, and earlier layout or
+compatibility evidence must not be read as covering the pinned button or the reordered card. The
+fixture's continuation is deterministic; it says nothing about a real model's reasoning. The
+behaviour boundaries are described in [phone control](phone-control.md); the base flow is in
+[the phone-control verification](testing-phone-control.md).
+
 ## Safety probe and regression checks
 
 A separate real `TYPE_APPLICATION_OVERLAY` probe first established the platform mechanics:

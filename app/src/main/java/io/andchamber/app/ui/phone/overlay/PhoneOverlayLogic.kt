@@ -38,15 +38,45 @@ internal fun panelActions(state: PhoneOverlayState): List<OverlayAction> {
         extra += OverlayAction.OpenChat
     }
     if (extra.isEmpty()) return base
-    // Continue goes right after the primary; open chat sits before the end action.
+    // Continue goes right after the primary; open chat sits before the end action. When the agent
+    // asked for the person, continuing is the main way on, so it becomes the panel's first button.
+    // It still only opens the native confirmation (the same navigation entry); nothing is granted
+    // or resumed from the overlay.
     val out = base.toMutableList()
-    if (OverlayAction.ContinueInChat in extra) out.add(minOf(1, out.size), OverlayAction.ContinueInChat)
+    if (OverlayAction.ContinueInChat in extra) {
+        out.add(if (state.phase == OverlayPhase.NeedUser) 0 else minOf(1, out.size), OverlayAction.ContinueInChat)
+    }
     if (OverlayAction.OpenChat in extra) {
         val endAt = out.indexOf(OverlayAction.End).takeIf { it >= 0 } ?: out.size
         out.add(endAt, OverlayAction.OpenChat)
     }
     return out
 }
+
+/**
+ * The one action pinned right under the panel header, outside the scrolling body, so notices and
+ * events can never push it off screen: the existing continue entry when the agent asked for the
+ * person and continuing is offered. Same navigation as the list button (opens the native
+ * confirmation); never a grant. Null otherwise, and never on the demo or an end confirmation.
+ */
+internal fun pinnedPanelAction(state: PhoneOverlayState): OverlayAction? {
+    if (state.demo || state.endConfirm || state.phase != OverlayPhase.NeedUser) return null
+    return panelActions(state).firstOrNull()?.takeIf { it == OverlayAction.ContinueInChat }
+}
+
+/** The buttons left for the scrolling body: [panelActions] without the pinned one (never twice). */
+internal fun bodyPanelActions(state: PhoneOverlayState): List<OverlayAction> {
+    val pinned = pinnedPanelAction(state) ?: return panelActions(state)
+    return panelActions(state).filter { it != pinned }
+}
+
+/** The continue button's words: "I've done it" when the agent asked for the person. */
+internal fun continueInChatLabel(phase: OverlayPhase): Int =
+    if (phase == OverlayPhase.NeedUser) {
+        io.andchamber.app.R.string.phone_overlay_btn_continue_after_need_user
+    } else {
+        io.andchamber.app.R.string.phone_overlay_btn_continue_in_chat
+    }
 
 /**
  * Splits panel buttons into full-width rows and one trailing row for the low-emphasis pair

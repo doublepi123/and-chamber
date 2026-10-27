@@ -200,6 +200,7 @@ internal fun PhoneHaltReason.label(): Int =
     when (this) {
         PhoneHaltReason.Paused -> R.string.phone_halt_paused
         PhoneHaltReason.TakenOver -> R.string.phone_halt_taken_over
+        PhoneHaltReason.NeedUser -> R.string.phone_halt_need_user
         PhoneHaltReason.Expired -> R.string.phone_halt_expired
         PhoneHaltReason.HostReturned -> R.string.phone_halt_host_returned
         PhoneHaltReason.TargetLeft -> R.string.phone_halt_target_left

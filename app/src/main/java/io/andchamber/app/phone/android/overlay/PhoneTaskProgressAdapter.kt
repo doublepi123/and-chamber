@@ -12,6 +12,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskSnapshot
+import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -117,6 +118,20 @@ internal class PhoneTaskProgressAdapter(
     ): PhoneOverlayTaskBinding? =
         synchronized(lock) {
             bound?.takeIf { it.key() == key && it.epoch == epoch }
+        }
+
+    /**
+     * Read-only retained state from the same bound binding and progress snapshot the overlay
+     * shows. It is null unless the bound task and the current store snapshot are the same key, so
+     * an abandoned binding, a different newer owner, or a stale store snapshot cannot leak an old
+     * state. This is a display fact only: it never makes the task live and grants nothing.
+     */
+    fun retainedTaskState(): PhoneTaskState? =
+        synchronized(lock) {
+            val binding = bound ?: return null
+            val snapshot = store.snapshot() ?: return null
+            if (snapshot.key != binding.key()) return null
+            snapshot.state
         }
 
     fun snapshot(): PhoneTaskSnapshot? = progress.value?.snapshot

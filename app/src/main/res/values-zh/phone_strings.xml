@@ -333,7 +333,7 @@
     <string name="phone_continue_delivered_title">已通知聊天继续</string>
     <string name="phone_continue_delivered_body">可以在聊天或浮窗里看进展。</string>
     <string name="phone_continue_failed_title">没能联系到聊天</string>
-    <string name="phone_continue_failed_body">没有重发任何操作。请打开聊天再说一次。</string>
+    <string name="phone_continue_failed_body">没能确认这次继续的结果。请查看手机和聊天；没有重发任何操作。</string>
     <string name="phone_continue_failed_running_body">任务的权限已经恢复，但没能通知聊天继续，也没有重发任何操作。请打开聊天看看现在的情况；如果不想让它操作，可以暂停或接管。</string>
     <string name="phone_continue_blocked_settling">停止确认后才能继续。</string>
     <string name="phone_continue_blocked_check">请先在应用里核对上一操作。</string>
@@ -356,4 +356,25 @@
     <string name="phone_standing_resume_use_task">有一个停下的任务在等你，请在上方卡片里继续或结束它。</string>
     <string name="phone_standing_resume_blocked_task">当前任务结束后才能恢复。</string>
     <string name="phone_standing_resume_blocked_unchecked">有一步可能已经生效，还没有核对。请先核对上一步的结果；这里不会自动解除暂停。</string>
+    <string name="phone_halt_need_user">代理请你处理</string>
+    <string name="phone_halt_need_user_title">代理在等你</string>
+    <string name="phone_halt_need_user_body">代理在 %1$s 里停下，请你亲自处理一步；之后它没有再操作。处理好后点下面的按钮，原任务会接着做，不用重新配对，也不用重新设置范围。代理看不到你输入的内容。</string>
+    <string name="phone_control_waiting_you">等你处理 · 由你操作</string>
+    <string name="phone_continue_after_need_user">我处理好了，让代理继续…</string>
+    <string name="phone_continue_again">再次确认继续…</string>
+    <string name="phone_continue_not_resumed_title">暂未恢复，原任务保留</string>
+    <string name="phone_continue_not_resumed_body">代理没有拿回权限，也没有重发任何操作。任务还在这里；原因解决后可以再次确认继续。</string>
+    <string name="phone_continue_failure_not_ready">当时聊天使用还没就绪。</string>
+    <string name="phone_continue_failure_scope">你保存的范围已不允许这样做。</string>
+    <string name="phone_continue_failure_stop_channel">无法显示停止入口。</string>
+    <string name="phone_continue_failure_target">没能回到任务所在的应用。</string>
+    <string name="phone_continue_failure_screen_not_idle">页面还在变化，暂时无法取得有效读屏。这本身不表示连接断开。</string>
+    <string name="phone_continue_failure_read_timeout">重新读取屏幕用时太长。</string>
+    <string name="phone_continue_failure_window_unstable">读取时屏幕一直在变化。</string>
+    <string name="phone_continue_failure_connection_lost">手机控制连接当前不可用。</string>
+    <string name="phone_continue_failure_cancelled">被更新的变化取消了。</string>
+    <string name="phone_continue_failure_other">出了点问题。</string>
+    <string name="phone_continue_blocked_sending">上一次继续还在处理中。</string>
+    <string name="phone_continue_blocked_already">这次停止已经继续过了，聊天只会被提醒一次。请到聊天里查看。</string>
+    <string name="phone_standing_resume_new_task">原任务已不在。恢复后，请回聊天发起新任务。</string>
 </resources>

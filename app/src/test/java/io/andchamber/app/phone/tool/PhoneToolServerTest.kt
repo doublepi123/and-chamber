@@ -16,7 +16,11 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneTaskContinuationFailure
+import io.andchamber.app.phone.standing.PhoneTaskContinuationState
+import io.andchamber.app.phone.standing.PhoneTaskContinuationStatus
 import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
@@ -977,11 +981,105 @@ class PhoneToolServerTest {
             val status = httpPost(fixture.port, toolBody("ses-a", "s1", input("status")))
             assertTrue(status.ok())
             assertEquals("true", status.data()["taskPresent"].toString())
+            // An older implementer has no retained/continuation port: the new fields stay false/null.
+            assertEquals("false", status.data()["taskRetained"].toString())
+            assertEquals("null", status.data()["taskState"].toString())
+            assertEquals("null", status.data()["continuationState"].toString())
+            assertEquals("null", status.data()["continuationFailure"].toString())
             assertFalse(status.body.contains("task-secret-id"))
             assertFalse(status.body.contains("runtime-secret-id"))
             assertFalse(status.body.contains("summary"))
             assertFalse(status.body.contains("packageName"))
             assertFalse(status.body.contains("events"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `status reports a retained waiting task without making it live or claiming the route`() = runBlocking {
+        val key = PhoneTaskKey("task-1", "runtime-1")
+        val events =
+            RecordingTaskEvents(
+                currentKey = null,
+                retainedState = PhoneTaskState.WAITING_USER,
+            )
+        val fixture = PhoneServerFixture(taskEvents = events)
+        try {
+            fixture.granted()
+            val stoppedEpoch = fixture.controller.state.value.epoch
+            // The real core need_user stop path advances the epoch and drops the grant.
+            fixture.controller.revoke()
+            val liveEpoch = fixture.controller.state.value.epoch
+            assertTrue(liveEpoch > stoppedEpoch)
+            assertNull(fixture.controller.state.value.grant)
+            fixture.taskStarter.continuationStatus =
+                PhoneTaskContinuationStatus(
+                    PhoneTaskContinuationState.NOT_RESUMED,
+                    PhoneTaskContinuationFailure.NOT_READY,
+                )
+
+            val status = httpPost(fixture.port, toolBody("ses-a", "s1", input("status")))
+            assertTrue(status.ok())
+            assertEquals(liveEpoch, status.epoch())
+            // Old field keeps its live-only meaning: a retained task is not a live-epoch task.
+            assertEquals("false", status.data()["taskPresent"].toString())
+            assertEquals("true", status.data()["taskRetained"].toString())
+            assertEquals(
+                "WAITING_USER",
+                status.data()["taskState"]!!.toString().trim('"'),
+            )
+            assertEquals(
+                "NOT_RESUMED",
+                status.data()["continuationState"]!!.toString().trim('"'),
+            )
+            assertEquals(
+                "NOT_READY",
+                status.data()["continuationFailure"]!!.toString().trim('"'),
+            )
+            // No authority was created or claimed by the status read.
+            assertEquals("[]", status.data()["grantedActions"].toString())
+            assertNull(fixture.controller.state.value.grant)
+            assertFalse(status.body.contains("task-1"))
+            assertFalse(status.body.contains("runtime-1"))
+            assertFalse(status.body.contains("ses-a"))
+            assertFalse(status.body.contains("need_user"))
+
+            // A recorded Failed is projected as-is with no failure reason; still no authority.
+            fixture.taskStarter.continuationStatus =
+                PhoneTaskContinuationStatus(PhoneTaskContinuationState.FAILED)
+            val failed = httpPost(fixture.port, toolBody("ses-b", "s1b", input("status")))
+            assertTrue(failed.ok())
+            assertEquals("FAILED", failed.data()["continuationState"]!!.toString().trim('"'))
+            assertEquals("null", failed.data()["continuationFailure"].toString())
+            assertEquals("true", failed.data()["taskRetained"].toString())
+            assertEquals("[]", failed.data()["grantedActions"].toString())
+
+            // A frozen old-epoch event is still refused by the real server epoch gate.
+            val stale = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "s2",
+                    input("progress", extra = mapOf("epoch" to stoppedEpoch, "phase" to "late")),
+                ),
+            )
+            assertEquals("EPOCH_CHANGED", stale.code())
+            // A mutation after the revoke is still NOT_GRANTED, retained projection or not.
+            val tap = httpPost(fixture.port, tapBody("obs-1", callId = "s3"))
+            assertEquals(200, tap.status)
+            assertEquals("NOT_GRANTED", tap.code())
+            // Status did not take the route or create authority: a current-epoch event is still
+            // refused for lack of a grant instead of being admitted by the retained projection.
+            val current = httpPost(
+                fixture.port,
+                toolBody(
+                    "ses-a",
+                    "s4",
+                    input("progress", extra = mapOf("epoch" to liveEpoch, "phase" to "x")),
+                ),
+            )
+            assertEquals("NOT_GRANTED", current.code())
         } finally {
             fixture.close()
         }
@@ -1565,6 +1663,7 @@ class PhoneToolServerTest {
     private class RecordingTaskEvents(
         var currentKey: PhoneTaskKey? = null,
         var expectedEpoch: Long? = null,
+        var retainedState: PhoneTaskState? = null,
         var reply: (PhoneTaskEvent) -> PhoneTaskEventReply = { PhoneTaskEventReply.Recorded(1) },
     ) : PhoneTaskEventHandler {
         override val available: Boolean = true
@@ -1576,6 +1675,8 @@ class PhoneToolServerTest {
             val expected = expectedEpoch
             return if (expected != null && expected != epoch) null else currentKey
         }
+
+        override fun retainedTaskState(): PhoneTaskState? = retainedState
 
         override suspend fun handle(
             key: PhoneTaskKey,

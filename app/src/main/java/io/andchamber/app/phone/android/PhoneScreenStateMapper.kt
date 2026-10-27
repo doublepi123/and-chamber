@@ -156,6 +156,10 @@ internal fun phoneScreenState(
     val task: PhoneTask =
         when {
             control is PhoneControl.Agent -> PhoneTask.Active(control.lease.target, control.lease.summary)
+            // A live halted/retained task is still the task the person is recovering, even when a
+            // persisted needs-check record exists from an earlier stop. The record is evidence, not
+            // a replacement task and never proves the work ended.
+            control is PhoneControl.Halted -> PhoneTask.Active(control.lease.target, control.lease.summary)
             record != null ->
                 PhoneTask.Ended(
                     PhoneTaskResult(
@@ -165,8 +169,6 @@ internal fun phoneScreenState(
                         items = emptyList<PhoneResultItem>(),
                     ),
                 )
-            control is PhoneControl.Halted ->
-                PhoneTask.Active(control.lease.target, control.lease.summary)
             else -> PhoneTask.None
         }
 

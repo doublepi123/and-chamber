@@ -671,6 +671,12 @@ internal class PhoneOverlayCoordinator(
         val leasePresentation =
             overlayLeasePresentation(lease?.expiresAtMs?.takeIf { screen.control is PhoneControl.Agent })
         val halted = screen.control as? PhoneControl.Halted
+        val explicitNeedUser =
+            liveEpoch == null &&
+                halted != null &&
+                halted.reason == PhoneHaltReason.NeedUser &&
+                halted.confirmed &&
+                halted.lastAction != PhoneLastAction.MayStillApply
         // A task-state fact only speaks for its own epoch: a stale waiting/ended projection must not
         // label a newer grant, and a resume after a stop is a new live epoch of the same task.
         val taskState =
@@ -695,6 +701,7 @@ internal class PhoneOverlayCoordinator(
                 // A result the person closed (or the bounded lifetime ended) stays closed while no new
                 // lease is live; a late progress emission must not reopen it.
                 closed = state.phase == PhoneOverlayPhase.ENDED && liveEpoch == null,
+                explicitNeedUser = explicitNeedUser,
             )
         val nextPhase =
             derived ?: when (state.phase) {

@@ -140,7 +140,17 @@ class PhoneOverlayFailureLogicTest {
         )
         assertEquals(
             PhoneOverlayStopReason.AgentAskedForYou,
-            overlayStopReasonFor(PhoneHaltReason.TakenOver, PhoneTaskState.WAITING_USER),
+            overlayStopReasonFor(PhoneHaltReason.NeedUser, PhoneTaskState.STOPPING),
+        )
+        assertEquals(
+            PhoneOverlayStopReason.AgentAskedForYou,
+            overlayStopReasonFor(PhoneHaltReason.NeedUser, null),
+        )
+        // An explicit takeover is newer than a stale waiting projection from an old need_user event.
+        assertNull(overlayStopReasonFor(PhoneHaltReason.TakenOver, PhoneTaskState.WAITING_USER))
+        assertEquals(
+            PhoneOverlayStopReason.AgentAskedForYou,
+            overlayStopReasonFor(null, PhoneTaskState.WAITING_USER),
         )
         // A plain pause / person take-over has no "why it stopped" badge.
         assertNull(overlayStopReasonFor(PhoneHaltReason.Paused, PhoneTaskState.ACTIVE))

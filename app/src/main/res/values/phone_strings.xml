@@ -333,7 +333,7 @@
     <string name="phone_continue_delivered_title">The chat was told to continue</string>
     <string name="phone_continue_delivered_body">Follow it in the chat or the overlay.</string>
     <string name="phone_continue_failed_title">The chat couldn\'t be reached</string>
-    <string name="phone_continue_failed_body">Nothing was re-sent. Open the chat and ask again.</string>
+    <string name="phone_continue_failed_body">The continuation result couldn\'t be confirmed. Check the phone and the chat; nothing was re-sent.</string>
     <string name="phone_continue_failed_running_body">The task\'s access is active again, but the chat wasn\'t told to continue, and nothing was re-sent. Open the chat to see where it stands, or pause or take over if you don\'t want it to act.</string>
     <string name="phone_continue_blocked_settling">Available once the stop is confirmed.</string>
     <string name="phone_continue_blocked_check">Check the last action in the app first.</string>
@@ -356,4 +356,25 @@
     <string name="phone_standing_resume_use_task">A stopped task is waiting. Continue or end it in the card above.</string>
     <string name="phone_standing_resume_blocked_task">Available once the current task is over.</string>
     <string name="phone_standing_resume_blocked_unchecked">A step may already have taken effect and hasn\'t been checked yet. Check the last result first; this entry won\'t clear the pause automatically.</string>
+    <string name="phone_halt_need_user">the agent asked for you</string>
+    <string name="phone_halt_need_user_title">The agent is waiting for you</string>
+    <string name="phone_halt_need_user_body">It stopped in %1$s and asked you to do one step yourself; it took no further steps. When you\'re done, tap the button below and the same task carries on. No need to pair again or set the scope again. The agent doesn\'t see what you type.</string>
+    <string name="phone_control_waiting_you">Waiting for you · you\'re in control</string>
+    <string name="phone_continue_after_need_user">I\'m done, let the agent continue…</string>
+    <string name="phone_continue_again">Confirm continue again…</string>
+    <string name="phone_continue_not_resumed_title">Not resumed yet, task kept</string>
+    <string name="phone_continue_not_resumed_body">The agent didn\'t get access back and nothing was re-sent. The task stays here; you can confirm continue again once the reason is fixed.</string>
+    <string name="phone_continue_failure_not_ready">Chat use wasn\'t ready at that moment.</string>
+    <string name="phone_continue_failure_scope">Your saved scope no longer allows it.</string>
+    <string name="phone_continue_failure_stop_channel">The stop entry couldn\'t be shown.</string>
+    <string name="phone_continue_failure_target">The task\'s app couldn\'t be brought back.</string>
+    <string name="phone_continue_failure_screen_not_idle">The page kept changing, so no stable screen hierarchy was available. This alone does not mean the connection dropped.</string>
+    <string name="phone_continue_failure_read_timeout">Reading the screen again took too long.</string>
+    <string name="phone_continue_failure_window_unstable">The screen kept changing while it was read.</string>
+    <string name="phone_continue_failure_connection_lost">The phone-control connection is no longer available.</string>
+    <string name="phone_continue_failure_cancelled">It was cancelled by a newer change.</string>
+    <string name="phone_continue_failure_other">Something went wrong.</string>
+    <string name="phone_continue_blocked_sending">The last continue is still being handled.</string>
+    <string name="phone_continue_blocked_already">This stop was already continued, and the chat is told only once. Look in the chat.</string>
+    <string name="phone_standing_resume_new_task">The original task is gone. After resuming, ask in the chat to start a new one.</string>
 </resources>

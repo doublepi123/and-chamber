@@ -120,6 +120,48 @@ Typed classification and retained behavior:
   rolls back exactly that epoch/task and propagates the original cancellation, leaving a newer owner
   unaffected. The existing scope and person-resume paths are unchanged.
 
+### Handoff and continuation follow-up (API 35 / x86_64)
+
+This follow-up used the real App on the covered API 35 / x86_64 emulator with a separate debug
+application identity, the synthetic fixture target and the deterministic local protocol fixture. It
+is API 35 emulator evidence only: not API 37/arm64 tablet, physical-device, real-model reasoning or
+general OEM evidence. The wake-fault case was an isolated emulator-only negative; no private host,
+port, UID, root rule or screenshot path is repository evidence. No new device instrumentation was
+executed.
+
+Final handoff checks passed: 2,070 JVM tests (no failures, errors or skips), 361 Node tests
+(360 passed and one existing skip), 72 Python tests, Android lint and debug/AndroidTest APK packaging.
+The Gradle checks ran serially; lint reported warnings/information, not a zero-warning result.
+
+The old installed v30 build reproduced both handoff defects: after `need_user` advanced the core
+epoch, status showed `NO_GRANT` / `NEED_USER` / `taskPresent=false`, while the native UI kept the
+original Continue entry but labelled the task Ended / You took over. A 30-second busy target made the
+first native Continue fail before any wake; the UI claimed the chat was unreachable, and a second
+confirmation was a no-op with the epoch and main-chat context unchanged.
+
+The current handoff surface keeps `taskPresent` as the strict live-epoch fact and adds read-only
+`taskRetained`, `taskState`, `continuationState` and fixed `continuationFailure` facts from the same bound task
+store and screen projection. They never grant, resume or widen authority; there is no new tool
+input action/schema, permission or overlay grant.
+
+| Flow | Evidence | Result |
+|---|---|---|
+| Manual `need_user` | Status `NO_GRANT` / `NEED_USER` / `taskPresent=false`, `taskRetained=true`, `taskState=WAITING_USER`; native title says the agent is waiting and the task is not Ended. Overlay Continue only navigates; epoch, no-grant and main-chat context stay unchanged until the native dialog is confirmed. | Passed |
+| Retry `NotResumed` | A 30-second busy target before the first wake produced `NOT_RESUMED` + `SCREEN_NOT_IDLE`, `taskRetained=true`, `taskState=STOPPING`, phase `NO_GRANT`, still connected, zero new main-chat messages and zero wake prompts. The UI said “not resumed yet, task kept”, not “chat unreachable” or a manual redo. | Passed |
+| Second confirmation after recovery | After the busy target cleared, a new person confirmation performed a fresh native epoch/route/Observe and reached `DELIVERED` / `ACTIVE`. The fixed wake appeared exactly once in the original session; the request tool count stayed at the original task's one, with one tap and one independent Save read-back. The final-layout APK repeated the same negative-then-success flow. | Passed |
+| Transient busy during a normal task | A normal running snapshot under the same 30-second busy fixture returned `HIERARCHY_NOT_IDLE`, but phase stayed `READY`, grant epoch and connection unchanged, `standingBlocked=false`, task `ACTIVE`; no `need_user` was created. After the page stabilized, a fresh snapshot on the same epoch succeeded without another native confirmation. This is native behavior, not a claim that a real model always follows the description. | Passed |
+| Second stop and `Failed` wake | A second real manual stop reset the previous `DELIVERED` state to `IDLE`. After native recovery, an isolated wake HTTP fault produced `FAILED` while phase stayed `READY` / `ACTIVE`, connected and unblocked; the original session's fixed-wake count stayed one before and one after, and the owned fault-injection rule was removed. An explicit new chat read-only snapshot needed no reauthorization and stayed on the same epoch; `Failed` remained non-retryable. | Passed |
+| Explicit finish and dismissal | A model `finish` with native stop confirmation produced `ENDED_PENDING_CHECK` / `taskRetained=true` / no grant; closing the native result cleared `taskRetained` to false and `taskState` to null. | Passed |
+
+The final layout's first screen was inspected with Observer: the pinned overlay-Continue control was
+visible; the native retry state presented “Not resumed yet”, a fixed technical cause and the Confirm
+again action directly, without the old manual instructions above it. No screenshot path or identifier
+is recorded here. Focused JVM coverage includes the explicit NeedUser overlay projection, stale
+`WAITING_USER` versus explicit takeover, retained same-task key/epoch after a failed continuation,
+core-stopped read failures, mapper halted-versus-record priority and the continuation failure policy.
+The descriptor/copy tests do not establish how often a real model will choose `need_user`; the
+running-busy check above establishes that the native program does not create that handoff itself.
+
 ## Evidence matrix
 
 | Claim | Evidence | Result |
@@ -205,6 +247,10 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
   budget with its reporting-only margin, the monotonic completion gate, and unchanged mutation
   unknown/no-replay. It also adds no new device instrumentation. Full-suite totals are owned by the
   separate full-suite validation.
+- The handoff follow-up adds focused JVM coverage for explicit NeedUser overlay waiting versus a
+  stale `WAITING_USER` projection, explicit takeover priority, retained task key/history/epoch after
+  a failed continuation, core-stopped read failures, mapper halted-versus-record priority and the
+  continuation failure policy. Full-suite totals remain owned by the separate validation.
 
 ## Important regressions retained
 
@@ -223,6 +269,13 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
   stayed enabled, sent the original fixed wake-up once, the same session produced the fixture input
   and an independent target read-back observed it. A different-runtime binding fails closed rather
   than rebinding.
+- A native `NeedUser` is separate from a person `TakenOver`; the mapper keeps a halted retained task
+  Active even when a needs-check record exists. The read-only status adds retained/task/continuation
+  facts; those facts never authorize. A `NotResumed` retry requires no wake attempt and no recovery
+  grant (or a confirmed exact rollback of that attempt), while a post-wake `Failed` is never retried.
+- A failed continuation rolls back the new grant but keeps the same task key/history and its latest
+  attempted bound epoch plus native stop receipt; the store may remain STOPPING and old epochs stay
+  rejected. Only an explicit End/dismiss or a new task abandons the old key.
 - Startup observation has one shared 15-second budget (overlay wait plus real remaining), and only
   explicit window/geometry/target transitions retry. A busy page returns `HIERARCHY_NOT_IDLE`, not a
   blind retry loop, and the connection remains usable.
@@ -291,6 +344,17 @@ chat message or fixture transcript entry. A fresh request must then start as `RU
 tap/read-back. This path is API 35 / x86_64 only; it is not tablet evidence. The retained-task
 **Continue** regression is recorded as a separate check on the same lane and must not be merged into
 the no-task resume path.
+
+For the handoff follow-up, use the same API 35 / x86_64 identity and synthetic fixture. Trigger a real
+`need_user`, then verify the native waiting title, retained task/status fields and that overlay
+Continue only navigates. Hold the target busy through the first confirmation and verify
+`NOT_RESUMED` + `SCREEN_NOT_IDLE`, no wake and no main-chat message; clear the fixture and confirm
+again to verify a fresh epoch/route/Observe, one wake in the original session and the independent
+target read-back. A second manual stop followed by an isolated wake fault must show `FAILED` while
+the live task remains, without an automatic resend. Finish must show `ENDED_PENDING_CHECK` until the
+native result is closed. This is API 35 emulator evidence only; the old tablet base-flow section is
+not extended. Dynamic hierarchy remains unsupported and Unicode input policy is unchanged. No claim
+is made that every human intervention or every possible model misuse is eliminated.
 
 The physical tablet follow-up is limited to the cases above; no general OEM background-lifetime,
 Android 11-wide compatibility, TalkBack or long-duration survival claim is made. The input backend supports only its declared ASCII subset, not Unicode,

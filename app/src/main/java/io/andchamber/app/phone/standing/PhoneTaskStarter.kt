@@ -25,6 +25,47 @@ enum class PhoneTaskStartState {
     NEEDS_USER,
 }
 
+/**
+ * Redacted native continuation delivery, for the read-only status surface. It is a display fact,
+ * never authority: it does not say that access came back and cannot be used to resume or grant.
+ */
+enum class PhoneTaskContinuationState {
+    IDLE,
+    SENDING,
+    DELIVERED,
+    FAILED,
+
+    /**
+     * A person-confirmed continuation did not bring access back. It is reported only for a native
+     * result that explicitly did not wake/grant, or an exactly rolled-back attempt; it is not a
+     * conservative guess about an unknown outcome.
+     */
+    NOT_RESUMED,
+}
+
+/** Fixed redacted reason for [PhoneTaskContinuationState.NOT_RESUMED]. No raw text or reason string. */
+enum class PhoneTaskContinuationFailure {
+    NOT_READY,
+    SCOPE_UNAVAILABLE,
+    STOP_CHANNEL_UNAVAILABLE,
+    TARGET_UNAVAILABLE,
+    SCREEN_NOT_IDLE,
+    READ_TIMEOUT,
+    WINDOW_UNSTABLE,
+    CONNECTION_LOST,
+    CANCELLED,
+    OTHER,
+}
+
+/**
+ * Typed read-only snapshot of the native continuation. [failure] is set only for a
+ * [PhoneTaskContinuationState.NOT_RESUMED] the native side actually recorded.
+ */
+data class PhoneTaskContinuationStatus(
+    val state: PhoneTaskContinuationState,
+    val failure: PhoneTaskContinuationFailure? = null,
+)
+
 /** Fixed startup phases only; never carries page text, packages or raw exception messages. */
 enum class PhoneTaskStartFailureStage { AUTHORITY, STOP_ENTRY, TASK_BINDING, TASK_RECORD, TARGET_LAUNCH, OVERLAY, OBSERVATION }
 
@@ -70,6 +111,14 @@ interface PhoneTaskStarter {
 
     /** Only the person-confirmed apps; null when no standing scope is active. */
     fun standing(): PhoneStandingView? = null
+
+    /**
+     * Read-only native continuation delivery and its fixed failure reason, or null when the
+     * backend has no continuation fact. Display/reporting only: it never grants, resumes or
+     * widens a saved scope, and [PhoneTaskContinuationState.NOT_RESUMED] is not proof that an
+     * earlier unknown outcome was safe.
+     */
+    fun continuation(): PhoneTaskContinuationStatus? = null
 
     suspend fun request(
         sessionId: String,

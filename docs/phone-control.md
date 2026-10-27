@@ -129,6 +129,37 @@ stop does not lock that path. Opening the native screen, reconnecting or the too
 never clears a pause. An unknown outcome, a missing/revoked/inactive scope, or a lost reason stays
 fail closed; no new acknowledgement shortcuts this entry into resuming.
 
+### Handoff state flow
+
+- **Normal:** one live grant/epoch and an ACTIVE task. No handoff state is present.
+- **Transient wait:** an ordinary busy read returns `HIERARCHY_NOT_IDLE` without revoking a live
+  grant. The agent may wait and make a bounded number of fresh read-only observations, each within
+  its existing call limit. Startup still treats this as terminal within its shared budget. The live
+  task remains READY/ACTIVE on the same epoch and does not become a person handoff by itself.
+- **Manual need_user:** the native halt is `NeedUser`, separate from `TakenOver`, with the
+  `NEED_USER` standing block and no live grant. The original task stays retained
+  (`taskRetained=true`, `taskState=WAITING_USER`) and is not presented as Ended. Overlay Continue is
+  navigation only; the native person dialog is still required.
+  Ordinary chat questions, answer choices and OpenCode permission replies do not by themselves
+  require this phone handoff; a genuinely manual operation on the phone still does.
+- **Retry NotResumed:** a failure before any wake attempt and before a recovery grant, or after an
+  exact-owner rollback confirmed that no recovery grant remains, records
+  `continuationState=NOT_RESUMED` plus one fixed failure reason. The same task key/history and the
+  latest attempted epoch/native stop receipt are kept even when the store projects STOPPING. A new
+  person confirmation may create a fresh grant and Observe; this is not a replay of old mutations.
+- **Delivered / Failed wake:** only after native recovery is established is exactly one fixed
+  wake-up sent. `DELIVERED` means the API accepted that prompt, not that the business task succeeded.
+  `FAILED` means the one wake was attempted but not confirmed;
+  it is never sent again and the live grant remains. It is never treated as retryable merely because
+  no grant happens to be live.
+- **Explicit End:** native End records `ENDED_PENDING_CHECK` and keeps the needs-check evidence;
+  dismissing the result clears the retained task. Old epoch actions and events remain rejected.
+
+The read-only status surface adds `taskRetained`, `taskState`, `continuationState` and the fixed
+`continuationFailure` reason alongside the existing `taskPresent`. `taskPresent` still means a live current
+epoch; the new fields come from the same bound task store and screen facts and never grant, resume,
+or widen authority. No tool input action/schema, permission or overlay grant is added.
+
 Stopping does not undo a dispatched operation. If an outcome is unknown, check the target app
 before deciding what to do next; the app does not replay it automatically. A tool acknowledgement
 does not prove that the person's business task completed. Task results remain unconfirmed without
@@ -275,6 +306,7 @@ collapsed and nothing is resent. Source boundaries are
 | Wireless-debugging discovery | `phone/android/PhoneDiscoveryService.kt`, `PhonePortDiscovery.kt`, `PhoneDiscoveryPolicy.kt` |
 | Standing configuration/lifecycle | `phone/standing/PhoneStanding.kt`, `PhoneTaskStarter.kt`, `phone/android/PhoneStandingConfig.kt`, `PhoneIntegrationTaskStarter.kt`, `phone/core/PhoneTimeLimits.kt` |
 | Standing pause projection and resume gate | `phone/android/PhoneScreenStateMapper.kt`, `PhoneStandingConfig.kt` (`StandingResumeFacts`/`standingResumeRefusal`), `PhoneIntegration.kt` (person resume) |
+| Continuation status and retained-task projection | `phone/standing/PhoneTaskStarter.kt`, `phone/android/PhoneIntegration.kt`, `phone/android/overlay/PhoneTaskProgressAdapter.kt` |
 | Temporary pairing input | `phone/android/PhonePairingSession.kt`, `PhonePairingActionReceiver.kt` |
 | Notification question/notice bridge | `notify/SessionPromptProjection.kt`, `phone/android/overlay/PhoneTaskConversation.kt` |
 | Admission and task state | `phone/core/PhoneController.kt`, `PhoneContract.kt`, `PhoneState.kt`, `PhoneTargetPolicy.kt` |
@@ -355,3 +387,19 @@ compatibility claim. The fault host was an isolated emulator-only negative and i
 App port discovery or a real device's cause; a real user's field typed failure would still be needed
 to judge that environment. Full-suite totals are owned by the separate full-suite validation and are
 not restated here.
+
+A further API 35 / x86_64 independent-App acceptance covered the handoff flow: a real `need_user`
+kept the original task retained (`WAITING_USER`) without a live grant while the native title said the
+agent was waiting; overlay Continue only navigated, and only the native dialog confirmation resumed
+control. A 30-second busy target before the first wake produced `NOT_RESUMED` + `SCREEN_NOT_IDLE`
+with no wake and no new main-chat message; after the fixture cleared, a second person confirmation
+performed a fresh epoch/route/Observe and sent the fixed wake exactly once in the original session,
+with one tap and one independent `Save` read-back. A transient busy snapshot during a normal task
+stayed `READY` on the same grant/task and did not create a need-user handoff. A second manual stop plus
+an isolated wake fault produced `FAILED` while the live task remained ready, with no automatic resend.
+An explicit Finish kept `ENDED_PENDING_CHECK` until the native result was closed. The final layout was
+inspected on the first screen and in the retry state: overlay Continue was visible, and the native
+retry showed “not resumed yet”, the fixed technical cause and Confirm again directly. This is API 35
+emulator evidence only, not API 37/arm64 tablet, physical-device or real-model reasoning evidence;
+dynamic hierarchy remains unsupported and the Unicode input policy is unchanged. No claim is made
+that every human intervention or every possible model misuse is eliminated.

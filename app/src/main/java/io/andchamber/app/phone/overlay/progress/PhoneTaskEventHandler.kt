@@ -90,6 +90,17 @@ interface PhoneTaskEventHandler {
     fun currentTask(epoch: Long): PhoneTaskKey?
 
     /**
+     * Read-only retained native task state for the tool's status projection, or null when the
+     * native side has no retained task projection. It comes from the same retained binding and
+     * progress snapshot the overlay shows, not from the live grant epoch, so a task that a
+     * `need_user` stop already handed back can still be WAITING_USER while [currentTask] for the
+     * advanced epoch is null. It never makes a task live: operation/event admission stays
+     * live-epoch-only, and an abandoned, dismissed or ended task does not come back as waiting.
+     * The default null keeps existing handlers compatible.
+     */
+    fun retainedTaskState(): PhoneTaskState? = null
+
+    /**
      * Handles one already route/epoch-admitted model event with a typed reply. The implementation
      * must verify [epoch] is still the native current epoch and return `EPOCH_CHANGED` /
      * `STALE_TASK` for a stale event; it must never adopt a newer epoch.

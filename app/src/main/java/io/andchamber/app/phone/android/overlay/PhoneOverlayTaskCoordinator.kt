@@ -11,6 +11,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskSnapshot
+import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -93,6 +94,9 @@ internal class PhoneOverlayTaskCoordinator(
 
     override fun currentTask(epoch: Long): PhoneTaskKey? = adapter.currentTask(epoch)
 
+    /** Read-only retained state from the same binding/snapshot; never live-epoch authority. */
+    override fun retainedTaskState(): PhoneTaskState? = adapter.retainedTaskState()
+
     /**
      * Main thread. Ends exactly the retained native task/epoch (person's End after a takeover,
      * need_user or unknown outcome, or a live task). The integration persists the needs-check record;
@@ -146,6 +150,8 @@ internal class LazyPhoneTaskEventHandler(
     override val available: Boolean get() = delegate.available
 
     override fun currentTask(epoch: Long): PhoneTaskKey? = delegate.currentTask(epoch)
+
+    override fun retainedTaskState(): PhoneTaskState? = delegate.retainedTaskState()
 
     override suspend fun handle(
         key: PhoneTaskKey,

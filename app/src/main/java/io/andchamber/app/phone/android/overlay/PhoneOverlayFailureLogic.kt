@@ -68,6 +68,11 @@ internal fun overlayStopReasonFor(
     halt: PhoneHaltReason?,
     taskState: PhoneTaskState?,
 ): PhoneOverlayStopReason? {
+    // The explicit native stop facts are newer than a progress snapshot. A confirmed NeedUser halt
+    // still explains "agent asked for you" while progress is only STOPPING or temporarily missing;
+    // an explicit takeover is never relabelled by a stale WAITING_USER projection.
+    if (halt == PhoneHaltReason.NeedUser) return PhoneOverlayStopReason.AgentAskedForYou
+    if (halt == PhoneHaltReason.TakenOver) return null
     if (taskState == PhoneTaskState.WAITING_USER) return PhoneOverlayStopReason.AgentAskedForYou
     return when (halt) {
         PhoneHaltReason.Expired -> PhoneOverlayStopReason.Expired
@@ -82,6 +87,7 @@ internal fun overlayStopReasonFor(
 
         PhoneHaltReason.Paused,
         PhoneHaltReason.TakenOver,
+        PhoneHaltReason.NeedUser,
         PhoneHaltReason.OutcomeUnknown,
         null,
         -> null

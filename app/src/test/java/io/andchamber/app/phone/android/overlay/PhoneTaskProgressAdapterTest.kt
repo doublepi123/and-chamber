@@ -1,6 +1,9 @@
 package io.andchamber.app.phone.android.overlay
 
 import io.andchamber.app.phone.android.PhoneOverlayTaskBinding
+import io.andchamber.app.phone.core.PhoneActionKind
+import io.andchamber.app.phone.core.PhoneController
+import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
 import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
 import io.andchamber.app.phone.overlay.progress.PhoneProgressKind
@@ -13,6 +16,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskState
+import io.andchamber.app.phone.tool.FakePhoneDriver
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -452,5 +456,93 @@ class PhoneTaskProgressAdapterTest {
         fixture.adapter.onTaskBinding(binding(1))
         assertNull(fixture.adapter.progress.value)
         assertNull(fixture.adapter.currentTask(1))
+    }
+
+    @Test
+    fun `a need_user stop advances the core epoch but keeps the retained waiting state`() {
+        val controller =
+            PhoneController(
+                driver = FakePhoneDriver(),
+                clock = { 1_000L },
+                newObservationId = { "obs-1" },
+            )
+        controller.enable()
+        val granted = controller.grant(pkg, PhoneActionKind.values().toSet(), 60_000L)
+        val epoch = (granted as PhoneGrantResult.Granted).grant.epoch
+        val adapter =
+            PhoneTaskProgressAdapter(
+                store = PhoneProgressStore(clock = { 1_000L }),
+                stop =
+                    PhoneTaskStopPort { binding, intent ->
+                        val live = controller.state.value.grant?.epoch
+                        // The real integration stop path: exactly this live epoch, then revoke.
+                        if (intent == PhoneTaskStopIntent.TAKEOVER && live == binding.epoch) {
+                            controller.revoke()
+                            PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
+                        } else {
+                            null
+                        }
+                    },
+            )
+        adapter.onTaskBinding(binding(epoch))
+
+        val reply =
+            adapter.handleOnMain(keyA, epoch, session, PhoneTaskEvent.NeedUser("n1", "check the code"))
+        assertTrue(reply is PhoneTaskEventReply.WaitingForUser)
+
+        // The core really advanced: a live-epoch lookup for the new epoch is a false negative...
+        val liveEpoch = controller.state.value.epoch
+        assertTrue(liveEpoch > epoch)
+        assertNull(controller.state.value.grant)
+        assertNull(adapter.currentTask(liveEpoch))
+        // ...while the retained state the overlay shows still is the waiting task.
+        assertEquals(PhoneTaskState.WAITING_USER, adapter.retainedTaskState())
+        assertEquals(PhoneTaskState.WAITING_USER, adapter.snapshot()?.state)
+        // The exact retained owner is still resolvable for a later person End; no grant was recreated.
+        assertEquals(taskA, adapter.bindingFor(keyA, epoch)?.taskId)
+        assertNull(controller.state.value.grant)
+        // The retained read is a snapshot only: it did not restore a grant or a live task.
+        assertEquals(
+            PhoneTaskEventError.EPOCH_CHANGED,
+            (
+                adapter.handleOnMain(keyA, liveEpoch, session, PhoneTaskEvent.Progress("m-new", "x"))
+                    as PhoneTaskEventReply.Refused
+            ).code,
+        )
+        assertEquals(PhoneTaskState.WAITING_USER, adapter.retainedTaskState())
+    }
+
+    @Test
+    fun `retained state is not faked after an end, an abandon or a new owner`() {
+        val fixture = Fixture()
+        fixture.adapter.onTaskBinding(binding(1))
+        assertEquals(PhoneTaskState.ACTIVE, fixture.adapter.retainedTaskState())
+        fixture.adapter.handleOnMain(keyA, 1, session, PhoneTaskEvent.NeedUser("n1", "check"))
+        assertEquals(PhoneTaskState.WAITING_USER, fixture.adapter.retainedTaskState())
+
+        // The person's overlay End: ended is retained, but it must never be shown as waiting.
+        assertTrue(
+            fixture.adapter.onNativeLeaseDropped(
+                taskA,
+                runtime,
+                1,
+                PhoneProgressReason.USER_REQUESTED,
+                ended = true,
+                ack = ack,
+            ),
+        )
+        assertEquals(PhoneTaskState.ENDED_PENDING_CHECK, fixture.adapter.retainedTaskState())
+
+        // Dismiss/abandon: nothing retained, and a late binding for the old key cannot revive it.
+        fixture.adapter.onTaskBinding(null)
+        assertNull(fixture.adapter.retainedTaskState())
+        fixture.adapter.onTaskBinding(binding(1))
+        assertNull(fixture.adapter.retainedTaskState())
+
+        // A new owner replaces the projection; the old waiting state never leaks into it.
+        fixture.stop.liveEpoch = 2
+        fixture.adapter.onTaskBinding(binding(2, taskId = taskB, route = "ses-b"))
+        assertEquals(PhoneTaskState.ACTIVE, fixture.adapter.retainedTaskState())
+        assertEquals(taskB, fixture.adapter.snapshot()?.key?.taskId)
     }
 }

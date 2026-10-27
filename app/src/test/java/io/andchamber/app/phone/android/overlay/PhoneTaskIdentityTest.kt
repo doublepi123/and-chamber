@@ -92,10 +92,10 @@ class PhoneTaskIdentityTest {
     }
 
     @Test
-    fun `a confirmed waiting or ended task outranks a stale projection and a fresh active lease runs`() {
-        // A late screen emission still says "taken over"; the native waiting fact must survive it.
+    fun `an explicit takeover is not relabelled by a stale waiting projection and a live lease runs`() {
+        // Explicit native TakenOver is newer source-of-truth than an old WAITING_USER projection.
         assertEquals(
-            PhoneOverlayPhase.WAITING_USER,
+            PhoneOverlayPhase.TAKEN_OVER,
             overlayPhaseFor(
                 agentLive = false,
                 pausing = false,
@@ -105,10 +105,9 @@ class PhoneTaskIdentityTest {
                 taskState = PhoneTaskState.WAITING_USER,
             ),
         )
-        // A confirmed waiting task also survives a stale "agent live" projection; the caller filters
-        // the task state to the current epoch/owner before it reaches this pure function.
+        // A live ACTIVE task on the current lease is still the only live-run case.
         assertEquals(
-            PhoneOverlayPhase.WAITING_USER,
+            PhoneOverlayPhase.RUNNING,
             overlayPhaseFor(
                 agentLive = true,
                 pausing = false,
@@ -140,6 +139,101 @@ class PhoneTaskIdentityTest {
                 pausedConfirmed = false,
                 takenOver = false,
                 taskState = PhoneTaskState.ENDED_PENDING_CHECK,
+            ),
+        )
+    }
+
+    @Test
+    fun `explicit confirmed need-user waits even with stopping or missing progress`() {
+        assertEquals(
+            PhoneOverlayPhase.WAITING_USER,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.STOPPING,
+                explicitNeedUser = true,
+            ),
+        )
+        assertEquals(
+            PhoneOverlayPhase.WAITING_USER,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = null,
+                explicitNeedUser = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `unknown closed and ended still win over explicit need-user`() {
+        assertEquals(
+            PhoneOverlayPhase.UNKNOWN,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.STOPPING,
+                unknownOutcome = true,
+                explicitNeedUser = true,
+            ),
+        )
+        assertEquals(
+            PhoneOverlayPhase.UNKNOWN,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.UNKNOWN_OUTCOME,
+                explicitNeedUser = true,
+            ),
+        )
+        assertEquals(
+            PhoneOverlayPhase.ENDED,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.STOPPING,
+                closed = true,
+                explicitNeedUser = true,
+            ),
+        )
+        assertEquals(
+            PhoneOverlayPhase.NEEDS_CHECK,
+            overlayPhaseFor(
+                agentLive = false,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.ENDED_PENDING_CHECK,
+                explicitNeedUser = true,
+            ),
+        )
+        // A newer live grant is not reopened by an old need-user flag.
+        assertEquals(
+            PhoneOverlayPhase.RUNNING,
+            overlayPhaseFor(
+                agentLive = true,
+                pausing = false,
+                paused = false,
+                pausedConfirmed = false,
+                takenOver = false,
+                taskState = PhoneTaskState.ACTIVE,
+                explicitNeedUser = false,
             ),
         )
     }

@@ -346,7 +346,9 @@ private fun OverlayPanel(
             shadowElevation = 8.dp,
             modifier = Modifier.widthIn(min = 240.dp, max = 360.dp).heightIn(max = maxH).testTag(OverlayTags.PANEL),
         ) {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(14.dp)) {
+            // Header and the one pinned action stay put; only the body below scrolls, so long
+            // notices or events never push the main way on (continue after "need you") off screen.
+            Column(modifier = Modifier.padding(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusDot(tone = phaseTone(state.phase), size = 8.dp)
                     Spacer(Modifier.width(8.dp))
@@ -372,10 +374,17 @@ private fun OverlayPanel(
                     }
                 }
 
-                if (state.endConfirm && canRequestEnd(state.phase)) {
-                    EndConfirm(actions)
-                } else {
-                    PanelBody(state, actions, now)
+                val pinned = pinnedPanelAction(state)
+                if (pinned != null) {
+                    Spacer(Modifier.size(10.dp))
+                    PanelButton(pinned, primary = true, actions = actions, phase = state.phase)
+                }
+                Column(modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                    if (state.endConfirm && canRequestEnd(state.phase)) {
+                        EndConfirm(actions)
+                    } else {
+                        PanelBody(state, actions, now, hasPinned = pinned != null)
+                    }
                 }
             }
         }
@@ -409,6 +418,7 @@ private fun PanelBody(
     state: PhoneOverlayState,
     actions: PhoneOverlayActions,
     now: Long,
+    hasPinned: Boolean = false,
 ) {
     val phase = state.phase
     // Why it stopped, first: the capsule never just changes or vanishes without a reason.
@@ -445,19 +455,21 @@ private fun PanelBody(
         }
     }
 
-    val buttons = panelActions(state)
+    // The pinned action (if any) is already above; it is never listed twice.
+    val buttons = bodyPanelActions(state)
     if (buttons.isNotEmpty()) {
         Spacer(Modifier.size(10.dp))
         // Low-emphasis Collapse and End share one secondary row, so a way back (open chat) doesn't
         // push the stack taller. Everything else keeps its own full-width row.
         val (stacked, footer) = panelButtonRows(buttons)
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            stacked.forEachIndexed { index, action -> PanelButton(action, primary = index == 0, actions = actions) }
+            // Only one filled button per panel: with a pinned primary, the rest stay secondary.
+            stacked.forEachIndexed { index, action -> PanelButton(action, primary = index == 0 && !hasPinned, actions = actions, phase = phase) }
             if (footer.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     footer.forEach { action ->
                         Box(modifier = Modifier.weight(1f)) {
-                            PanelButton(action, primary = false, actions = actions)
+                            PanelButton(action, primary = false, actions = actions, phase = phase)
                         }
                     }
                 }
@@ -640,6 +652,7 @@ private fun PanelButton(
     action: OverlayAction,
     primary: Boolean,
     actions: PhoneOverlayActions,
+    phase: OverlayPhase,
 ) {
     val (label, onClick) =
         when (action) {
@@ -651,7 +664,9 @@ private fun PanelButton(
             OverlayAction.RetryTakeOver -> R.string.phone_overlay_btn_retry_take_over to actions.onTakeOver
             OverlayAction.CloseResult -> R.string.phone_overlay_btn_close_result to actions.onCloseResult
             OverlayAction.OpenChat -> R.string.phone_overlay_btn_open_chat to actions.onOpenChat
-            OverlayAction.ContinueInChat -> R.string.phone_overlay_btn_continue_in_chat to actions.onContinueInChat
+            // Same navigation entry in every phase (opens the native confirmation); only the words
+            // change when the agent asked for the person.
+            OverlayAction.ContinueInChat -> continueInChatLabel(phase) to actions.onContinueInChat
         }
     val mod = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(OverlayTags.button(action))
     when {

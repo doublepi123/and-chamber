@@ -207,6 +207,8 @@ private fun StandingPauseBlock(
         BodyText(stringResource(R.string.phone_standing_resume_use_task))
         return
     }
+    // No stopped task is kept: resuming never picks an old task back up. Say so plainly.
+    if (standingResumeStartsFresh(state)) BodyText(stringResource(R.string.phone_standing_resume_new_task), modifier = Modifier.testTag(PhoneTags.STANDING_RESUME_FRESH))
     // While a resume runs, the top progress bar says so and the button stays disabled (pending).
     PhonePrimaryButton(
         text = stringResource(R.string.phone_standing_resume),
@@ -481,28 +483,30 @@ private fun StandingBlock.message(): Int =
 internal fun ContinueInChatBlock(
     state: PhoneScreenState,
     actions: PhoneControlActions,
+    /**
+     * Placed right under the stop reason ([haltContinueFirst]): no divider, and the reason/delivery
+     * notice and the agent's note are shown by the halt card itself (the note further down).
+     */
+    lead: Boolean = false,
 ) {
     val standing = state.standing ?: return
     val halted = state.control as? PhoneControl.Halted ?: return
     val continuation = standing.continuation
+    val waits = haltWaitsForPerson(state)
     var confirming by remember { mutableStateOf(false) }
-    HorizontalDivider()
-    if (continuation.needUser) {
-        PhoneNotice(
-            NoticeTone.Info,
-            Icons.Rounded.Info,
-            stringResource(R.string.phone_continue_need_user_title),
-            body = stringResource(R.string.phone_continue_need_user_body),
-        ) {
-            continuation.agentNote?.let { note ->
-                Text(stringResource(R.string.phone_continue_agent_note, note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+    if (!lead) {
+        HorizontalDivider()
+        // The halt card above already says "the agent is waiting for you"; only the agent's own
+        // (unverified) words are added here.
+        ContinueAgentNote(state)
+        ContinueDeliveryNotice(continuation.delivery, running = false, failure = continuation.failure)
+    } else if (continuation.delivery != PhoneContinueDelivery.NotResumed) {
+        // Sending/Delivered/Failed stay visible next to the (then disabled) button.
+        ContinueDeliveryNotice(continuation.delivery, running = false, failure = continuation.failure)
     }
-    ContinueDeliveryNotice(continuation.delivery, running = false)
     val offered = canContinueInChat(state)
     PhonePrimaryButton(
-        text = stringResource(R.string.phone_continue_in_chat),
+        text = stringResource(continueButtonLabel(waits, continuation.delivery)),
         onClick = { confirming = true },
         enabled = offered,
         icon = Icons.AutoMirrored.Rounded.Chat,
@@ -527,6 +531,15 @@ internal fun ContinueInChatBlock(
     }
 }
 
+/** The agent's own words for a need-user stop, marked unverified. Secondary; never an action. */
+@Composable
+internal fun ContinueAgentNote(state: PhoneScreenState) {
+    if (!haltWaitsForPerson(state)) return
+    state.standing?.continuation?.agentNote?.let { note ->
+        Text(stringResource(R.string.phone_continue_agent_note, note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 /**
  * Read-only state of the "tell the chat to continue" request. No buttons: no retry, no grant.
  * [running]: the lease is back (the task runs again), so a failure says the agent may act while the
@@ -537,11 +550,13 @@ internal fun ContinueDeliveryNotice(
     delivery: PhoneContinueDelivery,
     running: Boolean,
     modifier: Modifier = Modifier,
+    failure: PhoneContinueFailure? = null,
 ) {
     val mod = modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag(PhoneTags.CONTINUE_DELIVERY)
     when (delivery) {
         PhoneContinueDelivery.Delivered ->
             PhoneNotice(NoticeTone.Info, Icons.Rounded.CheckCircle, stringResource(R.string.phone_continue_delivered_title), body = stringResource(R.string.phone_continue_delivered_body), modifier = mod)
+        // Access came back, only the one chat wake-up didn't arrive. No resend button, ever.
         PhoneContinueDelivery.Failed ->
             PhoneNotice(
                 NoticeTone.Error,
@@ -550,19 +565,61 @@ internal fun ContinueDeliveryNotice(
                 body = stringResource(if (running) R.string.phone_continue_failed_running_body else R.string.phone_continue_failed_body),
                 modifier = mod,
             )
+        // Nothing came back: the task stays stopped and kept; the continue button below may be
+        // confirmed again once its other conditions hold.
+        PhoneContinueDelivery.NotResumed ->
+            PhoneNotice(
+                NoticeTone.Warning,
+                Icons.Rounded.WarningAmber,
+                stringResource(R.string.phone_continue_not_resumed_title),
+                body =
+                    listOfNotNull(
+                        stringResource((failure ?: PhoneContinueFailure.Other).label()),
+                        stringResource(R.string.phone_continue_not_resumed_body),
+                    ).joinToString(" "),
+                modifier = mod,
+            )
         // Still in flight: never shown as delivered.
         PhoneContinueDelivery.Sending -> BodyText(stringResource(R.string.phone_continue_sending), modifier = mod)
         PhoneContinueDelivery.Idle -> Unit
     }
 }
 
+/** The stopped card's continue button: "I've done it" when the agent asked for the person. */
+internal fun continueButtonLabel(
+    waitsForPerson: Boolean,
+    delivery: PhoneContinueDelivery,
+): Int =
+    when {
+        delivery == PhoneContinueDelivery.NotResumed -> R.string.phone_continue_again
+        waitsForPerson -> R.string.phone_continue_after_need_user
+        else -> R.string.phone_continue_in_chat
+    }
+
+internal fun PhoneContinueFailure.label(): Int =
+    when (this) {
+        PhoneContinueFailure.NotReady -> R.string.phone_continue_failure_not_ready
+        PhoneContinueFailure.ScopeUnavailable -> R.string.phone_continue_failure_scope
+        PhoneContinueFailure.StopChannelUnavailable -> R.string.phone_continue_failure_stop_channel
+        PhoneContinueFailure.TargetUnavailable -> R.string.phone_continue_failure_target
+        PhoneContinueFailure.ScreenNotIdle -> R.string.phone_continue_failure_screen_not_idle
+        PhoneContinueFailure.ReadTimeout -> R.string.phone_continue_failure_read_timeout
+        PhoneContinueFailure.WindowUnstable -> R.string.phone_continue_failure_window_unstable
+        PhoneContinueFailure.ConnectionLost -> R.string.phone_continue_failure_connection_lost
+        PhoneContinueFailure.Cancelled -> R.string.phone_continue_failure_cancelled
+        PhoneContinueFailure.Other -> R.string.phone_continue_failure_other
+    }
+
 /** Why continuing beside the chat isn't offered right now, in the order the person should fix it. */
 internal fun continueBlockedReason(state: PhoneScreenState): Int {
     val halted = state.control as? PhoneControl.Halted
+    val delivery = state.standing?.continuation?.delivery ?: PhoneContinueDelivery.Idle
     return when {
         halted == null -> R.string.phone_continue_blocked_generic
         !halted.confirmed -> R.string.phone_continue_blocked_settling
         halted.lastAction == PhoneLastAction.MayStillApply -> R.string.phone_continue_blocked_check
+        delivery == PhoneContinueDelivery.Sending -> R.string.phone_continue_blocked_sending
+        !continueRequestAllowed(delivery) -> R.string.phone_continue_blocked_already
         standingBaseReadiness(state) != StandingReadiness.Ready -> R.string.phone_continue_blocked_not_ready
         state.standing?.apps?.none { it.packageName == halted.lease.target.packageName } == true -> R.string.phone_continue_blocked_scope
         else -> R.string.phone_continue_blocked_generic

@@ -154,7 +154,7 @@ internal fun PhoneControlScreen(
                 }
 
                 // Stop controls sit above the step, so they never scroll out of reach behind a form.
-                if (step == PhoneStep.Running || step == PhoneStep.Halted) {
+                if ((step == PhoneStep.Running || step == PhoneStep.Halted) && stopControlsAboveStep(state)) {
                     StopControls(state = state, actions = actions, modifier = Modifier.padding(top = 12.dp))
                 }
 
@@ -189,6 +189,9 @@ internal fun PhoneControlScreen(
                         PhoneStep.Halted ->
                             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 HaltedCard(state = state, actions = actions)
+                                // The card leads with continuing; take over / end stay reachable
+                                // right below it instead of above.
+                                if (!stopControlsAboveStep(state)) StopControls(state = state, actions = actions)
                                 // Link down: the same connect form, below the halt facts. It only
                                 // restores the connection; continuing is still confirmed above.
                                 if (showsReconnect(state)) ConnectCard(state = state, actions = actions)
@@ -420,7 +423,8 @@ private fun StatusStrip(
                             }
                     is PhoneControl.Halted ->
                         if (control.confirmed) {
-                            StatusTone.Idle to stringResource(R.string.phone_control_paused)
+                            StatusTone.Idle to
+                                stringResource(if (haltWaitsForPerson(state)) R.string.phone_control_waiting_you else R.string.phone_control_paused)
                         } else {
                             StatusTone.Busy to stringResource(R.string.phone_control_pausing)
                         }
@@ -704,6 +708,8 @@ internal object PhoneTags {
     const val SAVE_STANDING = "phone.saveStanding"
     const val SAVE_STANDING_CONFIRM = "phone.saveStandingConfirm"
     const val CONTINUE_IN_CHAT = "phone.continueInChat"
+    const val HALT_NEED_USER = "phone.haltNeedUser"
+    const val STANDING_RESUME_FRESH = "phone.standingResumeFresh"
     const val STANDING_PAUSED = "phone.standingPaused"
     const val STANDING_PAUSED_ALSO = "phone.standingPausedAlso"
     const val RESUME_STANDING = "phone.resumeStanding"

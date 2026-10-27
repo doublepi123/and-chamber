@@ -147,8 +147,52 @@ internal data class PhoneStandingPause(
     val outcomeUnchecked: Boolean,
 )
 
-/** Whether a request to wake the chat after a stop reached it. Never a replay of an action. */
-internal enum class PhoneContinueDelivery { Idle, Sending, Delivered, Failed }
+/**
+ * Where a person-confirmed "continue" stands. Never a replay of an action.
+ *
+ * - [Idle]: nothing requested for this stop.
+ * - [Sending]: requested; resuming and waking the chat are in progress.
+ * - [Delivered]: the task runs again and the chat was told.
+ * - [Failed]: the task runs again (access restored), but the one chat wake-up didn't arrive. Never
+ *   re-sent; the person looks in the chat.
+ * - [NotResumed]: a technical failure before access came back. The original task stays stopped and
+ *   kept; the person may confirm again (see [PhoneContinuation.failure]).
+ */
+internal enum class PhoneContinueDelivery { Idle, Sending, Delivered, Failed, NotResumed }
+
+/**
+ * Why a confirmed continue didn't resume ([PhoneContinueDelivery.NotResumed]). Fixed values mapped by
+ * the integration layer; the screen shows fixed copy, never raw text.
+ */
+internal enum class PhoneContinueFailure {
+    /** The scope/runtime/tool wasn't ready at that moment. */
+    NotReady,
+
+    /** The saved scope no longer allows it (expired, revoked, changed). */
+    ScopeUnavailable,
+
+    /** The stop entry (notification/overlay) couldn't be shown. */
+    StopChannelUnavailable,
+
+    /** The task's app couldn't be brought back or isn't allowed any more. */
+    TargetUnavailable,
+
+    /** The screen wasn't in a state the agent may act on (e.g. locked, another app on top). */
+    ScreenNotIdle,
+
+    /** Reading the screen again took too long. */
+    ReadTimeout,
+
+    /** The window kept changing while it was read. */
+    WindowUnstable,
+
+    ConnectionLost,
+
+    /** Superseded or cancelled (another stop, a new task, the screen left). */
+    Cancelled,
+
+    Other,
+}
 
 /** The "continue beside the chat" entry after take over / need you / unknown. */
 @Immutable
@@ -158,6 +202,8 @@ internal data class PhoneContinuation(
     /** The agent's own words for that request. Not verified. */
     val agentNote: String? = null,
     val delivery: PhoneContinueDelivery = PhoneContinueDelivery.Idle,
+    /** Set only with [PhoneContinueDelivery.NotResumed]: why the continue didn't resume. */
+    val failure: PhoneContinueFailure? = null,
 )
 
 /** The standing scope. Chat requests inside it start without a per-task native grant. */
@@ -330,7 +376,12 @@ internal data class PhoneLease(
 
 internal enum class PhoneHaltReason {
     Paused,
+
+    /** The person took over (stop/overlay take-over). Not an agent request. */
     TakenOver,
+
+    /** The agent asked for the person (a real native-confirmed need_user). Not a take-over. */
+    NeedUser,
     Expired,
     HostReturned,
     TargetLeft,

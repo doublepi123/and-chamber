@@ -400,7 +400,8 @@ object PhoneToolProtocol {
     fun fixedMessage(code: String): String =
         when (code) {
             PhoneToolCodes.DISABLED -> "Phone control is turned off on the phone."
-            PhoneToolCodes.NOT_GRANTED -> "Phone control is not granted. Ask the person to grant it on the phone."
+            PhoneToolCodes.NOT_GRANTED ->
+                "Phone control is not granted for this call. The saved standing scope may still exist; check status and whether the phone shows a waiting task or a native continue entry before asking the person to grant anything again. Do not re-pair."
             PhoneToolCodes.LEASE_EXPIRED -> "The phone-control grant expired. Ask the person to grant it again."
             PhoneToolCodes.EPOCH_CHANGED -> "The phone-control grant changed. Take a new snapshot and use the new epoch."
             PhoneToolCodes.PAUSED -> "Phone control is paused on the phone. Ask the person to resume it."
@@ -424,9 +425,9 @@ object PhoneToolProtocol {
             PhoneToolCodes.DRIVER_UNAVAILABLE -> "Phone control is unavailable on this device."
             PhoneToolCodes.DEADLINE -> "The action timed out."
             PhoneToolCodes.HIERARCHY_NOT_IDLE ->
-                "The phone did not provide a stable hierarchy or page. This does not mean the connection is down. Do not retry in a loop; wait until the page is stable and ask the person to make a new request."
+                "The phone did not provide a valid hierarchy or page. This does not mean the connection is down, and it does not by itself revoke an existing task. Do not call need_user for this. Use status to see whether the original task is still live or a start was rolled back; if it is live, keep it and wait for the page to settle. If no task is live, do not fake a grant with snapshot or resume in place; only the existing saved scope and authority can support a new legal request. This error never authorises automatic recovery of stopped control, and retries are bounded."
             PhoneToolCodes.READ_TIMEOUT ->
-                "Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed."
+                "Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed, and this tool cannot recover it automatically."
             PhoneToolCodes.CANCELLED -> "Cancelled."
             PhoneToolCodes.SESSION_BUSY ->
                 "Another chat session owns phone control for the current request or grant. Ask the person to grant phone control again if this session should have it."
@@ -447,7 +448,7 @@ object PhoneToolProtocol {
             PhoneToolCodes.STANDING_UNAVAILABLE ->
                 "Phone control is not configured for direct chat requests. Ask the person to set up the standing scope on the phone."
             PhoneToolCodes.STANDING_BLOCKED ->
-                "Phone control is waiting for the person to confirm on the phone. Do not retry in a loop."
+                "Phone control is waiting for the person on the phone. The saved standing scope may still exist; check status and the native waiting/continue entry. Do not re-pair, and do not retry in a loop. Only the person can clear the block; this tool cannot resume or recover it automatically."
             PhoneToolCodes.STANDING_EXPIRED ->
                 "The phone-control standing scope expired. Ask the person to set it up again on the phone."
             PhoneToolCodes.START_FAILED, PhoneToolCodes.TARGET_LAUNCH_FAILED ->

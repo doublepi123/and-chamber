@@ -143,11 +143,111 @@ class PhoneScreenStateMapperTest {
         assertEquals(PhoneHaltReason.HostReturned, control.reason)
         assertTrue(control.confirmed)
         assertEquals(PhoneLastAction.MayStillApply, control.lastAction)
-        // The task record is what keeps the summary after the controller dropped the grant, and the
-        // result stays "needs checking" because no step was re-read.
-        val task = mapped.task as PhoneTask.Ended
+        // A retained halted task stays the current task even while the needs-check record exists.
+        // The record is evidence, not an ended task and not a success claim.
+        val task = mapped.task as PhoneTask.Active
+        assertEquals(target, task.target)
+        assertEquals("write a note", task.summary)
+    }
+
+    @Test
+    fun `a halted need-user task stays active while its needs-check record is kept`() {
+        val halt =
+            PhoneHaltSnapshot(
+                lease = lease,
+                reason = PhoneHaltReason.NeedUser,
+                confirmed = true,
+                lastAction = PhoneLastAction.NoneInFlight,
+            )
+        val record =
+            PhoneTaskRecord(
+                targetPackage = target.packageName,
+                summary = "write a note",
+                needsCheck = true,
+                haltReason = PhoneHaltReason.NeedUser.name,
+            )
+        val core = PhoneState(enabled = true, epoch = 9, connection = PhoneConnectionState.CONNECTED)
+        val mapped = phoneScreenState(core, facts(halt = halt, task = record))
+        val control = mapped.control as PhoneControl.Halted
+        assertEquals(PhoneHaltReason.NeedUser, control.reason)
+        // The top task is the retained task waiting for the person, never "Ended / check results".
+        val task = mapped.task as PhoneTask.Active
+        assertEquals(target, task.target)
+        assertEquals("write a note", task.summary)
+    }
+
+    @Test
+    fun `an unknown halted task stays active and keeps its unknown reason`() {
+        val halt =
+            PhoneHaltSnapshot(
+                lease = lease,
+                reason = PhoneHaltReason.OutcomeUnknown,
+                confirmed = true,
+                lastAction = PhoneLastAction.UserChecked,
+                acknowledged = true,
+            )
+        val record =
+            PhoneTaskRecord(
+                targetPackage = target.packageName,
+                summary = "write a note",
+                needsCheck = true,
+                haltReason = PhoneHaltReason.OutcomeUnknown.name,
+                acknowledged = true,
+            )
+        val core =
+            PhoneState(
+                enabled = true,
+                epoch = 9,
+                connection = PhoneConnectionState.CONNECTED,
+                blocked = PhoneBlockReason.UNKNOWN_OUTCOME,
+            )
+        val mapped = phoneScreenState(core, facts(halt = halt, task = record))
+        val control = mapped.control as PhoneControl.Halted
+        assertEquals(PhoneHaltReason.OutcomeUnknown, control.reason)
+        // Never presented as a completed/verified result.
+        assertTrue(mapped.task is PhoneTask.Active)
+    }
+
+    @Test
+    fun `after an explicit end only the needs-check record remains ended`() {
+        val record =
+            PhoneTaskRecord(
+                targetPackage = target.packageName,
+                summary = "write a note",
+                needsCheck = true,
+            )
+        val core = PhoneState(enabled = true, epoch = 0)
+        val ended =
+            phoneScreenState(
+                core,
+                facts().copy(lease = null, halt = null, task = record),
+            )
+        assertTrue(ended.control is PhoneControl.None)
+        val task = ended.task as PhoneTask.Ended
         assertEquals("write a note", task.result?.summary)
         assertTrue(task.result!!.items.isEmpty())
+
+        val dismissed =
+            phoneScreenState(
+                core,
+                facts().copy(lease = null, halt = null, task = null),
+            )
+        assertTrue(dismissed.control is PhoneControl.None)
+        assertTrue(dismissed.task is PhoneTask.None)
+    }
+
+    @Test
+    fun `a process-restored record without a halt stays ended and does not revive`() {
+        val record =
+            PhoneTaskRecord(
+                targetPackage = target.packageName,
+                summary = "write a note",
+                needsCheck = true,
+            )
+        val core = PhoneState(enabled = true, epoch = 0)
+        val mapped = phoneScreenState(core, facts().copy(lease = null, halt = null, task = record))
+        assertTrue(mapped.control is PhoneControl.None)
+        assertTrue(mapped.task is PhoneTask.Ended)
     }
 
     @Test

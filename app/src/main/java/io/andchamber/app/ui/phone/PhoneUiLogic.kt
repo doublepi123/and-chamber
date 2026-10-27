@@ -705,8 +705,56 @@ internal fun standingDeliveryNotice(state: PhoneScreenState): PhoneContinueDeliv
     val delivery = state.standing?.continuation?.delivery ?: return null
     if (delivery == PhoneContinueDelivery.Idle) return null
     if (state.control is PhoneControl.Halted) return null
+    // "Not resumed, task kept" belongs to a stopped task; without one it would point at nothing.
+    if (delivery == PhoneContinueDelivery.NotResumed) return null
     return delivery
 }
+
+/**
+ * Whether a new person-confirmed continue may be requested for the current stop. Only before any
+ * request ([PhoneContinueDelivery.Idle]) or after one that didn't resume
+ * ([PhoneContinueDelivery.NotResumed], the task is still kept). Never while one runs, and never
+ * after access came back ([PhoneContinueDelivery.Delivered]/[PhoneContinueDelivery.Failed]): the
+ * single chat wake-up is never sent twice for the same stop.
+ */
+internal fun continueRequestAllowed(delivery: PhoneContinueDelivery): Boolean =
+    delivery == PhoneContinueDelivery.Idle || delivery == PhoneContinueDelivery.NotResumed
+
+/**
+ * The stop is the agent waiting for the person: decided by the explicit native halt reason alone.
+ * [PhoneHaltReason.NeedUser] is true; a person's take-over and every other reason are false, even
+ * when a stale task projection ([PhoneContinuation.needUser], agent note) still says "waiting for
+ * you". The progress projection never overrides the native reason, and a missing one never hides it.
+ */
+internal fun haltWaitsForPerson(state: PhoneScreenState): Boolean =
+    (state.control as? PhoneControl.Halted)?.reason == PhoneHaltReason.NeedUser
+
+/**
+ * The stopped card leads with "why it waits" and the continue entry, before the task details: the
+ * agent asked for the person, or a confirmed continue didn't resume (task kept). Only in standing
+ * mode, after a confirmed stop with nothing left to check; an unsettled stop or an unchecked action
+ * keeps the original order (check first). Layout only: the button keeps every [canContinueInChat]
+ * guard and still opens the native confirmation.
+ *
+ * Only while no continue is in flight or done ([continueRequestAllowed]: Idle or NotResumed). While
+ * a continue is Sending a new grant may already exist although the old need-user halt is still
+ * shown, and after Delivered/Failed access is back: the stop controls must stay on top then.
+ */
+internal fun haltContinueFirst(state: PhoneScreenState): Boolean {
+    val halted = state.control as? PhoneControl.Halted ?: return false
+    val standing = state.standing ?: return false
+    if (!halted.confirmed || halted.lastAction == PhoneLastAction.MayStillApply) return false
+    val delivery = standing.continuation.delivery
+    if (!continueRequestAllowed(delivery)) return false
+    return haltWaitsForPerson(state) || delivery == PhoneContinueDelivery.NotResumed
+}
+
+/**
+ * Pause / take over / end sit above the step, except while the stopped card leads with continuing
+ * (a settled stop with no continue in flight or done, see [haltContinueFirst]); then they move
+ * right below that card (still on the screen, never removed).
+ */
+internal fun stopControlsAboveStep(state: PhoneScreenState): Boolean = !haltContinueFirst(state)
 
 /** Only this state may say "say it in chat now". */
 internal fun chatCanUsePhone(state: PhoneScreenState): Boolean = standingReadiness(state) == StandingReadiness.Ready
@@ -744,7 +792,7 @@ internal fun canContinueInChat(state: PhoneScreenState): Boolean {
         halted.lastAction != PhoneLastAction.MayStillApply &&
         state.stopChannel == PhoneStopChannel.Verified &&
         state.pending == null &&
-        standing.continuation.delivery != PhoneContinueDelivery.Sending &&
+        continueRequestAllowed(standing.continuation.delivery) &&
         halted.target() in standing.apps.map { it.packageName }
 }
 
@@ -811,6 +859,15 @@ internal fun confirmResumeStanding(
     onResumeStanding()
     return true
 }
+
+/**
+ * A pause with no stopped, running or active task: whatever task caused it is gone, so the scope
+ * resume only lets the chat start a new one. Never worded as picking the old task back up.
+ */
+internal fun standingResumeStartsFresh(state: PhoneScreenState): Boolean =
+    state.standing?.pause != null &&
+        state.control is PhoneControl.None &&
+        state.task !is PhoneTask.Active
 
 /** The status strip's control line when nobody holds the phone and chat use is paused. */
 internal fun standingPausedWithoutControl(state: PhoneScreenState): Boolean =

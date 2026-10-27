@@ -73,6 +73,32 @@ class PhoneStringsTest {
     }
 
     @Test
+    fun `need-user copy says the agent waits and the same task carries on, distinct from a take-over`() {
+        assertEquals("代理在等你", chinese.getValue("phone_halt_need_user_title"))
+        assertEquals("我处理好了，让代理继续…", chinese.getValue("phone_continue_after_need_user"))
+        val zhBody = chinese.getValue("phone_halt_need_user_body")
+        listOf("原任务会接着做", "不用重新配对", "不用重新设置范围", "看不到你输入").forEach { assertTrue("zh lacks '$it'", zhBody.contains(it)) }
+        assertTrue(english.getValue("phone_halt_need_user_body").contains("same task carries on"))
+        assertFalse(chinese.getValue("phone_halt_need_user_title").contains("接管"))
+        assertFalse(chinese.getValue("phone_halt_need_user").contains("接管"))
+        assertTrue(chinese.getValue("phone_halt_taken_over").contains("接管"))
+    }
+
+    @Test
+    fun `not-resumed keeps the task and failed without live control stays unconfirmed`() {
+        assertEquals("暂未恢复，原任务保留", chinese.getValue("phone_continue_not_resumed_title"))
+        val zhNot = chinese.getValue("phone_continue_not_resumed_body")
+        assertTrue(zhNot.contains("没有重发") && zhNot.contains("再次确认继续"))
+        val zhFailed = chinese.getValue("phone_continue_failed_body")
+        assertTrue(zhFailed.contains("没能确认") && zhFailed.contains("没有重发"))
+        assertFalse(zhFailed.contains("再说一次"))
+        assertTrue(english.getValue("phone_continue_failed_body").contains("couldn\\'t be confirmed"))
+        // The scope resume never claims to pick the old task back up.
+        val fresh = chinese.getValue("phone_standing_resume_new_task")
+        assertTrue(fresh.contains("原任务已不在") && fresh.contains("新任务"))
+    }
+
+    @Test
     fun `copy never claims a confirmation proves a person`() {
         val all = (english.values + chinese.values).joinToString("\n").lowercase()
         listOf("proves you", "verified human", "证明是你", "确认是本人").forEach { assertTrue("found '$it'", it !in all) }

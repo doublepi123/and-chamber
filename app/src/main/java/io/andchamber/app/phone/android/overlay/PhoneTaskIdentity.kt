@@ -106,15 +106,23 @@ internal fun overlayPhaseFor(
     /** True for a core/native uncertain outcome (e.g. halt.lastAction == MayStillApply). */
     unknownOutcome: Boolean = false,
     closed: Boolean = false,
+    /**
+     * Explicit native need_user halt fact (reason NeedUser, confirmed, not MayStillApply, no live
+     * epoch). It projects WAITING_USER even while the progress store is only STOPPING or its
+     * snapshot is temporarily missing. Unknown/closed/Ended still win, and an explicit takeover is
+     * never rewritten into "needs you" by a stale WAITING_USER projection.
+     */
+    explicitNeedUser: Boolean = false,
 ): PhoneOverlayPhase? {
     if (closed && !agentLive) return PhoneOverlayPhase.ENDED
     if (taskState == PhoneTaskState.ENDED_PENDING_CHECK) return PhoneOverlayPhase.NEEDS_CHECK
-    // A confirmed waiting task is the newest native stop for this task; it must not be replaced by a
-    // stale screen agent/take-over projection or by an older uncertain action.
-    if (taskState == PhoneTaskState.WAITING_USER) return PhoneOverlayPhase.WAITING_USER
     if (unknownOutcome || taskState == PhoneTaskState.UNKNOWN_OUTCOME) {
         return PhoneOverlayPhase.UNKNOWN
     }
+    if (explicitNeedUser) return PhoneOverlayPhase.WAITING_USER
+    // A current WAITING_USER projection is the legacy need_user fact. An explicit native takeover
+    // is newer source-of-truth and must not be relabelled by that stale projection.
+    if (taskState == PhoneTaskState.WAITING_USER && !takenOver) return PhoneOverlayPhase.WAITING_USER
     if (agentLive) return if (pausing) PhoneOverlayPhase.PAUSING else PhoneOverlayPhase.RUNNING
     if (paused) return if (pausedConfirmed) PhoneOverlayPhase.PAUSED else PhoneOverlayPhase.PAUSING
     if (takenOver) return PhoneOverlayPhase.TAKEN_OVER

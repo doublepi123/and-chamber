@@ -40,6 +40,7 @@ import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.phone.standing.PhoneStandingResume
 import io.andchamber.app.phone.standing.PhoneStandingScope
 import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskContinuationStatus
 import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
@@ -48,6 +49,7 @@ import io.andchamber.app.ui.phone.PhoneAutoConnect
 import io.andchamber.app.ui.phone.PhoneBusy
 import io.andchamber.app.ui.phone.PhoneConnectRequest
 import io.andchamber.app.ui.phone.PhoneContinueDelivery
+import io.andchamber.app.ui.phone.PhoneContinueFailure
 import io.andchamber.app.ui.phone.PhoneContinuation
 import io.andchamber.app.ui.phone.MAX_STANDING_APPS
 import io.andchamber.app.ui.phone.PhoneControlActions
@@ -173,6 +175,30 @@ internal class PhoneIntegration(
     private var standingViewCache: PhoneStandingView? = null
 
     private var continuationDelivery = PhoneContinueDelivery.Idle
+
+    /**
+     * Technical reason for [PhoneContinueDelivery.NotResumed]. It never replaces the original halt
+     * reason or the saved standing block; it only explains why access did not come back.
+     */
+    private var continuationFailure: PhoneContinueFailure? = null
+    private var continuationFailureStage: PhoneTaskStartFailureStage? = null
+    private var continuationFailureError: PhoneErrorCode? = null
+
+    /**
+     * One in-flight continuation attempt. It is used only by the outer exception cleanup; normal
+     * failures go through the exact rollback below. It is never authority and is cleared when the
+     * attempt ends.
+     */
+    private var continuationAttempt: ContinuationAttempt? = null
+
+    private data class ContinuationAttempt(
+        val epoch: Long,
+        var key: PhoneTaskKey? = null,
+        val halt: PhoneHaltSnapshot,
+        val previousRetainedEpoch: Long?,
+        val session: String,
+        var wakeAttempted: Boolean = false,
+    )
     private var continuationInFlight = false
 
     /** Bumped whenever the real native phone screen opens; a queued chat start must not proceed. */
@@ -494,7 +520,7 @@ internal class PhoneIntegration(
         if (!taskIdentity.matches(binding.taskId, binding.runtimeId)) return null
         invalidateGrantAttempt()
         halt(
-            PhoneHaltReason.TakenOver,
+            PhoneHaltReason.NeedUser,
             lease,
             actionInFlight = core.inFlightMutation || core.pausing,
         )
@@ -590,6 +616,24 @@ internal class PhoneIntegration(
 
     /** Thread-safe, non-suspend projection for the tool's `apps` action. Never authority. */
     fun standingViewSnapshot(): PhoneStandingView? = standingViewCache
+
+    /**
+     * Read-only redacted continuation status for the separate status lane. It reads only the same
+     * immutable [PhoneScreenFacts.continuation] projection used by the screen, has no extra guard or
+     * cache, and never grants/resumes/retries. Null is reserved for a caller with no screen fact.
+     */
+    fun continuationViewSnapshot(): PhoneTaskContinuationStatus? {
+        val continuation = facts.value.continuation
+        return PhoneTaskContinuationStatus(
+            state = continuation.delivery.toTaskContinuationState(),
+            failure =
+                if (continuation.delivery == PhoneContinueDelivery.NotResumed) {
+                    (continuation.failure ?: PhoneContinueFailure.Other).toTaskContinuationFailure()
+                } else {
+                    null
+                },
+        )
+    }
 
     /**
      * One direct chat request inside the person's saved standing scope. Main thread only.
@@ -734,7 +778,7 @@ internal class PhoneIntegration(
                     key = taskKey,
                 )
             }
-            continuationDelivery = PhoneContinueDelivery.Idle
+            setContinuationDelivery(PhoneContinueDelivery.Idle)
             val launched = runCatching { launchTarget(packageName) }.getOrDefault(false)
             if (!launched) {
                 return@transaction failStart(
@@ -856,7 +900,7 @@ internal class PhoneIntegration(
         serviceStop()
         closeLease(keepTask = false)
         taskSession = null
-        continuationDelivery = PhoneContinueDelivery.Idle
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
         mutateFacts {
             it.copy(
                 lease = null,
@@ -903,7 +947,7 @@ internal class PhoneIntegration(
             },
             ended = false,
         )
-        continuationDelivery = PhoneContinueDelivery.Idle
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
         refreshContinuation()
         return controller.state.value.grant == null
     }
@@ -984,7 +1028,7 @@ internal class PhoneIntegration(
             )
         standingBinding = PhoneStandingBindingState()
         standingBindingEverUsed = false
-        continuationDelivery = PhoneContinueDelivery.Idle
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
         store.setStanding(config)
         mutateFacts {
             it.copy(
@@ -1015,7 +1059,7 @@ internal class PhoneIntegration(
         }
         detachStandingTask()
         standingRevision += 1
-        continuationDelivery = PhoneContinueDelivery.Idle
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
         val revoked = current.config.copy(revoked = true)
         standingState = current.copy(config = revoked, expired = false)
         standingBinding = PhoneStandingBindingState()
@@ -1063,7 +1107,9 @@ internal class PhoneIntegration(
      * original chat exactly once with a fixed prompt. A failed wake does not roll back the lease.
      */
     private fun continueInChat() {
-        if (continuationInFlight || continuationDelivery != PhoneContinueDelivery.Idle) return
+        // Idle: first confirmation. NotResumed: a technical failure before access came back, so a
+        // fresh person confirmation may try again. Sending/Delivered/Failed are never repeated.
+        if (!continuationMayStart(continuationDelivery, continuationInFlight)) return
         val state = standingState ?: return
         val halt = facts.value.halt ?: return
         val core = controller.state.value
@@ -1084,9 +1130,12 @@ internal class PhoneIntegration(
         if (facts.value.runtimeStatus.tool != io.andchamber.app.ui.phone.PhoneToolStatus.Ready) return
         if (facts.value.stopChannel != PhoneStopChannel.Verified) return
         continuationInFlight = true
-        continuationDelivery = PhoneContinueDelivery.Sending
+        setContinuationDelivery(PhoneContinueDelivery.Sending)
         refreshContinuation()
         val revision = standingRevision
+        val previousRetainedEpoch = retainedTaskEpoch
+        val previousTaskSession = taskSession
+        val previousIdentity = taskIdentity.current()?.let { PhoneTaskKey(it.first, it.second) }
         scope.launch {
             try {
                 performContinuation(
@@ -1097,22 +1146,110 @@ internal class PhoneIntegration(
                     revision = revision,
                 )
             } catch (cancelled: CancellationException) {
+                cleanupUnexpectedContinuation(
+                    halt = halt,
+                    revision = revision,
+                    previousRetainedEpoch = previousRetainedEpoch,
+                    previousTaskSession = previousTaskSession,
+                    previousIdentity = previousIdentity,
+                    runtimeId = runtimeId,
+                )
                 throw cancelled
             } catch (_: Exception) {
-                if (continuationDelivery == PhoneContinueDelivery.Sending) {
-                    // A newer stop owns the state now; only neutral cleanup. Otherwise this attempt
-                    // itself failed and may be reported as Failed.
-                    continuationDelivery =
-                        if (facts.value.halt != null && facts.value.halt !== halt) {
-                            PhoneContinueDelivery.Idle
-                        } else {
-                            PhoneContinueDelivery.Failed
-                        }
-                    refreshContinuation()
-                }
+                // The strict transaction cleanup owns the grant/lease/task here; the label alone is
+                // never treated as a rollback.
+                cleanupUnexpectedContinuation(
+                    halt = halt,
+                    revision = revision,
+                    previousRetainedEpoch = previousRetainedEpoch,
+                    previousTaskSession = previousTaskSession,
+                    previousIdentity = previousIdentity,
+                    runtimeId = runtimeId,
+                )
             } finally {
                 continuationInFlight = false
+                continuationAttempt = null
             }
+        }
+    }
+
+    /**
+     * Safety net for an unexpected exception outside an explicit failure path. Before the wake
+     * attempt it performs the same exact-owner rollback and reports [PhoneContinueDelivery.NotResumed];
+     * after the wake attempt it keeps the established live grant and only marks the one-shot wake as
+     * failed. A newer owner is never touched.
+     *
+     * With no attempt object yet, a NotResumed/Other is recorded only when the original halt,
+     * revision, runtime, task identity/session and retained epoch are still unchanged and there is
+     * no new grant or wake. Otherwise the cleanup is neutral and never grants retry eligibility.
+     */
+    private fun cleanupUnexpectedContinuation(
+        halt: PhoneHaltSnapshot,
+        revision: Long,
+        previousRetainedEpoch: Long?,
+        previousTaskSession: String?,
+        previousIdentity: PhoneTaskKey?,
+        runtimeId: String,
+    ) {
+        val attempt = continuationAttempt
+        if (attempt == null) {
+            val core = controller.state.value
+            val identity = taskIdentity.current()
+            val identityMatches =
+                previousIdentity == null ||
+                    (
+                        identity != null &&
+                            identity.first == previousIdentity.taskId &&
+                            identity.second == previousIdentity.runtimeId
+                    )
+            val unchanged =
+                core.grant == null &&
+                    core.runtimeId == runtimeId &&
+                    facts.value.halt === halt &&
+                    standingRevision == revision &&
+                    retainedTaskEpoch == previousRetainedEpoch &&
+                    taskSession == previousTaskSession &&
+                    identityMatches
+            if (unchanged) {
+                // No grant and no wake happened for this failed attempt: keep/rebuild the original
+                // block and report the technical failure instead of silently going Idle.
+                controller.blockStanding(halt.reason.toStandingBlockReason())
+                setContinuationDelivery(PhoneContinueDelivery.NotResumed, PhoneContinueFailure.Other)
+                refreshContinuation()
+            } else if (continuationDelivery == PhoneContinueDelivery.Sending) {
+                setContinuationDelivery(PhoneContinueDelivery.Idle)
+                refreshContinuation()
+            }
+            return
+        }
+        if (!attempt.wakeAttempted) {
+            val failure = PhoneContinueFailure.Other
+            if (
+                rollbackContinuation(
+                    epoch = attempt.epoch,
+                    key = attempt.key,
+                    session = attempt.session,
+                    previousRetainedEpoch = attempt.previousRetainedEpoch,
+                    halt = attempt.halt,
+                    failure = failure,
+                    stage = null,
+                    error = null,
+                )
+            ) {
+                setContinuationDelivery(continuationPreWakeDelivery(), failure)
+                refreshContinuation()
+            } else if (continuationDelivery == PhoneContinueDelivery.Sending) {
+                setContinuationDelivery(PhoneContinueDelivery.Idle)
+                refreshContinuation()
+            }
+            return
+        }
+        if (continuationStillOwns(attempt.epoch, attempt.key)) {
+            setContinuationDelivery(PhoneContinueDelivery.Failed)
+            refreshContinuation()
+        } else if (continuationDelivery == PhoneContinueDelivery.Sending) {
+            setContinuationDelivery(PhoneContinueDelivery.Idle)
+            refreshContinuation()
         }
     }
 
@@ -1206,7 +1343,7 @@ internal class PhoneIntegration(
         fun clearSendingWhenSuperseded() {
             if (continuationDelivery == PhoneContinueDelivery.Sending) {
                 // Neutral cleanup only: never write this old attempt's failure/halt over a newer owner.
-                continuationDelivery = PhoneContinueDelivery.Idle
+                setContinuationDelivery(PhoneContinueDelivery.Idle)
                 refreshContinuation()
             }
         }
@@ -1223,7 +1360,15 @@ internal class PhoneIntegration(
             if (supersededBeforeGrant()) {
                 clearSendingWhenSuperseded()
             } else {
-                continuationDelivery = PhoneContinueDelivery.Failed
+                // Access did not come back. Keep the original halt/task and report a technical
+                // "not resumed"; never turn this into a second person step or a takeover.
+                controller.blockStanding(halt.reason.toStandingBlockReason())
+                setContinuationDelivery(
+                    continuationPreWakeDelivery(),
+                    PhoneContinueFailure.NotReady,
+                    PhoneTaskStartFailureStage.AUTHORITY,
+                    null,
+                )
                 refreshContinuation()
             }
             return
@@ -1252,22 +1397,10 @@ internal class PhoneIntegration(
                         clearSendingWhenSuperseded()
                     } else {
                         if (result.refusal != PhoneStandingRefusal.EXPIRED) {
-                            controller.blockStanding(
-                                when (halt.reason) {
-                                    PhoneHaltReason.TakenOver -> PhoneStandingBlockReason.NEED_USER
-                                    PhoneHaltReason.OutcomeUnknown,
-                                    PhoneHaltReason.ScreenUncertain,
-                                    -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
-                                    PhoneHaltReason.ConnectionLost,
-                                    PhoneHaltReason.StopChannelLost,
-                                    -> PhoneStandingBlockReason.CONNECTION_LOST
-                                    PhoneHaltReason.ScreenLocked -> PhoneStandingBlockReason.DEVICE_LOCKED
-                                    PhoneHaltReason.RuntimeChanged -> PhoneStandingBlockReason.RUNTIME_CHANGED
-                                    else -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
-                                },
-                            )
+                            controller.blockStanding(halt.reason.toStandingBlockReason())
                         }
-                        continuationDelivery = PhoneContinueDelivery.Failed
+                        val failure = continuationFailureFor(null, null, result.refusal)
+                        setContinuationDelivery(continuationPreWakeDelivery(), failure)
                         refreshContinuation()
                     }
                     return
@@ -1275,9 +1408,32 @@ internal class PhoneIntegration(
             }
         val epoch = granted.epoch
         var continuationKey: PhoneTaskKey? = null
-        fun fail() {
-            if (rollbackContinuation(epoch, continuationKey, session, previousRetainedEpoch, halt)) {
-                continuationDelivery = PhoneContinueDelivery.Failed
+        val attempt =
+            ContinuationAttempt(
+                epoch = epoch,
+                halt = halt,
+                previousRetainedEpoch = previousRetainedEpoch,
+                session = session,
+            )
+        continuationAttempt = attempt
+        fun fail(
+            failure: PhoneContinueFailure,
+            stage: PhoneTaskStartFailureStage? = null,
+            error: PhoneErrorCode? = null,
+        ) {
+            if (
+                rollbackContinuation(
+                    epoch = epoch,
+                    key = continuationKey,
+                    session = session,
+                    previousRetainedEpoch = previousRetainedEpoch,
+                    halt = halt,
+                    failure = failure,
+                    stage = stage,
+                    error = error,
+                )
+            ) {
+                setContinuationDelivery(continuationPreWakeDelivery(), failure, stage, error)
                 refreshContinuation()
             } else {
                 clearSendingWhenSuperseded()
@@ -1286,21 +1442,25 @@ internal class PhoneIntegration(
         // Cancellation at either suspension point after the new grant must never leave that grant
         // behind. fail() already performs the exact-owner continuation rollback and delivery state;
         // the original cancellation is rethrown unchanged.
-        suspend fun <T> withCancelRollback(block: suspend () -> T): T =
+        suspend fun <T> withCancelRollback(
+            stage: PhoneTaskStartFailureStage,
+            block: suspend () -> T,
+        ): T =
             try {
                 block()
             } catch (cancelled: CancellationException) {
-                fail()
+                fail(PhoneContinueFailure.Cancelled, stage, PhoneErrorCode.CANCELLED)
                 throw cancelled
             }
         // The foreground service builds its notification from this lease; it must already be
         // non-null before serviceStart, exactly like the first start path.
         lease = halt.lease
-        if (revision != standingRevision ||
-            screenGeneration != phoneScreenGeneration ||
-            !withCancelRollback { startStopEntry(epoch) }
-        ) {
-            fail()
+        if (revision != standingRevision || screenGeneration != phoneScreenGeneration) {
+            fail(PhoneContinueFailure.Cancelled, PhoneTaskStartFailureStage.AUTHORITY, null)
+            return
+        }
+        if (!withCancelRollback(PhoneTaskStartFailureStage.STOP_ENTRY) { startStopEntry(epoch) }) {
+            fail(PhoneContinueFailure.StopChannelUnavailable, PhoneTaskStartFailureStage.STOP_ENTRY, null)
             return
         }
         if (revision != standingRevision ||
@@ -1310,7 +1470,7 @@ internal class PhoneIntegration(
             controller.state.value.standingBlocked ||
             controller.state.value.blocked != null
         ) {
-            fail()
+            fail(PhoneContinueFailure.Cancelled, PhoneTaskStartFailureStage.AUTHORITY, null)
             return
         }
         taskSession = session
@@ -1326,27 +1486,31 @@ internal class PhoneIntegration(
                 ).also { taskNative.onTaskBinding(it) }
             }.getOrNull()
         if (continuationBinding == null) {
-            fail()
+            fail(PhoneContinueFailure.Other, PhoneTaskStartFailureStage.TASK_BINDING, null)
             return
         }
         continuationKey = PhoneTaskKey(continuationBinding.taskId, continuationBinding.runtimeId)
+        attempt.key = continuationKey
         retainedTaskEpoch = epoch
         if (!runCatching { grantRoutes.publishGrantRoute(epoch, session) }.getOrDefault(false)) {
-            fail()
+            fail(PhoneContinueFailure.Other, PhoneTaskStartFailureStage.TASK_BINDING, null)
             return
         }
         val launched = runCatching { launchTarget(target.packageName) }.getOrDefault(false)
+        if (!launched) {
+            fail(PhoneContinueFailure.TargetUnavailable, PhoneTaskStartFailureStage.TARGET_LAUNCH, null)
+            return
+        }
         val observed =
-            if (launched) {
-                withCancelRollback { observeStandingTarget(epoch, session, target.packageName) }
-            } else {
-                PhoneStandingObserveResult.Failed(
-                    stage = PhoneTaskStartFailureStage.TARGET_LAUNCH,
-                    error = null,
-                )
+            withCancelRollback(PhoneTaskStartFailureStage.OBSERVATION) {
+                observeStandingTarget(epoch, session, target.packageName)
             }
-        if (!launched || observed !is PhoneStandingObserveResult.Observed) {
-            fail()
+        if (observed is PhoneStandingObserveResult.Failed) {
+            fail(
+                continuationFailureFor(observed.stage, observed.error),
+                observed.stage,
+                observed.error,
+            )
             return
         }
         val after = controller.state.value
@@ -1357,7 +1521,7 @@ internal class PhoneIntegration(
             after.standingBlocked ||
             after.blocked != null
         ) {
-            fail()
+            fail(PhoneContinueFailure.Cancelled, PhoneTaskStartFailureStage.AUTHORITY, null)
             return
         }
         runCatching {
@@ -1368,6 +1532,7 @@ internal class PhoneIntegration(
                     needsCheck = true,
                 ),
             )
+            setContinuationDelivery(PhoneContinueDelivery.Sending)
             mutateFacts {
                 it.copy(
                     halt = null,
@@ -1380,7 +1545,7 @@ internal class PhoneIntegration(
                 )
             }
         }.onFailure {
-            fail()
+            fail(PhoneContinueFailure.Other, PhoneTaskStartFailureStage.TASK_RECORD, null)
             return
         }
         // A stop during the launch/observe window supersedes the continuation: do not wake the chat
@@ -1389,22 +1554,20 @@ internal class PhoneIntegration(
             clearSendingWhenSuperseded()
             return
         }
-        val delivered = runCatching { continueSender.send(session, STANDING_CONTINUE_PROMPT) }.getOrDefault(false)
-        val identity = taskIdentity.current()
-        val keyMatches =
-            continuationKey != null &&
-                identity != null &&
-                identity.first == continuationKey!!.taskId &&
-                identity.second == continuationKey!!.runtimeId
-        val stillOurs =
-            standingExactLiveOwner(
-                requestedEpoch = epoch,
-                liveEpoch = controller.state.value.grant?.epoch,
-                identityMatchesRequestedKey = keyMatches,
-                identityOwnedByNewerTask = identity != null && !keyMatches,
-            ) && facts.value.halt == null
-        if (stillOurs) {
-            continuationDelivery = if (delivered) PhoneContinueDelivery.Delivered else PhoneContinueDelivery.Failed
+        // From here on access is already back. A failed/unknown wake is the old one-shot failure:
+        // keep the live grant and never re-send. An unexpected exception/cancellation is handled by
+        // the outer cleanup with wakeAttempted set.
+        attempt.wakeAttempted = true
+        val delivered =
+            try {
+                continueSender.send(session, STANDING_CONTINUE_PROMPT)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+        if (continuationStillOwns(epoch, continuationKey)) {
+            setContinuationDelivery(continuationWakeDelivery(delivered))
             refreshContinuation()
         } else {
             clearSendingWhenSuperseded()
@@ -1423,6 +1586,9 @@ internal class PhoneIntegration(
         session: String,
         previousRetainedEpoch: Long?,
         halt: PhoneHaltSnapshot,
+        failure: PhoneContinueFailure,
+        stage: PhoneTaskStartFailureStage?,
+        error: PhoneErrorCode?,
     ): Boolean {
         val identity = taskIdentity.current()
         val keyMatches =
@@ -1431,36 +1597,65 @@ internal class PhoneIntegration(
                 identity.first == key.taskId &&
                 identity.second == key.runtimeId
         val identityOwnedByNewerTask = key != null && identity != null && !keyMatches
-        if (!standingExactLiveOwner(
+        val core = controller.state.value
+        val progress = runCatching { taskProgress()?.snapshot }.getOrNull()
+        // A read-only Observe can make the controller revoke its own grant before returning
+        // READ_TIMEOUT/NOT_CONNECTED. That is an explicit typed stop of this exact attempt, not a
+        // superseded owner: keep the retained task and never revoke/affect anything again.
+        val coreStopped =
+            continuationCoreStoppedExact(
+                typedError = error,
+                liveEpoch = core.grant?.epoch,
+                runtimeId = core.runtimeId,
+                attemptEpoch = epoch,
+                key = key,
+                retainedEpoch = retainedTaskEpoch,
+                identityMatchesKey = keyMatches,
+                haltStillSame = facts.value.halt === halt,
+                progressKeyMatches = key != null && progress?.key == key,
+                progressEpoch = progress?.grantEpoch,
+            )
+        val exact =
+            standingExactLiveOwner(
                 requestedEpoch = epoch,
-                liveEpoch = controller.state.value.grant?.epoch,
+                liveEpoch = core.grant?.epoch,
                 identityMatchesRequestedKey = keyMatches,
                 identityOwnedByNewerTask = identityOwnedByNewerTask,
                 requireIdentity = key != null,
-            )
-        ) {
+            ) || coreStopped
+        if (!exact) {
             return false
         }
-        controller.revoke()
+        if (!coreStopped) controller.revoke()
         serviceStop()
-        if (keyMatches) taskNative.onTaskBinding(null)
-        retainedTaskEpoch = previousRetainedEpoch
+        if (key != null && keyMatches) {
+            // The bound task/key is kept at the latest attempted epoch. Publish a real native stop
+            // receipt (ended=false) so the adapter/progress store projects STOPPING, not abandoned.
+            val kept =
+                taskNative.onNativeLeaseDropped(
+                    taskId = key.taskId,
+                    runtimeId = key.runtimeId,
+                    epoch = epoch,
+                    reason =
+                        if (coreStopped) {
+                            PhoneProgressReason.CONNECTION_LOST
+                        } else {
+                            PhoneProgressReason.USER_REQUESTED
+                        },
+                    ended = false,
+                    ack = PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true),
+                )
+            // Keep the retained epoch in step with the binding that really stayed published.
+            retainedTaskEpoch = if (kept) epoch else previousRetainedEpoch
+        } else {
+            // Nothing was bound for the new attempt: keep the original retained binding/epoch.
+            retainedTaskEpoch = previousRetainedEpoch
+        }
         taskSession = session
         lease = null
-        controller.blockStanding(
-            when (halt.reason) {
-                PhoneHaltReason.TakenOver -> PhoneStandingBlockReason.NEED_USER
-                PhoneHaltReason.OutcomeUnknown,
-                PhoneHaltReason.ScreenUncertain,
-                -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
-                PhoneHaltReason.ConnectionLost,
-                PhoneHaltReason.StopChannelLost,
-                -> PhoneStandingBlockReason.CONNECTION_LOST
-                PhoneHaltReason.ScreenLocked -> PhoneStandingBlockReason.DEVICE_LOCKED
-                PhoneHaltReason.RuntimeChanged -> PhoneStandingBlockReason.RUNTIME_CHANGED
-                else -> PhoneStandingBlockReason.UNKNOWN_OUTCOME
-            },
-        )
+        // Rebuild only the original stop's block reason; a technical failure is reported separately
+        // and never rewrites the person's standing authority.
+        controller.blockStanding(halt.reason.toStandingBlockReason())
         mutateFacts {
             it.copy(
                 lease = null,
@@ -1468,10 +1663,33 @@ internal class PhoneIntegration(
                 task = store.task(),
                 pending = null,
                 busy = null,
-                continuation = PhoneContinuation(delivery = PhoneContinueDelivery.Failed),
+                continuation =
+                    PhoneContinuation(
+                        delivery = continuationPreWakeDelivery(),
+                        failure = failure,
+                    ),
             )
         }
         return true
+    }
+
+    /** Whether this exact continuation still owns the live grant and no newer stop took it. */
+    private fun continuationStillOwns(
+        epoch: Long,
+        key: PhoneTaskKey?,
+    ): Boolean {
+        val identity = taskIdentity.current()
+        val keyMatches =
+            key != null &&
+                identity != null &&
+                identity.first == key.taskId &&
+                identity.second == key.runtimeId
+        return standingExactLiveOwner(
+            requestedEpoch = epoch,
+            liveEpoch = controller.state.value.grant?.epoch,
+            identityMatchesRequestedKey = keyMatches,
+            identityOwnedByNewerTask = identity != null && key != null && !keyMatches,
+        ) && facts.value.halt == null
     }
 
     private fun standingTarget(packageName: String): PhoneTarget =
@@ -2590,6 +2808,7 @@ internal class PhoneIntegration(
         controller.revoke()
         taskSession = null
         retainedTaskEpoch = null
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
         mutateFacts {
             it.copy(
                 halt = null,
@@ -2597,6 +2816,7 @@ internal class PhoneIntegration(
                 task = store.task(),
                 pending = null,
                 busy = null,
+                continuation = PhoneContinuation(),
             )
         }
         serviceStop()
@@ -2621,7 +2841,8 @@ internal class PhoneIntegration(
         taskIdentity.clear()
         retainedTaskEpoch = null
         taskNative.onTaskBinding(null)
-        mutateFacts { it.copy(task = null) }
+        setContinuationDelivery(PhoneContinueDelivery.Idle)
+        mutateFacts { it.copy(task = null, continuation = PhoneContinuation()) }
     }
 
     private fun observeTarget() {
@@ -2718,7 +2939,7 @@ internal class PhoneIntegration(
             retainedTaskEpoch = null
             standingBinding = PhoneStandingBindingState()
             standingBindingEverUsed = false
-            continuationDelivery = PhoneContinueDelivery.Idle
+            setContinuationDelivery(PhoneContinueDelivery.Idle)
             serviceStop()
             notifications.cancelPairing()
             mutateFacts { it.copy(agentToolBlocker = null) }
@@ -2882,6 +3103,19 @@ internal class PhoneIntegration(
         }
     }
 
+    private fun setContinuationDelivery(
+        delivery: PhoneContinueDelivery,
+        failure: PhoneContinueFailure? = null,
+        stage: PhoneTaskStartFailureStage? = null,
+        error: PhoneErrorCode? = null,
+    ) {
+        continuationDelivery = delivery
+        val notResumed = delivery == PhoneContinueDelivery.NotResumed
+        continuationFailure = if (notResumed) failure ?: PhoneContinueFailure.Other else null
+        continuationFailureStage = if (notResumed) stage else null
+        continuationFailureError = if (notResumed) error else null
+    }
+
     private fun refreshContinuation() {
         val snapshot = runCatching { taskProgress()?.snapshot }.getOrNull()
         val session = taskSession
@@ -2898,7 +3132,19 @@ internal class PhoneIntegration(
             } else {
                 null
             }
-        val next = PhoneContinuation(needUser = needUser, agentNote = note, delivery = continuationDelivery)
+        val failure =
+            if (continuationDelivery == PhoneContinueDelivery.NotResumed) {
+                continuationFailure ?: PhoneContinueFailure.Other
+            } else {
+                null
+            }
+        val next =
+            PhoneContinuation(
+                needUser = needUser,
+                agentNote = note,
+                delivery = continuationDelivery,
+                failure = failure,
+            )
         mutateFacts { if (it.continuation == next) it else it.copy(continuation = next) }
     }
 
@@ -3603,7 +3849,7 @@ internal class PhoneIntegration(
     ) {
         // A genuinely new stop may be continued once; a re-settle of the same halt must not erase
         // the one-shot delivery result.
-        if (facts.value.halt == null) continuationDelivery = PhoneContinueDelivery.Idle
+        if (facts.value.halt == null) setContinuationDelivery(PhoneContinueDelivery.Idle)
         mutateFacts {
             it.copy(
                 halt =
@@ -3670,6 +3916,14 @@ internal class PhoneIntegration(
         }
     }
 
+    /**
+     * Original stop reason -> the standing block the chat must keep waiting on. A model need_user is
+     * its own reason, not a person takeover; unknown/connection/lock/runtime keep their safety reason.
+     * This never widens authority.
+     */
+    private fun PhoneHaltReason.toStandingBlockReason(): PhoneStandingBlockReason =
+        continuationStandingBlockReason(this)
+
     private fun PhoneHaltReason.toProgressStopReason(): PhoneProgressReason? =
         when (this) {
             PhoneHaltReason.ScreenLocked -> PhoneProgressReason.DEVICE_LOCKED
@@ -3678,6 +3932,7 @@ internal class PhoneIntegration(
             PhoneHaltReason.Expired -> PhoneProgressReason.LEASE_EXPIRED
             PhoneHaltReason.RuntimeChanged -> PhoneProgressReason.RUNTIME_CHANGED
             PhoneHaltReason.OutcomeUnknown -> PhoneProgressReason.OUTCOME_UNKNOWN
+            PhoneHaltReason.NeedUser -> PhoneProgressReason.NEED_USER
             PhoneHaltReason.Paused,
             PhoneHaltReason.TakenOver,
             PhoneHaltReason.TargetLeft,
