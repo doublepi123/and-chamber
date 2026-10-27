@@ -136,6 +136,10 @@ fail closed; no new acknowledgement shortcuts this entry into resuming.
   grant. The agent may wait and make a bounded number of fresh read-only observations, each within
   its existing call limit. Startup still treats this as terminal within its shared budget. The live
   task remains READY/ACTIVE on the same epoch and does not become a person handoff by itself.
+  An empty hierarchy dump is treated the same way. On a real API 37 phone, a dump that overlaps an
+  earlier on-device dump (for example one whose read was abandoned) fails with UiAutomation
+  "already registered" and prints nothing; the driver re-reads it a bounded number of times
+  within the same call deadline before reporting `HIERARCHY_NOT_IDLE`, never `DRIVER_UNAVAILABLE`.
 - **Manual need_user:** the native halt is `NeedUser`, separate from `TakenOver`, with the
   `NEED_USER` standing block and no live grant. The original task stays retained
   (`taskRetained=true`, `taskState=WAITING_USER`) and is not presented as Ended. Overlay Continue is

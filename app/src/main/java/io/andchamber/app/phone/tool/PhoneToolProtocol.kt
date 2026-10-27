@@ -422,7 +422,8 @@ object PhoneToolProtocol {
             PhoneToolCodes.INVALID_REQUEST -> "Invalid request."
             PhoneToolCodes.OUT_OF_BOUNDS -> "The point is outside the current screen. Take a new snapshot."
             PhoneToolCodes.NOT_CONNECTED -> "The phone is not connected."
-            PhoneToolCodes.DRIVER_UNAVAILABLE -> "Phone control is unavailable on this device."
+            PhoneToolCodes.DRIVER_UNAVAILABLE ->
+                "The phone returned output that could not be read for this call. This does not prove the device is unsupported or that the connection is down, and it does not confirm whether an earlier action applied. Do not repeat a mutating action; take a fresh snapshot, and if this keeps happening ask the person to check the phone."
             PhoneToolCodes.DEADLINE -> "The action timed out."
             PhoneToolCodes.HIERARCHY_NOT_IDLE ->
                 "The phone did not provide a valid hierarchy or page. This does not mean the connection is down, and it does not by itself revoke an existing task. Do not call need_user for this. Use status to see whether the original task is still live or a start was rolled back; if it is live, keep it and wait for the page to settle. If no task is live, do not fake a grant with snapshot or resume in place; only the existing saved scope and authority can support a new legal request. This error never authorises automatic recovery of stopped control, and retries are bounded."

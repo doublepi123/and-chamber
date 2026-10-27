@@ -148,10 +148,15 @@ class LibAdbDevice(
     }
 
     override fun hierarchyXml(deadlineMs: Long, maxBytes: Int): ByteArray {
-        val bytes = readService(AdbCommandSchema.HIERARCHY_DESTINATION, deadlineMs, maxBytes)
-        if (bytes.isEmpty()) throw AdbDeviceException(AdbDeviceFailure.DRIVER)
-        // Only the whole fixed AOSP sentence becomes HIERARCHY_NOT_IDLE. Any XML that merely
-        // contains those words still goes to the bounded parser unchanged.
+        // An empty dump is what `uiautomator` prints when another dump on the device still holds
+        // the single UiAutomation registration (it fails with "already registered" and writes
+        // nothing). That earlier dump finishes on its own within seconds, so this read-only call
+        // re-reads a bounded number of times inside its own deadline. Nothing is injected.
+        val bytes = AdbHierarchyOutput.readRetryingEmpty(deadlineMs) { left ->
+            readService(AdbCommandSchema.HIERARCHY_DESTINATION, left, maxBytes)
+        }
+        // Only the whole fixed AOSP sentence, or output that stayed empty, becomes
+        // HIERARCHY_NOT_IDLE. Any XML that merely contains those words still goes to the parser.
         AdbHierarchyOutput.failure(bytes)?.let { throw AdbDeviceException(it) }
         return bytes
     }
