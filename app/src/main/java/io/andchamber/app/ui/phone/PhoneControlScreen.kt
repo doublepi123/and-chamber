@@ -229,7 +229,8 @@ private fun rememberNow(
     control: PhoneControl,
     clock: () -> Long,
 ): Long {
-    val expires = (control as? PhoneControl.Agent)?.lease?.expiresAtMs
+    // A permanent lease has no deadline to count down to; the coarse tick still runs for the scope.
+    val expires = (control as? PhoneControl.Agent)?.lease?.expiresAtMs?.takeUnless(::isPermanentTime)
     val now by produceState(clock(), expires) {
         value = clock()
         // Standing scopes also count down while there is no task lease. Keep ticking in that case;
@@ -403,11 +404,15 @@ private fun StatusStrip(
                     PhoneControl.None -> StatusTone.Idle to stringResource(R.string.phone_control_none)
                     is PhoneControl.Agent ->
                         StatusTone.Busy to
-                            stringResource(
-                                R.string.phone_control_agent,
-                                control.lease.target.label,
-                                timeLeftText(control.lease.expiresAtMs, now),
-                            )
+                            if (control.lease.permanent()) {
+                                stringResource(R.string.phone_control_agent_permanent, control.lease.target.label)
+                            } else {
+                                stringResource(
+                                    R.string.phone_control_agent,
+                                    control.lease.target.label,
+                                    timeLeftText(control.lease.expiresAtMs, now),
+                                )
+                            }
                     is PhoneControl.Halted ->
                         if (control.confirmed) {
                             StatusTone.Idle to stringResource(R.string.phone_control_paused)
@@ -455,19 +460,17 @@ private fun StatusLine(
     }
 }
 
-/** "4 min" or, in the last minute, "42 s". */
+/** "4 min", in the last minute "42 s", or "no time limit" for a permanent deadline. */
 @Composable
 internal fun timeLeftText(
     expiresAtMs: Long,
     now: Long,
-): String {
-    val seconds = secondsLeftInLastMinute(expiresAtMs, now)
-    return if (seconds != null) {
-        stringResource(R.string.phone_seconds_left, seconds)
-    } else {
-        stringResource(R.string.phone_minutes_left, minutesLeft(expiresAtMs, now))
+): String =
+    when (val left = timeLeft(expiresAtMs, now)) {
+        TimeLeft.NoLimit -> stringResource(R.string.phone_no_time_limit)
+        is TimeLeft.Seconds -> stringResource(R.string.phone_seconds_left, left.value)
+        is TimeLeft.Minutes -> stringResource(R.string.phone_minutes_left, left.value)
     }
-}
 
 /**
  * Pause / I'll take over / End task. Shown while the agent holds or held a lease. Pause is the
@@ -665,6 +668,18 @@ internal object PhoneTags {
     const val HOST = "phone.host"
     const val CONNECT_PORT = "phone.connectPort"
     const val CONNECT = "phone.connect"
+    const val PAIR_AGAIN = "phone.pairAgain"
+    const val STANDING_TIME = "phone.standingTime"
+    const val STANDING_WINDOW_CHOICE = "phone.standingWindow"
+    const val STANDING_PER_TASK_CHOICE = "phone.standingPerTask"
+    const val STANDING_PERMANENT_NOTE = "phone.standingPermanentNote"
+    const val PAIR_MANUAL_TOGGLE = "phone.pairManualToggle"
+    const val PAIR_SEARCH = "phone.pairSearch"
+    const val PAIR_SEARCH_RETRY = "phone.pairSearchRetry"
+    const val AUTO_CONNECT = "phone.autoConnect"
+    const val AUTO_CONNECT_STATUS = "phone.autoConnectStatus"
+    const val CONNECT_SEARCH_RETRY = "phone.connectSearchRetry"
+    const val CONNECT_MANUAL_TOGGLE = "phone.connectManualToggle"
     const val TARGET = "phone.target"
     const val SUMMARY = "phone.summary"
     const val GRANT = "phone.grant"

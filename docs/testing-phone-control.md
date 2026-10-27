@@ -17,6 +17,24 @@ The emulator's original image did not enforce ADB authentication. Acceptance ena
 `ro.adb.secure=1` on this test AVD and required a fresh unpaired client to fail TLS authentication.
 Host adb connectivity was never substituted for App-side pairing proof.
 
+### New API 35 / x86_64 follow-up
+
+These follow-up runs used the same covered API 35 / x86_64 emulator and a fresh debug application
+identity. They are separate evidence: they do not upgrade the earlier tablet/base-flow results and
+were not repeated on API 37, arm64 or an OEM device.
+
+| Claim | Evidence | Result |
+|---|---|---|
+| Fresh independent port probe needs no runtime and no saved receipt | Isolated debug package with no phone runtime and no pairing receipt. The test operator read the six-digit code from the open system pairing dialog and submitted it through SystemUI RemoteInput; the App did not read the code from the screen, and no port was entered into its UI. App NSD/foreground discovery completed the real pair, then fresh discovery supplied the TLS connection endpoint. | Passed |
+| An existing receipt still works | Separate **Find and connect** flow using an existing receipt reached the same TLS connection. | Passed |
+| Permanent scope and per-task limit survive a confirmed restart | Both permanent selectors were explicitly selected and confirmed. After saving and confirming a runtime restart, the scope remained `ScopePermanent` / `EachTaskNoLimit`; real tool status reported `leasePermanent=true` and `leaseRemainingMs=null`. | Passed |
+| A permanent lease does not exempt the stop path | Real overlay Takeover produced `NO_GRANT` and `standingBlocked=TAKEOVER`; the permanent lease did not bypass revoke. | Passed |
+
+The builtin-question and plain-notice follow-up is recorded in
+[the overlay verification](testing-phone-overlay.md). The matrix and tablet section below are the
+earlier base-flow evidence. Do not combine them to claim the new pairing, permanent, question or
+notice features on the tablet.
+
 ## Evidence matrix
 
 | Claim | Evidence | Result |
@@ -54,17 +72,52 @@ separate from, and do not replace, the real OpenCode tool-loop evidence above.
 
 ## Automated checks
 
-- JVM: 1,817 tests, no failures, errors or skips.
-- Node: 349 tests total: 348 passed, one existing stock-ChatContainer fixture skipped, no failures.
+### Physical tablet follow-up (earlier base flow)
+
+On an Android 17 / API 37 arm64 tablet, a dedicated test package also completed native TLS
+connection, chat-started ASCII input with an independent target echo, overlay handoff, native
+continuation with exactly one prompt in the original session, return-to-chat without revocation,
+same-target `open_app`, a 3200 × 2136 PNG capture, and a subsequent task with an independently
+observed Save counter increase. The provider was the deterministic local fixture, not a real-model
+reasoning test. Earlier continuation attempts were inconclusive; the clean follow-up build passed.
+
+This section is the earlier API 37/arm64 base-flow evidence. The fresh no-receipt pairing,
+permanent-scope and question/plain-notice follow-ups above and in the overlay document were not run
+on this tablet, so they must not be called tablet-passed.
+
+The tablet's launcher required a separate, person-approved cross-app launch permission. Its pairing
+notification exposed input through a long press; a collapsed notification was not evidence that
+RemoteInput was unsupported. Overlay-and-notification mode required the demo tap and visibility
+confirmation before it could be selected.
+
+The follow-up found a first-read handover race: the controller already owned the new epoch while the
+Main-thread overlay projection still carried the previous task. The bounded wait now waits for the
+exact current display owner instead of treating that projection lag as a stale lease. A changed live
+epoch still fails immediately, and no old display is accepted as ready for the new task. Regression
+tests cover both cases. This is evidence for the covered tablet flows, not general OEM compatibility,
+long-duration survival, TalkBack, or active permission-revocation coverage.
+
+### Emulator acceptance automation
+
+- JVM: 1,947 tests, no failures, errors or skips.
+- Node: 359 tests total: 358 passed, one existing stock-ChatContainer fixture skipped, no failures.
 - Python: 72 tests passed.
+- After the full run, a wording-only cleanup passed all 12 `PhoneStringsTest` cases and a debug APK
+  rebuild. Setup text now acknowledges Permanent rather than promising only short tasks.
 - `lintDebug`, debug APK and AndroidTest APK builds passed. Lint retained warnings/information;
   this is not a claim of zero lint findings.
-- Device instrumentation: 20/20 passed. The smoke suite does not stand in for pairing or the full
-  tool loop; the separate fixture/emulator lane carries the direct-start, continuation and overlay
-  evidence.
+- No new device instrumentation was executed in this round. The earlier 20/20 smoke result is
+  historical base-flow evidence only; it is not a new test result and does not cover the new
+  fresh-pairing, permanent-scope or question/notice follow-ups. The separate API 35 fixture/emulator
+  lane carries the new evidence; the smoke suite does not stand in for pairing or the full tool loop.
 
 ## Important regressions retained
 
+- Fresh pairing works without a pre-existing runtime or receipt: the test operator enters the system
+  dialog's six-digit code through RemoteInput, the App never receives a typed port, and NSD/foreground
+  discovery follows the pair. An existing receipt's **Find and connect** is a separate path.
+- A permanent standing scope or permanent per-task limit is not a stop exemption. A real overlay
+  Takeover ends in `NO_GRANT` and `standingBlocked=TAKEOVER`.
 - LibADB 3.1.1 can wait forever after queued data followed by CLSE. The local reader drains its
   buffer/queue before EOF; the test exercises the shipped SDK's hang and the replacement's success.
 - A failed async driver child must not cancel the HTTP parent instead of returning its structured
@@ -97,12 +150,25 @@ Always choose an explicitly named emulator and a dedicated debug application ID.
 instrumentation while a live runtime/control experiment is active: the runner may finish target
 activities or terminate its process.
 
-No physical arm64, OEM background-lifetime, Android 11-wide compatibility, TalkBack or long-duration
-survival claim is made. The input backend supports only its declared ASCII subset, not Unicode,
+For the new API 35 follow-up, start with a fresh debug application identity that has no runtime and
+no pairing receipt. Use the real system pairing dialog: read its six-digit code and submit it through
+SystemUI RemoteInput; do not type the port into the App UI. Let App NSD/foreground discovery perform
+the pair, then use a fresh NSD connection and TLS connect. Repeat with an existing receipt through
+**Find and connect**. Select both permanent choices explicitly, save, confirm the runtime restart,
+and check `leasePermanent=true` / `leaseRemainingMs=null`; then use real Overlay Takeover and verify
+`NO_GRANT` plus `standingBlocked=TAKEOVER`. The builtin-question and plain-notice steps are in
+[the overlay verification](testing-phone-overlay.md).
+
+The physical tablet follow-up is limited to the cases above; no general OEM background-lifetime,
+Android 11-wide compatibility, TalkBack or long-duration survival claim is made. The input backend supports only its declared ASCII subset, not Unicode,
 passwords or automatic submission. The target-package policy is not an OS sandbox, and the whole
 local runtime must remain trusted. Window checks are conservative before/after checks, not an atomic
 transaction with another Android app. No actual payment, account operation or externally
 consequential task was performed, and no business-success claim is made.
+
+The new follow-up is API 35 / x86_64 only. It does not establish API 37/arm64 tablet, OEM,
+TalkBack, real-model reasoning or active-lease permission-revocation behavior. The retained tablet
+section is earlier base-flow evidence, not evidence for the new features.
 
 The notification permission/AppOp check began with no lease; the run did not revoke permission
 during an active lease. That distinction matters: the no-lease gate is verified, active-lease

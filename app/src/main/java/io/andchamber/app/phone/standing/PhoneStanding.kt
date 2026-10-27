@@ -6,6 +6,7 @@ import io.andchamber.app.phone.core.PhoneGrant
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneTargetPolicy
+import io.andchamber.app.phone.core.PhoneTimeLimits
 
 /**
  * Why a chat request cannot use the standing scope. Fixed values only; no labels, packages, page
@@ -49,9 +50,12 @@ data class PhoneStandingScope internal constructor(
     val sessionLabel: String,
     val allowedPackages: List<String>,
     val allowedActions: Set<PhoneActionKind>,
-    /** Absolute elapsedRealtime end of the standing window. */
+    /** Absolute elapsedRealtime end of the standing window, or the explicit permanent sentinel. */
     val windowEndsMs: Long,
-    /** Upper bound for one task's lease, within the standing window. */
+    /**
+     * Upper bound for one task's lease: a finite value within the short lease range, or the explicit
+     * [PhoneTimeLimits.PERMANENT] sentinel. A finite window still bounds a permanent per-task value.
+     */
     val perTaskMs: Long,
     /** Optional native binding revision; it only invalidates stale native callbacks. */
     val taskRevision: Long? = null,
@@ -99,12 +103,15 @@ object PhoneStandingPolicy {
             scope.allowedPackages.distinct().size != scope.allowedPackages.size ||
             scope.allowedPackages.any { !PACKAGE_PATTERN.matches(it) } ||
             scope.allowedActions.isEmpty() ||
-            scope.perTaskMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS ||
+            (!PhoneTimeLimits.isPermanent(scope.perTaskMs) &&
+                scope.perTaskMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS) ||
             (scope.taskRevision != null && scope.taskRevision < 0L)
         ) {
             return PhoneStandingRefusal.INVALID
         }
-        if (scope.windowEndsMs <= now || perTaskTtl(scope, now) == null) {
+        if ((!PhoneTimeLimits.isPermanent(scope.windowEndsMs) && scope.windowEndsMs <= now) ||
+            perTaskTtl(scope, now) == null
+        ) {
             return PhoneStandingRefusal.EXPIRED
         }
         if (targetPackage !in scope.allowedPackages) return PhoneStandingRefusal.TARGET_NOT_ALLOWED
@@ -121,13 +128,32 @@ object PhoneStandingPolicy {
         return null
     }
 
-    /** Bounded per-task lease: at most the scope's per-task duration and the remaining window. */
+    /**
+     * Bounded per-task lease.
+     *
+     * The two native bounds combine as follows:
+     * - both finite: `min(perTaskMs, remaining window)`, still within the short lease range;
+     * - finite per-task + permanent window: [PhoneStandingScope.perTaskMs];
+     * - permanent per-task + finite window: exactly the remaining window, a finite derived grant
+     *   that may legitimately exceed [PhoneLimits.MAX_LEASE_MS] (for example four hours);
+     * - both permanent: [PhoneTimeLimits.PERMANENT].
+     *
+     * null means the window is over or has less than the minimum usable lease left. A finite
+     * deadline is never turned into the permanent sentinel: [PhoneTimeLimits.expiresAt] would
+     * refuse an overflow instead.
+     */
     fun perTaskTtl(
         scope: PhoneStandingScope,
         now: Long,
     ): Long? {
-        if (scope.windowEndsMs <= now) return null
-        val ttl = minOf(scope.perTaskMs, scope.windowEndsMs - now)
+        val windowPermanent = PhoneTimeLimits.isPermanent(scope.windowEndsMs)
+        if (!windowPermanent && scope.windowEndsMs <= now) return null
+        val windowRemaining =
+            if (windowPermanent) PhoneTimeLimits.PERMANENT else scope.windowEndsMs - now
+        if (PhoneTimeLimits.isPermanent(scope.perTaskMs)) {
+            return windowRemaining.takeIf { it >= PhoneLimits.MIN_LEASE_MS }
+        }
+        val ttl = minOf(scope.perTaskMs, windowRemaining)
         return ttl.takeIf { it >= PhoneLimits.MIN_LEASE_MS && it <= PhoneLimits.MAX_LEASE_MS }
     }
 

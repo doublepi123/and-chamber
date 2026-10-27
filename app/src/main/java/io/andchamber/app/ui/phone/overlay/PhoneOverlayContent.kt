@@ -60,6 +60,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.RadioButton
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.semantics.Role
 import io.andchamber.app.R
 import io.andchamber.app.ui.components.StatusDot
 import io.andchamber.app.ui.components.StatusTone
@@ -308,11 +313,17 @@ private fun capsuleLines(
     now: Long,
 ): Pair<String, String> {
     val title = stringResource(phaseTitle(state.phase))
+    // An open question from the chat outranks the sub-line: it is the one thing waiting for the person.
+    if (state.prompt?.let(::promptCanSubmit) == true) return title to stringResource(R.string.phone_overlay_prompt_capsule)
     val sub = phaseSub(state.phase)
     if (sub != null) return title to stringResource(sub)
     val parts = ArrayList<String>(2)
     state.sentCount?.let { parts += stringResource(R.string.phone_overlay_sent_count, it) }
-    overlayMinutesLeft(state.leaseEndsAtMs, now)?.let { parts += stringResource(R.string.phone_overlay_minutes_left, it) }
+    if (state.leasePermanent) {
+        parts += stringResource(R.string.phone_overlay_no_time_limit)
+    } else {
+        overlayMinutesLeft(state.leaseEndsAtMs, now)?.let { parts += stringResource(R.string.phone_overlay_minutes_left, it) }
+    }
     return title to (parts.joinToString(" · ").ifEmpty { stringResource(R.string.phone_overlay_waiting_update_none) })
 }
 
@@ -380,7 +391,9 @@ private fun ControlLine(
     val text =
         if (agentHolds) {
             val minutes = overlayMinutesLeft(state.leaseEndsAtMs, now)
-            if (minutes != null) {
+            if (state.leasePermanent) {
+                stringResource(R.string.phone_overlay_control_agent, state.targetLabel, stringResource(R.string.phone_overlay_no_time_limit))
+            } else if (minutes != null) {
                 stringResource(R.string.phone_overlay_control_agent, state.targetLabel, stringResource(R.string.phone_overlay_minutes_left, minutes))
             } else {
                 stringResource(R.string.phone_overlay_control_agent_no_time, state.targetLabel)
@@ -402,6 +415,9 @@ private fun PanelBody(
     state.stopReason?.let { Notice(NoticeTone.Info, stringResource(R.string.phone_overlay_stop_reason, stringResource(stopReasonText(it)))) }
     notice(phase)?.let { (tone, text) -> Notice(tone, stringResource(text)) }
     if (isRetainedHandover(state)) Foot(stringResource(R.string.phone_overlay_retained_note))
+    // The chat's own question for this task first, then its latest plain notice.
+    state.prompt?.let { PromptSection(it, actions) }
+    state.sessionNotice?.let { SessionNoticeSection(it) }
 
     if (phase == OverlayPhase.Running || phase == OverlayPhase.Paused) SummarySection(state.summary)
 
@@ -652,6 +668,139 @@ private fun PanelButton(
     }
 }
 
+/**
+ * A question from the local chat for this task. Picking a choice only selects it; Send hands over
+ * exactly one answer for this question and then stays disabled. Unknown never offers a re-send.
+ */
+@Composable
+private fun PromptSection(
+    prompt: OverlayPrompt,
+    actions: PhoneOverlayActions,
+) {
+    val key = prompt.key()
+    var picked by remember(key) { mutableStateOf<String?>(null) }
+    var sentFor by remember { mutableStateOf<PromptKey?>(null) }
+    val latest by rememberUpdatedState(actions)
+    // The panel opened on this question: re-read whether it is still open. Reads only, sends nothing.
+    LaunchedEffect(key) { latest.onRefreshPrompt() }
+
+    val submittable = promptCanSubmit(prompt) && sentFor != key
+    Spacer(Modifier.size(10.dp))
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().testTag(OverlayTags.PROMPT),
+    ) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                promptLabel(prompt) ?: stringResource(R.string.phone_overlay_prompt_default_label),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.semantics { heading() },
+            )
+            promptQuestion(prompt)?.let {
+                Text(it, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
+            }
+            if (prompt.choices.isNotEmpty() && (prompt.delivery == OverlayPromptDelivery.Ready || prompt.delivery == OverlayPromptDelivery.Sending)) {
+                Column(modifier = Modifier.selectableGroup()) {
+                    prompt.choices.forEachIndexed { index, choice ->
+                        val selected = picked == choice.value
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .selectable(
+                                        selected = selected,
+                                        enabled = submittable,
+                                        role = Role.RadioButton,
+                                        onClick = { picked = choice.value },
+                                    ).testTag(OverlayTags.PROMPT_CHOICE + ":" + index),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = selected, onClick = null, enabled = submittable)
+                            Spacer(Modifier.width(8.dp))
+                            Text(choice.label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                }
+            }
+            promptStatus(prompt.delivery, prompt.choices.isEmpty())?.let { status ->
+                Text(
+                    stringResource(status),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag(OverlayTags.PROMPT_STATUS),
+                )
+            }
+            promptActions(prompt).forEach { action ->
+                val mod = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                when (action) {
+                    PromptAction.Send ->
+                        Button(
+                            onClick = {
+                                val value = promptSubmission(prompt, picked, sentFor) ?: return@Button
+                                sentFor = key
+                                actions.onAnswerPrompt(prompt.formId, prompt.generation, value)
+                            },
+                            enabled = submittable && picked != null,
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = mod.testTag(OverlayTags.PROMPT_SEND),
+                        ) { Text(stringResource(R.string.phone_overlay_prompt_send)) }
+                    PromptAction.CheckAgain ->
+                        OutlinedButton(onClick = actions.onRefreshPrompt, shape = MaterialTheme.shapes.medium, modifier = mod.testTag(OverlayTags.PROMPT_REFRESH)) {
+                            Text(stringResource(R.string.phone_overlay_prompt_check_again))
+                        }
+                    PromptAction.OpenChat ->
+                        TextButton(onClick = actions.onOpenChat, modifier = mod.testTag(OverlayTags.PROMPT_OPEN_CHAT)) {
+                            Text(stringResource(R.string.phone_overlay_prompt_open_chat))
+                        }
+                }
+            }
+        }
+    }
+}
+
+@StringRes
+private fun promptStatus(
+    delivery: OverlayPromptDelivery,
+    noChoices: Boolean,
+): Int? =
+    when (delivery) {
+        OverlayPromptDelivery.Checking -> R.string.phone_overlay_prompt_checking
+        OverlayPromptDelivery.Ready -> if (noChoices) R.string.phone_overlay_prompt_answer_in_chat else R.string.phone_overlay_prompt_pick_hint
+        OverlayPromptDelivery.Sending -> R.string.phone_overlay_prompt_sending
+        OverlayPromptDelivery.Accepted -> R.string.phone_overlay_prompt_accepted
+        OverlayPromptDelivery.Unknown -> R.string.phone_overlay_prompt_unknown
+        OverlayPromptDelivery.Blocked -> R.string.phone_overlay_prompt_blocked
+        OverlayPromptDelivery.Refused -> R.string.phone_overlay_prompt_refused
+        OverlayPromptDelivery.Unsupported -> R.string.phone_overlay_prompt_unsupported
+        OverlayPromptDelivery.Superseded -> R.string.phone_overlay_prompt_superseded
+    }
+
+/** The chat's latest plain notice for this task. Read-only. */
+@Composable
+private fun SessionNoticeSection(notice: OverlaySessionNotice) {
+    val title = notice.title?.takeIf { it.isNotBlank() }
+    val body = notice.body?.takeIf { it.isNotBlank() }
+    if (title == null && body == null) return
+    val (bg, fg) =
+        when (notice.kind) {
+            OverlaySessionNoticeKind.Error, OverlaySessionNoticeKind.RestartInterrupted ->
+                MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
+            OverlaySessionNoticeKind.Ready, OverlaySessionNoticeKind.Goal ->
+                MaterialTheme.colorScheme.surfaceContainer to MaterialTheme.colorScheme.onSurface
+        }
+    Spacer(Modifier.size(10.dp))
+    Surface(shape = MaterialTheme.shapes.medium, color = bg, modifier = Modifier.fillMaxWidth().testTag(OverlayTags.SESSION_NOTICE)) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(stringResource(R.string.phone_overlay_session_notice_label), style = MaterialTheme.typography.labelSmall, color = fg)
+            title?.let { Text(it, style = MaterialTheme.typography.titleSmall, color = fg) }
+            body?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = fg) }
+        }
+    }
+}
+
 @Composable
 private fun EndConfirm(actions: PhoneOverlayActions) {
     Spacer(Modifier.size(10.dp))
@@ -692,6 +841,13 @@ internal object OverlayTags {
     const val END_CANCEL = "overlay.endCancel"
     const val END_CONFIRM = "overlay.endConfirm"
     const val SETTINGS = "overlay.settings"
+    const val PROMPT = "overlay.prompt"
+    const val PROMPT_CHOICE = "overlay.promptChoice"
+    const val PROMPT_SEND = "overlay.promptSend"
+    const val PROMPT_REFRESH = "overlay.promptRefresh"
+    const val PROMPT_OPEN_CHAT = "overlay.promptOpenChat"
+    const val PROMPT_STATUS = "overlay.promptStatus"
+    const val SESSION_NOTICE = "overlay.sessionNotice"
 
     fun button(action: OverlayAction): String = "overlay.btn." + action.name
 }

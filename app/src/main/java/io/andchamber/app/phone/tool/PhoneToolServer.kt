@@ -12,6 +12,7 @@ import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhonePoint
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneTargetPolicy
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
 import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEvent
@@ -758,7 +759,9 @@ class PhoneToolServer(
             return PhoneToolCodes.NOT_CONNECTED
         }
         val grant = state.grant ?: return PhoneToolCodes.NOT_GRANTED
-        if (controller.nowMs() >= grant.expiresAtMs) return PhoneToolCodes.LEASE_EXPIRED
+        if (PhoneTimeLimits.isExpired(controller.nowMs(), grant.expiresAtMs)) {
+            return PhoneToolCodes.LEASE_EXPIRED
+        }
         return null
     }
 
@@ -971,7 +974,10 @@ class PhoneToolServer(
             put("blocked", state.blocked?.name)
             put("connected", state.connection == io.andchamber.app.phone.core.PhoneConnectionState.CONNECTED)
             put("inFlight", state.inFlightMutation)
-            put("leaseRemainingMs", grant?.let { (it.expiresAtMs - controller.nowMs()).coerceAtLeast(0L) })
+            // A permanent native lease has no countdown: null plus an explicit flag, never a huge
+            // remaining number that would look like a finite deadline.
+            put("leaseRemainingMs", grant?.let { PhoneTimeLimits.remainingMs(controller.nowMs(), it.expiresAtMs) })
+            put("leasePermanent", grant != null && PhoneTimeLimits.isPermanent(grant.expiresAtMs))
             put("grantedActions", JsonArray(grant?.allowedActions.orEmpty().sortedBy { it.name }.map { JsonPrimitive(it.name) }))
             put("observationAvailable", state.observation != null)
             put("pendingConfirmation", pendingRequests.snapshot() != null)

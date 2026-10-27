@@ -40,6 +40,12 @@ internal data class PhoneOverlaySurfaceState(
     val appLabel: String? = null,
     val summary: String? = null,
     val leaseEndsAtMs: Long? = null,
+    /** A permanent native grant has no countdown; render "no time limit", not a huge minute count. */
+    val leasePermanent: Boolean = false,
+    /** The current task's question, already bound to this task/launch; null when there is none. */
+    val sessionPrompt: PhoneOverlayPromptView? = null,
+    /** The current task's latest plain notice, independent of the question; null when none. */
+    val sessionNotice: PhoneOverlayNoticeView? = null,
     /** Exact native display epoch; prevents a delayed old task feed appearing in a new surface. */
     val grantEpoch: Long? = null,
     val expanded: Boolean = false,
@@ -80,6 +86,10 @@ internal class PhoneOverlaySurfaceActions(
     val onOpenChat: () -> Unit = {},
     /** Open the native "continue beside the chat" confirmation; never resumes from here. */
     val onContinueInChat: () -> Unit = {},
+    /** One user tap on a shown choice. Native rechecks the frozen form/generation and task first. */
+    val onAnswerPrompt: (formId: String, generation: Long, value: String) -> Unit = { _, _, _ -> },
+    /** Re-read the pending form after an unknown result or when the answer surface opens. */
+    val onRefreshPrompt: () -> Unit = {},
 )
 
 /** The designer's overlay composable. Absent means overlay mode cannot run (never an empty window). */
@@ -612,6 +622,9 @@ internal class PhoneOverlaySurfaceHost(
                 appLabel = next.targetLabel,
                 summary = next.summary,
                 leaseEndsAtMs = next.leaseEndsAtMs,
+                leasePermanent = next.leasePermanent,
+                sessionPrompt = next.sessionPrompt,
+                sessionNotice = next.sessionNotice,
                 grantEpoch = next.ownerKey.removePrefix("grant-").toLongOrNull(),
                 expanded = next.expanded,
                 endConfirm = next.endConfirm,

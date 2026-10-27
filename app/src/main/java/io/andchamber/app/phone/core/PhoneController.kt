@@ -110,7 +110,9 @@ class PhoneController(
     /**
      * Native UI only. One grant at a time, independent from connection/task/runtime. A new grant
      * always starts a new epoch and clears the old request records: old ids are rejected by epoch
-     * and old actions are never replayed.
+     * and old actions are never replayed. [ttlMs] may be the explicit
+     * [PhoneTimeLimits.PERMANENT] sentinel, which only native configuration can produce; a finite
+     * value still stays within the short lease range.
      */
     fun grant(
         targetPackage: String,
@@ -119,7 +121,9 @@ class PhoneController(
     ): PhoneGrantResult {
         if (!mutableState.value.enabled) return PhoneGrantResult.Refused(PhoneErrorCode.DISABLED)
         targetPolicy.refusal(targetPackage)?.let { return PhoneGrantResult.Refused(it) }
-        if (ttlMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS) {
+        if (!PhoneTimeLimits.isPermanent(ttlMs) &&
+            ttlMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS
+        ) {
             return PhoneGrantResult.Refused(PhoneErrorCode.INVALID_REQUEST)
         }
         val now = clock()
@@ -133,7 +137,7 @@ class PhoneController(
                 targetPackage = targetPackage,
                 allowedActions = allowedActions.toSet(),
                 grantedAtMs = now,
-                expiresAtMs = now + ttlMs,
+                expiresAtMs = PhoneTimeLimits.expiresAt(now, ttlMs),
             )
             val open = activeCall
             requestRecords.clear()
@@ -161,7 +165,9 @@ class PhoneController(
      * starter port instead. The scope check and the grant happen under one lock, so a request can
      * never slip past a just-set pause, unknown block, standing standby or runtime change, and it
      * never clears those locks. Every call creates a new epoch; the lease is bounded by the scope's
-     * per-task duration and the remaining standing window.
+     * per-task duration and the remaining standing window. Either bound may be the explicit
+     * [PhoneTimeLimits.PERMANENT] sentinel: only two permanent bounds yield a permanent lease; a
+     * permanent per-task inside a finite window stays bounded by that window.
      */
     fun grantFromPreauthorization(
         scope: PhoneStandingScope,
@@ -184,7 +190,7 @@ class PhoneController(
                         targetPackage = targetPackage,
                         allowedActions = scope.allowedActions.toSet(),
                         grantedAtMs = now,
-                        expiresAtMs = now + ttl,
+                        expiresAtMs = PhoneTimeLimits.expiresAt(now, ttl),
                     )
                 open = activeCall
                 requestRecords.clear()
@@ -409,7 +415,7 @@ class PhoneController(
     fun refresh() {
         val calls = synchronized(lock) {
             val grant = mutableState.value.grant ?: return
-            if (clock() < grant.expiresAtMs) return
+            if (!PhoneTimeLimits.isExpired(clock(), grant.expiresAtMs)) return
             revokeLocked(PhoneEvent.LEASE_EXPIRED, expiredEpoch = grant.epoch)
         }
         cancelCall(calls, PhoneErrorCode.LEASE_EXPIRED)
@@ -519,7 +525,7 @@ class PhoneController(
         }
         val grant = state.grant ?: return@synchronized PlanResult.Refused(PhoneErrorCode.NOT_GRANTED)
         val now = clock()
-        if (now >= grant.expiresAtMs) {
+        if (PhoneTimeLimits.isExpired(now, grant.expiresAtMs)) {
             return@synchronized PlanResult.Refused(PhoneErrorCode.LEASE_EXPIRED)
         }
         if (state.connection != PhoneConnectionState.CONNECTED) {
@@ -677,10 +683,12 @@ class PhoneController(
             }
         }
 
-        val leaseRemaining = grant.expiresAtMs - now
-        val timeout = deadlineMs.coerceIn(1L, PhoneLimits.MAX_CALL_MS)
-            .coerceAtMost(leaseRemaining)
-            .coerceAtLeast(1L)
+        // A permanent lease has no countdown; the single call still keeps its own MAX_CALL bound.
+        val leaseRemaining = PhoneTimeLimits.remainingMs(now, grant.expiresAtMs)
+        val timeout =
+            deadlineMs.coerceIn(1L, PhoneLimits.MAX_CALL_MS)
+                .let { if (leaseRemaining == null) it else it.coerceAtMost(leaseRemaining) }
+                .coerceAtLeast(1L)
         PlanResult.Admitted(
             Plan(
                 key = key,
@@ -706,7 +714,9 @@ class PhoneController(
             if (state.epoch != plan.epoch) return@synchronized PhoneErrorCode.EPOCH_CHANGED
             val grant = state.grant ?: return@synchronized PhoneErrorCode.NOT_GRANTED
             val now = clock()
-            if (now >= grant.expiresAtMs) return@synchronized PhoneErrorCode.LEASE_EXPIRED
+            if (PhoneTimeLimits.isExpired(now, grant.expiresAtMs)) {
+                return@synchronized PhoneErrorCode.LEASE_EXPIRED
+            }
             if (now >= plan.deadlineAtMs) return@synchronized PhoneErrorCode.DEADLINE
             if (state.connection != PhoneConnectionState.CONNECTED) {
                 return@synchronized PhoneErrorCode.NOT_CONNECTED
@@ -900,7 +910,7 @@ class PhoneController(
             !state.enabled -> PhoneErrorCode.DISABLED
             state.epoch != plan.epoch -> PhoneErrorCode.EPOCH_CHANGED
             grant == null -> PhoneErrorCode.NOT_GRANTED
-            clock() >= grant.expiresAtMs -> PhoneErrorCode.LEASE_EXPIRED
+            PhoneTimeLimits.isExpired(clock(), grant.expiresAtMs) -> PhoneErrorCode.LEASE_EXPIRED
             clock() >= plan.deadlineAtMs -> PhoneErrorCode.DEADLINE
             state.connection != PhoneConnectionState.CONNECTED -> PhoneErrorCode.NOT_CONNECTED
             else -> null
@@ -939,7 +949,7 @@ class PhoneController(
             if (controlEpoch != plan.controlEpoch) return@synchronized null
             if (clock() >= plan.deadlineAtMs) return@synchronized null
             val grant = state.grant ?: return@synchronized null
-            if (clock() >= grant.expiresAtMs) return@synchronized null
+            if (PhoneTimeLimits.isExpired(clock(), grant.expiresAtMs)) return@synchronized null
             if (state.connection != PhoneConnectionState.CONNECTED) return@synchronized null
 
             observationGeneration += 1

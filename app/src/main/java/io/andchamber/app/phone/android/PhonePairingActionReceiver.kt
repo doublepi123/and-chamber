@@ -37,7 +37,7 @@ class PhonePairingActionReceiver : BroadcastReceiver() {
                 val text = remoteInput(intent, KEY_CODE) ?: return
                 integration.onPairingCodeReply(generation, text)
             }
-            ACTION_CANCEL -> integration.onPairingCancelRequested()
+            ACTION_CANCEL -> integration.onPairingCancelRequested(intent.getLongExtra(EXTRA_GENERATION, -1L))
             ACTION_OPEN_SETTINGS -> integration.openWirelessDebuggingSettings()
         }
     }

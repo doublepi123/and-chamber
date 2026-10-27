@@ -15,6 +15,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import io.andchamber.app.phone.standing.PhoneStandingGrantResult
+import io.andchamber.app.phone.standing.PhoneStandingScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -278,6 +280,42 @@ class PhoneControllerTest {
             fixture.request(PhoneAgentAction.Observe, requestId = "r1"),
         )
         assertEquals(PhoneErrorCode.DUPLICATE, (duplicate as PhoneCallResult.Refused).error)
+        assertEquals(2, fixture.driver.observeCalls)
+    }
+
+    @Test
+    fun `a permanent lease does not bypass duplicate or capacity refusal`() = runTest {
+        val fixture = Fixture(requestCapacity = 2)
+        fixture.controller.enable()
+        assertTrue(fixture.controller.connect() is PhoneConnectionResult.Connected)
+        assertTrue(
+            fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), PhoneTimeLimits.PERMANENT)
+                is PhoneGrantResult.Granted,
+        )
+
+        fixture.observe("r1")
+        fixture.observe("r2")
+        val full = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "r3"),
+        )
+        assertEquals(PhoneErrorCode.CAPACITY, (full as PhoneCallResult.Refused).error)
+
+        val duplicate = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "r1"),
+        )
+        assertEquals(PhoneErrorCode.DUPLICATE, (duplicate as PhoneCallResult.Refused).error)
+        assertEquals("a permanent lease must not clear or evict request records", 2, fixture.driver.observeCalls)
+
+        // A new permanent grant is still a new epoch: old ids are rejected, not replayed.
+        val oldEpoch = fixture.controller.state.value.epoch
+        assertTrue(
+            fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), PhoneTimeLimits.PERMANENT)
+                is PhoneGrantResult.Granted,
+        )
+        val stale = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, epoch = oldEpoch, requestId = "r4"),
+        )
+        assertEquals(PhoneErrorCode.EPOCH_CHANGED, (stale as PhoneCallResult.Refused).error)
         assertEquals(2, fixture.driver.observeCalls)
     }
 
@@ -990,6 +1028,97 @@ class PhoneControllerTest {
         assertEquals(fixture.controller.state.value.sequence, sequences.last())
         assertEquals(PhoneEvent.REVOKED, fixture.controller.state.value.lastEvent)
         assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `a permanent native grant is never expired by time and still executes`() = runTest {
+        val fixture = Fixture()
+        fixture.controller.enable()
+        assertTrue(fixture.controller.connect() is PhoneConnectionResult.Connected)
+
+        val granted =
+            fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), PhoneTimeLimits.PERMANENT)
+        val grant = (granted as PhoneGrantResult.Granted).grant
+        assertEquals(PhoneTimeLimits.PERMANENT, grant.expiresAtMs)
+
+        val observation = fixture.observe("r1")
+        // Far beyond any finite lease, but still with room for a finite call deadline.
+        fixture.now = 10L * 365L * 24L * 60L * 60L * 1_000L
+        fixture.controller.refresh()
+        assertEquals(grant, fixture.controller.state.value.grant)
+        assertNotEquals(PhoneEvent.LEASE_EXPIRED, fixture.controller.state.value.lastEvent)
+        assertEquals(PhonePhase.READY, fixture.controller.state.value.phase)
+
+        val tap = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "r2",
+                observation = observation.binding,
+            ),
+        )
+        assertTrue("a permanent lease refused a normal call: $tap", tap is PhoneCallResult.Dispatched)
+        assertEquals(PhoneDelivery.SENT, (tap as PhoneCallResult.Dispatched).delivery)
+    }
+
+    @Test
+    fun `permanent is the only ttl outside the finite lease range`() = runTest {
+        val fixture = Fixture()
+        fixture.controller.enable()
+
+        listOf(0L, -1L, PhoneLimits.MAX_LEASE_MS + 1L).forEach { ttl ->
+            val refused = fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), ttl)
+            assertEquals(
+                "ttl=$ttl",
+                PhoneErrorCode.INVALID_REQUEST,
+                (refused as PhoneGrantResult.Refused).error,
+            )
+        }
+        assertTrue(
+            fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), PhoneTimeLimits.PERMANENT)
+                is PhoneGrantResult.Granted,
+        )
+    }
+
+    @Test
+    fun `an unknown outcome still blocks a permanent standing scope`() = runTest {
+        val fixture = Fixture()
+        fixture.controller.enable()
+        assertTrue(fixture.controller.connect() is PhoneConnectionResult.Connected)
+        val permanentScope = PhoneStandingScope(
+            runtimeId = "runtime-1",
+            sessionLabel = "ses-a",
+            allowedPackages = listOf(TARGET),
+            allowedActions = setOf(PhoneActionKind.TAP),
+            windowEndsMs = PhoneTimeLimits.PERMANENT,
+            perTaskMs = PhoneTimeLimits.PERMANENT,
+        )
+        val granted = fixture.controller.grantFromPreauthorization(permanentScope, TARGET)
+        assertTrue(granted is PhoneStandingGrantResult.Granted)
+        assertEquals(PhoneTimeLimits.PERMANENT, (granted as PhoneStandingGrantResult.Granted).grant.expiresAtMs)
+
+        fixture.driver.dispatchReceipt = PhoneDispatchReceipt.Unknown()
+        val observation = fixture.observe("r1")
+        val first = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "r2",
+                observation = observation.binding,
+            ),
+        )
+        assertEquals(PhoneDelivery.UNKNOWN, (first as PhoneCallResult.Dispatched).delivery)
+        assertEquals(PhoneBlockReason.UNKNOWN_OUTCOME, fixture.controller.state.value.blocked)
+        assertTrue(fixture.controller.state.value.standingBlocked)
+
+        val fresh = fixture.observe("r3")
+        val blocked = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "r4",
+                observation = fresh.binding,
+            ),
+        )
+        assertEquals(PhoneErrorCode.OUTCOME_UNKNOWN, (blocked as PhoneCallResult.Refused).error)
+        assertEquals("the unknown outcome must not be replayed", 1, fixture.driver.dispatched.size)
     }
 
     private class Fixture(requestCapacity: Int = 8) {

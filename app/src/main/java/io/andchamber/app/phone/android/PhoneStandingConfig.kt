@@ -3,6 +3,7 @@ package io.andchamber.app.phone.android
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.ui.phone.PhoneRuntimeStatus
@@ -12,19 +13,25 @@ import io.andchamber.app.ui.phone.PhoneToolStatus
  * The person-confirmed standing configuration. This is configuration, never a lease: saving it does
  * not grant, connect, launch or start anything. It may be saved before the runtime loaded the tool,
  * and it survives a process restart as a bounded window (wall-clock end), never as authority.
+ *
+ * Either [windowEndsAtWallMs] or [perTaskMs] may be [PhoneTimeLimits.PERMANENT]. That is still only a
+ * configured scope: after a reboot or process death there is no grant, no task binding and no
+ * automatic resume; the first valid chat request still binds and every stop/block check still runs.
  */
 data class PhoneStandingConfig(
     val apps: List<PhoneStandingApp>,
     val actions: Set<PhoneActionKind>,
-    /** Absolute wall-clock end, persisted so a restarted process can age the window honestly. */
+    /** Absolute wall-clock end, or [PhoneTimeLimits.PERMANENT]. Persisted as configuration only. */
     val windowEndsAtWallMs: Long,
+    /** Per-task limit, or [PhoneTimeLimits.PERMANENT] when the person chose no per-task limit. */
     val perTaskMs: Long,
     val revoked: Boolean = false,
 )
 
 /**
  * Runtime projection of a saved configuration: [endsAtElapsedMs] is derived from the monotonic
- * clock used by the controller, so a wall-clock change cannot extend a per-task lease.
+ * clock used by the controller, so a wall-clock change cannot extend a per-task lease. A permanent
+ * window uses [PhoneTimeLimits.PERMANENT] for both ends; it never becomes a persistent lease.
  */
 internal data class PhoneStandingState(
     val config: PhoneStandingConfig,
@@ -42,7 +49,48 @@ internal const val STANDING_MIN_WINDOW_MS = 60_000L
 internal const val STANDING_MAX_WINDOW_MS = 24L * 60L * 60L * 1_000L
 
 internal fun PhoneStandingConfig.isActive(nowWallMs: Long): Boolean =
-    !revoked && nowWallMs < windowEndsAtWallMs
+    !revoked && !PhoneTimeLimits.isExpired(nowWallMs, windowEndsAtWallMs)
+
+/**
+ * Restores the monotonic projection from the persisted wall-clock end.
+ *
+ * A permanent scope stores [PhoneTimeLimits.PERMANENT] for both ends; restoring it must not compute
+ * `clock() + (MAX - wallClock)`, which would overflow. A finite end is bounded by the configured
+ * 24-hour maximum even if the wall clock moved backwards, and an unrepresentable remainder fails
+ * closed as expired instead of becoming a permanent scope.
+ */
+internal fun restoredStandingState(
+    config: PhoneStandingConfig,
+    nowWallMs: Long,
+    nowElapsedMs: Long,
+): PhoneStandingState {
+    if (PhoneTimeLimits.isPermanent(config.windowEndsAtWallMs)) {
+        // Explicit deadline sentinel: never compute MAX - wallClock + elapsedRealtime.
+        return PhoneStandingState(
+            config = config,
+            endsAtElapsedMs = PhoneTimeLimits.PERMANENT,
+            expired = false,
+        )
+    }
+    val remaining = PhoneTimeLimits.remainingMs(nowWallMs, config.windowEndsAtWallMs)
+        ?: return PhoneStandingState(
+            config = config,
+            endsAtElapsedMs = PhoneTimeLimits.PERMANENT,
+            expired = false,
+        )
+    if (remaining <= 0L) {
+        return PhoneStandingState(config = config, endsAtElapsedMs = nowElapsedMs, expired = true)
+    }
+    // A finite saved window can never be longer than the configured maximum. A much larger remainder
+    // is a corrupt/backwards-clock value; fail closed instead of projecting an unbounded active scope.
+    if (remaining > STANDING_MAX_WINDOW_MS) {
+        return PhoneStandingState(config = config, endsAtElapsedMs = nowElapsedMs, expired = true)
+    }
+    val endsAt =
+        runCatching { PhoneTimeLimits.expiresAt(nowElapsedMs, remaining) }
+            .getOrElse { return PhoneStandingState(config, nowElapsedMs, expired = true) }
+    return PhoneStandingState(config = config, endsAtElapsedMs = endsAt, expired = false)
+}
 
 /**
  * Pre-checks that need the native task/session memory the core does not carry. The core policy is
@@ -72,14 +120,27 @@ internal fun standingRequestRefusal(
         else -> null
     }
 
-/** Exact bounds used by the native save path; the UI has its own earlier copy of the same limits. */
+/**
+ * Exact bounds used by the native save path; the UI has its own earlier copy of the same limits.
+ *
+ * Either duration may be the explicit [PhoneTimeLimits.PERMANENT] sentinel. A permanent scope is
+ * configuration, not a lease: it still needs the runtime, native task binding and every stop/block
+ * check. When both values are finite, a task can never outlive its standing window.
+ */
 internal fun validStandingBounds(
     windowMs: Long,
     perTaskMs: Long,
-): Boolean =
-    windowMs in STANDING_MIN_WINDOW_MS..STANDING_MAX_WINDOW_MS &&
-        perTaskMs in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS &&
-        perTaskMs <= windowMs
+): Boolean {
+    val windowValid =
+        PhoneTimeLimits.isPermanent(windowMs) ||
+            windowMs in STANDING_MIN_WINDOW_MS..STANDING_MAX_WINDOW_MS
+    val perTaskValid =
+        PhoneTimeLimits.isPermanent(perTaskMs) ||
+            perTaskMs in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS
+    if (!windowValid || !perTaskValid) return false
+    if (PhoneTimeLimits.isPermanent(windowMs) || PhoneTimeLimits.isPermanent(perTaskMs)) return true
+    return perTaskMs <= windowMs
+}
 
 /**
  * Exact-owner test for a failed start rollback. A live epoch always decides first: if a newer task

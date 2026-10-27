@@ -33,6 +33,12 @@ internal data class PhoneOverlayWindowState(
     val targetLabel: String? = null,
     val summary: String? = null,
     val leaseEndsAtMs: Long? = null,
+    /** A permanent native grant has no countdown; this is an explicit fact, never a huge deadline. */
+    val leasePermanent: Boolean = false,
+    /** The current task's notification question, if any. Bound to the native task owner. */
+    val sessionPrompt: PhoneOverlayPromptView? = null,
+    /** The current task's latest plain notice, if any. Separate from the question identity. */
+    val sessionNotice: PhoneOverlayNoticeView? = null,
     val expanded: Boolean = false,
     val endConfirm: Boolean = false,
     val side: PhoneOverlaySide = PhoneOverlaySide.RIGHT,
@@ -73,12 +79,27 @@ internal data class PhoneOverlayWindowState(
     fun withEndConfirm(confirming: Boolean): PhoneOverlayWindowState =
         copy(expanded = true, endConfirm = confirming, revision = revision + 1)
 
+    /** A permanent/finite lease presentation change; the deadline and the fact always move together. */
+    fun withLeasePermanent(permanent: Boolean): PhoneOverlayWindowState =
+        if (leasePermanent == permanent) this else copy(leasePermanent = permanent, revision = revision + 1)
+
+    /** The current task's question. A new question or an owner change bumps the display revision. */
+    fun withSessionPrompt(prompt: PhoneOverlayPromptView?): PhoneOverlayWindowState =
+        if (sessionPrompt == prompt) this else copy(sessionPrompt = prompt, revision = revision + 1)
+
+    /** A plain notice is display-only; it never changes the question or its answer identity. */
+    fun withSessionNotice(notice: PhoneOverlayNoticeView?): PhoneOverlayWindowState =
+        if (sessionNotice == notice) this else copy(sessionNotice = notice, revision = revision + 1)
+
     /** A new task-display owner: a fresh generation, reset geometry and no stale confirmation. */
     fun withNewOwner(ownerKey: String): PhoneOverlayWindowState =
         copy(
             ownerKey = ownerKey,
             generation = generation + 1,
             revision = revision + 1,
+            leasePermanent = false,
+            sessionPrompt = null,
+            sessionNotice = null,
             expanded = false,
             endConfirm = false,
             offsetY = 0,

@@ -4,6 +4,7 @@ import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
 import io.andchamber.app.phone.overlay.progress.PhoneNativeCallOutcome
 import io.andchamber.app.phone.overlay.progress.PhoneProgressApply
@@ -103,6 +104,41 @@ class PhoneToolServerTest {
             // If status had claimed the route for B, this action would be SESSION_BUSY.
             val tapA = httpPost(fixture.port, tapBody(snapA.observationId(), session = "ses-a", callId = "a-tap"))
             assertTrue(tapA.ok())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `status reports a permanent lease as no countdown instead of a huge remaining`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            val noGrant = httpPost(fixture.port, toolBody("ses-b", "s1", input("status")))
+            assertTrue(noGrant.ok())
+            assertEquals("null", noGrant.data()["leaseRemainingMs"].toString())
+            assertEquals("false", noGrant.data()["leasePermanent"].toString())
+
+            fixture.granted(ttlMs = 60_000L)
+            val finite = httpPost(fixture.port, toolBody("ses-b", "s2", input("status")))
+            assertTrue(finite.ok())
+            assertEquals("60000", finite.data()["leaseRemainingMs"].toString())
+            assertEquals("false", finite.data()["leasePermanent"].toString())
+
+            fixture.granted(ttlMs = PhoneTimeLimits.PERMANENT)
+            val permanent = httpPost(fixture.port, toolBody("ses-b", "s3", input("status")))
+            assertTrue(permanent.ok())
+            // Never serialise Long.MAX_VALUE - now as a remaining duration, nor any value above the
+            // JavaScript safe-integer range.
+            assertEquals("null", permanent.data()["leaseRemainingMs"].toString())
+            assertEquals("true", permanent.data()["leasePermanent"].toString())
+            assertFalse(permanent.body.contains(Long.MAX_VALUE.toString()))
+            assertFalse(permanent.body.contains("9223372036854775807"))
+
+            fixture.controller.revoke()
+            val revoked = httpPost(fixture.port, toolBody("ses-b", "s4", input("status")))
+            assertTrue(revoked.ok())
+            assertEquals("null", revoked.data()["leaseRemainingMs"].toString())
+            assertEquals("false", revoked.data()["leasePermanent"].toString())
         } finally {
             fixture.close()
         }

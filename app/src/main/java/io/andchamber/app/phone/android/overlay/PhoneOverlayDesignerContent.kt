@@ -12,6 +12,11 @@ import io.andchamber.app.phone.overlay.progress.PhoneProgressReason
 import io.andchamber.app.phone.overlay.progress.PhoneProgressSource
 import io.andchamber.app.ui.phone.overlay.OverlayEvent
 import io.andchamber.app.ui.phone.overlay.OverlayPhase as UiOverlayPhase
+import io.andchamber.app.ui.phone.overlay.OverlayPrompt
+import io.andchamber.app.ui.phone.overlay.OverlayPromptChoice
+import io.andchamber.app.ui.phone.overlay.OverlayPromptDelivery
+import io.andchamber.app.ui.phone.overlay.OverlaySessionNotice
+import io.andchamber.app.ui.phone.overlay.OverlaySessionNoticeKind
 import io.andchamber.app.ui.phone.overlay.OverlaySide
 import io.andchamber.app.ui.phone.overlay.OverlaySource
 import io.andchamber.app.ui.phone.overlay.PhoneOverlayActions
@@ -57,6 +62,7 @@ internal class PhoneOverlayDesignerContent(
                 targetLabel = state.appLabel.orEmpty(),
                 summary = state.summary,
                 leaseEndsAtMs = state.leaseEndsAtMs,
+                leasePermanent = state.leasePermanent,
                 sentCount = currentTask?.sentCount,
                 events = events,
                 // Layout state is owned by the manager and arrives as an immutable value.
@@ -67,6 +73,8 @@ internal class PhoneOverlayDesignerContent(
                 retained = state.retained,
                 canContinueInChat = state.canContinueInChat,
                 demo = state.demo,
+                prompt = state.sessionPrompt?.toOverlayPrompt(),
+                sessionNotice = state.sessionNotice?.toOverlaySessionNotice(),
             )
         val uiActions =
             PhoneOverlayActions(
@@ -85,6 +93,8 @@ internal class PhoneOverlayDesignerContent(
                 onDragEnd = { actions.onDragEnd() },
                 onOpenChat = actions.onOpenChat,
                 onContinueInChat = actions.onContinueInChat,
+                onAnswerPrompt = actions.onAnswerPrompt,
+                onRefreshPrompt = actions.onRefreshPrompt,
             )
         AndChamberTheme {
             PhoneOverlayContent(
@@ -177,3 +187,47 @@ internal class PhoneOverlayDesignerContent(
             PhoneOverlayPhase.NEEDS_CHECK, PhoneOverlayPhase.ENDED -> UiOverlayPhase.Ended
         }
 }
+
+/** Native prompt data to the designer's immutable model. No visual decision lives here. */
+internal fun PhoneOverlayPromptView.toOverlayPrompt(): OverlayPrompt =
+    OverlayPrompt(
+        formId = formId,
+        generation = generation,
+        noticeTitle = noticeTitle,
+        noticeBody = noticeBody,
+        questionTitle = questionTitle,
+        questionDescription = questionDescription,
+        choices = choices.map { OverlayPromptChoice(value = it.value, label = it.label) },
+        delivery = delivery.toOverlayPromptDelivery(),
+    )
+
+/** Exhaustive mapping; a future native delivery state fails compilation instead of at runtime. */
+internal fun PhoneOverlayPromptDelivery.toOverlayPromptDelivery(): OverlayPromptDelivery =
+    when (this) {
+        PhoneOverlayPromptDelivery.Checking -> OverlayPromptDelivery.Checking
+        PhoneOverlayPromptDelivery.Ready -> OverlayPromptDelivery.Ready
+        PhoneOverlayPromptDelivery.Sending -> OverlayPromptDelivery.Sending
+        PhoneOverlayPromptDelivery.Accepted -> OverlayPromptDelivery.Accepted
+        PhoneOverlayPromptDelivery.Unknown -> OverlayPromptDelivery.Unknown
+        PhoneOverlayPromptDelivery.Blocked -> OverlayPromptDelivery.Blocked
+        PhoneOverlayPromptDelivery.Refused -> OverlayPromptDelivery.Refused
+        PhoneOverlayPromptDelivery.Unsupported -> OverlayPromptDelivery.Unsupported
+        PhoneOverlayPromptDelivery.Superseded -> OverlayPromptDelivery.Superseded
+    }
+
+/** Plain notice data to the designer's immutable model. It carries no answer identity. */
+internal fun PhoneOverlayNoticeView.toOverlaySessionNotice(): OverlaySessionNotice =
+    OverlaySessionNotice(
+        kind = kind.toOverlaySessionNoticeKind(),
+        title = title,
+        body = body,
+    )
+
+/** Exhaustive mapping; a future native notice kind fails compilation instead of at runtime. */
+internal fun PhoneOverlayNoticeKind.toOverlaySessionNoticeKind(): OverlaySessionNoticeKind =
+    when (this) {
+        PhoneOverlayNoticeKind.Ready -> OverlaySessionNoticeKind.Ready
+        PhoneOverlayNoticeKind.Error -> OverlaySessionNoticeKind.Error
+        PhoneOverlayNoticeKind.Goal -> OverlaySessionNoticeKind.Goal
+        PhoneOverlayNoticeKind.RestartInterrupted -> OverlaySessionNoticeKind.RestartInterrupted
+    }

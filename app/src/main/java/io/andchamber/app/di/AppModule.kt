@@ -20,6 +20,8 @@ import io.andchamber.app.notify.NotificationSettingsBootstrap
 import io.andchamber.app.notify.NotificationSink
 import io.andchamber.app.notify.OpenChamberNotifier
 import io.andchamber.app.notify.ProcessForeground
+import io.andchamber.app.notify.LocalApiSessionPromptTransport
+import io.andchamber.app.notify.SessionPromptController
 import io.andchamber.app.runtime.DefaultLocalRuntimeController
 import android.system.Os
 import io.andchamber.app.runtime.ForegroundStarter
@@ -137,7 +139,27 @@ val appModule =
             )
         }
 
-        single { NotificationSink(get(), ProcessForeground, get()) }
+        // Memory-only notification question for the phone overlay conversation. It reads pending
+        // state only for a local question event or an explicit refresh; never polls.
+        single {
+            SessionPromptController(
+                transport = LocalApiSessionPromptTransport(get()),
+                currentLaunchId = { get<OpenChamberServer>().readyLaunchId() },
+                currentTaskSession = { get<PhoneOverlayTaskCoordinator>().snapshot()?.routeSession },
+                // The overlay's task/owner snapshot is Main-owned; evaluate its submit fence there.
+                fenceDispatcher = Dispatchers.Main.immediate,
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            )
+        }
+
+        single {
+            NotificationSink(
+                get(),
+                ProcessForeground,
+                get(),
+                onEvent = { get<SessionPromptController>().onNotification(it) },
+            )
+        }
 
         single {
             val context = get<Context>()
@@ -391,6 +413,8 @@ val appModule =
                         progress = task.progress,
                     ),
                 taskProgress = task.progress,
+                conversation = get<SessionPromptController>(),
+                currentLaunchId = { get<OpenChamberServer>().readyLaunchId() },
                 // Exact retained/live native task end; it persists the needs-check record and never
                 // re-grants or touches a newer task.
                 endTask = { key, epoch -> task.endRetainedTask(key, epoch) },

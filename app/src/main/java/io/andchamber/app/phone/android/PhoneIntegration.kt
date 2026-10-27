@@ -29,6 +29,7 @@ import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.overlay.progress.PhoneProgressKind
 import io.andchamber.app.phone.overlay.progress.PhoneProgressReason
 import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
@@ -42,6 +43,7 @@ import io.andchamber.app.phone.standing.PhoneStandingView
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
 import io.andchamber.app.notify.OpenSessionLink
+import io.andchamber.app.ui.phone.PhoneAutoConnect
 import io.andchamber.app.ui.phone.PhoneBusy
 import io.andchamber.app.ui.phone.PhoneConnectRequest
 import io.andchamber.app.ui.phone.PhoneContinueDelivery
@@ -143,8 +145,11 @@ internal class PhoneIntegration(
      */
     private var standingState: PhoneStandingState? =
         store.standing()?.let { config ->
-            val remaining = config.windowEndsAtWallMs - wallClock()
-            PhoneStandingState(config = config, endsAtElapsedMs = clock() + remaining, expired = remaining <= 0L)
+            restoredStandingState(
+                config = config,
+                nowWallMs = wallClock(),
+                nowElapsedMs = clock(),
+            )
         }
 
     /** In-memory binding: a saved scope is bound to the first successful chat session/runtime. */
@@ -242,7 +247,25 @@ internal class PhoneIntegration(
     private var pairingOperationSeq = 0L
     private var activePairingOperation: Long? = null
 
-    private var discovery: PhonePortDiscovery? = null
+    /**
+     * The explicit bounded-discovery session. Results are accepted only for the current pairing
+     * generation or the completed pair's own connect search; a stop/new attempt drops the generation so
+     * a late callback cannot revive an old port.
+     */
+    private var pairingDiscoveryGeneration: Long? = null
+    private var pairingCompletedGeneration: Long? = null
+    private var pairingDiscoveredEndpoint: PhoneDiscoveredEndpoint? = null
+    private var connectDiscoveredEndpoint: PhoneDiscoveredEndpoint? = null
+    private var connectDiscoveryStatus: PhoneDiscoveryStatus = PhoneDiscoveryStatus.Idle
+
+    /** The explicit "connect to this phone" search runs only in-process and only for a short bound. */
+    private var connectSearch: PhonePortDiscovery? = null
+    private var connectSearchGeneration = 0L
+    private var connectSearchActive = false
+    private var connectSearchConsumed = false
+
+    private val autoConnect = PhoneAutoConnectGate()
+
     private val observers = mutableListOf<Job>()
 
     init {
@@ -278,6 +301,7 @@ internal class PhoneIntegration(
             onCancelPairingNotification = ::cancelPairingNotification,
             onPair = ::pairManually,
             onConnect = ::connect,
+            onAutoConnect = ::connectToThisPhone,
             onDisconnect = ::disconnect,
             onGrant = ::grant,
             onPause = ::pause,
@@ -318,12 +342,14 @@ internal class PhoneIntegration(
         finishConfirmedRestartIfReady()
         loadTargets()
         refreshPairingState()
-        startDiscovery()
         refreshStandingProjection()
     }
 
     fun onScreenClosed() {
-        stopDiscovery()
+        // The ordinary screen's cheap hint discovery is gone. An explicit pairing must keep its
+        // foreground discovery while the person is in the system settings pages; only the separate
+        // in-process "connect to this phone" search belongs to the screen.
+        cancelConnectSearch(clearPending = true)
     }
 
     // --- lifecycle from the activity/service ------------------------------------------------
@@ -906,6 +932,8 @@ internal class PhoneIntegration(
         }
         standingRevision += 1
         val known = facts.value.targets.associateBy { it.packageName }
+        val nowWallMs = wallClock()
+        val nowElapsedMs = clock()
         val config =
             PhoneStandingConfig(
                 apps = apps.map { target ->
@@ -913,10 +941,15 @@ internal class PhoneIntegration(
                     io.andchamber.app.phone.standing.PhoneStandingApp(label, target.packageName)
                 },
                 actions = kinds,
-                windowEndsAtWallMs = wallClock() + request.windowMs,
+                // PERMANENT maps to PERMANENT without adding MAX to the clock (overflow).
+                windowEndsAtWallMs = PhoneTimeLimits.expiresAt(nowWallMs, request.windowMs),
                 perTaskMs = request.perTaskMs,
             )
-        standingState = PhoneStandingState(config = config, endsAtElapsedMs = clock() + request.windowMs)
+        standingState =
+            PhoneStandingState(
+                config = config,
+                endsAtElapsedMs = PhoneTimeLimits.expiresAt(nowElapsedMs, request.windowMs),
+            )
         standingBinding = PhoneStandingBindingState()
         standingBindingEverUsed = false
         continuationDelivery = PhoneContinueDelivery.Idle
@@ -1480,18 +1513,33 @@ internal class PhoneIntegration(
         // real socket first so this draft is not stuck behind it, and never on the main thread.
         invalidatePairing()
         pairing.cancel()
+        stopPairingDiscovery()
+        autoConnect.disarm()
         notifications.ensureChannels()
         val target = host.trim().ifEmpty { DEFAULT_HOST }
+        // Main path: no port. The bounded foreground discovery must report the one local endpoint.
         val draft = pairing.begin(target)
-        notifications.notifyPairing(PhonePairNotifications.PAIRING_ID, notifications.pairingPort(draft.generation))
+        pairingDiscoveryGeneration = draft.generation
+        pairingCompletedGeneration = null
+        pairingDiscoveredEndpoint = null
+        connectDiscoveredEndpoint = null
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
         mutateFacts {
             it.copy(
                 pairingNotice = PhonePairingNotice.Waiting,
-                hints = it.hints.copy(host = draft.host),
+                hints = it.hints.copy(host = draft.host, pairingPort = null, connectPort = null),
                 problem = null,
+                pending = null,
+                discoveryPairing = PhoneDiscoveryStatus.Searching,
+                discoveryConnect = PhoneDiscoveryStatus.Idle,
+                autoConnect = PhoneAutoConnect.Idle,
             )
         }
-        // The notification exists before the system screen opens, so nothing has to be retyped later.
+        if (!PhoneDiscoveryService.startPairing(context, draft.generation)) {
+            failPairingDiscovery(PhonePairingOutcome.UNAVAILABLE)
+            return
+        }
+        // The notification exists before the system screen opens, so nothing has to be typed later.
         openDeveloperSettings()
         schedulePairingExpiry(draft.generation)
     }
@@ -1557,7 +1605,32 @@ internal class PhoneIntegration(
         }
     }
 
-    fun onPairingCancelRequested() = cancelPairingNotification()
+    fun onPairingCancelRequested(generation: Long) {
+        val live =
+            pairing.current()?.generation
+                ?: pairingDiscoveryGeneration
+                ?: pairingCompletedGeneration
+                ?: return
+        // A Cancel minted for an older notification must never end a newer explicit attempt.
+        if (generation != live) return
+        cancelPairingNotification()
+    }
+
+    /** Native retry of the bounded discovery path after a fixed timeout; opens the system screen again. */
+    fun retryPairingDiscovery() {
+        if (!facts.value.available || !facts.value.enabled) return
+        beginPairingNotification(facts.value.hints.host)
+    }
+
+    /**
+     * The explicit "connect to this phone" action. It opens only a short in-process search for the
+     * single current local TLS-connect endpoint; it never scans ports and never runs from screen open.
+     */
+    fun connectToThisPhone() {
+        if (guardBusy()) return
+        if (!facts.value.available || !facts.value.enabled) return
+        startConnectSearch()
+    }
 
     fun openWirelessDebuggingSettings() {
         openDeveloperSettings()
@@ -1567,7 +1640,23 @@ internal class PhoneIntegration(
         invalidatePairing()
         pairing.cancel()
         notifications.cancelPairing()
-        mutateFacts { it.copy(pairingNotice = PhonePairingNotice.Idle, pending = null) }
+        pairingDiscoveryGeneration = null
+        pairingCompletedGeneration = null
+        pairingDiscoveredEndpoint = null
+        connectDiscoveredEndpoint = null
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        cancelConnectSearch(clearPending = false)
+        mutateFacts {
+            it.copy(
+                pairingNotice = PhonePairingNotice.Idle,
+                pending = null,
+                discoveryPairing = PhoneDiscoveryStatus.Idle,
+                discoveryConnect = PhoneDiscoveryStatus.Idle,
+                autoConnect = PhoneAutoConnect.Idle,
+            )
+        }
     }
 
     /**
@@ -1589,7 +1678,21 @@ internal class PhoneIntegration(
             if (expired == generation) {
                 invalidatePairing()
                 notifications.cancelPairing()
-                mutateFacts { it.copy(pairingNotice = PhonePairingNotice.Idle) }
+                pairingDiscoveryGeneration = null
+                pairingCompletedGeneration = null
+                pairingDiscoveredEndpoint = null
+                connectDiscoveredEndpoint = null
+                connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
+                autoConnect.disarm()
+                stopPairingDiscovery()
+                mutateFacts {
+                    it.copy(
+                        pairingNotice = PhonePairingNotice.Idle,
+                        pending = null,
+                        discoveryPairing = PhoneDiscoveryStatus.TimedOut,
+                        discoveryConnect = PhoneDiscoveryStatus.Idle,
+                    )
+                }
             }
         }
     }
@@ -1630,7 +1733,12 @@ internal class PhoneIntegration(
             activePairingOperation = null
             pairing.finish(draft.generation)
             if (outcome == PhonePairingOutcome.PAIRED) {
-                notifications.cancelPairing()
+                // A receipt/real TLS pairing success. This is not a connection and grants nothing.
+                pairingCompletedGeneration = draft.generation
+                pairingDiscoveredEndpoint = null
+                connectDiscoveredEndpoint = null
+                connectDiscoveryStatus = PhoneDiscoveryStatus.Searching
+                autoConnect.arm(draft.generation)
                 notifications.notifyPairing(
                     PhonePairNotifications.PAIRING_ID,
                     notifications.paired(),
@@ -1641,10 +1749,27 @@ internal class PhoneIntegration(
                         problem = null,
                         pairingNotice = PhonePairingNotice.Idle,
                         pending = null,
+                        discoveryPairing = PhoneDiscoveryStatus.Idle,
+                        discoveryConnect = PhoneDiscoveryStatus.Searching,
                     )
                 }
+                // Search the connect type only now, after pairing really succeeded.
+                if (!PhoneDiscoveryService.requestConnectPhase(draft.generation)) {
+                    abandonAutoConnect(
+                        draft.generation,
+                        PhoneDiscoveryStatus.Unavailable,
+                    )
+                    return@launch
+                }
+                tryAutoConnectAfterPairing()
             } else {
                 // Fixed local error. This never claims the device's system authorization was revoked.
+                pairingDiscoveryGeneration = null
+                pairingCompletedGeneration = null
+                pairingDiscoveredEndpoint = null
+                connectDiscoveredEndpoint = null
+                autoConnect.disarm()
+                stopPairingDiscovery()
                 notifications.notifyPairing(
                     PhonePairNotifications.PAIRING_ID,
                     notifications.pairingFailed(outcome),
@@ -1656,6 +1781,8 @@ internal class PhoneIntegration(
                         pairingNotice = PhonePairingNotice.Idle,
                         pending = null,
                         busy = null,
+                        discoveryPairing = PhoneDiscoveryStatus.Idle,
+                        discoveryConnect = PhoneDiscoveryStatus.Idle,
                     )
                 }
             }
@@ -1673,6 +1800,14 @@ internal class PhoneIntegration(
         invalidatePairing()
         pairing.cancel()
         notifications.cancelPairing()
+        pairingDiscoveryGeneration = null
+        pairingCompletedGeneration = null
+        pairingDiscoveredEndpoint = null
+        connectDiscoveredEndpoint = null
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        cancelConnectSearch(clearPending = false)
         val operation = ++pairingOperationSeq
         activePairingOperation = operation
         mutateFacts { it.copy(pending = PhonePending.Pairing, problem = null, busy = null) }
@@ -1714,6 +1849,8 @@ internal class PhoneIntegration(
                             host = request.host.trim().ifEmpty { DEFAULT_HOST },
                             pairingPort = request.port,
                         ),
+                    discoveryPairing = PhoneDiscoveryStatus.Idle,
+                    discoveryConnect = PhoneDiscoveryStatus.Idle,
                 )
             }
         }
@@ -1732,6 +1869,12 @@ internal class PhoneIntegration(
     private fun failPairing(outcome: PhonePairingOutcome) {
         invalidatePairing()
         pairing.cancel()
+        pairingDiscoveryGeneration = null
+        pairingCompletedGeneration = null
+        pairingDiscoveredEndpoint = null
+        connectDiscoveredEndpoint = null
+        autoConnect.disarm()
+        stopPairingDiscovery()
         notifications.notifyPairing(
             PhonePairNotifications.PAIRING_ID,
             notifications.pairingFailed(outcome),
@@ -1754,8 +1897,21 @@ internal class PhoneIntegration(
             mutateFacts { it.copy(problem = PhoneDeviceProblem.Other) }
             return
         }
+        if (request.port <= 0) {
+            // The person asked to connect to this phone; a separate bounded search finds the one local
+            // TLS-connect endpoint. No port is typed on the main path.
+            startConnectSearch()
+            return
+        }
         val host = request.host.trim().ifEmpty { DEFAULT_HOST }
-        mutateFacts { it.copy(pending = PhonePending.Connecting, problem = null, busy = null) }
+        mutateFacts {
+            it.copy(
+                pending = PhonePending.Connecting,
+                problem = null,
+                busy = null,
+                autoConnect = PhoneAutoConnect.Idle,
+            )
+        }
         scope.launch {
             val paired = withContext(Dispatchers.IO) { runCatching { driver.hasPairingReceipt(host) }.getOrDefault(false) }
             if (!paired) {
@@ -1816,7 +1972,16 @@ internal class PhoneIntegration(
     private fun disconnect() {
         if (guardBusy()) return
         invalidateGrantAttempt()
-        mutateFacts { it.copy(pending = PhonePending.Disconnecting, busy = null) }
+        cancelPairingNotification()
+        cancelConnectSearch(clearPending = false)
+        autoConnect.disarm()
+        mutateFacts {
+            it.copy(
+                pending = PhonePending.Disconnecting,
+                busy = null,
+                autoConnect = PhoneAutoConnect.Idle,
+            )
+        }
         scope.launch {
             controller.disconnect()
             closeLease(keepTask = true)
@@ -2315,13 +2480,14 @@ internal class PhoneIntegration(
             refreshAgentToolBlocker()
             loadTargets()
             refreshPairingState()
-            startDiscovery()
             refreshStandingProjection()
             refreshContinuation()
         } else {
             store.setEnabled(false)
             invalidateGrantAttempt()
             cancelPairingNotification()
+            cancelConnectSearch(clearPending = false)
+            autoConnect.disarm()
             controller.disable()
             scope.launch { runCatching { controller.disconnect() } }
             closeLease(keepTask = false)
@@ -2346,9 +2512,11 @@ internal class PhoneIntegration(
                     continuation = PhoneContinuation(),
                     pairingNotice = PhonePairingNotice.Idle,
                     hints = PhoneEndpointHints(host = it.hints.host),
+                    discoveryPairing = PhoneDiscoveryStatus.Idle,
+                    discoveryConnect = PhoneDiscoveryStatus.Idle,
+                    autoConnect = PhoneAutoConnect.Idle,
                 )
             }
-            stopDiscovery()
             refreshStandingProjection()
         }
     }
@@ -2519,33 +2687,511 @@ internal class PhoneIntegration(
         }
     }
 
-    // --- discovery -------------------------------------------------------------------------
+    // --- bounded local discovery ------------------------------------------------------------
 
-    private fun startDiscovery() {
-        if (!facts.value.available) return
-        if (discovery != null) return
-        val created =
-            PhonePortDiscovery(context) { pairingPort, connectPort ->
-                mutateFacts {
-                    it.copy(
-                        hints =
-                            it.hints.copy(
-                                pairingPort = it.hints.pairingPort ?: pairingPort,
-                                connectPort = it.hints.connectPort ?: connectPort,
-                            ),
-                    )
+    /**
+     * Fixed discovery update from [PhoneDiscoveryService]. It only reacts for the exact explicit
+     * pairing generation (or its completed connect phase); an old service generation is ignored.
+     */
+    internal fun onDiscoverySnapshot(snapshot: PhoneDiscoverySnapshot) {
+        if (!facts.value.enabled) {
+            stopPairingDiscovery()
+            return
+        }
+        val completed = pairingCompletedGeneration
+        val active = pairingDiscoveryGeneration
+        if (snapshot.generation != active && snapshot.generation != completed) return
+
+        connectDiscoveryStatus = snapshot.connect
+        if (snapshot.connect is PhoneDiscoveryStatus.Ready) {
+            val endpoint = (snapshot.connect as PhoneDiscoveryStatus.Ready).endpoint
+            if (connectDiscoveredEndpoint?.identity != endpoint.identity) {
+                connectDiscoveredEndpoint = endpoint
+            }
+        } else {
+            connectDiscoveredEndpoint = null
+        }
+        mutateFacts { it.copy(discoveryConnect = snapshot.connect) }
+
+        if (completed == snapshot.generation) {
+            // Pairing already succeeded: only the connect endpoint matters now.
+            tryAutoConnectAfterPairing()
+            return
+        }
+        handlePairingDiscoveryStatus(snapshot.generation, snapshot.pairing)
+    }
+
+    private fun handlePairingDiscoveryStatus(
+        generation: Long,
+        status: PhoneDiscoveryStatus,
+    ) {
+        if (generation != pairingDiscoveryGeneration) return
+        val draft = pairing.current() ?: return
+        if (draft.generation != generation) return
+        when (status) {
+            is PhoneDiscoveryStatus.Ready -> {
+                val endpoint = status.endpoint
+                if (pairingDiscoveredEndpoint?.identity != endpoint.identity) {
+                    // A replaced advertisement must close the old code gate first; otherwise the
+                    // already-configured port would silently keep accepting the old code notification.
+                    if (pairingDiscoveredEndpoint != null) invalidatePairingEndpoint(generation)
+                    acceptPairingEndpoint(generation, endpoint)
                 }
             }
-        if (created.start()) {
-            discovery = created
-        } else {
-            created.stop()
+            is PhoneDiscoveryStatus.Ambiguous -> {
+                invalidatePairingEndpoint(generation)
+                mutateFacts { it.copy(discoveryPairing = status) }
+            }
+            PhoneDiscoveryStatus.TimedOut -> failPairingDiscovery(PhonePairingOutcome.TIMEOUT)
+            PhoneDiscoveryStatus.Unavailable -> failPairingDiscovery(PhonePairingOutcome.UNAVAILABLE)
+            PhoneDiscoveryStatus.Idle, PhoneDiscoveryStatus.Searching -> {
+                invalidatePairingEndpoint(generation)
+                mutateFacts { it.copy(discoveryPairing = status) }
+            }
         }
     }
 
-    private fun stopDiscovery() {
-        discovery?.stop()
-        discovery = null
+    private fun acceptPairingEndpoint(
+        generation: Long,
+        endpoint: PhoneDiscoveredEndpoint,
+    ) {
+        when (pairing.acceptEndpoint(generation, endpoint.host, endpoint.port)) {
+            is PhonePairingSession.EndpointResult.Accepted -> {
+                pairingDiscoveredEndpoint = endpoint
+                mutateFacts {
+                    it.copy(
+                        pairingNotice = PhonePairingNotice.Waiting,
+                        problem = null,
+                        hints = it.hints.copy(pairingPort = endpoint.port, host = endpoint.host),
+                        discoveryPairing = PhoneDiscoveryStatus.Ready(endpoint),
+                    )
+                }
+                // configurePairing takes the driver lock pair() also uses; never on the main thread.
+                scope.launch {
+                    val configured =
+                        withContext(Dispatchers.IO) {
+                            runCatching { driver.configurePairing(endpoint.host, endpoint.port) }
+                        }
+                    // Cancel, timeout, a lost endpoint or a newer attempt makes this stale.
+                    if (!facts.value.enabled) return@launch
+                    val current = pairing.current()
+                    if (current?.generation != generation ||
+                        current.stage != PhonePairingSession.Stage.AWAITING_CODE ||
+                        pairingDiscoveredEndpoint?.identity != endpoint.identity
+                    ) {
+                        return@launch
+                    }
+                    if (configured.isFailure) {
+                        failPairingDiscovery(PhonePairingOutcome.POLICY_REFUSED)
+                        return@launch
+                    }
+                    notifications.notifyPairing(
+                        PhonePairNotifications.PAIRING_ID,
+                        notifications.pairingCode(generation),
+                    )
+                    mutateFacts {
+                        it.copy(
+                            pairingNotice = PhonePairingNotice.Waiting,
+                            hints = it.hints.copy(pairingPort = endpoint.port, host = endpoint.host),
+                            problem = null,
+                            discoveryPairing = PhoneDiscoveryStatus.Ready(endpoint),
+                        )
+                    }
+                }
+            }
+            PhonePairingSession.EndpointResult.InvalidPort,
+            PhonePairingSession.EndpointResult.Expired,
+            PhonePairingSession.EndpointResult.NotSearching,
+            PhonePairingSession.EndpointResult.Stale,
+            -> Unit
+        }
+    }
+
+    /**
+     * The endpoint or its advertisement disappeared. The code gate closes with it: a stale code reply
+     * can no longer be accepted, and the person can wait for the system dialog to re-advertise. While a
+     * bounded pair exchange is already running this is only discovery bookkeeping, not a stop.
+     */
+    private fun invalidatePairingEndpoint(generation: Long) {
+        if (pairingDiscoveredEndpoint == null) return
+        pairingDiscoveredEndpoint = null
+        val reopened = pairing.endpointLost(generation)
+        if (!reopened) return
+        notifications.notifyPairing(
+            PhonePairNotifications.PAIRING_ID,
+            notifications.pairingSearching(generation),
+        )
+        mutateFacts {
+            it.copy(
+                pairingNotice = PhonePairingNotice.Waiting,
+                hints = it.hints.copy(pairingPort = null),
+                discoveryPairing = PhoneDiscoveryStatus.Searching,
+            )
+        }
+    }
+
+    /** Fixed unavailable/timed-out state. No automatic port prompt; the existing manual path remains. */
+    private fun failPairingDiscovery(outcome: PhonePairingOutcome) {
+        invalidatePairing()
+        pairing.cancel()
+        pairingDiscoveryGeneration = null
+        pairingCompletedGeneration = null
+        pairingDiscoveredEndpoint = null
+        connectDiscoveredEndpoint = null
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        notifications.notifyPairing(
+            PhonePairNotifications.PAIRING_ID,
+            notifications.pairingFailed(outcome),
+        )
+        val status =
+            if (outcome == PhonePairingOutcome.TIMEOUT) {
+                PhoneDiscoveryStatus.TimedOut
+            } else {
+                PhoneDiscoveryStatus.Unavailable
+            }
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
+        mutateFacts {
+            it.copy(
+                pending = null,
+                paired = false,
+                problem = problemFor(outcome),
+                pairingNotice = PhonePairingNotice.Idle,
+                hints = it.hints.copy(pairingPort = null, connectPort = null),
+                discoveryPairing = status,
+                discoveryConnect = PhoneDiscoveryStatus.Idle,
+                autoConnect = PhoneAutoConnect.Idle,
+            )
+        }
+    }
+
+    internal fun onDiscoveryUnavailable(generation: Long) {
+        if (generation != pairingDiscoveryGeneration) return
+        failPairingDiscovery(PhonePairingOutcome.UNAVAILABLE)
+    }
+
+    /**
+     * The foreground discovery ended. An intentional stop clears the generation first and is ignored.
+     * An unexpected stop closes the automatic path; it never silently keeps waiting and never asks for
+     * a typed port.
+     */
+    internal fun onDiscoveryServiceStopped(generation: Long) {
+        if (generation == 0L) return
+        if (pairingCompletedGeneration == generation) {
+            if (autoConnect.isAttempted(generation)) return
+            // Pairing succeeded but the connect search ended without an endpoint: no loop, manual path.
+            pairingCompletedGeneration = null
+            pairingDiscoveryGeneration = null
+            connectDiscoveredEndpoint = null
+            autoConnect.disarm()
+            stopPairingDiscovery()
+            mutateFacts {
+                it.copy(
+                    pending = null,
+                    problem = PhoneDeviceProblem.Other,
+                    discoveryConnect = PhoneDiscoveryStatus.Unavailable,
+                    autoConnect = PhoneAutoConnect.Failed,
+                )
+            }
+            return
+        }
+        if (generation != pairingDiscoveryGeneration) return
+        if (pairing.current()?.stage == PhonePairingSession.Stage.PAIRING) return
+        failPairingDiscovery(PhonePairingOutcome.UNAVAILABLE)
+    }
+
+    private fun stopPairingDiscovery() {
+        PhoneDiscoveryService.stop(context)
+    }
+
+    // --- explicit connect discovery ---------------------------------------------------------
+
+    /**
+     * "Connect to this phone" after pairing: one short in-process search for the single current
+     * TLS-connect endpoint. It never scans ports and never loops; ambiguity waits for the bound.
+     */
+    private fun startConnectSearch() {
+        if (!facts.value.available || !facts.value.enabled) return
+        if (connectSearchActive) return
+        val generation = ++connectSearchGeneration
+        connectSearchConsumed = false
+        val created =
+            PhonePortDiscovery(context) { _, connect ->
+                onConnectSearchUpdate(generation, connect)
+            }
+        if (!created.start(setOf(PhoneDiscoveryKind.CONNECT), CONNECT_SEARCH_TIMEOUT_MS)) {
+            created.stop()
+            connectDiscoveryStatus = PhoneDiscoveryStatus.Unavailable
+            mutateFacts {
+                it.copy(
+                    pending = null,
+                    problem = PhoneDeviceProblem.Other,
+                    discoveryConnect = PhoneDiscoveryStatus.Unavailable,
+                )
+            }
+            return
+        }
+        connectSearch = created
+        connectSearchActive = true
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Searching
+        mutateFacts {
+            it.copy(
+                pending = PhonePending.Connecting,
+                problem = null,
+                hints = it.hints.copy(connectPort = null),
+                discoveryConnect = PhoneDiscoveryStatus.Searching,
+                autoConnect = PhoneAutoConnect.Idle,
+            )
+        }
+    }
+
+    private fun onConnectSearchUpdate(
+        generation: Long,
+        status: PhoneDiscoveryStatus,
+    ) {
+        if (!connectSearchActive || generation != connectSearchGeneration) return
+        if (!facts.value.enabled) {
+            cancelConnectSearch(clearPending = true)
+            return
+        }
+        connectDiscoveryStatus = status
+        mutateFacts { it.copy(discoveryConnect = status) }
+        when (status) {
+            is PhoneDiscoveryStatus.Ready -> {
+                if (connectSearchConsumed) return
+                connectSearchConsumed = true
+                connectToDiscoveredEndpoint(endpoint = status.endpoint, autoPairGeneration = null)
+            }
+            PhoneDiscoveryStatus.TimedOut,
+            PhoneDiscoveryStatus.Unavailable,
+            -> {
+                cancelConnectSearch(clearPending = false)
+                mutateFacts {
+                    it.copy(
+                        pending = null,
+                        problem = PhoneDeviceProblem.Other,
+                        discoveryConnect = status,
+                    )
+                }
+            }
+            PhoneDiscoveryStatus.Idle,
+            PhoneDiscoveryStatus.Searching,
+            is PhoneDiscoveryStatus.Ambiguous,
+            -> Unit
+        }
+    }
+
+    private fun cancelConnectSearch(clearPending: Boolean) {
+        val wasActive = connectSearchActive
+        connectSearch?.stop()
+        connectSearch = null
+        connectSearchActive = false
+        connectSearchConsumed = false
+        connectSearchGeneration += 1
+        if (clearPending && wasActive && facts.value.pending == PhonePending.Connecting) {
+            mutateFacts { it.copy(pending = null) }
+        }
+    }
+
+    // --- one automatic connect after explicit pairing --------------------------------------
+
+    private fun tryAutoConnectAfterPairing() {
+        val generation = pairingCompletedGeneration ?: return
+        val endpoint = connectDiscoveredEndpoint
+        if (autoConnect.shouldAttempt(generation, endpoint, facts.value.enabled)) {
+            autoConnect.markAttempted(generation)
+            connectToDiscoveredEndpoint(endpoint = endpoint!!, autoPairGeneration = generation)
+            return
+        }
+        if (autoConnect.isAttempted(generation)) return
+        val terminal = connectDiscoveryStatus
+        if (terminal == PhoneDiscoveryStatus.TimedOut || terminal == PhoneDiscoveryStatus.Unavailable) {
+            finishPairingDiscoveryWithoutConnect(generation, terminal)
+        }
+    }
+
+    private fun finishPairingDiscoveryWithoutConnect(
+        generation: Long,
+        status: PhoneDiscoveryStatus,
+    ) {
+        if (pairingCompletedGeneration != generation) return
+        pairingCompletedGeneration = null
+        pairingDiscoveryGeneration = null
+        connectDiscoveredEndpoint = null
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        // Pairing itself succeeded. Do not post a "pairing failed" notification for a connect search
+        // that found no endpoint; the screen shows the fixed TimedOut/Unavailable connect state.
+        mutateFacts {
+            it.copy(
+                pending = null,
+                paired = true,
+                problem = PhoneDeviceProblem.Other,
+                hints = it.hints.copy(connectPort = null),
+                discoveryConnect = status,
+                autoConnect = PhoneAutoConnect.Failed,
+            )
+        }
+    }
+
+    /** No live foreground service can start the connect search: keep the pairing receipt, no loop. */
+    private fun abandonAutoConnect(
+        generation: Long,
+        status: PhoneDiscoveryStatus,
+    ) {
+        if (pairingCompletedGeneration != generation) return
+        pairingCompletedGeneration = null
+        pairingDiscoveryGeneration = null
+        connectDiscoveredEndpoint = null
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        mutateFacts {
+            it.copy(
+                pending = null,
+                paired = true,
+                discoveryConnect = status,
+                autoConnect = PhoneAutoConnect.Failed,
+            )
+        }
+    }
+
+    /**
+     * Exactly one configure+connect for a discovered endpoint. [autoPairGeneration] is non-null only
+     * for the explicit pairing the person started; opening the screen never arms it. A failure is
+     * reported once and is never retried, and nothing here grants, clears a standing block or resumes
+     * a task.
+     */
+    private fun connectToDiscoveredEndpoint(
+        endpoint: PhoneDiscoveredEndpoint,
+        autoPairGeneration: Long?,
+    ) {
+        val explicitGeneration =
+            if (autoPairGeneration == null) connectSearchGeneration else null
+        fun stillCurrent(): Boolean =
+            if (autoPairGeneration == null) {
+                facts.value.enabled &&
+                    connectSearchActive &&
+                    explicitGeneration == connectSearchGeneration
+            } else {
+                facts.value.enabled && autoConnect.isArmedFor(autoPairGeneration)
+            }
+        mutateFacts {
+            it.copy(
+                pending = PhonePending.Connecting,
+                problem = null,
+                hints = it.hints.copy(host = endpoint.host, connectPort = endpoint.port),
+                discoveryConnect = PhoneDiscoveryStatus.Ready(endpoint),
+                autoConnect =
+                    if (autoPairGeneration == null) {
+                        PhoneAutoConnect.Idle
+                    } else {
+                        PhoneAutoConnect.Running
+                    },
+            )
+        }
+        scope.launch {
+            val paired =
+                withContext(Dispatchers.IO) {
+                    runCatching { driver.hasPairingReceipt(DEFAULT_HOST) }.getOrDefault(false)
+                }
+            if (!stillCurrent()) return@launch
+            if (!paired) {
+                mutateFacts {
+                    it.copy(
+                        pending = null,
+                        paired = false,
+                        problem = PhoneDeviceProblem.NotAuthorized,
+                        discoveryConnect = PhoneDiscoveryStatus.Idle,
+                        autoConnect =
+                            if (autoPairGeneration == null) {
+                                PhoneAutoConnect.Idle
+                            } else {
+                                PhoneAutoConnect.Failed
+                            },
+                    )
+                }
+                finishConnectAttempt(autoPairGeneration)
+                return@launch
+            }
+            val configured =
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        driver.prepareForConnect(PhoneLimits.DEFAULT_CALL_MS)
+                        driver.configure(endpoint.host, endpoint.port)
+                    }
+                }
+            if (!stillCurrent()) return@launch
+            if (configured.isFailure) {
+                mutateFacts {
+                    it.copy(
+                        pending = null,
+                        problem = PhoneDeviceProblem.Other,
+                        discoveryConnect = PhoneDiscoveryStatus.Idle,
+                        autoConnect =
+                            if (autoPairGeneration == null) {
+                                PhoneAutoConnect.Idle
+                            } else {
+                                PhoneAutoConnect.Failed
+                            },
+                    )
+                }
+                finishConnectAttempt(autoPairGeneration)
+                return@launch
+            }
+            val result =
+                runCatching { controller.connect(PhoneLimits.DEFAULT_CALL_MS) }
+                    .getOrElse { PhoneConnectionResult.Failed(PhoneErrorCode.DRIVER_UNAVAILABLE) }
+            if (!stillCurrent()) return@launch
+            when (result) {
+                is PhoneConnectionResult.Connected ->
+                    mutateFacts {
+                        it.copy(
+                            pending = null,
+                            paired = true,
+                            problem = null,
+                            hints = it.hints.copy(host = endpoint.host, connectPort = endpoint.port),
+                            discoveryConnect = PhoneDiscoveryStatus.Ready(endpoint),
+                            autoConnect = PhoneAutoConnect.Idle,
+                        )
+                    }
+                is PhoneConnectionResult.Failed ->
+                    mutateFacts {
+                        it.copy(
+                            pending = null,
+                            problem = problemFor(result.error),
+                            discoveryConnect = PhoneDiscoveryStatus.Idle,
+                            autoConnect =
+                                if (autoPairGeneration == null) {
+                                    PhoneAutoConnect.Idle
+                                } else {
+                                    PhoneAutoConnect.Failed
+                                },
+                        )
+                    }
+            }
+            finishConnectAttempt(autoPairGeneration)
+        }
+    }
+
+    private fun finishConnectAttempt(autoPairGeneration: Long?) {
+        if (autoPairGeneration == null) {
+            cancelConnectSearch(clearPending = false)
+            return
+        }
+        // One attempt per explicit pairing. A later connect is a new person action.
+        autoConnect.markAttempted(autoPairGeneration)
+        pairingCompletedGeneration = null
+        pairingDiscoveryGeneration = null
+        connectDiscoveredEndpoint = null
+        autoConnect.disarm()
+        stopPairingDiscovery()
+        connectDiscoveryStatus = PhoneDiscoveryStatus.Idle
+        mutateFacts {
+            it.copy(
+                discoveryPairing = PhoneDiscoveryStatus.Idle,
+                discoveryConnect = PhoneDiscoveryStatus.Idle,
+            )
+        }
     }
 
     // --- state plumbing --------------------------------------------------------------------
@@ -2889,6 +3535,9 @@ internal class PhoneIntegration(
 
         /** Long enough for one handshake, within the pairing entry point's own bound. */
         const val PAIRING_DEADLINE_MS = 60_000L
+
+        /** One explicit "connect to this phone" search, short and in-process. */
+        const val CONNECT_SEARCH_TIMEOUT_MS = 45_000L
 
         /** Stop reasons an agent-requested handoff may carry into the task store. */
         private val TASK_STOP_REASONS: Set<PhoneProgressReason> =

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneLimits
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingPolicy
 import kotlinx.serialization.json.Json
@@ -121,7 +122,7 @@ class PrefsPhoneIntegrationStore(
         prefs.edit().putString(KEY_STANDING, encodeStanding(config)).apply()
     }
 
-    private companion object {
+    internal companion object {
         const val KEY_ENABLED = "enabled"
         const val KEY_TASK_PACKAGE = "task.package"
         const val KEY_TASK_SUMMARY = "task.summary"
@@ -148,7 +149,7 @@ class PrefsPhoneIntegrationStore(
             return if (bounded.isEmpty() || bounded.any(Char::isISOControl)) packageName else bounded
         }
 
-        fun encodeStanding(config: PhoneStandingConfig): String =
+        internal fun encodeStanding(config: PhoneStandingConfig): String =
             buildJsonObject {
                 put("version", 1)
                 put("windowEndsAtWallMs", config.windowEndsAtWallMs)
@@ -168,7 +169,10 @@ class PrefsPhoneIntegrationStore(
                 )
             }.toString()
 
-        fun decodeStanding(raw: String): PhoneStandingConfig? =
+        internal fun decodeStanding(
+            raw: String,
+            nowWallMs: Long = System.currentTimeMillis(),
+        ): PhoneStandingConfig? =
             runCatching {
                 val root = Json.parseToJsonElement(raw) as JsonObject
                 if ((root["version"]?.jsonPrimitive?.content ?: "") != "1") return null
@@ -197,8 +201,19 @@ class PrefsPhoneIntegrationStore(
                         .distinctBy { it.packageName }
                         .take(PhoneStandingPolicy.MAX_PACKAGES)
                 if (apps.isEmpty() || actions.isEmpty()) return null
-                if (windowEndsAtWallMs <= 0L) return null
-                if (perTaskMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS) return null
+                // A finite end is at most the configured window ahead of the save. A far-future value
+                // that is not the exact sentinel is corrupt, not permanent.
+                if (!PhoneTimeLimits.isPermanent(windowEndsAtWallMs) &&
+                    (windowEndsAtWallMs <= 0L ||
+                        windowEndsAtWallMs - nowWallMs > STANDING_MAX_WINDOW_MS)
+                ) {
+                    return null
+                }
+                if (!PhoneTimeLimits.isPermanent(perTaskMs) &&
+                    perTaskMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS
+                ) {
+                    return null
+                }
                 PhoneStandingConfig(
                     apps = apps,
                     actions = actions,

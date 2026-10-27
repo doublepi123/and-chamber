@@ -14,6 +14,7 @@ import io.andchamber.app.R
 import io.andchamber.app.phone.android.PhoneControlNotifications
 import io.andchamber.app.phone.android.PhoneControlReturnActivity
 import io.andchamber.app.phone.android.PhoneControlService
+import io.andchamber.app.phone.android.PhoneDiscoveryService
 import io.andchamber.app.phone.android.PhoneIdentityStore
 import io.andchamber.app.phone.android.PhonePairingActionReceiver
 import io.andchamber.app.phone.android.PhonePairingSession
@@ -22,6 +23,7 @@ import io.andchamber.app.phone.android.PhoneTargetCatalog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,6 +56,33 @@ class PhoneIntegrationWiringTest {
                     android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE != 0,
             )
         }
+    }
+
+    @Test
+    fun boundedDiscoveryServiceHasSpecialUseSubtypeAndMulticastPermission() {
+        @Suppress("DEPRECATION")
+        val info =
+            context.packageManager.getServiceInfo(
+                ComponentName(context, PhoneDiscoveryService::class.java),
+                0,
+            )
+        assertFalse(info.exported)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            assertTrue(
+                info.foregroundServiceType and
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE != 0,
+            )
+        }
+        @Suppress("DEPRECATION")
+        val declared =
+            context.packageManager
+                .getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+                .requestedPermissions
+                .orEmpty()
+        assertTrue(declared.contains("android.permission.CHANGE_WIFI_MULTICAST_STATE"))
+        // Local NSD on target 35 must not add a runtime nearby/location gate.
+        assertFalse(declared.contains("android.permission.NEARBY_WIFI_DEVICES"))
+        assertFalse(declared.contains("android.permission.ACCESS_FINE_LOCATION"))
     }
 
     @Test
@@ -167,6 +196,8 @@ class PhoneIntegrationWiringTest {
         val notifications = PhoneControlNotifications(context)
         val steps =
             listOf(
+                // Searching never asks for the port: no RemoteInput at all.
+                notifications.pairingSearching(3L) to 0,
                 notifications.pairingPort(3L) to 1,
                 notifications.pairingCode(3L) to 1,
                 notifications.pairingBusy(3L) to 0,
@@ -185,6 +216,24 @@ class PhoneIntegrationWiringTest {
             // Cancelling is always available and never carries an input.
             assertEquals(expectedRemote + 1, actions.size)
         }
+    }
+
+    @Test
+    fun pairingNotificationActionsUseTheCurrentGenerationIdentity() {
+        assertEquals(
+            "same action and generation maps to one request-code slot",
+            PhoneControlNotifications.requestCode(7L, 4),
+            PhoneControlNotifications.requestCode(7L, 4),
+        )
+        assertNotEquals(
+            "a new generation never shares the code action slot",
+            PhoneControlNotifications.requestCode(7L, 4),
+            PhoneControlNotifications.requestCode(8L, 4),
+        )
+        // Searching has exactly one action (Cancel) and no RemoteInput; the code step keeps one input.
+        val searching = PhoneControlNotifications(context).pairingSearching(7L)
+        assertEquals(1, searching.actions.orEmpty().size)
+        assertTrue(searching.actions.orEmpty().single().remoteInputs.isNullOrEmpty())
     }
 
     @Test

@@ -18,8 +18,10 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.HourglassTop
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.NotificationsOff
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Checkbox
@@ -41,7 +43,10 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -117,8 +122,10 @@ private fun RiskLine(text: String) {
 }
 
 /**
- * Wireless debugging setup: turn it on, pair once, then connect. The pairing port and the
- * connection port are different numbers on different system screens, so each has its own field.
+ * Wireless debugging setup on this phone: turn it on, pair once with a code typed into a
+ * notification, then connect. On the normal path nobody types a port: the native side looks for
+ * this phone's own pairing and connection services. Port and address fields stay folded away as a
+ * manual fallback the person opens themselves.
  *
  * The pairing code is held only in plain [remember] state (never saved instance state), cleared
  * when it is submitted, when a pairing attempt fails, and whenever the app goes to the background.
@@ -136,15 +143,18 @@ internal fun ConnectCard(
     var connectPort by rememberSaveable(device.hints.connectPort) { mutableStateOf(device.hints.connectPort?.toString().orEmpty()) }
     var code by remember { mutableStateOf("") }
     var manualPair by rememberSaveable { mutableStateOf(false) }
+    // Another address only makes sense through the manual section, so it starts open for one.
+    var manualConnect by rememberSaveable { mutableStateOf(device.hints.host != PhoneUiLimits.DEFAULT_HOST) }
     var showErrors by rememberSaveable { mutableStateOf(false) }
-    val paired = device.paired == true
     var pairAgain by rememberSaveable { mutableStateOf(false) }
+    val plan = connectPlan(state, pairAgain = pairAgain, manualPair = manualPair, manualConnect = manualConnect)
 
     // A pairing code is valid only while the system dialog is open: never keep it around.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { code = "" }
     LaunchedEffect(device.problem) { if (device.problem != null) code = "" }
 
     val effectiveHost = if (customHost) parseHost(host) else PhoneUiLimits.DEFAULT_HOST
+    val notificationHost = pairingHost(manualConnect, customHost, host)
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val connecting = device.link == PhoneLink.Connecting
@@ -161,6 +171,12 @@ internal fun ConnectCard(
                 actions.onConnect(request.request)
             }
         }
+    }
+    val openManualConnect = { manualConnect = true }
+    val autoConnect = {
+        focus.clearFocus(force = true)
+        keyboard?.hide()
+        actions.onAutoConnect()
     }
 
     ChamberCard {
@@ -184,23 +200,28 @@ internal fun ConnectCard(
             HorizontalDivider()
 
             // 2. Pairing (first time)
-            StepHeading(2, stringResource(R.string.phone_step_pair), done = paired)
-            if (paired && !pairAgain) {
+            StepHeading(2, stringResource(R.string.phone_step_pair), done = device.paired == true)
+            if (!plan.showsPairing) {
                 BodyText(stringResource(R.string.phone_paired_before))
-                TextButton(onClick = { pairAgain = true }) { Text(stringResource(R.string.phone_pair_again)) }
+                TextButton(onClick = { pairAgain = true }, modifier = Modifier.testTag(PhoneTags.PAIR_AGAIN)) {
+                    Text(stringResource(R.string.phone_pair_again))
+                }
             } else {
                 BodyText(stringResource(R.string.phone_pair_how))
                 PairingNoticeBlock(
                     notice = device.pairingNotice,
-                    enabled = !busy && effectiveHost != null,
-                    onBegin = { effectiveHost?.let(actions.onBeginPairingNotification) },
+                    search = plan.pairingSearch,
+                    enabled = !busy && notificationHost != null,
+                    onBegin = { notificationHost?.let(actions.onBeginPairingNotification) },
+                    onRetry = { notificationHost?.let { retryDiscovery(DiscoveryKind.Pairing, actions, it) } },
+                    onManual = { manualPair = true },
                     onCancel = actions.onCancelPairingNotification,
                     onOpenNotificationSettings = actions.onOpenNotificationSettings,
                 )
-                TextButton(onClick = { manualPair = !manualPair }) {
+                TextButton(onClick = { manualPair = !manualPair }, modifier = Modifier.testTag(PhoneTags.PAIR_MANUAL_TOGGLE)) {
                     Text(stringResource(if (manualPair) R.string.phone_pair_manual_hide else R.string.phone_pair_manual_show))
                 }
-                AnimatedVisibility(visible = manualPair, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                AnimatedVisibility(visible = plan.showsManualPairing, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         BodyText(stringResource(R.string.phone_pair_manual_body))
                         PortField(
@@ -247,34 +268,68 @@ internal fun ConnectCard(
 
             HorizontalDivider()
 
-            // 3. Connect
+            // 3. Connect: found automatically on this phone; typing a port is the folded fallback.
             StepHeading(3, stringResource(R.string.phone_step_connect))
-            BodyText(stringResource(R.string.phone_connect_port_body))
-            PortField(
-                value = connectPort,
-                onValueChange = { connectPort = it },
-                label = stringResource(R.string.phone_connect_port),
-                hint = stringResource(R.string.phone_connect_port_hint),
-                error = showErrors && parsePort(connectPort) == null,
-                tag = PhoneTags.CONNECT_PORT,
-                // Default path: the port is the last thing typed, so the keyboard can connect.
-                // With another address, Next moves on to the address field, which connects.
-                onGo = if (customHost) null else submitConnect,
-            )
-            HostChooser(
-                custom = customHost,
-                onCustomChange = { customHost = it; if (!it) host = PhoneUiLimits.DEFAULT_HOST },
-                host = host,
-                onHostChange = { host = it },
-                error = customHost && showErrors && parseHost(host) == null,
-                onGo = submitConnect,
-            )
-            PhonePrimaryButton(
-                text = stringResource(R.string.phone_connect),
-                enabled = !busy && !connecting,
-                onClick = submitConnect,
-                modifier = Modifier.testTag(PhoneTags.CONNECT),
-            )
+            if (plan.offersAutoConnect) {
+                BodyText(stringResource(R.string.phone_connect_auto_body))
+                AutoConnectStatusBlock(
+                    status = plan.autoStatus,
+                    onRetry = { retryDiscovery(DiscoveryKind.Connect, actions) },
+                    retryEnabled = plan.canAutoConnect,
+                    onManual = openManualConnect,
+                )
+                val autoText = stringResource(R.string.phone_connect_auto)
+                if (plan.primary == ConnectPrimary.AutoConnect) {
+                    PhonePrimaryButton(
+                        text = autoText,
+                        enabled = plan.canAutoConnect,
+                        onClick = autoConnect,
+                        modifier = Modifier.testTag(PhoneTags.AUTO_CONNECT),
+                    )
+                } else {
+                    PhoneSecondaryButton(
+                        text = autoText,
+                        enabled = plan.canAutoConnect,
+                        onClick = autoConnect,
+                        modifier = Modifier.testTag(PhoneTags.AUTO_CONNECT),
+                    )
+                }
+            } else {
+                BodyText(stringResource(R.string.phone_connect_after_pair))
+            }
+            TextButton(onClick = { manualConnect = !manualConnect }, modifier = Modifier.testTag(PhoneTags.CONNECT_MANUAL_TOGGLE)) {
+                Text(stringResource(if (manualConnect) R.string.phone_connect_manual_hide else R.string.phone_connect_manual_show))
+            }
+            AnimatedVisibility(visible = plan.showsManualConnect, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BodyText(stringResource(R.string.phone_connect_port_body))
+                    PortField(
+                        value = connectPort,
+                        onValueChange = { connectPort = it },
+                        label = stringResource(R.string.phone_connect_port),
+                        hint = stringResource(R.string.phone_connect_port_hint),
+                        error = showErrors && parsePort(connectPort) == null,
+                        tag = PhoneTags.CONNECT_PORT,
+                        // Default path: the port is the last thing typed, so the keyboard can connect.
+                        // With another address, Next moves on to the address field, which connects.
+                        onGo = if (customHost) null else submitConnect,
+                    )
+                    HostChooser(
+                        custom = customHost,
+                        onCustomChange = { customHost = it; if (!it) host = PhoneUiLimits.DEFAULT_HOST },
+                        host = host,
+                        onHostChange = { host = it },
+                        error = customHost && showErrors && parseHost(host) == null,
+                        onGo = submitConnect,
+                    )
+                    PhoneSecondaryButton(
+                        text = stringResource(R.string.phone_connect),
+                        enabled = !busy && !connecting,
+                        onClick = submitConnect,
+                        modifier = Modifier.testTag(PhoneTags.CONNECT),
+                    )
+                }
+            }
         }
     }
 }
@@ -282,13 +337,19 @@ internal fun ConnectCard(
 @Composable
 private fun PairingNoticeBlock(
     notice: PhonePairingNotice,
+    search: PairingSearch?,
     enabled: Boolean,
     onBegin: () -> Unit,
+    onRetry: () -> Unit,
+    onManual: () -> Unit,
     onCancel: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
 ) {
+    val live = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag(PhoneTags.PAIR_SEARCH)
     when (notice) {
-        PhonePairingNotice.Idle ->
+        PhonePairingNotice.Idle -> {
+            // The last search ended without a clear result: say why, above the button that retries.
+            (search as? PairingSearch.Problem)?.let { DiscoveryProblemNotice(it.problem, pairing = true, modifier = live) }
             PhonePrimaryButton(
                 text = stringResource(R.string.phone_pair_with_notification),
                 onClick = onBegin,
@@ -296,14 +357,42 @@ private fun PairingNoticeBlock(
                 icon = Icons.Rounded.Notifications,
                 modifier = Modifier.testTag(PhoneTags.PAIR_NOTIFICATION),
             )
+        }
         PhonePairingNotice.Waiting ->
-            PhoneNotice(
-                tone = NoticeTone.Info,
-                icon = Icons.Rounded.Notifications,
-                title = stringResource(R.string.phone_pair_waiting_title),
-                body = stringResource(R.string.phone_pair_waiting_body),
-            ) {
-                TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+            when (search) {
+                PairingSearch.Searching ->
+                    PhoneNotice(
+                        tone = NoticeTone.Info,
+                        icon = Icons.Rounded.Search,
+                        title = stringResource(R.string.phone_pair_searching_title),
+                        body = stringResource(R.string.phone_pair_searching_body),
+                        modifier = live,
+                    ) {
+                        TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+                    }
+                is PairingSearch.Problem ->
+                    DiscoveryProblemNotice(search.problem, pairing = true, modifier = live) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = onRetry, enabled = enabled, modifier = Modifier.testTag(PhoneTags.PAIR_SEARCH_RETRY)) {
+                                Text(stringResource(R.string.phone_discovery_retry))
+                            }
+                            TextButton(onClick = onManual) { Text(stringResource(R.string.phone_discovery_manual)) }
+                            TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+                        }
+                    }
+                PairingSearch.EnterCode, null ->
+                    PhoneNotice(
+                        tone = NoticeTone.Info,
+                        icon = Icons.Rounded.Notifications,
+                        title = stringResource(R.string.phone_pair_waiting_title),
+                        body = stringResource(R.string.phone_pair_waiting_body),
+                        modifier = live,
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            BodyText(stringResource(R.string.phone_pair_waiting_xiaomi))
+                            TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
+                        }
+                    }
             }
         PhonePairingNotice.NotificationsBlocked ->
             PhoneNotice(
@@ -315,6 +404,67 @@ private fun PairingNoticeBlock(
                 TextButton(onClick = onOpenNotificationSettings) { Text(stringResource(R.string.phone_open_notification_settings)) }
             }
     }
+}
+
+/** The automatic connect's real state: searching, connecting, or why it didn't work. */
+@Composable
+private fun AutoConnectStatusBlock(
+    status: AutoConnectStatus?,
+    onRetry: () -> Unit,
+    retryEnabled: Boolean,
+    onManual: () -> Unit,
+) {
+    val live = Modifier.semantics { liveRegion = LiveRegionMode.Polite }.testTag(PhoneTags.AUTO_CONNECT_STATUS)
+    val fallback: @Composable () -> Unit = {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = onRetry, enabled = retryEnabled, modifier = Modifier.testTag(PhoneTags.CONNECT_SEARCH_RETRY)) {
+                Text(stringResource(R.string.phone_discovery_retry))
+            }
+            TextButton(onClick = onManual) { Text(stringResource(R.string.phone_discovery_manual)) }
+        }
+    }
+    when (status) {
+        null -> Unit
+        AutoConnectStatus.Searching ->
+            PhoneNotice(NoticeTone.Info, Icons.Rounded.Search, stringResource(R.string.phone_connect_searching), modifier = live)
+        AutoConnectStatus.Connecting ->
+            PhoneNotice(NoticeTone.Info, Icons.Rounded.HourglassTop, stringResource(R.string.phone_connect_auto_running), modifier = live)
+        AutoConnectStatus.Failed ->
+            PhoneNotice(
+                NoticeTone.Warning,
+                Icons.Rounded.WarningAmber,
+                stringResource(R.string.phone_connect_auto_failed),
+                body = stringResource(R.string.phone_connect_auto_failed_body),
+                modifier = live,
+                content = fallback,
+            )
+        is AutoConnectStatus.Problem -> DiscoveryProblemNotice(status.problem, pairing = false, modifier = live, content = fallback)
+    }
+}
+
+@Composable
+private fun DiscoveryProblemNotice(
+    problem: DiscoveryProblem,
+    pairing: Boolean,
+    modifier: Modifier = Modifier,
+    content: (@Composable () -> Unit)? = null,
+) {
+    val (title, body) =
+        when (problem) {
+            DiscoveryProblem.NotFound ->
+                R.string.phone_discovery_not_found to
+                    if (pairing) R.string.phone_discovery_not_found_pair_body else R.string.phone_discovery_not_found_connect_body
+            DiscoveryProblem.Unavailable -> R.string.phone_discovery_unavailable to R.string.phone_discovery_unavailable_body
+            DiscoveryProblem.Ambiguous -> R.string.phone_discovery_ambiguous to R.string.phone_discovery_ambiguous_body
+        }
+    PhoneNotice(
+        tone = NoticeTone.Warning,
+        icon = Icons.Rounded.WarningAmber,
+        title = stringResource(title),
+        body = stringResource(body),
+        modifier = modifier,
+        content = content,
+    )
 }
 
 /**

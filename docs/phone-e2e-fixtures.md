@@ -246,6 +246,52 @@ For explicit orchestration, `mode=action` with `action` selects the same sequenc
 `x2`/`y2`, `durationMs`, `text`, and `label` are optional fixed overrides. Explicit action
 sentinel prompts still go through the real OpenCode tool call.
 
+### `ask_choice`: built-in question to a phone action
+
+`ask_choice` exercises OpenCode 2.0.32's built-in `question` tool before a real phone action. It is a
+separate test-only branch; it does not add a production tool, plugin change, overlay rule or
+notification reply path. The sentinel names the expected option:
+
+```text
+[[andchamber-phone-e2e {"mode":"begin","scenario":"ask_choice","expectAnswer":"Tap Save"}]]
+```
+
+The order is fixed:
+
+1. The first model turn emits the real `andchamber_phone` `request`. This creates the current phone
+   task/route; without it the real overlay has no `currentTask` and cannot show a choice. Only a
+   parsed direct-start envelope with a fresh integer epoch and `RUNNING`/`READY`/`NEEDS_USER`
+   continues.
+2. The next turn emits the built-in `question` tool with exactly one question:
+
+   ```json
+   {"questions":[{"question":"Which fixture action should I run next?","header":"Next step","options":[{"label":"Tap Save","description":"Run the tap_save scenario"},{"label":"Type text","description":"Run the input scenario"}]}]}
+   ```
+
+   Option descriptions are mandatory. The fixture omits `multiple` and never sends `custom:false`;
+   the model does not own the form's custom flag. If the request does not prove the real `question`
+   function/schema was injected, the fixture returns a fixed refusal and emits no question call.
+3. The real runtime creates the pending form (`q0` string, option values equal to the labels,
+   `custom:true`). A person answers through the production overlay/notification path; the
+   production bridge performs the real `NotificationActions.formReply` with an `answer` map. The
+   fixture never posts an answer, a continuation prompt or a second request. It only reads the
+   resulting roletool text:
+
+   ```text
+   User has answered your questions: "Which fixture action should I run next?"="Tap Save". You can now continue with the user's answers in mind.
+   ```
+
+4. Only an exact listed option that equals `expectAnswer` continues. `Tap Save` reuses the
+   `tap_save` sequence and `Type text` reuses the `input` sequence (`status`, `snapshot`, mutation,
+   `snapshot`) on the same task, then verifies the real UI. A missing answer or a still-pending
+   result emits a fixed pending text; a wrong, unknown or free-form answer emits fixed mismatch
+   text. Neither mutates, retries, asks again or posts a continuation.
+
+A question roletool result is prose, never a phone envelope: even if it contains a JSON object with
+`version`/`ok`/`action`/`epoch`, the fixture does not parse it as a phone result or let it satisfy
+snapshot/read-back verification. Logs record the actual tool name (`tool=question action=- case=call-question`),
+but never the question text, option labels, expected answer, answer or tool arguments.
+
 ### Transcript shape
 
 The server logs only counts, fixed sentinel case, tool name, fixed action and fixed case. Direct
@@ -339,6 +385,11 @@ This covers:
 - capture wire format: one exact text envelope in a tool multipart with known media parts is
   accepted; two text parts or unknown part shapes are rejected; a following image user attachment
   is ignored; the test-only provider config declares image input;
+- `ask_choice`: `request` precedes the built-in `question`; missing/malformed question schema is
+  refused without a fake call; a pending, wrong, unknown or free-form answer stops without a
+  mutation; an exact listed choice runs the `tap_save` or `input` sequence once on the same task;
+  the question roletool result cannot impersonate a phone envelope; JSON and SSE name `question`;
+  and logs keep only the tool name, not question/answer/arguments;
 - loopback HTTP server, model listing, transcript count/no-prompt logging;
 - offline target APK build, signature verification, manifest package/label/launchable activity,
   absence of `INTERNET`, `fixture_input_echo` resource presence, and `classes.dex` presence.
@@ -351,6 +402,13 @@ Not verified here: installing the target APK, the real guest runtime, standing s
 readiness, the real OpenCode model loop, native continuation delivery, real uiautomator/ADB actions,
 and real captures. Those belong to the orchestrator/emulator run. The API 35/x86_64 emulator run is the only device claim; physical
 arm64/OEM, TalkBack and real-model reasoning are not established by these fixtures.
+
+The `ask_choice` focused Node tests do not model or close the runtime's pending-form schema
+(`q0`, `custom:true`), do not render the overlay choice, and do not deliver a real notification or
+SystemUI reply. The fixture test only proves the built-in `question` function/schema is present and
+that the fixture asks the two fixed options; the real harness must independently verify the pending
+form, `custom:true`, overlay display and answer round-trip on the device. The native choice sender
+accepts only the listed option values. No device pass is claimed by this section.
 
 ## 6. Native UI smoke (phone entry / off state)
 

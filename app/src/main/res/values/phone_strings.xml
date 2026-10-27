@@ -4,13 +4,13 @@
     <!-- Header -->
     <string name="phone_title">Phone control</string>
     <string name="phone_experimental">Experimental</string>
-    <string name="phone_entry_body">Let the agent use one app on this phone for a short time. Off by default; you turn it on yourself.</string>
+    <string name="phone_entry_body">Let the agent use apps on this phone within the scope you choose. Off by default; you turn it on yourself.</string>
     <string name="phone_unavailable_title">Not available in this version</string>
     <string name="phone_unavailable_body">Phone control is an experiment and isn\'t turned on in this build.</string>
 
     <!-- Turning it on -->
     <string name="phone_enable_title">Let the agent use apps on this phone</string>
-    <string name="phone_enable_intro">The agent can tap, swipe and type in one app you choose, for a short time you set. You can pause, take over or end the task at any time.</string>
+    <string name="phone_enable_intro">The agent can tap, swipe and type in an app you choose. You can set a time limit or choose Permanent, and pause, take over or end the task at any time.</string>
     <string name="phone_risk_title">Before you turn this on</string>
     <string name="phone_risk_runtime">The whole on-device runtime is trusted: any program or agent running in it can use this connection, not only the chat you\'re in.</string>
     <string name="phone_risk_adb">Wireless debugging gives device-level access. While it\'s connected, whatever holds the connection can do far more than this screen allows. Turn wireless debugging off when you\'re done.</string>
@@ -38,6 +38,7 @@
     <string name="phone_task_ended">Ended · check the results</string>
     <string name="phone_minutes_left">%1$d min</string>
     <string name="phone_seconds_left">%1$d s</string>
+    <string name="phone_no_time_limit">no time limit</string>
 
     <!-- Pending operations -->
     <string name="phone_pending_enabling">Turning on…</string>
@@ -62,10 +63,22 @@
     <string name="phone_step_pair">Pair (first time only)</string>
     <string name="phone_paired_before">Already paired. Pair again only if connecting fails.</string>
     <string name="phone_pair_again">Pair again</string>
-    <string name="phone_pair_how">On the wireless debugging screen, tap \"Pair device with pairing code\" and keep that dialog open. Switching to AndChamber closes it, and the code stops working.</string>
+    <string name="phone_pair_how">Tap the button below. AndChamber opens the wireless debugging screen and looks for this phone\'s pairing dialog by itself. There, tap \"Pair device with pairing code\" and keep that dialog open. You only type the six-digit code, in AndChamber\'s notification.</string>
     <string name="phone_pair_with_notification">Pair using a notification</string>
     <string name="phone_pair_waiting_title">Enter the code in the notification</string>
-    <string name="phone_pair_waiting_body">With the pairing dialog still open, pull down the notification shade and type the six-digit code into AndChamber\'s notification. Don\'t paste it into a chat.</string>
+    <string name="phone_pair_waiting_body">Keep the pairing dialog open, pull down the notification shade and type the six-digit code into AndChamber\'s notification. Don\'t paste it into a chat.</string>
+    <string name="phone_pair_searching_title">Looking for the pairing dialog on this phone…</string>
+    <string name="phone_pair_searching_body">On the wireless debugging screen, tap \"Pair device with pairing code\" and keep the dialog open. Once it\'s found, the notification asks only for the six-digit code.</string>
+    <string name="phone_pair_waiting_xiaomi">On some Xiaomi phones, the notification only shows its text box after you long-press it.</string>
+    <string name="phone_discovery_retry">Search again</string>
+    <string name="phone_discovery_manual">Enter the port myself</string>
+    <string name="phone_discovery_not_found">Not found on this phone</string>
+    <string name="phone_discovery_not_found_pair_body">No open pairing dialog was found in time. Make sure wireless debugging is on and the \"Pair device with pairing code\" dialog is open, then search again.</string>
+    <string name="phone_discovery_not_found_connect_body">No wireless debugging connection was found in time. Make sure wireless debugging is on, then search again.</string>
+    <string name="phone_discovery_unavailable">Can\'t search right now</string>
+    <string name="phone_discovery_unavailable_body">The phone didn\'t allow the search. Check that Wi-Fi is on, then search again, or enter the port yourself.</string>
+    <string name="phone_discovery_ambiguous">More than one match found</string>
+    <string name="phone_discovery_ambiguous_body">AndChamber won\'t guess which one is right. Close other pairing dialogs and search again, or enter the port yourself.</string>
     <string name="phone_pair_blocked_title">Notifications are off</string>
     <string name="phone_pair_blocked_body">The pairing notification can\'t be shown. Turn on notifications, or pair manually below if the dialog can stay open.</string>
     <string name="phone_pair_manual_show">Pair without the notification</string>
@@ -77,6 +90,15 @@
     <string name="phone_pairing_code_hint">Six digits from the pairing dialog.</string>
     <string name="phone_pair">Pair</string>
     <string name="phone_step_connect">Connect</string>
+    <string name="phone_connect_auto_body">AndChamber looks for this phone\'s own wireless debugging port and connects to it. Nothing to type. Connecting doesn\'t let the agent do anything yet.</string>
+    <string name="phone_connect_auto">Find and connect</string>
+    <string name="phone_connect_searching">Looking for wireless debugging on this phone…</string>
+    <string name="phone_connect_auto_running">Connecting to this phone…</string>
+    <string name="phone_connect_auto_failed">Couldn\'t connect automatically</string>
+    <string name="phone_connect_auto_failed_body">Search again, or enter the port from the wireless debugging screen yourself.</string>
+    <string name="phone_connect_after_pair">Pair first. After pairing succeeds, AndChamber tries to connect on its own.</string>
+    <string name="phone_connect_manual_show">Enter the port myself</string>
+    <string name="phone_connect_manual_hide">Hide manual connection</string>
     <string name="phone_connect_port_body">Use the port under \"IP address &amp; port\" on the wireless debugging screen. It differs from the pairing port and changes whenever wireless debugging restarts.</string>
     <string name="phone_connect_port">Connection port</string>
     <string name="phone_connect_port_hint">From \"IP address &amp; port\" on the wireless debugging screen.</string>
@@ -96,9 +118,9 @@
     <string name="phone_problem_code_rejected">Pairing failed</string>
     <string name="phone_problem_code_rejected_body">The code was wrong or has expired. Open a new pairing dialog and use its new code.</string>
     <string name="phone_problem_pair_port">Couldn\'t reach the pairing port</string>
-    <string name="phone_problem_pair_port_body">Check the port in the open pairing dialog. It changes every time the dialog opens.</string>
+    <string name="phone_problem_pair_port_body">Keep the pairing dialog open and try again. Its port changes every time the dialog opens.</string>
     <string name="phone_problem_connect_refused">Couldn\'t connect</string>
-    <string name="phone_problem_connect_refused_body">Check the connection port on the wireless debugging screen. If you haven\'t paired yet, pair first.</string>
+    <string name="phone_problem_connect_refused_body">Check that wireless debugging is still on, then search again or enter the port yourself. If you haven\'t paired yet, pair first.</string>
     <string name="phone_problem_not_authorized">The phone hasn\'t approved this connection</string>
     <string name="phone_problem_not_authorized_body">Pair again, then connect.</string>
     <string name="phone_problem_lost">Connection lost</string>
@@ -134,7 +156,7 @@
     <string name="phone_open_notification_settings">Open notification settings</string>
 
     <!-- Granting -->
-    <string name="phone_grant_title">Give the agent a short task</string>
+    <string name="phone_grant_title">Give the agent a task</string>
     <string name="phone_request_title">The agent asked to use an app</string>
     <string name="phone_request_body">It suggested the task below. You choose the app, the time and the actions. Nothing starts until you confirm.</string>
     <string name="phone_grant_step_app">Choose one app</string>
@@ -248,7 +270,7 @@
     <string name="phone_standing_title">Use the phone from chat</string>
     <string name="phone_standing_setup_body">Set this up once: choose the apps the agent may use, what it may do, and for how long. Then just ask in the local OpenChamber chat. Requests inside this scope start without asking here each time.</string>
     <string name="phone_standing_ready_title">Ready: ask in the chat</string>
-    <string name="phone_standing_ready_body">Say what you want in the local OpenChamber chat, for example which app and what to do. You won\'t be sent here to approve each task. Each task still has its own short time and stops when it runs out.</string>
+    <string name="phone_standing_ready_body">Say what you want in the local OpenChamber chat, for example which app and what to do. You won\'t be sent here to approve each task. Tasks follow your chosen scope and time limits. Permanent removes time expiry, not the other stop rules.</string>
     <string name="phone_standing_open_chat">Open the chat</string>
     <string name="phone_standing_restart_title">One restart needed</string>
     <string name="phone_standing_restart_body">The running OpenChamber started before phone control was set up, so the chat can\'t use the phone yet. Restart it once; your chats are kept.</string>
@@ -276,6 +298,21 @@
     <string name="phone_standing_too_many">Too many apps. Choose fewer.</string>
     <string name="phone_standing_window">How long this scope lasts</string>
     <string name="phone_standing_hours">%1$d h</string>
+    <string name="phone_control_agent_permanent">Agent · %1$s · no time limit</string>
+    <string name="phone_running_limits_permanent">Allowed: %1$s · no time limit</string>
+    <string name="phone_running_auto_pause_permanent">There is no time limit, but it still pauses when you take over, come back to AndChamber, lock the screen, the connection drops, or the app leaves the screen or can\'t be confirmed.</string>
+    <string name="phone_standing_permanent">Permanent</string>
+    <string name="phone_standing_window_line_left">Scope ends in %1$d min</string>
+    <string name="phone_standing_window_line_permanent">Scope: permanent (doesn\'t end by time)</string>
+    <string name="phone_standing_per_task_line">Each task up to %1$d min</string>
+    <string name="phone_standing_per_task_line_permanent">Each task: no time limit</string>
+    <string name="phone_standing_per_task_line_scope">Each task: no limit of its own, ends when the scope ends</string>
+    <string name="phone_standing_confirm_window_hours">Scope lasts %1$d h.</string>
+    <string name="phone_standing_confirm_window_permanent">Scope: permanent. It doesn\'t end by time; turn it off here when you\'re done.</string>
+    <string name="phone_standing_confirm_per_task_minutes">Each task up to %1$d min.</string>
+    <string name="phone_standing_confirm_per_task_permanent">Each task: no time limit.</string>
+    <string name="phone_standing_confirm_per_task_scope">Each task: no limit of its own. It still ends when the scope ends.</string>
+    <string name="phone_standing_permanent_note">Permanent only means it doesn\'t end because time runs out. Taking over, locking the screen, a dropped connection or turning phone control off still stops the agent. After AndChamber or the phone restarts, an old task doesn\'t resume by itself. Each single action still has its own timeout.</string>
     <string name="phone_standing_per_task">Each task\'s time limit</string>
     <string name="phone_standing_trust">You trust the whole local OpenChamber runtime with this scope, not only one chat. You can turn it off here at any time.</string>
     <string name="phone_standing_review">Review and allow…</string>

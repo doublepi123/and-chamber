@@ -22,6 +22,18 @@ const path = require('node:path');
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const PRIVATE_ROOT = '/tmp/opencode';
 const PHONE_TOOL = 'andchamber_phone';
+// OpenCode 2.0.32's built-in question tool. Its pending form is created by the real runtime; this
+// fixture only asks the fixed choice and reads the roletool answer, never the pending form schema.
+const QUESTION_TOOL = 'question';
+const ASK_CHOICE_SCENARIO = 'ask_choice';
+const ASK_QUESTION_TEXT = 'Which fixture action should I run next?';
+const ASK_QUESTION_HEADER = 'Next step';
+const ASK_OPTIONS = Object.freeze([
+  Object.freeze({ label: 'Tap Save', description: 'Run the tap_save scenario' }),
+  Object.freeze({ label: 'Type text', description: 'Run the input scenario' }),
+]);
+const ASK_OPTION_SCENARIOS = Object.freeze({ 'Tap Save': 'tap_save', 'Type text': 'input' });
+const ASK_ANSWER_RE = /^User has answered your questions: "Which fixture action should I run next\?"="([^"]*)"\. You can now continue with the user's answers in mind\.$/;
 const TARGET_PACKAGE = 'io.example.phonefixture';
 const DEFAULT_INPUT_TEXT = 'andchamber-ascii-1';
 const INPUT_ECHO_EMPTY = 'fixture-input-echo-empty';
@@ -167,19 +179,44 @@ function findNativeContinuation(messages, sentinel) {
   return null;
 }
 
-function inspectTools(tools) {
+function findToolFunction(tools, name) {
   const list = Array.isArray(tools) ? tools : [];
-  let phone = null;
   for (const tool of list) {
     if (!tool || typeof tool !== 'object') continue;
     const fn = tool.function && typeof tool.function === 'object' ? tool.function : tool;
-    if (fn.name === PHONE_TOOL) {
-      phone = fn;
-      break;
-    }
+    if (fn.name === name) return fn;
   }
+  return null;
+}
+
+function inspectTools(tools) {
+  const list = Array.isArray(tools) ? tools : [];
+  const phone = findToolFunction(tools, PHONE_TOOL);
+  const question = findToolFunction(tools, QUESTION_TOOL);
+  const questionParameters = question && (question.parameters && typeof question.parameters === 'object'
+    ? question.parameters
+    : question.inputSchema);
+  const questionProperties = questionParameters && questionParameters.properties &&
+    typeof questionParameters.properties === 'object' ? questionParameters.properties : null;
+  const questionInfo = {
+    present: Boolean(question),
+    valid: Boolean(
+      questionParameters &&
+      questionProperties &&
+      questionProperties.questions &&
+      typeof questionProperties.questions === 'object' &&
+      Array.isArray(questionParameters.required) &&
+      questionParameters.required.includes('questions'),
+    ),
+  };
   if (!phone) {
-    return { count: list.length, present: false, valid: false, reasons: ['missing'] };
+    return {
+      count: list.length,
+      present: false,
+      valid: false,
+      reasons: ['missing'],
+      question: questionInfo,
+    };
   }
   const reasons = [];
   const parameters = phone.parameters && typeof phone.parameters === 'object'
@@ -204,7 +241,13 @@ function inspectTools(tools) {
     reasons.push('required-action');
   }
   if (!parameters || parameters.additionalProperties !== false) reasons.push('additional-properties');
-  return { count: list.length, present: true, valid: reasons.length === 0, reasons };
+  return {
+    count: list.length,
+    present: true,
+    valid: reasons.length === 0,
+    reasons,
+    question: questionInfo,
+  };
 }
 
 function parseEnvelope(text) {
@@ -247,7 +290,7 @@ function analyzeTurn(body) {
       if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
         for (const call of message.tool_calls) {
           const fn = call && call.function && typeof call.function === 'object' ? call.function : null;
-          if (!fn || fn.name !== PHONE_TOOL) continue;
+          if (!fn || (fn.name !== PHONE_TOOL && fn.name !== QUESTION_TOOL)) continue;
           let args = null;
           try {
             args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : null;
@@ -256,6 +299,7 @@ function analyzeTurn(body) {
           }
           calls.push({
             id: typeof call.id === 'string' ? call.id : '',
+            name: fn.name,
             args: args && typeof args === 'object' && !Array.isArray(args) ? args : null,
           });
         }
@@ -265,7 +309,7 @@ function analyzeTurn(body) {
           id: typeof message.tool_call_id === 'string' ? message.tool_call_id : '',
           text: payload.text,
           valid: payload.valid,
-          parsed: payload.valid ? parseEnvelope(payload.text) : null,
+          parsed: null,
         });
       }
     }
@@ -279,6 +323,11 @@ function analyzeTurn(body) {
   for (const call of calls) {
     call.result = (call.id && byId.get(call.id)) || results[resultCursor] || null;
     resultCursor += 1;
+    // Only the phone tool returns a phone envelope. A question roletool answer is plain prose even
+    // if a malformed request tries to make it look like one.
+    if (call.name === PHONE_TOOL && call.result && call.result.valid) {
+      call.result.parsed = parseEnvelope(call.result.text);
+    }
   }
 
   let firstSnapshot = null;
@@ -325,7 +374,7 @@ function textPlan(text, caseName) {
   return { kind: 'text', text, case: caseName };
 }
 
-function toolPlan(args, callSeq, step, scenario) {
+function toolPlan(args, callSeq, step, scenario, toolName = PHONE_TOOL) {
   return {
     kind: 'tool',
     action: args.action,
@@ -334,7 +383,7 @@ function toolPlan(args, callSeq, step, scenario) {
     toolCall: {
       id: `call_phone_e2e_${callSeq}`,
       type: 'function',
-      function: { name: PHONE_TOOL, arguments: JSON.stringify(args) },
+      function: { name: toolName, arguments: JSON.stringify(args) },
     },
   };
 }
@@ -347,7 +396,7 @@ function sentinelLabel(sentinel) {
   const raw = typeof value.scenario === 'string'
     ? value.scenario
     : typeof value.action === 'string' ? value.action : 'none';
-  const scenario = SEQUENCES[raw] ? raw : 'other';
+  const scenario = raw === ASK_CHOICE_SCENARIO || SEQUENCES[raw] ? raw : 'other';
   return `${mode}:${scenario}`;
 }
 
@@ -589,6 +638,144 @@ function epochOf(state) {
   return 0;
 }
 
+function askQuestionArgs() {
+  return {
+    questions: [{
+      question: ASK_QUESTION_TEXT,
+      header: ASK_QUESTION_HEADER,
+      options: ASK_OPTIONS.map((option) => ({
+        label: option.label,
+        description: option.description,
+      })),
+    }],
+  };
+}
+
+function askAnswerOf(result) {
+  if (!result || result.valid !== true || typeof result.text !== 'string') return { state: 'pending' };
+  const text = result.text.trim();
+  if (!text) return { state: 'pending' };
+  const match = ASK_ANSWER_RE.exec(text);
+  if (match) return { state: 'answer', answer: match[1] };
+  if (/\b(pending|waiting|unanswered|await(?:ing)?)\b/i.test(text)) return { state: 'pending' };
+  return { state: 'mismatch' };
+}
+
+function askRequestConfirmed(state) {
+  const requestParsed = state.calls[0] && state.calls[0].result && state.calls[0].result.parsed;
+  const startState = requestParsed && requestParsed.ok === true &&
+    requestParsed.data && typeof requestParsed.data === 'object' ? requestParsed.data.state : null;
+  return Boolean(
+    requestParsed &&
+    requestParsed.ok === true &&
+    isInteger(requestParsed.epoch) &&
+    requestParsed.epoch >= 1 &&
+    START_STATES.includes(startState),
+  );
+}
+
+function askChoicePlan(state, value, callSeq) {
+  // The question tool is a built-in runtime tool, not the phone plugin. This fixture refuses to fake
+  // it when the request does not prove it was injected.
+  if (!state.tools.question || !state.tools.question.present) {
+    return textPlan('phone-e2e-fixture: question tool not injected', 'ask-choice-question-missing');
+  }
+  if (!state.tools.question.valid) {
+    return textPlan('phone-e2e-fixture: question schema rejected', 'ask-choice-question-invalid');
+  }
+  const expected = typeof value.expectAnswer === 'string' ? value.expectAnswer : '';
+  const chosen = Object.prototype.hasOwnProperty.call(ASK_OPTION_SCENARIOS, expected)
+    ? ASK_OPTION_SCENARIOS[expected]
+    : null;
+  if (!chosen) {
+    return textPlan(
+      'phone-e2e-fixture: ask_choice expected option is not one of the fixed options',
+      'ask-choice-expected-invalid',
+    );
+  }
+
+  if (state.callCount < 2) {
+    if (state.callCount === 0) {
+      // The real request creates the current phone task/route first. Without it the real overlay has
+      // no currentTask and cannot show the question choice.
+      const summary = typeof value.summary === 'string' && value.summary.length > 0
+        ? value.summary.slice(0, 200)
+        : `AndChamber phone E2E ${ASK_CHOICE_SCENARIO}`;
+      return toolPlan({
+        action: 'request',
+        summary,
+        packageName: typeof value.packageName === 'string' ? value.packageName : TARGET_PACKAGE,
+      }, callSeq, 'request', ASK_CHOICE_SCENARIO);
+    }
+    if (!askRequestConfirmed(state)) {
+      return textPlan('phone-e2e-fixture: request-not-confirmed', 'request-not-confirmed');
+    }
+    return toolPlan(askQuestionArgs(), callSeq, 'question', ASK_CHOICE_SCENARIO, QUESTION_TOOL);
+  }
+
+  if (!askRequestConfirmed(state)) {
+    return textPlan('phone-e2e-fixture: request-not-confirmed', 'request-not-confirmed');
+  }
+
+  const questionCall = state.calls[1];
+  if (!questionCall || questionCall.name !== QUESTION_TOOL) {
+    return textPlan('phone-e2e-fixture: question call missing', 'ask-choice-question-missing');
+  }
+  const decision = askAnswerOf(questionCall.result);
+  if (decision.state === 'pending') {
+    return textPlan('phone-e2e-fixture: question is still awaiting the user', 'ask-choice-pending');
+  }
+  if (decision.state !== 'answer') {
+    return textPlan(
+      'phone-e2e-fixture: ask_choice answer mismatch: not a recognized option',
+      'ask-choice-mismatch',
+    );
+  }
+  if (decision.answer !== expected) {
+    return textPlan(
+      'phone-e2e-fixture: ask_choice answer mismatch: expected option was not selected',
+      'ask-choice-mismatch',
+    );
+  }
+
+  // Only the exact expected option continues. The same original task then runs the chosen real
+  // mutation sequence once; it does not send another request or ask for another user prompt.
+  const scenarioSequence = SEQUENCES[chosen];
+  const actionIndex = state.callCount - 2;
+  if (actionIndex < scenarioSequence.length) {
+    const step = scenarioSequence[actionIndex];
+    let args;
+    try {
+      args = actionArgs(state, step, value, chosen);
+    } catch (error) {
+      if (!(error instanceof PlanError)) throw error;
+      return textPlan(`phone-e2e-fixture: plan rejected ${error.message}`, `plan-rejected:${error.message}`);
+    }
+    return toolPlan(args, callSeq, step, ASK_CHOICE_SCENARIO);
+  }
+
+  if (!state.lastResult) {
+    return textPlan('phone-e2e-fixture: awaiting tool result', 'awaiting-tool-result');
+  }
+  const lastAction = state.lastCall && state.lastCall.args && typeof state.lastCall.args.action === 'string'
+    ? state.lastCall.args.action
+    : 'unknown';
+  const mutationStep =
+    scenarioSequence.find((step) => step !== 'status' && step !== 'snapshot') ||
+    scenarioSequence[scenarioSequence.length - 1];
+  const verified = verifyScenario(state, chosen, lastAction, value);
+  if (!verified.ok) {
+    return textPlan(
+      `phone-e2e-fixture: e2e-complete scenario=${ASK_CHOICE_SCENARIO} action=${mutationStep} verify=fail:${verified.reason} epoch=${epochOf(state)}`,
+      'e2e-verify-failed',
+    );
+  }
+  return textPlan(
+    `phone-e2e-fixture: e2e-complete scenario=${ASK_CHOICE_SCENARIO} action=${mutationStep} verify=pass epoch=${epochOf(state)}`,
+    'e2e-complete',
+  );
+}
+
 function planTurn(body, options = {}) {
   const callSeq = isInteger(options.callSeq) ? options.callSeq : 1;
   const state = analyzeTurn(body);
@@ -610,12 +797,6 @@ function planTurn(body, options = {}) {
       : 'unknown';
     return textPlan(`phone-e2e-fixture: tool refused action=${state.error.action} code=${code}`, 'tool-refused');
   }
-  if (state.lastCall && state.lastResult && !state.lastResult.parsed) {
-    const lastAction = state.lastCall.args && state.lastCall.args.action;
-    if (lastAction !== 'request' && lastAction !== 'finish') {
-      return textPlan('phone-e2e-fixture: tool result is not an envelope', 'tool-result-invalid');
-    }
-  }
 
   const value = state.sentinel.value;
   let mode = typeof value.mode === 'string' ? value.mode : '';
@@ -629,6 +810,21 @@ function planTurn(body, options = {}) {
     scenario = typeof value.resumeScenario === 'string'
       ? value.resumeScenario
       : scenario === 'need_user' ? 'input' : scenario;
+  }
+
+  if (scenario === ASK_CHOICE_SCENARIO) {
+    if (mode !== 'begin' && mode !== 'continue' && mode !== 'action') {
+      return textPlan('phone-e2e-fixture: unsupported sentinel mode', 'sentinel-invalid');
+    }
+    return askChoicePlan(state, value, callSeq);
+  }
+
+  // A question roletool answer is prose, not a phone envelope; only phone results are checked here.
+  if (state.lastCall && state.lastCall.name === PHONE_TOOL && state.lastResult && !state.lastResult.parsed) {
+    const lastAction = state.lastCall.args && state.lastCall.args.action;
+    if (lastAction !== 'request' && lastAction !== 'finish') {
+      return textPlan('phone-e2e-fixture: tool result is not an envelope', 'tool-result-invalid');
+    }
   }
 
   let sequence;
@@ -1003,8 +1199,10 @@ function startServer(options = {}) {
       sentinel: sentinelText,
       callCount: state.callCount,
       decision: plan.kind,
-      tool: plan.kind === 'tool' ? PHONE_TOOL : '',
-      action: plan.kind === 'tool' ? plan.action : '',
+      // The actual fixed tool name: a question turn is `question`, not the phone tool. Arguments,
+      // question text and answers are never logged.
+      tool: plan.kind === 'tool' ? plan.toolCall.function.name : '',
+      action: plan.kind === 'tool' ? (plan.action || '-') : '',
       case: plan.case,
     }, emit, transcript);
 
@@ -1148,6 +1346,10 @@ if (require.main === module) main();
 
 module.exports = {
   PHONE_TOOL,
+  QUESTION_TOOL,
+  ASK_CHOICE_SCENARIO,
+  ASK_QUESTION_TEXT,
+  ASK_OPTIONS,
   TARGET_PACKAGE,
   DEFAULT_INPUT_TEXT,
   INPUT_ECHO_EMPTY,

@@ -22,6 +22,66 @@ Pipeline for OpenChamber events (stdout from the server):
   - Permission with a session and a `permission-<sid>:<rid>` tag → `Permission`. Otherwise `OpenOnly`.
   - Question → `Question` (needs the pending form first).
   - Plugin, RestartInterrupted, Unknown, or no session → `OpenOnly`.
+- Phone-overlay conversation projection, `SessionPromptProjection.kt`:
+  - `NotificationSink` has an optional `onEvent` callback. `accept` invokes it for every parsed local
+    stdout event **before** foreground suppression; it only feeds a memory projection and never
+    changes the notification action plan or permission semantics.
+  - `SessionPromptController` (implements `SessionPromptPort`) owns two read-only memory flows:
+    - `projection: StateFlow<SessionPromptProjection>` for the current task question;
+    - `notice: StateFlow<SessionNoticeProjection?>` for a plain non-question notice.
+  - Source and lifecycle:
+    - Only a local `question` event starts a question projection; `onEvent` is ignored if the launch
+      is not trusted or the session is not the current native task session.
+    - `pending()` is read once for the event, again when the answer surface is opened/refreshed, and
+      once immediately before a submit. There is no periodic poll. A failed read sets `Unknown`, never
+      "answered".
+    - Only a single-field closed choice with 1..3 options is offerable. The pinned builtin question
+      carries `custom:true`; the overlay still offers no free text and submits option values only.
+    - `noticeTitle`/`noticeBody` come from the notification; `questionTitle`/`questionDescription`
+      come from the form field (description is the main question) and are bounded (160/640 chars).
+    - The projection stores no entered answer, form default, server response body, permission
+      resource, page text, progress event or log entry. `schemaFingerprint` is a SHA-256 digest of the
+      field constraints plus `metadata.kind`/`metadata.tool.id`/`metadata.tool.messageID`; raw
+      metadata is never stored.
+  - Notices:
+    - `Ready`, `Error`, `Goal` and `RestartInterrupted` are projected as bounded plain notices.
+    - `Permission`, `Unknown` and `Plugin` are not plain notices; permission keeps its original
+      notification action path and is never answered by the overlay.
+    - The notice flow is independent of the question identity and is cleared when the native task
+      owner changes.
+  - Submit and duplicate protection:
+    - `submit` requires the exact frozen `formId` + `generation` + a shown option. It sets `Sending`
+      synchronously, so a second tap is ignored.
+    - Before the one POST, the controller re-reads pending and matches launch, session, directory,
+      form id and schema; the overlay also fences task id/runtime id/grant epoch/route session/launch.
+      The fence is evaluated on `Dispatchers.Main.immediate` in production because the overlay task
+      snapshot is Main-owned.
+    - One bounded in-memory tombstone is recorded per `launch + session + formId` immediately before
+      the request. It holds no value or answer, has 64 entries and never evicts. A later refresh,
+      duplicate question event or new task/epoch cannot offer that form as `Ready`. A new form id or
+      launch has a new key. A full table returns the read-only `Blocked` state without sending rather
+      than evicting an old attempt. A pending-read failure before any POST is not tombstoned, so it
+      may be read again.
+    - 2xx maps to `Accepted` (delivery only, not business success); 0/5xx/cancellation and a failed
+      read before sending map to `Unknown` (never retried automatically); 3xx/4xx map to `Refused`;
+      a form that disappeared maps to `Gone`. The response body is never stored or echoed.
+  - Overlay binding (`phone/android/overlay/PhoneTaskConversation.kt`):
+    - A new task key (including clear → another task) clears question and notice and never adopts the
+      global pending form again, even when the route session is unchanged. Only a new question event
+      projects a question for the new task.
+    - A new epoch of the same task may keep its own question, but with a fresh generation and a new
+      pending check; an old generation cannot submit. A projected but not attempted form is retired
+      when the task owner is cleared so a duplicate event cannot rebind it.
+    - Native prompt/notice enums map to the UI model with exhaustive `when` branches; a future native
+      state fails compilation rather than a runtime lookup.
+    - After a real user Send, the coordinator collapses the panel in the same Main callback before
+      the IO pending check/POST can finish. Only a same task/form/generation `Unknown` / `Refused` /
+      `Superseded` / `Blocked` result reopens the read-only panel; `Accepted`, a new owner or a
+      changed answer identity stays collapsed.
+  - `PendingForms.closedChoice` accepts the pinned `custom:true` choice fields but offers options only;
+    `formSchemaFingerprint` is the bounded digest described above.
+  - Tests: `notify/SessionPromptControllerTest`, `phone/.../PhoneTaskConversationTest`,
+    `phone/.../PhoneOverlayDesignerContentMappingTest`.
 - `OpenChamberNotifier`:
   - Channels `agent-finished` (DEFAULT), `needs-input` (HIGH), `errors` (HIGH), `other` (DEFAULT). `ensureChannels()` re-applies names on every call and keeps user importance.
   - Notification id = `NotificationPayload.notificationId(tag)`: FNV-1a over UTF-8, non-negative. The same tag replaces the earlier notification.
@@ -120,6 +180,7 @@ OpenChamber event:
 6. Action tap → `NotificationActionReceiver.onReceive` → `goAsync` → per-id lock → (`pending()` check) → `LocalApiClient.send` → `updateStatus` ("Sent", then 3 s and `cancelIfCurrent`), `cancel`, or `keep(KeepPlan)`. Only a `NotificationRevisionGate` pending-Sent match removes an id after a delay; any newer write to that id makes the old clean-up a no-op.
 7. Inline step (in the shade, no Activity) → `ACTION_INLINE_FORM` broadcast → per-id lock → revision check → controller step → `updateInlineIfRevision` (next field, new revision) … last field → "Sending…" → one whole-map POST → "Answers sent" → cleared after 3 s. Stale actions do nothing.
 8. Legacy only: Fill form tap → `NotificationFormActivity` (immutable PendingIntent carrying the revision) → `NotificationFormController.load()` → the whole form → `submit()` once with every field → `cancelIfRevision`, or `keepIfRevision` and the screen stays open with a fixed status (the returned revision is kept for a later retry). A keep re-creates the Fill form action with its new revision, so reopening still works; an answer whose revision was replaced by a newer notification on the same id changes nothing. No automatic resend.
+9. Phone-overlay conversation (parallel to Android notification delivery): the same parsed local event is offered to `SessionPromptController` before suppression. A `question` reads pending once and may expose one choice form; `Ready`/`Error`/`Goal`/`RestartInterrupted` update the independent plain notice. A real user selection/Send sets `Sending`, collapses the overlay panel, then re-reads pending and sends one form reply; `Accepted`/`Unknown`/`Refused` are delivery facts, and duplicate/old forms are blocked by the bounded tombstone.
 
 Runtime alert:
 1. `RuntimeState` change → `NotificationObserver` → `RuntimeErrorWatch.onState` → `postAlert`.
@@ -129,7 +190,8 @@ Runtime alert:
 ## Integration
 
 - Depends on `data/LocalApiClient.kt` (HTTP, login, cookie jar), `runtime/` (`LocalRuntimeController`, `RuntimeState`, `FailurePhase`), `service/` (`RuntimeService` is not used directly here, but the foreground notification is its own channel), `MainActivity`, `NotificationFormActivity` (multi-field form screen; it uses `NotificationFormController`), and `R` strings (`channel_*`, `action_*` including `action_fill_form`, `reply_sent`, `reply_failed`, `alert_*`).
-- Wired in `di/AppModule.kt`: `OpenChamberNotifier`, `NotificationSink(get(), ProcessForeground, get())`, `NotificationObserver(...)`, `NotificationBootstrapStore`, `NotificationSettingsBootstrap` (inside the observer).
+- Wired in `di/AppModule.kt`: `OpenChamberNotifier`, `SessionPromptController` (with `LocalApiSessionPromptTransport` and `Dispatchers.Main.immediate` for the task/launch fence), `NotificationSink(get(), ProcessForeground, get(), onEvent = …)`, `NotificationObserver(...)`, `NotificationBootstrapStore`, `NotificationSettingsBootstrap` (inside the observer).
+- `PhoneOverlayCoordinator` consumes `SessionPromptPort` as a Main-owned projection: task key/epoch/route/launch fencing, question/notice views, submit collapse and same-identity failure reopen. `PhoneOverlayDesignerContent` maps the native prompt/notice types to the UI model with exhaustive enum mappings.
 - Started by `AndChamberApplication.onCreate`.
 - Receives stdout from `runtime/process/ProotOpenChamberServer` through the `notificationSink` lambda.
 - Manifest: `NotificationActionReceiver` and `NotificationFormActivity` are declared with `exported="false"`. `POST_NOTIFICATIONS` is requested.

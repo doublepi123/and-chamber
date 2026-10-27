@@ -6,7 +6,11 @@ object PhoneLimits {
     const val DEFAULT_CALL_MS: Long = 5_000L
     const val MAX_CALL_MS: Long = 15_000L
 
-    /** A lease is short-lived on purpose. The native UI chooses the exact value in this range. */
+    /**
+     * A finite lease/per-task duration is short-lived on purpose. The native UI chooses the exact
+     * value in this range. The explicit [PhoneTimeLimits.PERMANENT] sentinel is the only value
+     * outside it, and it can only come from native configuration after the person confirms it.
+     */
     const val MIN_LEASE_MS: Long = 1_000L
     const val MAX_LEASE_MS: Long = 30 * 60 * 1_000L
 

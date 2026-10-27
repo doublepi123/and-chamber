@@ -7,7 +7,7 @@ import io.andchamber.app.phone.overlay.safety.OverlayPhase
  *
  * [READY] only means the manager intends to show exactly this epoch's window and its own barrier
  * reports VISIBLE. It is not proof of visibility: the driver still runs its independent witness.
- * [STALE] means the epoch/owner changed and the caller must refuse immediately.
+ * [STALE] means the live epoch changed and the caller must refuse immediately.
  */
 internal enum class OverlayDriverSurfaceGate { NOT_REQUIRED, READY, WAITING, STALE }
 
@@ -15,8 +15,9 @@ internal enum class OverlayDriverSurfaceGate { NOT_REQUIRED, READY, WAITING, STA
  * Pure gate for [PhoneOverlayCoordinator.awaitDriverSurface].
  *
  * Notification-only needs no overlay. For a selected overlay, only the exact epoch's current grant
- * owner may become ready; a different grant owner or a changed live epoch is stale. A not-yet-bound
- * owner (`retained`/empty) is still waiting for the manager, not stale.
+ * owner may become ready. A changed live epoch is stale; a different display owner only waits,
+ * since the Main collector may not have projected the new grant yet. It never makes an old window
+ * ready for a new task.
  */
 internal fun overlayDriverSurfaceGate(
     overlaySelected: Boolean,
@@ -31,9 +32,6 @@ internal fun overlayDriverSurfaceGate(
     when {
         !overlaySelected -> OverlayDriverSurfaceGate.NOT_REQUIRED
         liveEpoch != epoch -> OverlayDriverSurfaceGate.STALE
-        ownerKey.startsWith(GRANT_OWNER_PREFIX) && ownerKey != grantOwner(epoch) ->
-            OverlayDriverSurfaceGate.STALE
-
         hostVisible || !surfaceShown || hiddenForRead -> OverlayDriverSurfaceGate.WAITING
         ownerKey != grantOwner(epoch) -> OverlayDriverSurfaceGate.WAITING
         phase != OverlayPhase.VISIBLE -> OverlayDriverSurfaceGate.WAITING

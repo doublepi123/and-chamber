@@ -182,8 +182,23 @@ private fun ScopeSummary(
         }
     }
     BodyText(stringResource(R.string.phone_grant_confirm_actions, actionList(standing.actions)))
-    standingMinutesLeft(standing.status, now)?.let {
-        BodyText(stringResource(R.string.phone_standing_window_left, it, standing.perTaskMinutes))
+    // A permanent window or per-task limit shows a fixed word, never a huge remaining number.
+    val windowLine =
+        when {
+            standingWindowPermanent(standing.status) -> stringResource(R.string.phone_standing_window_line_permanent)
+            else -> standingMinutesLeft(standing.status, now)?.let { stringResource(R.string.phone_standing_window_line_left, it) }
+        }
+    if (windowLine != null) {
+        val perTaskLine =
+            when (perTaskDisplay(perTaskPermanent(standing), standingWindowPermanent(standing.status))) {
+                PerTaskDisplay.NoLimit -> stringResource(R.string.phone_standing_per_task_line_permanent)
+                PerTaskDisplay.UntilScopeEnds -> stringResource(R.string.phone_standing_per_task_line_scope)
+                PerTaskDisplay.Minutes -> stringResource(R.string.phone_standing_per_task_line, standing.perTaskMinutes)
+            }
+        BodyText(windowLine + " · " + perTaskLine, modifier = Modifier.testTag(PhoneTags.STANDING_TIME))
+    }
+    if (standingWindowPermanent(standing.status) || perTaskPermanent(standing)) {
+        BodyText(stringResource(R.string.phone_standing_permanent_note))
     }
     BodyText(stringResource(R.string.phone_standing_limits_note))
 }
@@ -199,8 +214,9 @@ private fun StandingEditor(
 ) {
     var chosen by rememberSaveable { mutableStateOf(standing.apps.map { it.packageName }.toSet()) }
     var scope by rememberSaveable { mutableStateOf((standing.actions.ifEmpty { DEFAULT_ACTIONS }).map { it.name }.toSet()) }
-    var hours by rememberSaveable { mutableIntStateOf(DEFAULT_STANDING_WINDOW_HOURS) }
-    var perTask by rememberSaveable { mutableIntStateOf(standing.perTaskMinutes) }
+    var hours by rememberSaveable { mutableIntStateOf(initialWindowChoice(standing.status)) }
+    // "Permanent" is a choice, never the default: new scopes start at the bounded defaults.
+    var perTask by rememberSaveable { mutableIntStateOf(initialPerTaskChoice(standing)) }
     var query by rememberSaveable { mutableStateOf("") }
     var confirming by remember { mutableStateOf(false) }
     var showErrors by rememberSaveable { mutableStateOf(false) }
@@ -275,15 +291,28 @@ private fun StandingEditor(
     }
     Text(stringResource(R.string.phone_standing_window), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        STANDING_WINDOW_HOURS.forEach { h ->
-            FilterChip(selected = hours == h, onClick = { hours = h }, label = { Text(stringResource(R.string.phone_standing_hours, h)) }, modifier = Modifier.heightIn(min = 40.dp))
+        STANDING_WINDOW_CHOICES.forEach { h ->
+            FilterChip(
+                selected = hours == h,
+                onClick = { hours = h },
+                label = { Text(if (h == PERMANENT_CHOICE) stringResource(R.string.phone_standing_permanent) else stringResource(R.string.phone_standing_hours, h)) },
+                modifier = Modifier.heightIn(min = 40.dp).testTag(PhoneTags.STANDING_WINDOW_CHOICE + ":" + h),
+            )
         }
     }
     Text(stringResource(R.string.phone_standing_per_task), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        PhoneUiLimits.DURATION_CHOICES_MIN.forEach { m ->
-            FilterChip(selected = perTask == m, onClick = { perTask = m }, label = { Text(stringResource(R.string.phone_duration_minutes, m)) }, modifier = Modifier.heightIn(min = 40.dp))
+        STANDING_PER_TASK_CHOICES.forEach { m ->
+            FilterChip(
+                selected = perTask == m,
+                onClick = { perTask = m },
+                label = { Text(if (m == PERMANENT_CHOICE) stringResource(R.string.phone_standing_permanent) else stringResource(R.string.phone_duration_minutes, m)) },
+                modifier = Modifier.heightIn(min = 40.dp).testTag(PhoneTags.STANDING_PER_TASK_CHOICE + ":" + m),
+            )
         }
+    }
+    if (hours == PERMANENT_CHOICE || perTask == PERMANENT_CHOICE) {
+        BodyText(stringResource(R.string.phone_standing_permanent_note))
     }
     BodyText(stringResource(R.string.phone_standing_trust))
     StopChannelGate(state.stopChannel, actions)
@@ -309,7 +338,21 @@ private fun StandingEditor(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(apps.joinToString(stringResource(R.string.phone_list_separator)) { it.label }, style = MaterialTheme.typography.bodyMedium)
                     Text(stringResource(R.string.phone_grant_confirm_actions, actionList(chosenActions)), style = MaterialTheme.typography.bodyMedium)
-                    Text(stringResource(R.string.phone_standing_confirm_time, hours, perTask), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (hours == PERMANENT_CHOICE) stringResource(R.string.phone_standing_confirm_window_permanent) else stringResource(R.string.phone_standing_confirm_window_hours, hours),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        when (perTaskDisplay(perTask == PERMANENT_CHOICE, hours == PERMANENT_CHOICE)) {
+                            PerTaskDisplay.NoLimit -> stringResource(R.string.phone_standing_confirm_per_task_permanent)
+                            PerTaskDisplay.UntilScopeEnds -> stringResource(R.string.phone_standing_confirm_per_task_scope)
+                            PerTaskDisplay.Minutes -> stringResource(R.string.phone_standing_confirm_per_task_minutes, perTask)
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (hours == PERMANENT_CHOICE || perTask == PERMANENT_CHOICE) {
+                        Text(stringResource(R.string.phone_standing_permanent_note), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.testTag(PhoneTags.STANDING_PERMANENT_NOTE))
+                    }
                     Text(stringResource(R.string.phone_standing_confirm_body), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(stringResource(R.string.phone_grant_confirm_screen), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -319,7 +362,7 @@ private fun StandingEditor(
                     onClick = {
                         confirming = false
                         if (standingBlock(state, apps, chosenActions) == null) {
-                            actions.onSaveStanding(PhoneStandingRequest(apps, chosenActions, hours * 3_600_000L, perTask * 60_000L))
+                            actions.onSaveStanding(standingRequest(apps, chosenActions, hours, perTask))
                             onDone()
                         }
                     },

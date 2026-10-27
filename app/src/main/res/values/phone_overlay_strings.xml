@@ -14,6 +14,23 @@
     <string name="phone_overlay_move_left">Move to left edge</string>
     <string name="phone_overlay_move_right">Move to right edge</string>
     <string name="phone_overlay_minutes_left">%1$d min left</string>
+    <string name="phone_overlay_no_time_limit">No time limit</string>
+    <string name="phone_overlay_prompt_capsule">The chat has a question · tap to answer</string>
+    <string name="phone_overlay_prompt_default_label">Question from the chat</string>
+    <string name="phone_overlay_prompt_pick_hint">Pick one answer, then tap Send. Nothing is sent until you do.</string>
+    <string name="phone_overlay_prompt_send">Send answer</string>
+    <string name="phone_overlay_prompt_check_again">Check again</string>
+    <string name="phone_overlay_prompt_open_chat">Answer in the chat</string>
+    <string name="phone_overlay_prompt_checking">Checking that this question is still open…</string>
+    <string name="phone_overlay_prompt_sending">Sending your answer…</string>
+    <string name="phone_overlay_prompt_accepted">The chat received your answer. That doesn\'t mean the agent has acted on it yet.</string>
+    <string name="phone_overlay_prompt_unknown">It isn\'t known whether your answer arrived. It won\'t be sent again from here. Check again, or open the chat to see.</string>
+    <string name="phone_overlay_prompt_blocked">This question can\'t be answered here right now. Nothing was sent. Answer it in the chat.</string>
+    <string name="phone_overlay_prompt_refused">The chat didn\'t take this answer. Nothing else was sent. Answer it in the chat.</string>
+    <string name="phone_overlay_prompt_unsupported">This question can\'t be answered from here. Answer it in the chat.</string>
+    <string name="phone_overlay_prompt_superseded">A newer question replaced this one.</string>
+    <string name="phone_overlay_prompt_answer_in_chat">This question needs an answer in the chat.</string>
+    <string name="phone_overlay_session_notice_label">From the chat</string>
     <string name="phone_overlay_sent_count">%1$d sent</string>
     <string name="phone_overlay_waiting_confirm">Waiting for confirmation</string>
 

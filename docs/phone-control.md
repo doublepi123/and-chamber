@@ -7,8 +7,13 @@ device control and does not change the embedded browser's foreground-only author
 The covered API 35 / x86_64 emulator flows passed [integrated acceptance](testing-phone-control.md),
 including a direct chat request, preauthorized app opening, native continuation and the first
 overlay-read wait. Do not treat a fixture script or a successful APK build alone as full product
-verification. Physical arm64 devices, vendor background policies, TalkBack and real-model reasoning
-have not been verified for this feature.
+verification. A separate API 37/arm64 tablet follow-up covered the cases recorded in the acceptance
+document; broad vendor background policies, TalkBack and real-model reasoning remain unverified.
+
+The newer auto-port pairing/connect discovery, permanent standing durations and notification-question
+overlay projection were validated only on the API 35 / x86_64 emulator. The earlier API 37/arm64
+tablet follow-up predates these features and does not cover them; do not widen its claims from this
+document.
 
 ## Trust and scope
 
@@ -19,9 +24,11 @@ have not been verified for this feature.
 - Wireless debugging authorizes a device-level ADB identity. Restricting the tool to a native
   preauthorized app set is an admission policy, not an Android permission sandbox.
 - The person saves one bounded **standing scope**: allowed apps, allowed actions, a window and a
-  per-task duration. This is configuration, not a lease. The first valid chat request binds it to the
-  current runtime and session. Each task then gets a new controller epoch and a short lease bounded
-  by the per-task duration and the remaining window.
+  per-task duration. Both duration selectors offer an explicit **Permanent** choice; the finite
+  defaults are unchanged. This is configuration, not a lease. The first valid chat request binds it
+  to the current runtime and session. Each task then gets a new controller epoch and a lease bounded
+  by the per-task duration and the remaining window. A permanent per-task choice inside a finite
+  window is still bounded by that window's end.
 - Only apps in that preauthorized set are openable. There is no arbitrary intent, shell, URI or
   package-install surface, and the installed-app catalogue is never handed to the model. The host,
   system UI, settings and system authorization surfaces cannot be selected for agent control.
@@ -37,9 +44,22 @@ have not been verified for this feature.
 2. If the local runtime was already running without the phone plugin, return Home and restart it
    yourself. Restarting interrupts current OpenChamber tasks; enabling the switch never restarts it
    silently. The person confirms the restart on the standing card.
-3. Follow Android's Wireless debugging setup. Keep the system pairing-code dialog open and use
-   the notification's two reply steps for its pairing port and six-digit code. Pairing and connection
-   ports are different. A manual connection-port fallback remains available.
+3. Follow Android's Wireless debugging setup. The main path no longer asks for two ports. While the
+   system settings screens are open, a bounded native discovery service searches Android's official
+   `_adb-tls-pairing._tcp` type, accepts only an endpoint whose numeric address is loopback or this
+   phone's own interface address, and confirms that the single resolved port is really listening by
+   binding `127.0.0.1:port` (only `EADDRINUSE` counts; a successful bind or another error discards the
+   advertisement). The notification then asks only for the six-digit code; pairing starts against the
+   discovered endpoint. After a real pairing success, a fresh bounded connect discovery finds the
+   current `_adb-tls-connect._tcp` endpoint, probes it the same way, and performs one automatic TLS
+   connect. An already-paired person can use **Find and connect** for the same bounded discovery.
+   The old typed host/port path is kept only as a manual fallback. Cancel, completion or the
+   five-minute bound stops the service, NSD and the short-lived API 30–33 multicast lock. On Android
+   13 with T extension SDK 7 (and newer) an advertisement's port updates are followed with
+   `registerServiceInfoCallback`; otherwise the bounded serial legacy resolve is used. Queries use
+   the service type without a trailing dot and normalise a leading dot the platform may report, while
+   accepting only those two exact types. Nothing scans ports or reads shell properties, and the
+   feature adds no nearby-device or location runtime permission.
 4. Save the standing scope: apps, action classes, window and per-task duration. Saving does not
    grant or launch anything, and it works before the running launcher has loaded the plugin.
 5. Once the new runtime is actually running and the tool handshake is ready, the first valid chat
@@ -55,6 +75,14 @@ have not been verified for this feature.
 
 The legacy per-task native grant form remains in the controller for compatibility, but the default
 UI is configure-once standing. A chat proposal/request is never authority by itself.
+
+Permanent durations use one explicit `PhoneTimeLimits.PERMANENT` sentinel inside the native layer;
+they are never produced by adding a large duration to a clock. The tool protocol exposes
+`leasePermanent` with no lease countdown (`leaseRemainingMs = null`) instead of a huge deadline. A
+permanent standing scope is still stored as configuration only: after a reboot or process restart
+there is no restored grant, observation or task route. The first valid chat request still binds the
+configured scope, and every person stop, screen lock, disconnect, runtime change and process boundary
+keeps its existing stop behaviour.
 
 Foreground-service readiness is checked before a task route is published and the target is launched.
 Notification permission/channel checks and a successful `startForeground` call are not proof that the
@@ -85,7 +113,7 @@ separate, relevant evidence.
 Pause stops new changes; authorized observation can still help inspect an uncertain result. Use
 **I'll take over**, return to the native phone page, or end the task before entering sensitive
 information: these revoke the whole lease, including observation. A model's final sentence is not a
-native control-release acknowledgement; use the native controls or the short lease's expiry.
+  native control-release acknowledgement; use the native controls, or expiry for a finite lease.
 
 ## Optional system progress overlay
 
@@ -146,14 +174,37 @@ live lease; the extra window/focus checks do not extend authority.
 See the [system-overlay verification](testing-phone-overlay.md) for production-window evidence and
 the separate platform probe, regression cases and limitations.
 
+## Task questions and notices in the overlay
+
+The floating surface can also show the current task's OpenChamber question and plain notices. Its
+only source is local runtime stdout `DesktopNotification` events; it does not poll the browser or a
+remote server. `SessionPromptController` reads the pending form once for the event and again when the
+answer surface is opened or refreshed, then fences one answer on the current native task, route
+session, launch, form id, schema fingerprint and presentation generation.
+
+Only a **Ready single-choice** question offers choices and **Send** in the overlay. A complex or
+unsupported form falls back to opening the local chat; no generic form is synthesized in the floating
+window. `Permission` and unknown notification kinds keep their original notification/entry path and
+never become an overlay permission reply. An unknown send outcome is never automatically retried or
+shown as answered. A 2xx/HTTP 204 response is delivery acknowledgement, not proof of business success.
+
+Plain **Ready**, **Error**, **Goal** and **RestartInterrupted** notices are displayed with bounded
+text and are independent of the question identity. Selecting an answer collapses the panel first so
+it cannot keep covering the target. A failed delivery re-expands the panel read-only only when the
+same task/epoch/launch and the same form/generation still own it; a different identity stays
+collapsed and nothing is resent. Source boundaries are
+`notify/SessionPromptProjection.kt` and `phone/android/overlay/PhoneTaskConversation.kt`.
+
 ## Implementation boundaries
 
 | Area | Entry points |
 |---|---|
 | Native presentation | `ui/phone/PhoneControlScreen.kt`, `PhoneStandingCard.kt`, `PhoneUiModel.kt`, `PhoneUiLogic.kt` |
 | Android coordination | `phone/android/PhoneIntegration.kt`, `PhoneControlService.kt`, `PhoneControlNotifications.kt` |
-| Standing configuration/lifecycle | `phone/standing/PhoneStanding.kt`, `PhoneTaskStarter.kt`, `phone/android/PhoneStandingConfig.kt`, `PhoneIntegrationTaskStarter.kt` |
+| Wireless-debugging discovery | `phone/android/PhoneDiscoveryService.kt`, `PhonePortDiscovery.kt`, `PhoneDiscoveryPolicy.kt` |
+| Standing configuration/lifecycle | `phone/standing/PhoneStanding.kt`, `PhoneTaskStarter.kt`, `phone/android/PhoneStandingConfig.kt`, `PhoneIntegrationTaskStarter.kt`, `phone/core/PhoneTimeLimits.kt` |
 | Temporary pairing input | `phone/android/PhonePairingSession.kt`, `PhonePairingActionReceiver.kt` |
+| Notification question/notice bridge | `notify/SessionPromptProjection.kt`, `phone/android/overlay/PhoneTaskConversation.kt` |
 | Admission and task state | `phone/core/PhoneController.kt`, `PhoneContract.kt`, `PhoneState.kt`, `PhoneTargetPolicy.kt` |
 | Real device driver | `phone/adb/AdbPhoneDriverService.kt`, `AdbPhoneDriver.kt`, `AdbWindowState.kt` |
 | Native ADB identity | `phone/android/PhoneIdentityStore.kt` |
@@ -198,7 +249,14 @@ acceptance. Those results must be recorded separately and must distinguish emula
 
 The API 35/x86_64 emulator acceptance passed the configure-once save → confirmed runtime restart →
 RPC registration → Ready → direct begin flow, `open_app`, native continuation, first overlay-read
-wait and the retained driver/pairing/capture cases. It did not test physical arm64/OEM,
-TalkBack or real-model reasoning. The notification check began with no live lease; no active-lease
-permission-revoke claim is made. Detailed counts and evidence are in
-[testing-phone-control.md](testing-phone-control.md).
+wait and the retained driver/pairing/capture cases. It also passed the newer auto-port path: a fresh
+port was discovered, the notification accepted only the real six-digit SystemUI RemoteInput code, and
+the subsequent TLS connect was automatic. A permanent standing scope survived save/restart with the
+actual lease shown as permanent, and a real built-in question (`q0 = custom true`) answered in the
+overlay with **Tap Save** returned HTTP 204, continued the same model turn and kept the Save count at
+exactly one without an extra prompt. The first unknown overlay outcome was not positioned and was not
+resent; the final clean end-to-end run passed twice. Physical tablet follow-up results are recorded
+separately and cover only the earlier basic flows; they do not establish the new auto-port, permanent
+or question-bridge features. Neither run establishes broad OEM behaviour, TalkBack or real-model
+reasoning. The notification check began with no live lease; no active-lease permission-revoke claim
+is made. Detailed counts and evidence are in [testing-phone-control.md](testing-phone-control.md).

@@ -2,9 +2,11 @@ package io.andchamber.app.phone.android
 
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.ui.phone.PhoneToolStatus
+import io.andchamber.app.ui.phone.PhoneUiLimits
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -21,6 +23,13 @@ class PhoneStandingConfigTest {
             perTaskMs = 60_000L,
         )
     private val emptyBinding = PhoneStandingBindingState()
+
+    @Test
+    fun `only the core helper defines the permanent sentinel`() {
+        assertEquals(PhoneTimeLimits.PERMANENT, PhoneUiLimits.PERMANENT_MS)
+        assertTrue(PhoneTimeLimits.isPermanent(PhoneUiLimits.PERMANENT_MS))
+        assertFalse(PhoneTimeLimits.isPermanent(PhoneTimeLimits.PERMANENT - 1L))
+    }
 
     @Test
     fun `a saved scope is configuration, not a lease`() {
@@ -93,6 +102,129 @@ class PhoneStandingConfigTest {
         assertFalse(validStandingBounds(windowMs = 3_600_000L, perTaskMs = 0L))
         assertFalse(validStandingBounds(windowMs = 120_000L, perTaskMs = 180_000L))
         assertFalse(validStandingBounds(windowMs = STANDING_MAX_WINDOW_MS + 1, perTaskMs = 60_000L))
+    }
+
+    @Test
+    fun `either duration can be permanent but arbitrary huge values are refused`() {
+        assertTrue(validStandingBounds(PhoneTimeLimits.PERMANENT, PhoneTimeLimits.PERMANENT))
+        assertTrue(validStandingBounds(PhoneTimeLimits.PERMANENT, perTaskMs = 900_000L))
+        // A permanent per-task limit stays bounded by a finite standing window in the controller.
+        assertTrue(validStandingBounds(windowMs = 3_600_000L, perTaskMs = PhoneTimeLimits.PERMANENT))
+        // The explicit permanent task sentinel must pass the old perTask <= window check; the core
+        // truncates the task to the 4-hour scope end, not to a wrapped number.
+        assertTrue(validStandingBounds(windowMs = 4L * 60L * 60L * 1_000L, perTaskMs = PhoneTimeLimits.PERMANENT))
+        assertFalse(validStandingBounds(PhoneTimeLimits.PERMANENT - 1L, perTaskMs = 60_000L))
+        assertFalse(validStandingBounds(PhoneTimeLimits.PERMANENT, perTaskMs = PhoneTimeLimits.PERMANENT - 1L))
+        assertFalse(validStandingBounds(windowMs = 120_000L, perTaskMs = 180_000L))
+    }
+
+    @Test
+    fun `a permanent scope restores MAX without arithmetic and never expires by time`() {
+        val permanent =
+            config.copy(
+                windowEndsAtWallMs = PhoneTimeLimits.PERMANENT,
+                perTaskMs = PhoneTimeLimits.PERMANENT,
+            )
+        assertTrue(permanent.isActive(nowWallMs = 1L))
+        assertTrue(permanent.isActive(nowWallMs = PhoneTimeLimits.PERMANENT - 1L))
+        assertFalse(permanent.copy(revoked = true).isActive(nowWallMs = 1L))
+
+        val restored =
+            restoredStandingState(
+                config = permanent,
+                nowWallMs = 1_700_000_000_000L,
+                nowElapsedMs = 123_456L,
+            )
+        assertEquals(PhoneTimeLimits.PERMANENT, restored.endsAtElapsedMs)
+        assertFalse(restored.expired)
+        assertEquals(PhoneTimeLimits.PERMANENT, PhoneTimeLimits.expiresAt(1_700_000_000_000L, PhoneTimeLimits.PERMANENT))
+    }
+
+    @Test
+    fun `a finite scope restores a bounded monotonic end and an elapsed one stays expired`() {
+        val nowWall = 1_700_000_000_000L
+        val finite = config.copy(windowEndsAtWallMs = nowWall + 60_000L, perTaskMs = 60_000L)
+        val restored = restoredStandingState(finite, nowWallMs = nowWall, nowElapsedMs = 5_000L)
+        assertEquals(5_000L + 60_000L, restored.endsAtElapsedMs)
+        assertFalse(restored.expired)
+
+        val elapsed =
+            restoredStandingState(
+                finite.copy(windowEndsAtWallMs = nowWall - 1L),
+                nowWallMs = nowWall,
+                nowElapsedMs = 5_000L,
+            )
+        assertEquals(5_000L, elapsed.endsAtElapsedMs)
+        assertTrue(elapsed.expired)
+        assertFalse(elapsed.config.isActive(nowWall))
+    }
+
+    @Test
+    fun `restore never overflows on a corrupt far-future finite end`() {
+        val corrupt =
+            config.copy(
+                windowEndsAtWallMs = PhoneTimeLimits.PERMANENT - 1L,
+                perTaskMs = 60_000L,
+            )
+        val restored = restoredStandingState(corrupt, nowWallMs = 1L, nowElapsedMs = 10L)
+        assertTrue("a corrupt finite end must fail closed", restored.expired)
+        assertEquals(10L, restored.endsAtElapsedMs)
+        assertTrue(restored.endsAtElapsedMs < PhoneTimeLimits.PERMANENT)
+    }
+
+    @Test
+    fun `the persisted config round-trips both permanent durations`() {
+        val permanent =
+            config.copy(
+                windowEndsAtWallMs = PhoneTimeLimits.PERMANENT,
+                perTaskMs = PhoneTimeLimits.PERMANENT,
+            )
+        val raw = PrefsPhoneIntegrationStore.encodeStanding(permanent)
+        val decoded = PrefsPhoneIntegrationStore.decodeStanding(raw)
+        assertEquals(permanent, decoded)
+
+        val finiteWindowPermanentTask =
+            config.copy(
+                windowEndsAtWallMs = 1_700_000_060_000L,
+                perTaskMs = PhoneTimeLimits.PERMANENT,
+            )
+        assertEquals(
+            finiteWindowPermanentTask,
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(finiteWindowPermanentTask),
+            ),
+        )
+
+        // Finite and revoked configurations keep their old round-trip behavior.
+        val finite = config.copy(windowEndsAtWallMs = 1_700_000_060_000L, perTaskMs = 900_000L)
+        assertEquals(
+            finite,
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(finite),
+            ),
+        )
+        val revoked = finite.copy(revoked = true)
+        assertEquals(
+            revoked,
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(revoked),
+            ),
+        )
+
+        // A huge number that is not the exact sentinel is not a permanent duration.
+        val corrupt = permanent.copy(perTaskMs = PhoneTimeLimits.PERMANENT - 1L)
+        assertNull(
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(corrupt),
+            ),
+        )
+        val corruptWindow = permanent.copy(windowEndsAtWallMs = PhoneTimeLimits.PERMANENT - 1L)
+        assertNull(
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(corruptWindow),
+                nowWallMs = 1_700_000_000_000L,
+            ),
+        )
     }
 
     @Test

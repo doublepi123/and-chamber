@@ -14,6 +14,23 @@
     <string name="phone_overlay_move_left">移到左侧</string>
     <string name="phone_overlay_move_right">移到右侧</string>
     <string name="phone_overlay_minutes_left">剩 %1$d 分</string>
+    <string name="phone_overlay_no_time_limit">不限时</string>
+    <string name="phone_overlay_prompt_capsule">聊天有个问题 · 点开回答</string>
+    <string name="phone_overlay_prompt_default_label">来自聊天的问题</string>
+    <string name="phone_overlay_prompt_pick_hint">选一个答案，再点“发送答案”。点之前不会发送任何东西。</string>
+    <string name="phone_overlay_prompt_send">发送答案</string>
+    <string name="phone_overlay_prompt_check_again">再查一次</string>
+    <string name="phone_overlay_prompt_open_chat">去聊天里回答</string>
+    <string name="phone_overlay_prompt_checking">正在确认这个问题是否还在等待回答…</string>
+    <string name="phone_overlay_prompt_sending">正在发送你的答案…</string>
+    <string name="phone_overlay_prompt_accepted">聊天已收到你的答案。这不代表代理已经照做。</string>
+    <string name="phone_overlay_prompt_unknown">不确定你的答案是否送达。这里不会再次发送。请再查一次，或打开聊天查看。</string>
+    <string name="phone_overlay_prompt_blocked">现在无法在这里回答这个问题，没有发送任何东西。请去聊天里回答。</string>
+    <string name="phone_overlay_prompt_refused">聊天没有接受这个答案，没有发送其他内容。请去聊天里回答。</string>
+    <string name="phone_overlay_prompt_unsupported">这个问题不能在这里回答，请去聊天里回答。</string>
+    <string name="phone_overlay_prompt_superseded">这个问题已被新的问题取代。</string>
+    <string name="phone_overlay_prompt_answer_in_chat">这个问题需要在聊天里回答。</string>
+    <string name="phone_overlay_session_notice_label">来自聊天</string>
     <string name="phone_overlay_sent_count">已发出 %1$d 个</string>
     <string name="phone_overlay_waiting_confirm">等待确认</string>
 

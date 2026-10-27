@@ -3,6 +3,8 @@ package io.andchamber.app.phone.android.overlay
 import android.content.Context
 import android.os.SystemClock
 import io.andchamber.app.phone.android.PhoneIntegration
+import io.andchamber.app.notify.SessionPromptDeliveryState
+import io.andchamber.app.notify.SessionPromptPort
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
@@ -46,6 +48,10 @@ internal class PhoneOverlayCoordinator(
     private val content: PhoneOverlayContentPort = PhoneOverlayContentPort.Unavailable,
     /** Native-only task progress for the overlay's phase/event projection. */
     private val taskProgress: StateFlow<PhoneTaskProgressView?> = MutableStateFlow(null),
+    /** Memory-only notification question for the current native task; null in tests / when disabled. */
+    private val conversation: SessionPromptPort? = null,
+    /** The trusted local server launch; the question view and submit fence are bound to it. */
+    private val currentLaunchId: () -> Long? = { null },
     /** Ends exactly the retained/live native task (key/epoch). A wrong owner must return false. */
     private val endTask: (PhoneTaskKey, Long) -> Boolean = { _, _ -> false },
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
@@ -89,6 +95,13 @@ internal class PhoneOverlayCoordinator(
     private var lastStopReasonValue: PhoneOverlayStopReason? = null
     private var dragDx = 0f
 
+    /** Frozen task owner the current question was last shown for; a change clears old selections. */
+    private var conversationKey: PhoneTaskKey? = null
+    private var conversationEpoch: Long? = null
+    private var conversationRoute: String? = null
+    /** The user's one submit whose final delivery may need the read-only error panel reopened. */
+    private var promptSubmitWatch: PhonePromptSubmitWatch? = null
+
     /** Per-rotation user posture. Memory only; never a phase, owner, lease or summary. */
     private val positionMemory = PhoneOverlayPositionMemory()
     private var lastRotation: Int? = null
@@ -106,6 +119,16 @@ internal class PhoneOverlayCoordinator(
         // project its typed phase immediately instead of replaying a stale screen state.
         scope.launch {
             taskProgress.collect(::onTaskProgressChanged)
+        }
+        // The question projection is memory-only and changes only on a local notification event or an
+        // explicit refresh; collecting it is not a poll.
+        conversation?.let { port ->
+            scope.launch {
+                port.projection.collect { refresh() }
+            }
+            scope.launch {
+                port.notice.collect { refresh() }
+            }
         }
         scope.launch {
             geometryActive.collectLatest { shown ->
@@ -584,6 +607,15 @@ internal class PhoneOverlayCoordinator(
     private fun onTaskProgressChanged(view: PhoneTaskProgressView?) {
         val snapshot = view?.snapshot ?: return
         if (shownState == null) return
+        // A route claim or a new task/epoch is a conversation-owner change even while the task has no
+        // phase projection (ACTIVE). Refresh it before any phase filtering so a question is never
+        // hidden behind a same-phase emission, and a new epoch never keeps an old selection.
+        if (snapshot.key != conversationKey ||
+            snapshot.grantEpoch != conversationEpoch ||
+            snapshot.routeSession != conversationRoute
+        ) {
+            refresh()
+        }
         val liveEpoch = integration.liveLeaseEpoch()
         if (!overlayTaskSnapshotBelongsToDisplay(snapshot.grantEpoch, liveEpoch, state.ownerKey)) {
             return
@@ -636,7 +668,8 @@ internal class PhoneOverlayCoordinator(
                 ?: (screen.control as? PhoneControl.Halted)?.lease
         val label = lease?.target?.label
         val summary = lease?.summary
-        val endsAt = lease?.expiresAtMs?.takeIf { screen.control is PhoneControl.Agent }
+        val leasePresentation =
+            overlayLeasePresentation(lease?.expiresAtMs?.takeIf { screen.control is PhoneControl.Agent })
         val halted = screen.control as? PhoneControl.Halted
         // A task-state fact only speaks for its own epoch: a stale waiting/ended projection must not
         // label a newer grant, and a resume after a stop is a new live epoch of the same task.
@@ -671,7 +704,8 @@ internal class PhoneOverlayCoordinator(
                 else -> state.phase
             }
         val previousPhase = state.phase
-        state = state.withPhase(nextPhase, label, summary, endsAt)
+        state = state.withPhase(nextPhase, label, summary, leasePresentation.leaseEndsAtMs)
+            .withLeasePermanent(leasePresentation.leasePermanent)
         val mappedStopReason = overlayStopReasonFor(halted?.reason, taskState)
         // A failure's explanation survives a state emission that has no halt fact of its own; only a
         // new live authority (handled above) clears it.
@@ -711,6 +745,7 @@ internal class PhoneOverlayCoordinator(
     }
 
     private fun refresh() {
+        syncConversation()
         publishSettings()
         val hasLease = integration.liveLeaseEpoch() != null
         val mode = settings.mode()
@@ -918,6 +953,116 @@ internal class PhoneOverlayCoordinator(
         }
     }
 
+    /**
+     * Binds the memory-only notification question to the current native task. A new task key or
+     * grant epoch clears any old selection; the same session/launch is revalidated and gets a fresh
+     * generation, so a previous answer can never submit against the new owner.
+     */
+    private fun syncConversation() {
+        val port = conversation ?: return
+        val snapshot = currentTaskSnapshot()
+        val key = snapshot?.key
+        val epoch = snapshot?.grantEpoch
+        val step = conversationReconcile(conversationKey, conversationEpoch, key, epoch, snapshot?.routeSession)
+        if (step.invalidate) {
+            conversationKey = key
+            conversationEpoch = epoch
+            port.invalidate(step.keepSession)
+            if (step.refresh) port.refresh()
+        }
+        conversationRoute = snapshot?.routeSession
+        state =
+            state
+                .withSessionPrompt(phoneOverlayPromptView(port.projection.value, snapshot, currentLaunchId()))
+                .withSessionNotice(phoneOverlayNoticeView(port.notice.value, snapshot, currentLaunchId()))
+        settlePromptSubmitWatch()
+    }
+
+    /**
+     * After the user's one submit collapsed the panel, reopen its read-only error/recovery entry only
+     * for the same task/epoch/launch and the same form/generation. A new owner or question never
+     * reopens the old panel; Accepted (or Gone/Unsupported) stays collapsed.
+     */
+    private fun settlePromptSubmitWatch() {
+        val watch = promptSubmitWatch ?: return
+        val port = conversation ?: return
+        val projection = port.projection.value
+        val sameOwner =
+            phoneTaskConversationStillOwns(
+                owner = watch.owner,
+                snapshot = currentTaskSnapshot(),
+                launchId = currentLaunchId(),
+                projection = projection,
+            )
+        val sameAnswer = projection.formId == watch.formId && projection.generation == watch.generation
+        if (!sameOwner || !sameAnswer) {
+            promptSubmitWatch = null
+            return
+        }
+        if (promptSubmitShouldExpand(watch, sameOwner, sameAnswer, projection.deliveryState)) {
+            promptSubmitWatch = null
+            if (!state.expanded) applyState(state.withExpanded(true))
+            return
+        }
+        when (projection.deliveryState) {
+            SessionPromptDeliveryState.Checking,
+            SessionPromptDeliveryState.Ready,
+            SessionPromptDeliveryState.Sending,
+            -> Unit
+            SessionPromptDeliveryState.Idle,
+            SessionPromptDeliveryState.Accepted,
+            SessionPromptDeliveryState.Unknown,
+            SessionPromptDeliveryState.Blocked,
+            SessionPromptDeliveryState.Refused,
+            SessionPromptDeliveryState.Gone,
+            SessionPromptDeliveryState.Unsupported,
+            SessionPromptDeliveryState.Superseded,
+            -> promptSubmitWatch = null
+        }
+    }
+
+    /** Freezes the current native task/key/epoch/route/launch; null means no question may be answered. */
+    private fun conversationOwner(): PhoneTaskConversationOwner? {
+        val snapshot = currentTaskSnapshot() ?: return null
+        val routeSession = snapshot.routeSession ?: return null
+        val launch = currentLaunchId() ?: return null
+        return PhoneTaskConversationOwner(
+            taskId = snapshot.key.taskId,
+            runtimeId = snapshot.key.runtimeId,
+            grantEpoch = snapshot.grantEpoch,
+            routeSession = routeSession,
+            launchId = launch,
+        )
+    }
+
+    private fun answerPrompt(
+        formId: String,
+        generation: Long,
+        value: String,
+    ) {
+        val port = conversation ?: return
+        val owner = conversationOwner() ?: return
+        val submitted =
+            port.submit(formId, generation, value) {
+                phoneTaskConversationStillOwns(
+                    owner = owner,
+                    snapshot = currentTaskSnapshot(),
+                    launchId = currentLaunchId(),
+                    projection = port.projection.value,
+                )
+            }
+        val watch = promptSubmitWatchFor(submitted, owner, formId, generation) ?: return
+        promptSubmitWatch = watch
+        // The question is answered once by a real user tap. Collapse now, while the model is still
+        // blocked on the question, so the driver cannot read its own overlay covering the target.
+        // The IO pending check and HTTP reply continue independently.
+        applyState(state.withExpanded(false))
+    }
+
+    private fun refreshPrompt() {
+        conversation?.refresh()
+    }
+
     /** Deliberate native mode change: a person's stop path, not a visibility failure. */
     private fun stopForModeChange() {
         if (overlayLostWhileLeased) return
@@ -933,7 +1078,10 @@ internal class PhoneOverlayCoordinator(
 
     private fun liveActions(): PhoneOverlaySurfaceActions =
         PhoneOverlaySurfaceActions(
-            onExpand = { applyState(state.withExpanded(true)) },
+            onExpand = {
+                if (state.sessionPrompt != null) refreshPrompt()
+                applyState(state.withExpanded(true))
+            },
             onCollapse = { applyState(state.withExpanded(false)) },
             onPause = {
                 if (state.phase == PhoneOverlayPhase.RUNNING) {
@@ -959,6 +1107,8 @@ internal class PhoneOverlayCoordinator(
             onDragEnd = { surfaceDragEnd() },
             onOpenChat = { onOpenChat() },
             onContinueInChat = { onContinueInChat() },
+            onAnswerPrompt = ::answerPrompt,
+            onRefreshPrompt = ::refreshPrompt,
         )
 
     private fun applyState(next: PhoneOverlayWindowState) {

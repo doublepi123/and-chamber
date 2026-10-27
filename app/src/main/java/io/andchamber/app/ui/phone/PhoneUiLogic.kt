@@ -351,6 +351,157 @@ internal fun overallResult(items: List<PhoneResultItem>): PhoneOverall =
         else -> PhoneOverall.NeedsCheck
     }
 
+// ---- connect without typing ports ----------------------------------------------------------------
+
+/** The filled button of the connect card. Everything else there is secondary. */
+internal enum class ConnectPrimary {
+    /** Not known to be paired (or pairing again): pair first, through the notification. */
+    PairWithNotification,
+
+    /** Paired: find this phone's own connection port and connect, nothing to type. */
+    AutoConnect,
+}
+
+/** Why a search for this phone's own service ended without one clear result. */
+internal enum class DiscoveryProblem { NotFound, Unavailable, Ambiguous }
+
+internal fun discoveryProblem(discovery: PhoneDiscovery): DiscoveryProblem? =
+    when (discovery) {
+        PhoneDiscovery.TimedOut -> DiscoveryProblem.NotFound
+        PhoneDiscovery.Unavailable -> DiscoveryProblem.Unavailable
+        PhoneDiscovery.Ambiguous -> DiscoveryProblem.Ambiguous
+        PhoneDiscovery.Idle, PhoneDiscovery.Searching, PhoneDiscovery.Ready -> null
+    }
+
+/** What the pairing notice says while the notification waits. Null when it isn't waiting. */
+internal sealed interface PairingSearch {
+    /** Looking for the pairing dialog's service on this phone. */
+    data object Searching : PairingSearch
+
+    /** Found (or the native side doesn't report a search): the notification asks for the code. */
+    data object EnterCode : PairingSearch
+
+    data class Problem(val problem: DiscoveryProblem) : PairingSearch
+}
+
+/**
+ * While the notification waits: searching, enter the code, or why the search failed. After the
+ * native side ended the attempt (notice back to Idle), a failed search is still explained.
+ */
+internal fun pairingSearch(device: PhoneDeviceState): PairingSearch? {
+    val problem = discoveryProblem(device.pairingDiscovery)
+    return when (device.pairingNotice) {
+        PhonePairingNotice.NotificationsBlocked -> null
+        PhonePairingNotice.Idle -> problem?.let(PairingSearch::Problem)
+        PhonePairingNotice.Waiting ->
+            when {
+                problem != null -> PairingSearch.Problem(problem)
+                device.pairingDiscovery == PhoneDiscovery.Searching -> PairingSearch.Searching
+                else -> PairingSearch.EnterCode
+            }
+    }
+}
+
+/** What the connect step says about the automatic path. Null: nothing to report. */
+internal sealed interface AutoConnectStatus {
+    data object Searching : AutoConnectStatus
+
+    data object Connecting : AutoConnectStatus
+
+    /** The found port didn't connect. The reason, if known, is the device problem shown above. */
+    data object Failed : AutoConnectStatus
+
+    data class Problem(val problem: DiscoveryProblem) : AutoConnectStatus
+}
+
+internal fun autoConnectStatus(device: PhoneDeviceState): AutoConnectStatus? {
+    if (device.link == PhoneLink.Connected) return null
+    if (device.autoConnect == PhoneAutoConnect.Running) return AutoConnectStatus.Connecting
+    if (device.connectDiscovery == PhoneDiscovery.Searching) return AutoConnectStatus.Searching
+    if (device.autoConnect == PhoneAutoConnect.Failed) return AutoConnectStatus.Failed
+    return discoveryProblem(device.connectDiscovery)?.let(AutoConnectStatus::Problem)
+}
+
+/**
+ * The connect card's layout. Port and address fields appear only after the person asked for the
+ * manual path; the normal path needs no port at all.
+ */
+internal data class ConnectPlan(
+    val primary: ConnectPrimary,
+    /**
+     * "Find and connect" is offered. Not while pairing is known to be missing: connecting would
+     * only be refused (after a successful pairing the native side connects by itself).
+     */
+    val offersAutoConnect: Boolean,
+    /** "Find and connect" can be pressed now. */
+    val canAutoConnect: Boolean,
+    val autoStatus: AutoConnectStatus?,
+    /** Null while the pairing section is folded (paired) or the notification isn't waiting. */
+    val pairingSearch: PairingSearch?,
+    /** The pairing section (notification button / waiting notice) is open. */
+    val showsPairing: Boolean,
+    /** Manual pairing port + code fields (split screen only). */
+    val showsManualPairing: Boolean,
+    /** Manual connection port + other-address fields. */
+    val showsManualConnect: Boolean,
+)
+
+internal fun connectPlan(
+    state: PhoneScreenState,
+    pairAgain: Boolean,
+    manualPair: Boolean,
+    manualConnect: Boolean,
+): ConnectPlan {
+    val device = state.device
+    val paired = device.paired == true
+    val showsPairing = !paired || pairAgain
+    val status = autoConnectStatus(device)
+    val offersAuto = device.paired != false
+    val canAuto =
+        offersAuto &&
+            state.pending == null &&
+            device.link != PhoneLink.Connecting &&
+            device.link != PhoneLink.Connected &&
+            status != AutoConnectStatus.Searching &&
+            status != AutoConnectStatus.Connecting
+    return ConnectPlan(
+        primary = if (showsPairing) ConnectPrimary.PairWithNotification else ConnectPrimary.AutoConnect,
+        offersAutoConnect = offersAuto,
+        canAutoConnect = canAuto,
+        autoStatus = status,
+        pairingSearch = if (showsPairing) pairingSearch(device) else null,
+        showsPairing = showsPairing,
+        showsManualPairing = showsPairing && manualPair,
+        showsManualConnect = manualConnect,
+    )
+}
+
+/** Which search a "Search again" button restarts. */
+internal enum class DiscoveryKind { Pairing, Connect }
+
+/**
+ * "Search again". Restarts only the local search: the pairing notification (the person still types
+ * the code) or find-and-connect. It never grants, continues or resumes anything.
+ */
+internal fun retryDiscovery(
+    kind: DiscoveryKind,
+    actions: PhoneControlActions,
+    pairingHost: String = PhoneUiLimits.DEFAULT_HOST,
+) = when (kind) {
+    DiscoveryKind.Pairing -> actions.onBeginPairingNotification(pairingHost)
+    DiscoveryKind.Connect -> actions.onAutoConnect()
+}
+
+/**
+ * The host the pairing notification is for: this phone, unless the person opened the manual
+ * connection section and typed another address there.
+ */
+internal fun pairingHost(
+    manualConnect: Boolean,
+    customHost: Boolean,
+    hostText: String,
+): String? = if (manualConnect && customHost) parseHost(hostText) else PhoneUiLimits.DEFAULT_HOST
+
 /** A TCP port typed by the person, or null. */
 internal fun parsePort(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 1..65_535 }
 
@@ -397,24 +548,67 @@ internal fun parsePairingCode(text: String): String? =
 internal fun sanitizePairingCodeInput(text: String): String =
     text.filter(Char::isDigit).take(PhoneUiLimits.PAIRING_CODE_LENGTH)
 
-/** Whole minutes left, rounded up; 0 once expired. */
+/**
+ * Milliseconds left before a finite deadline: never negative, saturating instead of wrapping.
+ * Null for the explicit "no time limit" deadline, which has nothing to count down.
+ */
+internal fun remainingMs(
+    expiresAtMs: Long,
+    nowMs: Long,
+): Long? {
+    if (isPermanentTime(expiresAtMs)) return null
+    if (expiresAtMs <= nowMs) return 0
+    // Both finite: the difference may still exceed Long (e.g. a negative clock); saturate.
+    val left = expiresAtMs - nowMs
+    return if (left < 0) PhoneUiLimits.PERMANENT_MS - 1 else left
+}
+
+/** Whole units left, rounded up without `+ (unit - 1)` overflow, capped to Int. */
+internal fun ceilUnits(
+    leftMs: Long,
+    unitMs: Long,
+): Int {
+    if (leftMs <= 0) return 0
+    val units = leftMs / unitMs + if (leftMs % unitMs == 0L) 0 else 1
+    return units.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+}
+
+/** Whole minutes left, rounded up; 0 once expired; null for "no time limit". */
 internal fun minutesLeft(
     expiresAtMs: Long,
     nowMs: Long,
-): Int {
-    val left = expiresAtMs - nowMs
-    if (left <= 0) return 0
-    return ((left + 59_999) / 60_000).toInt()
-}
+): Int? = remainingMs(expiresAtMs, nowMs)?.let { ceilUnits(it, 60_000) }
 
-/** Seconds left within the last minute, for a precise countdown; null above one minute. */
+/** Seconds left within the last minute, for a precise countdown; null above one minute or without a limit. */
 internal fun secondsLeftInLastMinute(
     expiresAtMs: Long,
     nowMs: Long,
 ): Int? {
-    val left = expiresAtMs - nowMs
-    if (left <= 0) return 0
-    return if (left <= 60_000) ((left + 999) / 1_000).toInt() else null
+    val left = remainingMs(expiresAtMs, nowMs) ?: return null
+    return if (left <= 60_000) ceilUnits(left, 1_000) else null
+}
+
+/** What a lease countdown shows. Decided from the real deadline only, never from the configuration. */
+internal sealed interface TimeLeft {
+    /** The deadline is the explicit "no time limit" value. */
+    data object NoLimit : TimeLeft
+
+    data class Minutes(val value: Int) : TimeLeft
+
+    /** The last minute, to the second. */
+    data class Seconds(val value: Int) : TimeLeft
+}
+
+/**
+ * A configured per-task "Permanent" inside a 4 h scope still gets a finite grant ending with the
+ * scope: that deadline is counted down here, not shown as "no time limit".
+ */
+internal fun timeLeft(
+    expiresAtMs: Long,
+    nowMs: Long,
+): TimeLeft {
+    val left = remainingMs(expiresAtMs, nowMs) ?: return TimeLeft.NoLimit
+    return if (left <= 60_000) TimeLeft.Seconds(ceilUnits(left, 1_000)) else TimeLeft.Minutes(ceilUnits(left, 60_000))
 }
 
 /** The target to preselect: the agent's suggestion if it is in the list and allowed. */
@@ -553,8 +747,100 @@ internal fun sanitizeStandingApps(
 ): List<PhoneTarget> =
     apps.distinctBy { it.packageName }.filter { targetBlock(it, hostPackage) == null }.take(MAX_STANDING_APPS)
 
-/** A standing window still running; minutes left rounded up, or null. */
+/** A standing window still running; minutes left rounded up, or null (also for a permanent one). */
 internal fun standingMinutesLeft(
     status: PhoneStandingStatus,
     nowMs: Long,
-): Int? = (status as? PhoneStandingStatus.Active)?.let { minutesLeft(it.endsAtMs, nowMs) }
+): Int? = (status as? PhoneStandingStatus.Active)?.takeUnless { isPermanentTime(it.endsAtMs) }?.let { minutesLeft(it.endsAtMs, nowMs) }
+
+// ---- "Permanent": no time limit, chosen explicitly ------------------------------------------------
+
+/** The explicit "no time limit" value; an arbitrary large number is not permanent. */
+internal fun isPermanentTime(value: Long): Boolean = value == PhoneUiLimits.PERMANENT_MS
+
+/** The "Permanent" chip in a saved Int choice (hours or minutes). Never a default. */
+internal const val PERMANENT_CHOICE = 0
+
+/** Standing window chips: the bounded hours first, then "Permanent". */
+internal val STANDING_WINDOW_CHOICES: List<Int> = STANDING_WINDOW_HOURS + PERMANENT_CHOICE
+
+/** Per-task chips in the standing scope: the bounded minutes first, then "Permanent". */
+internal val STANDING_PER_TASK_CHOICES: List<Int> = PhoneUiLimits.DURATION_CHOICES_MIN + PERMANENT_CHOICE
+
+/**
+ * Branches on "Permanent" before any unit multiplication. Only an offered chip is accepted; anything
+ * else (a stale saved value, `Int.MAX_VALUE`) falls back to the bounded default, never to permanent.
+ */
+internal fun standingWindowMs(hours: Int): Long =
+    when (hours) {
+        PERMANENT_CHOICE -> PhoneUiLimits.PERMANENT_MS
+        in STANDING_WINDOW_HOURS -> hours * 3_600_000L
+        else -> DEFAULT_STANDING_WINDOW_HOURS * 3_600_000L
+    }
+
+internal fun standingPerTaskMs(minutes: Int): Long =
+    when (minutes) {
+        PERMANENT_CHOICE -> PhoneUiLimits.PERMANENT_MS
+        in PhoneUiLimits.DURATION_CHOICES_MIN -> minutes * 60_000L
+        else -> PhoneUiLimits.DEFAULT_DURATION_MIN * 60_000L
+    }
+
+/** How the standing scope's per-task limit reads. */
+internal enum class PerTaskDisplay {
+    /** A fixed number of minutes. */
+    Minutes,
+
+    /** Per-task "Permanent" inside a finite scope: each task ends with the scope. */
+    UntilScopeEnds,
+
+    /** Per-task "Permanent" and a permanent scope: no time limit at all. */
+    NoLimit,
+}
+
+internal fun perTaskDisplay(
+    perTaskPermanent: Boolean,
+    windowPermanent: Boolean,
+): PerTaskDisplay =
+    when {
+        !perTaskPermanent -> PerTaskDisplay.Minutes
+        windowPermanent -> PerTaskDisplay.NoLimit
+        else -> PerTaskDisplay.UntilScopeEnds
+    }
+
+/** What the confirm button sends. "Permanent" travels as [PhoneUiLimits.PERMANENT_MS], unchanged. */
+internal fun standingRequest(
+    apps: List<PhoneTarget>,
+    actions: Set<PhoneActionScope>,
+    hours: Int,
+    minutes: Int,
+): PhoneStandingRequest = PhoneStandingRequest(apps, actions, standingWindowMs(hours), standingPerTaskMs(minutes))
+
+/**
+ * Per-task "no time limit". [PhoneStanding.perTaskPermanent] is the field; `Int.MAX_VALUE` minutes
+ * is the mapper's earlier stand-in and reads the same, so it is never shown as a minute count.
+ */
+internal fun perTaskPermanent(standing: PhoneStanding): Boolean = standing.perTaskPermanent || standing.perTaskMinutes == Int.MAX_VALUE
+
+/**
+ * The editor's starting window chip. Editing a saved permanent scope keeps "Permanent", so changing
+ * only the apps doesn't quietly shorten it. Everything else (a new, expired or revoked scope, or a
+ * finite one, whose original hours aren't known from its end time) starts at the bounded default;
+ * a huge finite end time is never read as permanent.
+ */
+internal fun initialWindowChoice(status: PhoneStandingStatus): Int =
+    if (standingWindowPermanent(status)) PERMANENT_CHOICE else DEFAULT_STANDING_WINDOW_HOURS
+
+/** The editor's starting per-task chip: the saved one, "Permanent" only if that was saved. */
+internal fun initialPerTaskChoice(standing: PhoneStanding): Int =
+    when {
+        perTaskPermanent(standing) -> PERMANENT_CHOICE
+        standing.perTaskMinutes in PhoneUiLimits.DURATION_CHOICES_MIN -> standing.perTaskMinutes
+        else -> PhoneUiLimits.DEFAULT_DURATION_MIN
+    }
+
+/** The standing scope has no end time. */
+internal fun standingWindowPermanent(status: PhoneStandingStatus): Boolean =
+    status is PhoneStandingStatus.Active && isPermanentTime(status.endsAtMs)
+
+/** The task lease has no deadline: no countdown is shown. */
+internal fun PhoneLease.permanent(): Boolean = isPermanentTime(expiresAtMs)

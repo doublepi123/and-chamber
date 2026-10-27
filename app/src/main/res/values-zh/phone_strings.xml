@@ -4,13 +4,13 @@
     <!-- 顶部 -->
     <string name="phone_title">手机操控</string>
     <string name="phone_experimental">实验</string>
-    <string name="phone_entry_body">让代理在这台手机的一个应用里短时操作。默认关闭，需要你手动开启。</string>
+    <string name="phone_entry_body">让代理在你设定的范围内操作这台手机上的应用。默认关闭，需要你手动开启。</string>
     <string name="phone_unavailable_title">此版本不提供</string>
     <string name="phone_unavailable_body">手机操控仍在实验中，此版本未开启。</string>
 
     <!-- 开启 -->
     <string name="phone_enable_title">让代理操作这台手机上的应用</string>
-    <string name="phone_enable_intro">代理可以在你选定的一个应用里点按、滑动和输入文字，时长由你设定且很短。你随时可以暂停、自己操作或结束任务。</string>
+    <string name="phone_enable_intro">代理可以在你选定的应用里点按、滑动和输入文字。你可以设置时限或选择永久，也随时可以暂停、自己操作或结束任务。</string>
     <string name="phone_risk_title">开启前请了解</string>
     <string name="phone_risk_runtime">信任的是整个本机运行环境：其中运行的任何程序或代理都能使用这条连接，不只是你当前的对话。</string>
     <string name="phone_risk_adb">无线调试提供设备级权限。连接期间，持有连接的一方能做的远超本页面允许的范围。用完请关闭无线调试。</string>
@@ -38,6 +38,7 @@
     <string name="phone_task_ended">已结束 · 请核对结果</string>
     <string name="phone_minutes_left">%1$d 分钟</string>
     <string name="phone_seconds_left">%1$d 秒</string>
+    <string name="phone_no_time_limit">不限时</string>
 
     <!-- 进行中 -->
     <string name="phone_pending_enabling">正在开启…</string>
@@ -62,10 +63,22 @@
     <string name="phone_step_pair">配对（仅首次）</string>
     <string name="phone_paired_before">已配对过。只有连接失败时才需要重新配对。</string>
     <string name="phone_pair_again">重新配对</string>
-    <string name="phone_pair_how">在无线调试页面点按“使用配对码配对设备”，并让这个弹窗保持打开。切回 AndChamber 会关闭弹窗，配对码随即失效。</string>
+    <string name="phone_pair_how">点下面的按钮。AndChamber 会打开无线调试页面，并自己查找这台手机上的配对弹窗。在那里点按“使用配对码配对设备”，并让弹窗保持打开。你只需要在 AndChamber 的通知里输入 6 位配对码。</string>
     <string name="phone_pair_with_notification">通过通知配对</string>
     <string name="phone_pair_waiting_title">在通知中输入配对码</string>
     <string name="phone_pair_waiting_body">保持配对弹窗打开，下拉通知栏，在 AndChamber 的通知里输入 6 位配对码。不要把配对码粘贴到对话里。</string>
+    <string name="phone_pair_searching_title">正在这台手机上查找配对弹窗…</string>
+    <string name="phone_pair_searching_body">在无线调试页面点按“使用配对码配对设备”，并让弹窗保持打开。找到后，通知里只需要输入 6 位配对码。</string>
+    <string name="phone_pair_waiting_xiaomi">部分小米手机需要长按这条通知，才会出现输入框。</string>
+    <string name="phone_discovery_retry">重新查找</string>
+    <string name="phone_discovery_manual">自己输入端口</string>
+    <string name="phone_discovery_not_found">在这台手机上没找到</string>
+    <string name="phone_discovery_not_found_pair_body">在规定时间内没找到打开着的配对弹窗。请确认无线调试已开启，且“使用配对码配对设备”弹窗正开着，然后重新查找。</string>
+    <string name="phone_discovery_not_found_connect_body">在规定时间内没找到无线调试连接。请确认无线调试已开启，然后重新查找。</string>
+    <string name="phone_discovery_unavailable">现在无法查找</string>
+    <string name="phone_discovery_unavailable_body">手机没有允许这次查找。请确认 Wi-Fi 已开启后重新查找，或自己输入端口。</string>
+    <string name="phone_discovery_ambiguous">找到了不止一个</string>
+    <string name="phone_discovery_ambiguous_body">AndChamber 不会替你猜是哪一个。请关掉其他配对弹窗后重新查找，或自己输入端口。</string>
     <string name="phone_pair_blocked_title">通知已关闭</string>
     <string name="phone_pair_blocked_body">无法显示配对通知。请开启通知；如果配对弹窗能一直保持打开，也可以在下方手动配对。</string>
     <string name="phone_pair_manual_show">不通过通知配对</string>
@@ -77,6 +90,15 @@
     <string name="phone_pairing_code_hint">配对弹窗里的 6 位数字。</string>
     <string name="phone_pair">配对</string>
     <string name="phone_step_connect">连接</string>
+    <string name="phone_connect_auto_body">AndChamber 会查找这台手机自己的无线调试端口并连接，不用输入任何东西。连接本身不会让代理做任何操作。</string>
+    <string name="phone_connect_auto">自动查找并连接</string>
+    <string name="phone_connect_searching">正在这台手机上查找无线调试…</string>
+    <string name="phone_connect_auto_running">正在连接到这台手机…</string>
+    <string name="phone_connect_auto_failed">没能自动连接</string>
+    <string name="phone_connect_auto_failed_body">请重新查找，或自己输入无线调试页面上的端口。</string>
+    <string name="phone_connect_after_pair">请先配对。配对成功后，AndChamber 会自己尝试连接。</string>
+    <string name="phone_connect_manual_show">自己输入端口</string>
+    <string name="phone_connect_manual_hide">收起手动连接</string>
     <string name="phone_connect_port_body">使用无线调试页面上“IP 地址和端口”中的端口。它和配对端口不同，每次重新开启无线调试都会变化。</string>
     <string name="phone_connect_port">连接端口</string>
     <string name="phone_connect_port_hint">无线调试页面上“IP 地址和端口”中的端口。</string>
@@ -96,9 +118,9 @@
     <string name="phone_problem_code_rejected">配对失败</string>
     <string name="phone_problem_code_rejected_body">配对码错误或已失效。请重新打开配对弹窗，使用新的配对码。</string>
     <string name="phone_problem_pair_port">无法连接配对端口</string>
-    <string name="phone_problem_pair_port_body">请核对当前配对弹窗里的端口。每次打开弹窗，端口都会变化。</string>
+    <string name="phone_problem_pair_port_body">请让配对弹窗保持打开后重试。每次打开弹窗，端口都会变化。</string>
     <string name="phone_problem_connect_refused">无法连接</string>
-    <string name="phone_problem_connect_refused_body">请核对无线调试页面上的连接端口。如果还没配对，请先配对。</string>
+    <string name="phone_problem_connect_refused_body">请确认无线调试仍然开启，然后重新查找，或自己输入端口。如果还没配对，请先配对。</string>
     <string name="phone_problem_not_authorized">手机尚未允许此连接</string>
     <string name="phone_problem_not_authorized_body">请重新配对后再连接。</string>
     <string name="phone_problem_lost">连接已断开</string>
@@ -134,7 +156,7 @@
     <string name="phone_open_notification_settings">打开通知设置</string>
 
     <!-- 授权 -->
-    <string name="phone_grant_title">给代理一个短任务</string>
+    <string name="phone_grant_title">给代理一个任务</string>
     <string name="phone_request_title">代理请求使用一个应用</string>
     <string name="phone_request_body">它建议了下面的任务。应用、时长和动作都由你决定，你确认之前什么都不会开始。</string>
     <string name="phone_grant_step_app">选择一个应用</string>
@@ -248,7 +270,7 @@
     <string name="phone_standing_title">在聊天里使用手机</string>
     <string name="phone_standing_setup_body">只需设置一次：选好代理能用的应用、能做的动作和有效时长。之后直接在本机 OpenChamber 聊天里说就行，范围内的请求不会每次都跳到这里确认。</string>
     <string name="phone_standing_ready_title">已就绪：去聊天里说</string>
-    <string name="phone_standing_ready_body">在本机 OpenChamber 聊天里说你要做的事，比如用哪个应用、做什么。不会每个任务都跳到这里授权。每个任务仍有自己的短时限，到时自动停。</string>
+    <string name="phone_standing_ready_body">在本机 OpenChamber 聊天里说你要做的事，比如用哪个应用、做什么。不会每个任务都跳到这里授权。任务遵守你选定的范围和时限；永久只取消时间到期，其他停手规则不变。</string>
     <string name="phone_standing_open_chat">打开聊天</string>
     <string name="phone_standing_restart_title">需要重启一次</string>
     <string name="phone_standing_restart_body">正在运行的 OpenChamber 是在设置手机操控之前启动的，聊天暂时用不了手机。重启一次即可，聊天记录会保留。</string>
@@ -276,6 +298,21 @@
     <string name="phone_standing_too_many">选的应用太多了，请少选几个。</string>
     <string name="phone_standing_window">这个范围的有效时长</string>
     <string name="phone_standing_hours">%1$d 小时</string>
+    <string name="phone_control_agent_permanent">代理 · %1$s · 不限时</string>
+    <string name="phone_running_limits_permanent">允许：%1$s · 不限时</string>
+    <string name="phone_running_auto_pause_permanent">没有时间限制，但你接管、回到 AndChamber、锁屏、连接断开，或应用离开屏幕、无法确认当前页面时，代理仍会暂停。</string>
+    <string name="phone_standing_permanent">永久</string>
+    <string name="phone_standing_window_line_left">范围 %1$d 分钟后到期</string>
+    <string name="phone_standing_window_line_permanent">范围：永久（不按时间到期）</string>
+    <string name="phone_standing_per_task_line">每个任务最多 %1$d 分钟</string>
+    <string name="phone_standing_per_task_line_permanent">每个任务：不限时</string>
+    <string name="phone_standing_per_task_line_scope">每个任务：不单独限时，范围到期时结束</string>
+    <string name="phone_standing_confirm_window_hours">范围有效 %1$d 小时。</string>
+    <string name="phone_standing_confirm_window_permanent">范围：永久。不会按时间到期；用完请在这里关闭。</string>
+    <string name="phone_standing_confirm_per_task_minutes">每个任务最多 %1$d 分钟。</string>
+    <string name="phone_standing_confirm_per_task_permanent">每个任务：不限时。</string>
+    <string name="phone_standing_confirm_per_task_scope">每个任务：不单独限时，但范围到期时仍会结束。</string>
+    <string name="phone_standing_permanent_note">“永久”只表示不会因为时间到而结束。你接管、锁屏、连接断开或关闭手机控制时，代理仍会停止。AndChamber 或手机重启后，旧任务不会自己恢复。每一次操作仍有各自的超时。</string>
     <string name="phone_standing_per_task">每个任务的时限</string>
     <string name="phone_standing_trust">你信任的是整个本机 OpenChamber 运行环境，而不只是某一个对话。你可以随时在这里关闭。</string>
     <string name="phone_standing_review">检查并允许…</string>

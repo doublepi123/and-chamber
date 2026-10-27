@@ -4,13 +4,16 @@ import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneConnectionState
 import io.andchamber.app.phone.core.PhoneState
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.ui.phone.PhoneActionScope
 import io.andchamber.app.ui.phone.PhoneAgentRequest
+import io.andchamber.app.ui.phone.PhoneAutoConnect
 import io.andchamber.app.ui.phone.PhoneBusy
 import io.andchamber.app.ui.phone.PhoneControl
 import io.andchamber.app.ui.phone.PhoneDeviceProblem
 import io.andchamber.app.ui.phone.PhoneDeviceState
 import io.andchamber.app.ui.phone.PhoneDiagnostics
+import io.andchamber.app.ui.phone.PhoneDiscovery
 import io.andchamber.app.ui.phone.PhoneEndpointHints
 import io.andchamber.app.ui.phone.PhoneHaltReason
 import io.andchamber.app.ui.phone.PhoneLastAction
@@ -29,6 +32,7 @@ import io.andchamber.app.ui.phone.PhoneTargetVerdict
 import io.andchamber.app.ui.phone.PhoneTask
 import io.andchamber.app.ui.phone.PhoneTaskResult
 import io.andchamber.app.ui.phone.PhoneContinuation
+import io.andchamber.app.ui.phone.PhoneUiLimits
 import io.andchamber.app.ui.phone.phoneHaltFacts
 
 /**
@@ -69,6 +73,11 @@ internal data class PhoneScreenFacts(
     val runtimeStatus: PhoneRuntimeStatus = PhoneRuntimeStatus(),
     /** Native continuation facts after a stop. */
     val continuation: PhoneContinuation = PhoneContinuation(),
+    /** Bounded local discovery, separate from what pairing/connection actually proved. */
+    val discoveryPairing: PhoneDiscoveryStatus = PhoneDiscoveryStatus.Idle,
+    val discoveryConnect: PhoneDiscoveryStatus = PhoneDiscoveryStatus.Idle,
+    /** Native-initiated connect after a found endpoint. Manual connects stay [PhoneAutoConnect.Idle]. */
+    val autoConnect: PhoneAutoConnect = PhoneAutoConnect.Idle,
 )
 
 internal data class PhoneLeaseFacts(
@@ -177,6 +186,9 @@ internal fun phoneScreenState(
                 hints = facts.hints,
                 problem = facts.problem,
                 pairingNotice = facts.pairingNotice,
+                pairingDiscovery = facts.discoveryPairing.toScreenDiscovery(),
+                connectDiscovery = facts.discoveryConnect.toScreenDiscovery(),
+                autoConnect = facts.autoConnect,
             ),
         stopChannel = facts.stopChannel,
         control = control,
@@ -224,18 +236,34 @@ private fun standingProjection(
                 verdict = PhoneTargetVerdict.Allowed,
             )
         }
+    val perTaskPermanent = state?.config?.perTaskMs?.let(PhoneTimeLimits::isPermanent) == true
     return PhoneStanding(
         status = status,
         apps = apps,
         actions = state?.config?.let { actionScopes(it.actions) }.orEmpty(),
         perTaskMinutes =
-            state?.config?.perTaskMs
-                ?.let { (it / 60_000L).toInt().coerceAtLeast(1) }
-                ?: 5,
+            if (perTaskPermanent) {
+                PhoneUiLimits.DEFAULT_DURATION_MIN
+            } else {
+                state?.config?.perTaskMs
+                    ?.let { (it / 60_000L).toInt().coerceAtLeast(1) }
+                    ?: PhoneUiLimits.DEFAULT_DURATION_MIN
+            },
+        perTaskPermanent = perTaskPermanent,
         runtime = facts.runtimeStatus,
         continuation = facts.continuation,
     )
 }
+
+private fun PhoneDiscoveryStatus.toScreenDiscovery(): PhoneDiscovery =
+    when (this) {
+        PhoneDiscoveryStatus.Idle -> PhoneDiscovery.Idle
+        PhoneDiscoveryStatus.Searching -> PhoneDiscovery.Searching
+        is PhoneDiscoveryStatus.Ready -> PhoneDiscovery.Ready
+        is PhoneDiscoveryStatus.Ambiguous -> PhoneDiscovery.Ambiguous
+        PhoneDiscoveryStatus.TimedOut -> PhoneDiscovery.TimedOut
+        PhoneDiscoveryStatus.Unavailable -> PhoneDiscovery.Unavailable
+    }
 
 private fun PhoneLeaseFacts.toLease(core: PhoneState): PhoneLease =
     PhoneLease(

@@ -23,6 +23,15 @@ internal object PhoneUiLimits {
     const val MAX_SUMMARY_CHARS = 200
     const val PAIRING_CODE_LENGTH = 6
     const val MAX_HOST_CHARS = 253
+
+    /**
+     * "No time limit", chosen explicitly by the person for the standing scope or each task in it.
+     * The same value as the native `PhoneTimeLimits.PERMANENT`, kept here so the screen doesn't
+     * depend on `phone/core`. Used as-is for durations ([PhoneStandingRequest.windowMs],
+     * [PhoneStandingRequest.perTaskMs]) and deadlines ([PhoneStandingStatus.Active.endsAtMs],
+     * [PhoneLease.expiresAtMs]); never turned into minutes or added to a clock.
+     */
+    const val PERMANENT_MS: Long = Long.MAX_VALUE
 }
 
 /** Everything the screen shows. Immutable; the integration layer publishes a new value per change. */
@@ -88,7 +97,10 @@ internal data class PhoneRuntimeStatus(
 internal sealed interface PhoneStandingStatus {
     data object NotSet : PhoneStandingStatus
 
-    /** In effect until [endsAtMs] (same clock as the screen's `clock`). */
+    /**
+     * In effect until [endsAtMs] (same clock as the screen's `clock`). [PhoneUiLimits.PERMANENT_MS]:
+     * the person chose no end time; it still ends when revoked or phone control is turned off.
+     */
     data class Active(val endsAtMs: Long) : PhoneStandingStatus
 
     data object Expired : PhoneStandingStatus
@@ -115,8 +127,13 @@ internal data class PhoneStanding(
     val status: PhoneStandingStatus = PhoneStandingStatus.NotSet,
     val apps: List<PhoneTarget> = emptyList(),
     val actions: Set<PhoneActionScope> = emptySet(),
-    /** Each task's own lease, inside the standing window. */
+    /** Each task's own lease, inside the standing window. Ignored when [perTaskPermanent]. */
     val perTaskMinutes: Int = PhoneUiLimits.DEFAULT_DURATION_MIN,
+    /**
+     * The person chose no time limit per task. A task then still ends with a finite standing window,
+     * and stops on take-over, screen lock, connection loss or turning phone control off.
+     */
+    val perTaskPermanent: Boolean = false,
     val runtime: PhoneRuntimeStatus = PhoneRuntimeStatus(),
     val continuation: PhoneContinuation = PhoneContinuation(),
 )
@@ -126,7 +143,9 @@ internal data class PhoneStanding(
 internal data class PhoneStandingRequest(
     val apps: List<PhoneTarget>,
     val actions: Set<PhoneActionScope>,
+    /** [PhoneUiLimits.PERMANENT_MS] only when the person explicitly chose "Permanent". */
     val windowMs: Long,
+    /** [PhoneUiLimits.PERMANENT_MS] only when the person explicitly chose "Permanent". */
     val perTaskMs: Long,
 )
 
@@ -140,7 +159,42 @@ internal data class PhoneDeviceState(
     /** The latest problem, if the last pairing/connection attempt failed or the link dropped. */
     val problem: PhoneDeviceProblem? = null,
     val pairingNotice: PhonePairingNotice = PhonePairingNotice.Idle,
+    /**
+     * Native search for *this phone's own* pairing service while the pairing notification waits.
+     * Never another host, never a network scan; the person still types the code themselves.
+     */
+    val pairingDiscovery: PhoneDiscovery = PhoneDiscovery.Idle,
+    /** Native search for this phone's own connection service, before an automatic connect. */
+    val connectDiscovery: PhoneDiscovery = PhoneDiscovery.Idle,
+    /**
+     * A connect the native side started from the found port (after pairing, or from
+     * [PhoneControlActions.onAutoConnect]). Connecting is never a grant and never ends a pause.
+     */
+    val autoConnect: PhoneAutoConnect = PhoneAutoConnect.Idle,
 )
+
+/** One native search for a local wireless-debugging service. Only real search results, no guesses. */
+internal enum class PhoneDiscovery {
+    /** Not searching (not started, cancelled, or no longer relevant). */
+    Idle,
+
+    Searching,
+
+    /** Exactly one matching service on this phone was found. */
+    Ready,
+
+    /** The search couldn't run (e.g. the system service failed, no Wi-Fi). */
+    Unavailable,
+
+    /** Nothing was found in time. */
+    TimedOut,
+
+    /** More than one candidate on this phone; the native side won't pick one. */
+    Ambiguous,
+}
+
+/** An automatic connect to the port the native side found. Manual connects stay [Idle]. */
+internal enum class PhoneAutoConnect { Idle, Running, Failed }
 
 internal enum class PhoneLink { Disconnected, Connecting, Connected, Lost }
 
@@ -229,6 +283,7 @@ internal data class PhoneLease(
     val target: PhoneTarget,
     val summary: String,
     val actions: Set<PhoneActionScope>,
+    /** [PhoneUiLimits.PERMANENT_MS]: no time limit (shown without a countdown). */
     val expiresAtMs: Long,
 )
 
@@ -371,11 +426,20 @@ internal class PhoneControlActions(
     val onOpenNotificationSettings: () -> Unit = {},
     /** Re-check whether the stop entry can be shown (e.g. after returning from settings). */
     val onRecheckStopChannel: () -> Unit = {},
-    /** Post the pairing notification with RemoteInput; [host] is the host to pair with. */
+    /**
+     * Post the pairing notification with RemoteInput; [host] is the host to pair with. The main
+     * path passes [PhoneUiLimits.DEFAULT_HOST]: the native side then looks for this phone's pairing
+     * port itself and asks only for the code. Also used by "search again" while pairing.
+     */
     val onBeginPairingNotification: (host: String) -> Unit = {},
     val onCancelPairingNotification: () -> Unit = {},
     val onPair: (PhonePairRequest) -> Unit = {},
     val onConnect: (PhoneConnectRequest) -> Unit = {},
+    /**
+     * Find this phone's own connection port and connect to it (no port typed). Also "search
+     * again" after a failed search. Only restores the link: never a grant, never ends a pause.
+     */
+    val onAutoConnect: () -> Unit = {},
     val onDisconnect: () -> Unit = {},
     /** A fresh, natively confirmed grant. Also the only way to resume after a pause. */
     val onGrant: (PhoneGrantRequest) -> Unit = {},

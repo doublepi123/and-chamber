@@ -408,11 +408,17 @@ internal fun RunningCard(
             Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceContainer) {
                 Text(lease.summary, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth().padding(10.dp))
             }
-            BodyText(stringResource(R.string.phone_running_limits, actionList(lease.actions), timeLeftText(lease.expiresAtMs, now)))
+            BodyText(
+                if (lease.permanent()) {
+                    stringResource(R.string.phone_running_limits_permanent, actionList(lease.actions))
+                } else {
+                    stringResource(R.string.phone_running_limits, actionList(lease.actions), timeLeftText(lease.expiresAtMs, now))
+                },
+            )
             if (agent.actionInFlight) {
                 BodyText(stringResource(R.string.phone_running_in_flight), color = MaterialTheme.colorScheme.onSurface)
             }
-            BodyText(stringResource(R.string.phone_running_auto_pause))
+            BodyText(stringResource(if (lease.permanent()) R.string.phone_running_auto_pause_permanent else R.string.phone_running_auto_pause))
             BodyText(stringResource(R.string.phone_running_no_renew))
             PhoneSecondaryButton(
                 text = stringResource(R.string.phone_open_target, lease.target.label),

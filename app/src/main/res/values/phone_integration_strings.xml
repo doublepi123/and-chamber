@@ -4,9 +4,9 @@
 <resources>
     <!-- Channels -->
     <string name="phone_notif_channel_control">Phone control session</string>
-    <string name="phone_notif_channel_control_desc">Shows the short phone-control session and its Pause and Return controls. Keep this on if you want to be able to stop the agent from another app.</string>
+    <string name="phone_notif_channel_control_desc">Shows the phone-control session and its Pause and Return controls. Keep this on if you want to be able to stop the agent from another app.</string>
     <string name="phone_notif_channel_pairing">Phone control pairing</string>
-    <string name="phone_notif_channel_pairing_desc">Asks for the pairing port and the six-digit code from Android\'s wireless debugging screen.</string>
+    <string name="phone_notif_channel_pairing_desc">Asks for the six-digit code from Android\'s wireless debugging pairing dialog.</string>
 
     <!-- Session notification (stop entry) -->
     <string name="phone_notif_running_title">Agent is using %1$s</string>
@@ -20,13 +20,15 @@
 
     <!-- Pairing notification -->
     <string name="phone_pair_notif_title">Pair with this phone</string>
-    <string name="phone_pair_notif_port_body">Android\'s wireless debugging screen is open. Choose \"Pair device with pairing code\" and type the port shown there here. The dialog stays open.</string>
+    <string name="phone_pair_notif_searching_body">Looking for the pairing dialog on this phone. Tap \"Pair device with pairing code\" and keep the dialog open; this notification then asks only for the six-digit code.</string>
+    <string name="phone_pair_notif_not_found_body">The pairing dialog wasn\'t found on this phone. Open AndChamber to search again or enter the port yourself.</string>
+    <string name="phone_pair_notif_port_body">If the pairing port wasn\'t found on its own, type the port shown in Android\'s pairing dialog here. Keep the dialog open.</string>
     <string name="phone_pair_notif_port_label">Pairing port</string>
-    <string name="phone_pair_notif_code_body">Type the six-digit code from Android\'s pairing dialog here. It is used once, never saved and never written to a chat.</string>
+    <string name="phone_pair_notif_code_body">Type the six-digit code from Android\'s pairing dialog here. It is used once, never saved and never written to a chat. On some Xiaomi phones, long-press this notification to show the text box.</string>
     <string name="phone_pair_notif_code_label">Six-digit code</string>
     <string name="phone_pair_notif_busy">Pairing… one bounded attempt is running. Cancel if the dialog was closed.</string>
     <string name="phone_pair_notif_paired_title">Paired</string>
-    <string name="phone_pair_notif_paired_body">Return to AndChamber and enter the connection port shown on the wireless debugging screen. Pairing alone does not connect.</string>
+    <string name="phone_pair_notif_paired_body">AndChamber now looks for this phone\'s connection port and tries to connect. If that doesn\'t work, open AndChamber to search again or enter the port. Connecting alone doesn\'t let the agent act.</string>
     <string name="phone_pair_notif_failed_code">The pairing code was refused. Check the code on the screen and pair again. Nothing was authorized.</string>
     <string name="phone_pair_notif_failed_port">The pairing port could not be reached. Reopen the pairing dialog, because its port changes, then try again.</string>
     <string name="phone_pair_notif_failed_policy">This pairing port or address is not allowed. Use the port from this phone\'s own wireless debugging screen.</string>

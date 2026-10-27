@@ -89,6 +89,8 @@ internal data class PhoneOverlayState(
     val summary: String? = null,
     /** Lease end on the same clock as the screen's `clock`; null when there is no live lease. */
     val leaseEndsAtMs: Long? = null,
+    /** The live lease has no time limit: "No time limit" instead of a countdown. */
+    val leasePermanent: Boolean = false,
     /** Dispatch receipts so far; null when unknown. A count of sent actions, not of finished steps. */
     val sentCount: Int? = null,
     /** Newest first. The panel shows the latest three; the result card groups all by source. */
@@ -109,6 +111,71 @@ internal data class PhoneOverlayState(
     val retained: Boolean = false,
     /** Configure-once mode: offer "continue beside the chat" (opens the native confirmation). */
     val canContinueInChat: Boolean = false,
+    /**
+     * The current task's own question from the local OpenChamber chat (its notification), bound to
+     * this task by the native side. Null when there is none. Never another app's notification, and
+     * never a permission request (those keep their own entry).
+     */
+    val prompt: OverlayPrompt? = null,
+    /** The current task's latest plain notice from the chat (no question, no answer). */
+    val sessionNotice: OverlaySessionNotice? = null,
+)
+
+/** Where an answer stands. Delivery only: never that the agent acted on it. */
+internal enum class OverlayPromptDelivery {
+    /** The native side is checking that the question is still open. */
+    Checking,
+
+    /** Open: the person may pick one choice and send it. The only state that offers sending. */
+    Ready,
+    Sending,
+
+    /** The chat received the answer. */
+    Accepted,
+
+    /** Whether the answer arrived isn't known. Never re-sent from here; check again or open the chat. */
+    Unknown,
+
+    /** Can't be answered here right now (nothing was sent). */
+    Blocked,
+    Refused,
+    Unsupported,
+
+    /** A newer question replaced this one. */
+    Superseded,
+}
+
+@Immutable
+internal data class OverlayPromptChoice(
+    /** Sent back as-is through [PhoneOverlayActions.onAnswerPrompt]. */
+    val value: String,
+    val label: String,
+)
+
+/**
+ * One question. [formId] and [generation] are the frozen identity of what the person saw; an
+ * answer always carries both. Text is the chat's own and is shown as received.
+ */
+@Immutable
+internal data class OverlayPrompt(
+    val formId: String,
+    val generation: Long,
+    val noticeTitle: String? = null,
+    val noticeBody: String? = null,
+    val questionTitle: String? = null,
+    val questionDescription: String? = null,
+    val choices: List<OverlayPromptChoice> = emptyList(),
+    val delivery: OverlayPromptDelivery = OverlayPromptDelivery.Checking,
+)
+
+internal enum class OverlaySessionNoticeKind { Ready, Error, Goal, RestartInterrupted }
+
+/** A plain notice from the chat for this task. Read-only: no buttons, no answer. */
+@Immutable
+internal data class OverlaySessionNotice(
+    val kind: OverlaySessionNoticeKind,
+    val title: String? = null,
+    val body: String? = null,
 )
 
 /** Why the agent stopped. Shown so the capsule never just "disappears" without a reason. */
@@ -174,6 +241,13 @@ internal class PhoneOverlayActions(
     val onOpenChat: () -> Unit = {},
     /** Configure-once: open the native "continue beside the chat" confirmation. Never resumes here. */
     val onContinueInChat: () -> Unit = {},
+    /**
+     * The person picked a choice and pressed Send. Called once per shown question (formId +
+     * generation); the native side re-checks both before replying. Never called for Unknown.
+     */
+    val onAnswerPrompt: (formId: String, generation: Long, value: String) -> Unit = { _, _, _ -> },
+    /** Re-read whether the question is still open (panel opened, "check again"). Sends nothing. */
+    val onRefreshPrompt: () -> Unit = {},
 )
 
 // ---- settings card ---------------------------------------------------------------------------

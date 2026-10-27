@@ -172,6 +172,15 @@ class PhoneStandingControllerTest {
                 target,
             )
         assertEquals(PhoneStandingRefusal.INVALID, (invalid as PhoneStandingGrantResult.Refused).refusal)
+
+        listOf(0L, -1L, PhoneLimits.MAX_LEASE_MS + 1L).forEach { perTaskMs ->
+            val badPerTask = fixture.controller.grantFromPreauthorization(scope(perTaskMs = perTaskMs), target)
+            assertEquals(
+                "perTaskMs=$perTaskMs",
+                PhoneStandingRefusal.INVALID,
+                (badPerTask as PhoneStandingGrantResult.Refused).refusal,
+            )
+        }
     }
 
     @Test
@@ -226,5 +235,138 @@ class PhoneStandingControllerTest {
         assertEquals(before, after)
         assertTrue(after.standingBlocked)
         assertTrue(after.paused)
+    }
+
+    @Test
+    fun `a permanent scope with a permanent per-task never expires by time`() = runTest {
+        val fixture = Fixture().connected()
+
+        val result =
+            fixture.controller.grantFromPreauthorization(
+                scope(
+                    windowEndsMs = PhoneTimeLimits.PERMANENT,
+                    perTaskMs = PhoneTimeLimits.PERMANENT,
+                ),
+                target,
+            )
+        val grant = (result as PhoneStandingGrantResult.Granted).grant
+        assertEquals(PhoneTimeLimits.PERMANENT, grant.expiresAtMs)
+
+        fixture.now = PhoneTimeLimits.PERMANENT - 1
+        fixture.controller.refresh()
+
+        assertEquals("a permanent lease was treated as expired", grant, fixture.controller.state.value.grant)
+        assertEquals(PhoneEvent.GRANTED, fixture.controller.state.value.lastEvent)
+    }
+
+    @Test
+    fun `a permanent per-task in a finite window stays bounded by the remaining window`() = runTest {
+        val fixture = Fixture().connected()
+        val fourHours = 4 * 60 * 60 * 1_000L
+        val windowEndsMs = fixture.now + fourHours
+
+        val result =
+            fixture.controller.grantFromPreauthorization(
+                scope(windowEndsMs = windowEndsMs, perTaskMs = PhoneTimeLimits.PERMANENT),
+                target,
+            )
+        val grant = (result as PhoneStandingGrantResult.Granted).grant
+
+        assertEquals(windowEndsMs, grant.expiresAtMs)
+        assertTrue(
+            "a finite window must not be capped at the old 30 minute maximum",
+            grant.expiresAtMs - fixture.now > PhoneLimits.MAX_LEASE_MS,
+        )
+
+        fixture.now = windowEndsMs
+        fixture.controller.refresh()
+        assertNull(fixture.controller.state.value.grant)
+        assertEquals(PhoneEvent.LEASE_EXPIRED, fixture.controller.state.value.lastEvent)
+
+        val expired = fixture.controller.grantFromPreauthorization(
+            scope(windowEndsMs = windowEndsMs, perTaskMs = PhoneTimeLimits.PERMANENT),
+            target,
+        )
+        assertEquals(
+            PhoneStandingRefusal.EXPIRED,
+            (expired as PhoneStandingGrantResult.Refused).refusal,
+        )
+    }
+
+    @Test
+    fun `a finite per-task in a permanent window stays a finite short lease`() = runTest {
+        val fixture = Fixture().connected()
+
+        val result =
+            fixture.controller.grantFromPreauthorization(
+                scope(
+                    windowEndsMs = PhoneTimeLimits.PERMANENT,
+                    perTaskMs = 60_000L,
+                ),
+                target,
+            )
+        val grant = (result as PhoneStandingGrantResult.Granted).grant
+
+        assertEquals(60_000L, grant.expiresAtMs - fixture.now)
+        fixture.now += 60_000L
+        fixture.controller.refresh()
+        assertNull(fixture.controller.state.value.grant)
+        assertEquals(PhoneEvent.LEASE_EXPIRED, fixture.controller.state.value.lastEvent)
+    }
+
+    @Test
+    fun `pause takeover lock connection loss and runtime change still stop a permanent scope`() = runTest {
+        val permanent = scope(
+            windowEndsMs = PhoneTimeLimits.PERMANENT,
+            perTaskMs = PhoneTimeLimits.PERMANENT,
+        )
+
+        val paused = Fixture().connected()
+        assertTrue(paused.controller.grantFromPreauthorization(permanent, target) is PhoneStandingGrantResult.Granted)
+        paused.controller.pause()
+        assertEquals(
+            PhoneStandingRefusal.PAUSED,
+            (paused.controller.grantFromPreauthorization(permanent, target) as PhoneStandingGrantResult.Refused).refusal,
+        )
+
+        val takeover = Fixture().connected()
+        takeover.controller.blockStanding(PhoneStandingBlockReason.TAKEOVER)
+        assertEquals(
+            PhoneStandingRefusal.STANDING_BLOCKED,
+            (takeover.controller.grantFromPreauthorization(permanent, target) as PhoneStandingGrantResult.Refused).refusal,
+        )
+
+        val locked = Fixture().connected()
+        assertTrue(locked.controller.grantFromPreauthorization(permanent, target) is PhoneStandingGrantResult.Granted)
+        locked.controller.onDeviceLocked()
+        assertNull(locked.controller.state.value.grant)
+        assertEquals(
+            PhoneStandingRefusal.STANDING_BLOCKED,
+            (locked.controller.grantFromPreauthorization(permanent, target) as PhoneStandingGrantResult.Refused).refusal,
+        )
+
+        val lost = Fixture().connected()
+        assertTrue(lost.controller.grantFromPreauthorization(permanent, target) is PhoneStandingGrantResult.Granted)
+        lost.controller.onConnectionLost()
+        assertNull(lost.controller.state.value.grant)
+        assertEquals(
+            PhoneStandingRefusal.NOT_CONNECTED,
+            (lost.controller.grantFromPreauthorization(permanent, target) as PhoneStandingGrantResult.Refused).refusal,
+        )
+        lost.controller.connect(1_000)
+        assertEquals(
+            "a reconnect must not restore a lease or clear the standing stop",
+            PhoneStandingRefusal.STANDING_BLOCKED,
+            (lost.controller.grantFromPreauthorization(permanent, target) as PhoneStandingGrantResult.Refused).refusal,
+        )
+
+        val changed = Fixture().connected()
+        assertTrue(changed.controller.grantFromPreauthorization(permanent, target) is PhoneStandingGrantResult.Granted)
+        changed.controller.onRuntimeChanged("launch-8")
+        assertNull(changed.controller.state.value.grant)
+        assertEquals(
+            PhoneStandingBlockReason.RUNTIME_CHANGED,
+            changed.controller.state.value.standingBlockReason,
+        )
     }
 }

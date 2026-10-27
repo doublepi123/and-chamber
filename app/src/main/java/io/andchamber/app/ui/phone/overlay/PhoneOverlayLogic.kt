@@ -121,9 +121,8 @@ internal fun overlayMinutesLeft(
     nowMs: Long,
 ): Int? {
     val end = leaseEndsAtMs ?: return null
-    val left = end - nowMs
-    if (left <= 0) return 0
-    return ((left + 59_999) / 60_000).toInt()
+    // The explicit "no time limit" deadline never becomes a minute count; no `+ 59_999` overflow.
+    return io.andchamber.app.ui.phone.minutesLeft(end, nowMs)
 }
 
 /** How long ago, coarse on purpose: seconds below a minute, then minutes. */
@@ -143,8 +142,70 @@ internal fun ago(
     return when {
         d < 5_000 -> Ago.JustNow
         d < 60_000 -> Ago.Seconds((d / 1_000).toInt())
-        else -> Ago.Minutes((d / 60_000).toInt())
+        else -> Ago.Minutes((d / 60_000).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
     }
+}
+
+// ---- a question from the chat --------------------------------------------------------------
+
+/** The prominent line: the question itself, else the notification body. */
+internal fun promptQuestion(prompt: OverlayPrompt): String? =
+    prompt.questionDescription?.takeIf { it.isNotBlank() } ?: prompt.noticeBody?.takeIf { it.isNotBlank() }
+
+/** The small label above it: the form's title, else the notification title. */
+internal fun promptLabel(prompt: OverlayPrompt): String? =
+    prompt.questionTitle?.takeIf { it.isNotBlank() } ?: prompt.noticeTitle?.takeIf { it.isNotBlank() }
+
+/** Choices can be picked and sent only while the question is open and has choices. */
+internal fun promptCanSubmit(prompt: OverlayPrompt): Boolean = prompt.delivery == OverlayPromptDelivery.Ready && prompt.choices.isNotEmpty()
+
+/** What the question block offers besides the choices. */
+internal enum class PromptAction {
+    /** Send the picked choice. Enabled only with a pick, in Ready, and not already sent. */
+    Send,
+
+    /** Re-read the question. For Unknown: never a re-send. */
+    CheckAgain,
+
+    /** Answer it in the chat instead. */
+    OpenChat,
+}
+
+internal fun promptActions(prompt: OverlayPrompt): List<PromptAction> =
+    when (prompt.delivery) {
+        OverlayPromptDelivery.Ready ->
+            if (prompt.choices.isEmpty()) listOf(PromptAction.OpenChat) else listOf(PromptAction.Send, PromptAction.OpenChat)
+        // Read-only: look at the status again or go to the chat. Never another send.
+        OverlayPromptDelivery.Unknown, OverlayPromptDelivery.Blocked -> listOf(PromptAction.CheckAgain, PromptAction.OpenChat)
+        OverlayPromptDelivery.Refused,
+        OverlayPromptDelivery.Unsupported,
+        -> listOf(PromptAction.OpenChat)
+        OverlayPromptDelivery.Checking,
+        OverlayPromptDelivery.Sending,
+        OverlayPromptDelivery.Accepted,
+        OverlayPromptDelivery.Superseded,
+        -> emptyList()
+    }
+
+/** The identity of one shown question; a send is allowed once per identity. */
+internal data class PromptKey(val formId: String, val generation: Long)
+
+internal fun OverlayPrompt.key(): PromptKey = PromptKey(formId, generation)
+
+/**
+ * The one answer the Send button may hand over, or null. Needs a picked value that is one of the
+ * shown choices, an open question, and no earlier send for this exact question (a second tap while
+ * the native side hasn't reported Sending yet is ignored).
+ */
+internal fun promptSubmission(
+    prompt: OverlayPrompt,
+    picked: String?,
+    sentFor: PromptKey?,
+): String? {
+    if (!promptCanSubmit(prompt)) return null
+    if (sentFor == prompt.key()) return null
+    val value = picked ?: return null
+    return value.takeIf { v -> prompt.choices.any { it.value == v } }
 }
 
 // ---- settings card ---------------------------------------------------------------------------

@@ -5,10 +5,13 @@ import io.andchamber.app.phone.core.PhoneGrant
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhoneObservationSummary
 import io.andchamber.app.phone.core.PhoneState
+import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneConnectionState
 import io.andchamber.app.ui.phone.PhoneActionScope
+import io.andchamber.app.ui.phone.PhoneAutoConnect
 import io.andchamber.app.ui.phone.PhoneControl
+import io.andchamber.app.ui.phone.PhoneDiscovery
 import io.andchamber.app.ui.phone.PhoneHaltReason
 import io.andchamber.app.ui.phone.PhoneLastAction
 import io.andchamber.app.ui.phone.PhoneLink
@@ -49,6 +52,48 @@ class PhoneScreenStateMapperTest {
         halt = halt,
         task = task,
     )
+
+    @Test
+    fun `discovery and native auto connect stay separate from pairing and the link`() {
+        val endpoint =
+            PhoneDiscoveredEndpoint(
+                kind = PhoneDiscoveryKind.CONNECT,
+                host = "127.0.0.1",
+                port = 42000,
+                serviceName = "adb-1",
+                receivedAtMs = 1,
+            )
+        val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.DISCONNECTED)
+        val mapped =
+            phoneScreenState(
+                core,
+                facts().copy(
+                    paired = true,
+                    discoveryPairing = PhoneDiscoveryStatus.Ambiguous(2),
+                    discoveryConnect = PhoneDiscoveryStatus.Ready(endpoint),
+                    autoConnect = PhoneAutoConnect.Running,
+                ),
+            )
+        assertEquals(PhoneDiscovery.Ambiguous, mapped.device.pairingDiscovery)
+        assertEquals(PhoneDiscovery.Ready, mapped.device.connectDiscovery)
+        assertEquals(PhoneAutoConnect.Running, mapped.device.autoConnect)
+        // Found services and an in-flight auto connect are not a paired/connected claim.
+        assertEquals(PhoneLink.Disconnected, mapped.device.link)
+        assertEquals(true, mapped.device.paired)
+
+        val timedOut =
+            phoneScreenState(
+                core,
+                facts().copy(
+                    discoveryPairing = PhoneDiscoveryStatus.TimedOut,
+                    discoveryConnect = PhoneDiscoveryStatus.Unavailable,
+                    autoConnect = PhoneAutoConnect.Failed,
+                ),
+            )
+        assertEquals(PhoneDiscovery.TimedOut, timedOut.device.pairingDiscovery)
+        assertEquals(PhoneDiscovery.Unavailable, timedOut.device.connectDiscovery)
+        assertEquals(PhoneAutoConnect.Failed, timedOut.device.autoConnect)
+    }
 
     @Test
     fun `a grant is an agent lease bound to the controller expiry`() {
@@ -223,6 +268,28 @@ class PhoneScreenStateMapperTest {
 
         val revoked = phoneScreenState(core, facts().copy(standingEnabled = true, standingState = PhoneStandingState(config.copy(revoked = true), 5_000L)), nowElapsedMs = 1L)
         assertEquals(io.andchamber.app.ui.phone.PhoneStandingStatus.Revoked, revoked.standing?.status)
+
+        val permanent =
+            phoneScreenState(
+                core,
+                facts().copy(
+                    standingEnabled = true,
+                    standingState =
+                        PhoneStandingState(
+                            config.copy(
+                                windowEndsAtWallMs = PhoneTimeLimits.PERMANENT,
+                                perTaskMs = PhoneTimeLimits.PERMANENT,
+                            ),
+                            endsAtElapsedMs = PhoneTimeLimits.PERMANENT,
+                        ),
+                ),
+                nowElapsedMs = 9_999_999L,
+            )
+        assertEquals(
+            io.andchamber.app.ui.phone.PhoneStandingStatus.Active(PhoneTimeLimits.PERMANENT),
+            permanent.standing?.status,
+        )
+        assertEquals(true, permanent.standing?.perTaskPermanent)
     }
 
     @Test

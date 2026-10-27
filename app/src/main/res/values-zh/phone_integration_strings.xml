@@ -4,9 +4,9 @@
 <resources>
     <!-- Channels -->
     <string name="phone_notif_channel_control">手机控制会话</string>
-    <string name="phone_notif_channel_control_desc">显示这次短时的手机控制会话，以及“暂停”和“返回”按钮。想在其他应用里也能停下代理，请保持开启。</string>
+    <string name="phone_notif_channel_control_desc">显示这次手机控制会话，以及“暂停”和“返回”按钮。想在其他应用里也能停下代理，请保持开启。</string>
     <string name="phone_notif_channel_pairing">手机控制配对</string>
-    <string name="phone_notif_channel_pairing_desc">向你索取 Android 无线调试界面上的配对端口和六位配对码。</string>
+    <string name="phone_notif_channel_pairing_desc">向你索取 Android 无线调试配对弹窗里的六位配对码。</string>
 
     <!-- Session notification (stop entry) -->
     <string name="phone_notif_running_title">代理正在使用 %1$s</string>
@@ -20,13 +20,15 @@
 
     <!-- Pairing notification -->
     <string name="phone_pair_notif_title">与这台手机配对</string>
-    <string name="phone_pair_notif_port_body">Android 的无线调试界面已打开。请选择“使用配对码配对设备”，然后在这里输入界面上显示的端口。配对对话框会保持打开。</string>
+    <string name="phone_pair_notif_searching_body">正在这台手机上查找配对弹窗。请点按“使用配对码配对设备”并保持弹窗打开；之后这条通知只需要你输入六位配对码。</string>
+    <string name="phone_pair_notif_not_found_body">在这台手机上没找到配对弹窗。请打开 AndChamber 重新查找，或自己输入端口。</string>
+    <string name="phone_pair_notif_port_body">如果没能自动找到配对端口，请在这里输入 Android 配对弹窗上显示的端口，并保持弹窗打开。</string>
     <string name="phone_pair_notif_port_label">配对端口</string>
-    <string name="phone_pair_notif_code_body">在这里输入 Android 配对对话框里的六位配对码。它只使用一次，不会保存，也不会写进聊天。</string>
+    <string name="phone_pair_notif_code_body">在这里输入 Android 配对弹窗里的六位配对码。它只使用一次，不会保存，也不会写进聊天。部分小米手机需要长按这条通知才会出现输入框。</string>
     <string name="phone_pair_notif_code_label">六位配对码</string>
     <string name="phone_pair_notif_busy">正在配对… 只有一次有时限的尝试。如果对话框已经关闭，请取消。</string>
     <string name="phone_pair_notif_paired_title">已配对</string>
-    <string name="phone_pair_notif_paired_body">回到 AndChamber，输入无线调试界面上显示的连接端口。仅配对还不会连接。</string>
+    <string name="phone_pair_notif_paired_body">AndChamber 正在查找这台手机的连接端口并尝试连接。如果不成功，请打开 AndChamber 重新查找或自己输入端口。仅连接不会让代理执行任何操作。</string>
     <string name="phone_pair_notif_failed_code">配对码被拒绝。请核对界面上的配对码后重新配对。没有授予任何权限。</string>
     <string name="phone_pair_notif_failed_port">无法连接到配对端口。配对对话框的端口每次都会变化，请重新打开后再试。</string>
     <string name="phone_pair_notif_failed_policy">这个配对端口或地址不被允许。请使用这台手机自己无线调试界面上的端口。</string>

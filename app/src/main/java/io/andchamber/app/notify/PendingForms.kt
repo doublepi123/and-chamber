@@ -207,6 +207,38 @@ object PendingForms {
     }
 
     /**
+     * The single-choice subset the native conversation may answer: one string field with
+     * 1..[MAX_CHOICE_BUTTONS] options. OpenCode 2.0.32's built-in questions always carry
+     * `custom:true`, but that only allows free text; the overlay deliberately offers no free-text
+     * input and submits one of the listed option values only.
+     */
+    internal fun closedChoice(form: JsonObject): FormAnswer.Choice? = classifyForm(form) as? FormAnswer.Choice
+
+    /**
+     * The same raw-schema fingerprint for a classified form, used by the native conversation
+     * projection so a changed choice set or constraint invalidates an in-flight answer. Metadata
+     * (including the tool/message id) is part of the digest; the raw fields and metadata are never
+     * stored or logged.
+     */
+    internal fun formSchemaFingerprint(form: JsonObject): String? =
+        (form["fields"] as? JsonArray)?.let { fields ->
+            val fieldSchema = runCatching { inlineSchema(fields) }.getOrNull() ?: return null
+            // Stable identity keys only, never the raw metadata blob: the tool/message id tells one
+            // question turn from another without keeping or logging any server text.
+            val metadata = form["metadata"] as? JsonObject
+            val tool = metadata?.get("tool") as? JsonObject
+            val identity =
+                listOf(
+                    "kind=" + metadata?.text("kind").orEmpty(),
+                    "tool=" + tool?.text("id").orEmpty(),
+                    "message=" + tool?.text("messageID").orEmpty(),
+                ).joinToString(";")
+            val canonical = "$fieldSchema\u001D$identity"
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
+            digest.joinToString(separator = "") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+        }
+
+    /**
      * A stable fingerprint of every raw field constraint except display-only text. It deliberately
      * includes unknown keys too, so a newly added pattern or any constraint the model does not store
      * still invalidates a staged answer instead of being silently ignored.

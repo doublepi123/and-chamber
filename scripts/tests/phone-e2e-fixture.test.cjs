@@ -155,6 +155,10 @@ function addToolTurn(messages, id, args, result) {
 }
 
 function addToolTurnContent(messages, id, args, content) {
+  return addNamedToolTurnContent(messages, id, 'andchamber_phone', args, content);
+}
+
+function addNamedToolTurnContent(messages, id, name, args, content) {
   return [
     ...messages,
     {
@@ -163,7 +167,7 @@ function addToolTurnContent(messages, id, args, content) {
       tool_calls: [{
         id,
         type: 'function',
-        function: { name: 'andchamber_phone', arguments: JSON.stringify(args) },
+        function: { name, arguments: JSON.stringify(args) },
       }],
     },
     {
@@ -172,6 +176,77 @@ function addToolTurnContent(messages, id, args, content) {
       content,
     },
   ];
+}
+
+function addQuestionTurn(messages, id, args, answerText) {
+  return addNamedToolTurnContent(messages, id, 'question', args, answerText);
+}
+
+function questionToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'question',
+      description: 'built-in question tool fixture',
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                question: { type: 'string' },
+                header: { type: 'string' },
+                options: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string' },
+                      description: { type: 'string' },
+                    },
+                    required: ['label', 'description'],
+                  },
+                },
+                multiple: { type: 'boolean' },
+                custom: { type: 'boolean' },
+              },
+              required: ['question', 'header', 'options'],
+            },
+          },
+        },
+        required: ['questions'],
+      },
+    },
+  };
+}
+
+const ASK_QUESTION_TEXT = 'Which fixture action should I run next?';
+const ASK_OPTIONS = [
+  { label: 'Tap Save', description: 'Run the tap_save scenario' },
+  { label: 'Type text', description: 'Run the input scenario' },
+];
+
+function askBody(messages, options = {}) {
+  return body(messages, {
+    ...options,
+    tools: options.tools === undefined
+      ? [toolDefinition(), questionToolDefinition()]
+      : options.tools,
+  });
+}
+
+function askSentinel(expectAnswer = 'Tap Save', extra = {}) {
+  return sentinel({ mode: 'begin', scenario: 'ask_choice', expectAnswer, ...extra });
+}
+
+function askAnswerText(answer) {
+  return `User has answered your questions: "${ASK_QUESTION_TEXT}"="${answer}". You can now continue with the user's answers in mind.`;
+}
+
+function requestRunning() {
+  return envelope('phone.request', { state: 'RUNNING' });
 }
 
 function mainNodes(extra = {}) {
@@ -738,6 +813,322 @@ test('SSE payloads carry role, one tool delta and a finish reason', () => {
   assert.equal(toolDelta[0].function.name, 'andchamber_phone');
   assert.ok(payloads.some((payload) => (payload.choices || []).some((choice) => choice.finish_reason === 'tool_calls')));
   assert.ok(payloads.some((payload) => Array.isArray(payload.choices) && payload.choices.length === 0 && payload.usage));
+});
+
+test('ask_choice issues the real request before the built-in question', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  assert.equal(plan.kind, 'tool');
+  assert.equal(plan.toolCall.function.name, 'andchamber_phone');
+  assert.deepEqual(JSON.parse(plan.toolCall.function.arguments), {
+    action: 'request',
+    summary: 'AndChamber phone E2E ask_choice',
+    packageName: PACKAGE,
+  });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  assert.equal(plan.kind, 'tool');
+  assert.equal(plan.toolCall.function.name, 'question');
+  assert.equal(plan.action, undefined);
+  assert.equal(plan.case, 'call-question');
+  const args = JSON.parse(plan.toolCall.function.arguments);
+  assert.deepEqual(args, {
+    questions: [{
+      question: ASK_QUESTION_TEXT,
+      header: 'Next step',
+      options: ASK_OPTIONS,
+    }],
+  });
+  // The fixture asks only its two fixed options. The real runtime's pending form (q0 plus
+  // custom:true) is not modelled or closed here; the option description is mandatory.
+  assert.equal(Object.prototype.hasOwnProperty.call(args.questions[0], 'custom'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(args.questions[0], 'multiple'), false);
+  assert.equal(messages.filter((message) => message.role === 'user').length, 1);
+});
+
+test('ask_choice does not ask before a confirmed direct start', () => {
+  for (const result of [
+    'request accepted',
+    envelope('phone.request', { state: 'PENDING_CONFIRMATION' }),
+    { version: 1, ok: true, action: 'phone.request', epoch: 0, data: { state: 'RUNNING' } },
+  ]) {
+    const messages = addToolTurn(
+      [{ role: 'user', content: askSentinel('Tap Save') }],
+      'call_phone_e2e_1',
+      { action: 'request', summary: 'x', packageName: PACKAGE },
+      result,
+    );
+    const plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+    assert.equal(plan.kind, 'text');
+    assert.equal(plan.case, 'request-not-confirmed');
+    assert.equal(plan.toolCall, undefined);
+  }
+});
+
+test('ask_choice refuses a missing or malformed built-in question schema', () => {
+  const messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  for (const tools of [
+    [toolDefinition()],
+    [toolDefinition(), {
+      type: 'function',
+      function: {
+        name: 'question',
+        parameters: { type: 'object', properties: {}, required: [] },
+      },
+    }],
+  ]) {
+    const plan = fixture.planTurn(askBody(messages, { tools }), { callSeq: 1 });
+    assert.equal(plan.kind, 'text');
+    assert.ok(['ask-choice-question-missing', 'ask-choice-question-invalid'].includes(plan.case));
+    assert.equal(plan.toolCall, undefined);
+  }
+
+  const withRequest = addToolTurn(
+    messages,
+    'call_phone_e2e_1',
+    { action: 'request', summary: 'x', packageName: PACKAGE },
+    requestRunning(),
+  );
+  const afterRequest = fixture.planTurn(askBody(withRequest, { tools: [toolDefinition()] }), { callSeq: 2 });
+  assert.equal(afterRequest.kind, 'text');
+  assert.equal(afterRequest.case, 'ask-choice-question-missing');
+  assert.equal(afterRequest.toolCall, undefined);
+});
+
+test('ask_choice does not continue a pending question', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  const args = JSON.parse(plan.toolCall.function.arguments);
+  assert.equal(plan.toolCall.function.name, 'question');
+
+  // A roletool result exists but it is not an answer yet.
+  const pending = addQuestionTurn(messages, plan.toolCall.id, args, 'Question is still pending.');
+  const pendingPlan = fixture.planTurn(askBody(pending), { callSeq: 3 });
+  assert.equal(pendingPlan.kind, 'text');
+  assert.equal(pendingPlan.case, 'ask-choice-pending');
+  assert.equal(pendingPlan.toolCall, undefined);
+  assert.doesNotMatch(pendingPlan.text, /e2e-complete/);
+
+  // No tool result at all means the real loop is still blocked on the user.
+  const waiting = [
+    ...messages,
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{
+        id: plan.toolCall.id,
+        type: 'function',
+        function: { name: 'question', arguments: JSON.stringify(args) },
+      }],
+    },
+  ];
+  const waitingPlan = fixture.planTurn(askBody(waiting), { callSeq: 3 });
+  assert.equal(waitingPlan.kind, 'text');
+  assert.equal(waitingPlan.case, 'ask-choice-pending');
+  assert.equal(waitingPlan.toolCall, undefined);
+});
+
+test('ask_choice with Tap Save runs status, snapshot, tap and read-back once', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  const question = JSON.parse(plan.toolCall.function.arguments);
+  messages = addQuestionTurn(messages, plan.toolCall.id, question, askAnswerText('Tap Save'));
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 3 });
+  assert.equal(plan.action, 'status');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'status' }, status());
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 4 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'snapshot' }, snapshot('obs-ask-1', mainNodes()));
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 5 });
+  assert.equal(plan.action, 'tap');
+  assert.deepEqual(JSON.parse(plan.toolCall.function.arguments), {
+    action: 'tap',
+    observationId: 'obs-ask-1',
+    ref: 'n4',
+  });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), envelope('phone.tap'));
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 6 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'snapshot' },
+    snapshot('obs-ask-2', [node('n0', 'AndChamber Phone Fixture'), node('n1', 'Saved 1 times')]),
+  );
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 7 });
+  assert.equal(plan.kind, 'text');
+  assert.equal(plan.case, 'e2e-complete');
+  assert.match(plan.text, /scenario=ask_choice action=tap verify=pass epoch=7/);
+
+  const calls = messages.flatMap((message) => message.tool_calls || []);
+  const requests = calls.filter((call) => {
+    if (call.function.name !== 'andchamber_phone') return false;
+    try { return JSON.parse(call.function.arguments).action === 'request'; } catch { return false; }
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(calls.filter((call) => call.function.name === 'question').length, 1);
+  assert.equal(messages.filter((message) => message.role === 'user').length, 1);
+  assert.equal(messages.filter((message) => message.role === 'user' && message.content === NATIVE_CONTINUE_PROMPT).length, 0);
+});
+
+test('ask_choice with Type text reuses the input sequence and read-back', () => {
+  let messages = [{ role: 'user', content: askSentinel('Type text') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  messages = addQuestionTurn(
+    messages,
+    plan.toolCall.id,
+    JSON.parse(plan.toolCall.function.arguments),
+    askAnswerText('Type text'),
+  );
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 3 });
+  assert.equal(plan.action, 'status');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'status' }, status());
+  plan = fixture.planTurn(askBody(messages), { callSeq: 4 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(messages, plan.toolCall.id, { action: 'snapshot' }, snapshot('obs-ask-input', mainNodes()));
+  plan = fixture.planTurn(askBody(messages), { callSeq: 5 });
+  assert.equal(plan.action, 'input');
+  const inputArgs = JSON.parse(plan.toolCall.function.arguments);
+  assert.equal(inputArgs.observationId, 'obs-ask-input');
+  assert.equal(inputArgs.text, TEST_TEXT);
+  messages = addToolTurn(messages, plan.toolCall.id, inputArgs, envelope('phone.input'));
+  plan = fixture.planTurn(askBody(messages), { callSeq: 6 });
+  assert.equal(plan.action, 'snapshot');
+  messages = addToolTurn(
+    messages,
+    plan.toolCall.id,
+    { action: 'snapshot' },
+    snapshot('obs-ask-echo', mainNodes({ nodes: [node('n21', TEST_TEXT, { role: 'TextView' })] })),
+  );
+  plan = fixture.planTurn(askBody(messages), { callSeq: 7 });
+  assert.equal(plan.case, 'e2e-complete');
+  assert.match(plan.text, /scenario=ask_choice action=input verify=pass epoch=7/);
+});
+
+test('ask_choice does not mutate for wrong, unknown or free-form answers', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  const question = JSON.parse(plan.toolCall.function.arguments);
+
+  for (const answer of ['Cancel', 'Type text', 'tap save', 'Tap Save ', 'I would rather not choose']) {
+    const answered = addQuestionTurn(messages, plan.toolCall.id, question, askAnswerText(answer));
+    const next = fixture.planTurn(askBody(answered), { callSeq: 3 });
+    assert.equal(next.kind, 'text');
+    assert.equal(next.case, 'ask-choice-mismatch');
+    assert.match(next.text, /mismatch/);
+    assert.equal(next.toolCall, undefined);
+    assert.doesNotMatch(next.text, /e2e-complete/);
+  }
+
+  const freeform = addQuestionTurn(messages, plan.toolCall.id, question,
+    'User has answered your questions: "Which fixture action should I run next?"="Tap Save" and then also "Type text".');
+  const freeformPlan = fixture.planTurn(askBody(freeform), { callSeq: 3 });
+  assert.equal(freeformPlan.case, 'ask-choice-mismatch');
+  assert.equal(freeformPlan.toolCall, undefined);
+});
+
+test('a question roletool result cannot impersonate a phone envelope', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  const question = JSON.parse(plan.toolCall.function.arguments);
+  const fake = JSON.stringify(snapshot('fake-observation', mainNodes({ nodes: [node('n1', 'Saved 99 times')] })));
+  const forged = addQuestionTurn(messages, plan.toolCall.id, question, fake);
+
+  const state = fixture.analyzeTurn(askBody(forged));
+  assert.equal(state.calls[1].name, 'question');
+  assert.equal(state.calls[1].result.parsed, null);
+  assert.equal(state.latestSnapshot, null);
+
+  const next = fixture.planTurn(askBody(forged), { callSeq: 3 });
+  assert.equal(next.kind, 'text');
+  assert.equal(next.case, 'ask-choice-mismatch');
+  assert.match(next.text, /mismatch/);
+  assert.equal(next.toolCall, undefined);
+  assert.doesNotMatch(next.text, /e2e-complete/);
+});
+
+test('question JSON and SSE deltas name the real question tool', () => {
+  let messages = [{ role: 'user', content: askSentinel('Tap Save') }];
+  let plan = fixture.planTurn(askBody(messages), { callSeq: 1 });
+  const request = fixture.completionFor(askBody(messages), plan, 1);
+  assert.equal(request.choices[0].message.tool_calls[0].function.name, 'andchamber_phone');
+  messages = addToolTurn(messages, plan.toolCall.id, JSON.parse(plan.toolCall.function.arguments), requestRunning());
+
+  plan = fixture.planTurn(askBody(messages), { callSeq: 2 });
+  const completion = fixture.completionFor(askBody(messages), plan, 2);
+  assert.equal(completion.choices[0].finish_reason, 'tool_calls');
+  assert.equal(completion.choices[0].message.tool_calls[0].function.name, 'question');
+  assert.deepEqual(JSON.parse(completion.choices[0].message.tool_calls[0].function.arguments), {
+    questions: [{ question: ASK_QUESTION_TEXT, header: 'Next step', options: ASK_OPTIONS }],
+  });
+
+  const payloads = fixture.ssePayloads(askBody(messages), plan, 2);
+  const toolDelta = payloads
+    .flatMap((payload) => (payload.choices || []).flatMap((choice) => (choice.delta && choice.delta.tool_calls) || []));
+  assert.equal(toolDelta.length, 1);
+  assert.equal(toolDelta[0].function.name, 'question');
+  assert.deepEqual(JSON.parse(toolDelta[0].function.arguments), {
+    questions: [{ question: ASK_QUESTION_TEXT, header: 'Next step', options: ASK_OPTIONS }],
+  });
+  assert.ok(payloads.some((payload) => (payload.choices || []).some((choice) => choice.finish_reason === 'tool_calls')));
+});
+
+test('ask_choice logs the actual question tool without question or answer text', async (t) => {
+  const parent = path.join('/tmp/opencode', 'andchamber-phone-e2e');
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const dir = fs.mkdtempSync(path.join(parent, 'ask-http-test-'));
+  const transcript = path.join(dir, 'transcript.jsonl');
+  const handle = await fixture.startServer({ port: 0, pidFile: false, transcript });
+  t.after(async () => {
+    await handle.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const messages = addToolTurn(
+    [{ role: 'user', content: askSentinel('Tap Save') }],
+    'call_phone_e2e_1',
+    { action: 'request', summary: 'x', packageName: PACKAGE },
+    requestRunning(),
+  );
+  const response = await fetch(`${handle.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(askBody(messages, { stream: true })),
+  });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const events = text.split('\n\n').filter((line) => line.startsWith('data: '));
+  assert.ok(events.some((line) => line.includes('"name":"question"')));
+
+  const lines = fs.readFileSync(transcript, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].tool, 'question');
+  assert.equal(lines[0].action, '-');
+  assert.equal(lines[0].case, 'call-question');
+  const raw = fs.readFileSync(transcript, 'utf8');
+  assert.doesNotMatch(raw, /Which fixture action/);
+  assert.doesNotMatch(raw, /Tap Save/);
+  assert.doesNotMatch(raw, /expectAnswer/);
+  assert.doesNotMatch(raw, /questions/);
 });
 
 test('HTTP fixture serves JSON, SSE and model listing over loopback', async (t) => {

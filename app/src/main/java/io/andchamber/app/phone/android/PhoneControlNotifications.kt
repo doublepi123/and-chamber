@@ -186,8 +186,26 @@ internal class PhoneControlNotifications(
     }
 
     /**
-     * Step one: the transient pairing port from the system dialog. No content intent: tapping the body
-     * must not open another Activity, because that would close the system pairing dialog.
+     * Discovery state: the person asked to pair and this app is looking for the one local
+     * `_adb-tls-pairing._tcp` endpoint. It deliberately has no RemoteInput and no port instruction;
+     * the port is not something the person has to read or type on the main path.
+     *
+     * Cancel is the only action. No content intent, so the system pairing dialog stays on top.
+     */
+    fun pairingSearching(generation: Long): Notification {
+        val body = text(R.string.phone_pair_notif_searching_body)
+        return pairingBuilder()
+            .setContentTitle(text(R.string.phone_pair_notif_title))
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setOnlyAlertOnce(true)
+            .addAction(cancelPairingAction(generation))
+            .build()
+    }
+
+    /**
+     * Legacy manual fallback only: the transient pairing port typed by the person. No content intent:
+     * tapping the body must not open another Activity, because that would close the system dialog.
      */
     fun pairingPort(generation: Long): Notification {
         val reply =
@@ -236,13 +254,17 @@ internal class PhoneControlNotifications(
             .addAction(cancelPairingAction(generation))
             .build()
 
-    /** Paired. The connect port still has to be read from the system screen by the person. */
+    /**
+     * Paired, now looking for this phone's own TLS-connect endpoint and trying it at most once.
+     *
+     * The notification deliberately carries no body that would ask for the connect port: the main path
+     * reads that port from discovery. A body key for "connecting to this phone" belongs to the UI/string
+     * lane; until it exists this shows the fixed paired title only.
+     */
     fun paired(): Notification =
         NotificationCompat.Builder(context, CHANNEL_PAIRING)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(text(R.string.phone_pair_notif_paired_title))
-            .setContentText(text(R.string.phone_pair_notif_paired_body))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text(R.string.phone_pair_notif_paired_body)))
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)

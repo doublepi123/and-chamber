@@ -1,14 +1,19 @@
 package io.andchamber.app.phone.android
 
 /**
- * The in-memory draft of one notification-based pairing attempt.
+ * The in-memory draft of one explicit pairing attempt.
  *
- * Two RemoteInput replies arrive in order: the transient pairing port first, then the six-digit code.
- * Nothing is persisted: no port, no code, no host. The code is handed to the driver as a `CharArray`
- * that the caller clears, and it never appears in `toString`.
+ * Main path: [begin] starts at [Stage.SEARCHING]. A local `_adb-tls-pairing._tcp` endpoint arrives from
+ * bounded discovery and [acceptEndpoint] moves the draft to [Stage.AWAITING_CODE]; the notification
+ * then asks only for the six-digit code. The person still types that code: this class never reads a
+ * system property, host ADB state or a desktop key, and it never persists a port or code.
+ *
+ * Legacy/manual fallback: [beginManual] starts at [Stage.AWAITING_PORT] and keeps the old typed-port
+ * reply. Nothing on the main path can reach that stage by default.
  *
  * [generation] makes stale notification replies harmless: a reply for an older generation is refused
  * instead of starting (or consuming) a newer attempt, and [ttlMs] clears a draft the person abandoned.
+ * Losing the discovered endpoint sends the draft back to [Stage.SEARCHING], which closes the code gate.
  * Cancelling only drops this draft; it never claims that the device's system pairing window, or any
  * authorization it granted, was revoked.
  */
@@ -16,7 +21,7 @@ internal class PhonePairingSession(
     private val clock: () -> Long,
     private val ttlMs: Long = DEFAULT_TTL_MS,
 ) {
-    enum class Stage { AWAITING_PORT, AWAITING_CODE, PAIRING }
+    enum class Stage { SEARCHING, AWAITING_PORT, AWAITING_CODE, PAIRING }
 
     data class Draft(
         val generation: Long,
@@ -37,6 +42,19 @@ internal class PhonePairingSession(
         data object InvalidPort : PortResult
     }
 
+    sealed interface EndpointResult {
+        data class Accepted(val draft: Draft) : EndpointResult
+
+        data object Stale : EndpointResult
+
+        data object Expired : EndpointResult
+
+        data object InvalidPort : EndpointResult
+
+        /** This draft is not searching for an endpoint (manual fallback or code/busy stage). */
+        data object NotSearching : EndpointResult
+    }
+
     sealed interface CodeResult {
         /** The one-shot code to pass to the driver. The receiver must clear [code] afterwards. */
         class Ready(val draft: Draft, val code: CharArray) : CodeResult
@@ -47,22 +65,32 @@ internal class PhonePairingSession(
 
         data object InvalidCode : CodeResult
 
-        /** The port has not been entered yet, or a pairing call is already running. */
+        /** No endpoint has arrived yet, or a pairing call is already running. */
         data object NotReady : CodeResult
     }
 
     private var generation = 0L
     private var draft: Draft? = null
 
+    /** Main path: no port is expected; discovery must supply the local endpoint. */
     @Synchronized
-    fun begin(host: String): Draft {
+    fun begin(host: String): Draft = beginAt(host, Stage.SEARCHING)
+
+    /** Legacy/manual fallback: the person types the pairing port. */
+    @Synchronized
+    fun beginManual(host: String): Draft = beginAt(host, Stage.AWAITING_PORT)
+
+    private fun beginAt(
+        host: String,
+        stage: Stage,
+    ): Draft {
         val now = clock()
         generation += 1
         val next =
             Draft(
                 generation = generation,
                 host = host,
-                stage = Stage.AWAITING_PORT,
+                stage = stage,
                 createdAtMs = now,
                 updatedAtMs = now,
                 pairingPort = null,
@@ -74,6 +102,47 @@ internal class PhonePairingSession(
     /** The live draft, or null once expired. Does not resurrect an expired attempt. */
     @Synchronized
     fun current(): Draft? = liveDraft(clock())
+
+    /**
+     * Takes the single current local endpoint from bounded discovery.
+     *
+     * Only [Stage.SEARCHING] accepts it. A later endpoint for an attempt already waiting for the code
+     * must first be invalidated through [endpointLost], so a second candidate can never overwrite the
+     * configured port silently.
+     */
+    @Synchronized
+    fun acceptEndpoint(
+        generation: Long,
+        host: String,
+        port: Int,
+    ): EndpointResult {
+        val now = clock()
+        val live = liveDraft(now)
+        if (live == null) return EndpointResult.Expired
+        if (live.generation != generation) return EndpointResult.Stale
+        if (live.stage != Stage.SEARCHING) return EndpointResult.NotSearching
+        if (port !in 1..65_535) return EndpointResult.InvalidPort
+        val next =
+            live.copy(
+                host = host,
+                stage = Stage.AWAITING_CODE,
+                pairingPort = port,
+                updatedAtMs = now,
+            )
+        draft = next
+        return EndpointResult.Accepted(next)
+    }
+
+    /** The discovered endpoint or its service advertisement went away: close the code gate. */
+    @Synchronized
+    fun endpointLost(generation: Long): Boolean {
+        val now = clock()
+        val live = liveDraft(now) ?: return false
+        if (live.generation != generation) return false
+        if (live.stage != Stage.AWAITING_CODE) return false
+        draft = live.copy(stage = Stage.SEARCHING, pairingPort = null, updatedAtMs = now)
+        return true
+    }
 
     @Synchronized
     fun acceptPort(
@@ -106,12 +175,22 @@ internal class PhonePairingSession(
         return CodeResult.Ready(live.copy(stage = Stage.PAIRING, updatedAtMs = now), code)
     }
 
-    /** Puts the draft back to the port step after a failed exchange, keeping the generation. */
+    /** Puts a manual draft back to the typed-port step after a failed exchange. */
     @Synchronized
     fun retryPort(generation: Long): Draft? {
         val live = liveDraft(clock()) ?: return null
         if (live.generation != generation) return null
         val next = live.copy(stage = Stage.AWAITING_PORT, pairingPort = null, updatedAtMs = clock())
+        draft = next
+        return next
+    }
+
+    /** Native retry of the discovery path; a new endpoint must arrive again. */
+    @Synchronized
+    fun retrySearch(generation: Long): Draft? {
+        val live = liveDraft(clock()) ?: return null
+        if (live.generation != generation) return null
+        val next = live.copy(stage = Stage.SEARCHING, pairingPort = null, updatedAtMs = clock())
         draft = next
         return next
     }

@@ -45,6 +45,34 @@ Native reconfirmation makes tool control available; fixture continuation prompts
 driven by the harness. These results do not establish a real model's autonomous planning, waiting,
 sensitive-page recognition or continuation strategy.
 
+## Chat question and plain-notice follow-up (API 35 / x86_64, this round)
+
+These are separate API 35 / x86_64 follow-up runs, made after the earlier overlay base flow. They
+used the real builtin-question path, a real form reply and the production overlay; model decisions
+still came from the deterministic fixture. The final two runs used a build with no fixed-stage/HTTP
+probe logging. Raw screenshots and traces remain outside this repository.
+
+| Claim | Evidence |
+|---|---|
+| Builtin question is visible in full | A real OpenCode builtin question produced a pending form with one `q0` string field (`custom:true`) and two options. A screenshot observer confirmed the full question text, both options and the actual Send control; raw screenshots are not stored here. |
+| An unknown first reply is read-only | The first send returned `Unknown`; the cause was not established. The overlay showed a read-only `Unknown` state with refresh/open-chat and did not automatically POST the form reply again. |
+| Expanded panel is correctly excluded | A later fresh form returned HTTP 204, but the panel was still expanded over the fixture's Save button. The driver refused the target tap with `TARGET_FORBIDDEN`. That is the intended own-overlay exclusion, not a target or fixture failure. |
+| A user Send collapses before the reply completes | After the fix, a real user Send enters `Sending`; the same Main callback collapses the panel immediately, while the IO pending check and single POST continue. It does not wait for HTTP 204 to collapse. There is no model-triggered collapse action. |
+| Post-fix question loop completes twice | Two final no-diagnostic builds completed: overlay selects **Tap Save** + **Send** → HTTP accepted → the same model turn performs `status`/`snapshot`/`tap`/readback → fixture verification passes; the independent target witness reports `Saved` once. No extra user prompt or manual form-reply substitute was used. |
+| Only the same answer identity may reopen | Focused JVM/regression checks cover the decision: if the final state is `Unknown` / `Refused` / `Superseded` / `Blocked` and the task/epoch/launch plus `formId`/`generation` are unchanged, the panel reopens read-only so the failure is not silent. A new task/epoch/launch or changed answer identity does not reopen the old panel; `Accepted` stays collapsed. This boundary was not separately forced in the two device runs. |
+| Plain notices are shown independently | Under the **From the chat** section, a real task notice displayed the title **Build is ready** and body **Phone completed the task**. It is separate from the question identity; permission events keep their original notification path. No notice is written to progress, tool status or logs. |
+| Accepted is terminal for this submission | After `Accepted`, refresh did not show a false `Unsupported` message and the overlay could not send the same question again. |
+| Duplicate protection is bounded | The submit tombstone is keyed by launch + session + form id, holds no answer, is capped at 64 entries and never evicts. A full table shows `Blocked` read-only rather than allowing a duplicate; a new form id or launch may submit while capacity remains. A pending-read failure before POST is not tombstoned and may be re-read. This boundary is covered by focused JVM tests; it was not a 65-form device stress run. |
+
+The `Unknown` and `TARGET_FORBIDDEN` observations above are historical findings before the final
+collapse fix. They are not the successful post-fix runs and must not be counted as a pass for the
+overlay-covered target. The final evidence is the two no-diagnostic question loops.
+
+The native prompt/notice data is mapped field-for-field to the UI model: `formId` and `generation`
+are preserved unchanged, the question/notice text stays bounded, and all prompt delivery states and
+notice kinds use exhaustive `when` branches rather than runtime string lookup. A future native state
+therefore requires a compile-time mapping update.
+
 ## Safety probe and regression checks
 
 A separate real `TYPE_APPLICATION_OVERLAY` probe first established the platform mechanics:
@@ -83,12 +111,16 @@ Production regressions retain these boundaries:
 
 ## Final automated checks
 
-- 1,741 JVM tests passed, with no failures or skips.
-- Node: 335 passed and one existing stock-ChatContainer fixture skipped; Python: 72 passed.
-- Native device checks: 13 phone wiring, four overlay wiring and three entry/localization/large-font
-  smoke tests passed. These metadata/smoke checks do not replace the real task loops above.
+- JVM: 1,947 tests, with no failures, errors or skips.
+- Node: 359 tests total: 358 passed and one existing stock-ChatContainer fixture skipped; no failures.
+- Python: 72 tests passed.
+- A later wording-only cleanup passed all 12 `PhoneStringsTest` cases and a debug APK rebuild.
 - `lintDebug`, debug and AndroidTest packaging passed; lint retains warnings/information, not a
-  zero-warning claim. The isolated debug APK passed signature verification.
+  zero-warning claim.
+- No new device instrumentation was executed in this round. The earlier device smoke result
+  (20/20 in the earlier run) remains historical base-flow evidence only; it is not a new test result
+  and does not cover the question/notice or permanent-scope follow-ups. The new evidence is the
+  API 35 / x86_64 production overlay run above.
 - No release version, tag or publication was created by this work.
 
 ## Reproduction
@@ -97,6 +129,20 @@ Use [the offline fixture instructions](phone-e2e-fixtures.md), an explicitly sel
 independent `andchamber.testApplicationId`. Check authentication enforcement before using pairing
 success as evidence. Use the normal native controls for permission/demo/grant/handoff; do not replace
 them with a fake controller or preauthorized host adb commands.
+
+For the question follow-up, use the real builtin-question fixture with the two-option form. Confirm
+the full question text, both options and the Send control on the production overlay; select one
+option and press Send. Verify the panel collapses immediately after the real user Send, the form
+reply is accepted, the same model turn continues through `status`/`snapshot`/`tap`/readback, and the
+independent target witness shows `Saved` exactly once. Do not inject an extra user prompt or send a
+form reply by hand. The `Unknown`/`TARGET_FORBIDDEN` observations above are historical; the post-fix
+evidence is the two no-diagnostic runs. Use the focused JVM tests for the bounded tombstone and
+same-identity reopen boundaries rather than fabricating a device failure.
+
+For the plain-notice check, deliver the ordinary **Ready**, **Goal** or **Error** notice for the
+current task session and confirm it appears independently of the question. A permission event must
+continue through its original notification path, not as a plain notice, and must not call a
+permission reply from the overlay.
 
 Do not run native instrumentation or a UiAutomation inspector concurrently with a model/driver
 operation: the runner may terminate its target, and UiAutomation can compete with the driver's real
@@ -114,3 +160,9 @@ Unreliable states fail closed. Physical arm64/OEM behavior, foldables, multi-win
 model reasoning are not established by this emulator evidence. Accessibility semantics/actions can
 be inspected without claiming that every spoken TalkBack interaction was exercised. Unicode,
 password entry, automatic submission and malicious same-UID guest isolation remain out of scope.
+
+The question, plain-notice and permanent-scope follow-ups are API 35 / x86_64 only. No new API 37,
+arm64, tablet, OEM, TalkBack or real-model-reasoning evidence was produced for them. The earlier
+API 37 tablet base flow in [the phone-control verification](testing-phone-control.md) is retained as
+historical base-flow evidence and must not be cited as a pass for these new features. No active-lease
+permission revocation was exercised in this round, and no claim is made for untested negative cases.

@@ -23,11 +23,13 @@ class PhoneOverlayDriverSurfaceTest {
     }
 
     @Test
-    fun `a different grant owner is stale immediately`() {
+    fun `a different display owner waits while the live epoch still belongs to this start`() {
         assertEquals(
-            OverlayDriverSurfaceGate.STALE,
+            OverlayDriverSurfaceGate.WAITING,
             gate(ownerKey = "grant-99"),
         )
+        assertEquals(OverlayDriverSurfaceGate.WAITING, gate(ownerKey = "grant-5"))
+        assertEquals(OverlayDriverSurfaceGate.READY, gate(ownerKey = "grant-7"))
     }
 
     @Test
@@ -40,6 +42,7 @@ class PhoneOverlayDriverSurfaceTest {
             OverlayDriverSurfaceGate.STALE,
             gate(liveEpoch = null),
         )
+        assertEquals(OverlayDriverSurfaceGate.STALE, gate(liveEpoch = 8, ownerKey = "grant-5"))
     }
 
     @Test
