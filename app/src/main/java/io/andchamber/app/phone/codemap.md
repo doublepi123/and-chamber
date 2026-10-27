@@ -17,11 +17,18 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
 - `core/`: Android-free contracts, admission guard, single-operation controller, bounded request
   records, observation generations, structured delivery/unknown results, monotonic leases, the single
   `PhoneTimeLimits.PERMANENT` sentinel, standing block/grant/resume primitives and target policy.
+  The controller starts each driver call from the fresh remaining plan deadline (driver margin ≤500 ms
+  is reporting-only), and on `READ_TIMEOUT` publishes the logical disconnect/revoke in the same call,
+  keeps the first error, preserves unknown, and fences the revoke to the planned connection owner.
 - `standing/`: native-only standing scope, admission policy, refusal/start/open-app result types and
   the `PhoneTaskStarter` port. Permanent window/per-task values remain configuration and are still
   bounded by a finite scope end; the model/tool surface cannot construct a scope or grant itself.
 - `adb/`: local-host policy, pairing receipts, fixed command schema, bounded XML/window parsing,
-  window/content witnesses, native device transport and driver. No arbitrary shell tool surface.
+  window/content witnesses, native device transport and driver. Fixed typed read failures:
+  `AdbDeviceFailure.HIERARCHY_NOT_IDLE` for the whole-trim fixed idle sentence,
+  `AdbWindowStateFailure.NOT_READY` only for a complete null `mCurrentFocus`/`mFocusedApp` field line
+  (mapped to `WINDOW_CHANGED`), `AdbDeviceFailure.READ_TIMEOUT` for an abandoned read-service
+  open/read, and the monotonic read deadline gate. No arbitrary shell tool surface.
 - `tool/`: strict versioned tool schema, authenticated loopback server, per-launch claims/cancel
   tombstones, session-label routing, direct `request`, preauthorized `apps` and same-target
   `open_app`, plus permanent-lease status without a countdown. The old native pending-proposal store
@@ -31,8 +38,9 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   service, notification pairing replies, target catalogue/verdicts, bounded auto-port discovery with
   resolve tokens and loopback bind validation, process/epoch intent identities, the validating
   notification Return Activity, standing config persistence (finite or permanent sentinel)/mapping,
-  the fail-closed standing pause projection and fresh-gated person resume coordinator, the lazy tool
-  starter adapter and the one-shot continuation sender.
+  the fail-closed standing pause projection and fresh-gated person resume coordinator, the shared
+  startup/continuation observation loop (one 15 s budget, only explicit window transitions retried,
+  first typed failure retained), the lazy tool starter adapter and the one-shot continuation sender.
 - `overlay/progress/`: bounded task/event store and native event ports. Task identity is stable across
   grant epochs; model narration stays unverified. Handoff/end require native stop receipts.
 - `overlay/safety/`: dynamic mode gate, real WindowManager witnesses, geometry-generation policy and
@@ -64,6 +72,14 @@ a real `Observe` of that foreground target before replying `Started(RUNNING)`. F
 exactly the epoch/task. `apps` lists only preauthorized labels/packages, never the installed
 catalogue; `open_app` accepts only the live task's same session/target and proves the foreground
 observation.
+
+That start/continuation observation uses one shared budget of at most 15 seconds, including the
+overlay wait and the real remaining time; it retries only explicit window/geometry/target
+transitions. A busy hierarchy is `HIERARCHY_NOT_IDLE`, and a read-service watchdog expiry is
+`READ_TIMEOUT`; the latter publishes the logical disconnect/revoke in the same call and never claims
+the physical close. A complete official `mCurrentFocus=null`/`mFocusedApp=null` line is `NOT_READY`
+and maps to `WINDOW_CHANGED` inside the same budget; malformed/truncated/oversized/unknown output
+stays fail-closed.
 
 Explicit pairing starts `PhoneDiscoveryService` as a bounded foreground service while the system
 settings pages are open. It searches official `_adb-tls-pairing._tcp` (query without a trailing dot,
@@ -161,3 +177,13 @@ handoff/continuation, capture and consecutive task ownership; it does not cover 
 Broad OEM behavior, TalkBack, API 37 new-feature behaviour and real-model reasoning quality are not
 established by that evidence. No new device instrumentation was executed for the paused-recovery
 follow-up; its regression used the synthetic fixture.
+
+A later API 35/x86_64 independent-App follow-up covered static idle, bounded busy (6 s), sustained
+busy (30 s) and a forced read fault: the normal groups started, tapped and read back with `Save`
+exactly once and the connection connected; sustained busy returned `HIERARCHY_NOT_IDLE` /
+`OBSERVATION` with no grant/task and the connection connected after one terminal attempt; the forced
+fault returned `READ_TIMEOUT` / `OBSERVATION` with a logical disconnect and no grant/task/`Save`
+change. These are API 35 emulator results with the deterministic protocol fixture, not
+tablet/physical-device/real-model/OEM evidence. The fault host was an isolated emulator-only
+negative, not port-discovery or real-device cause evidence. Full-suite totals are owned by the
+separate full-suite validation and are not restated here.

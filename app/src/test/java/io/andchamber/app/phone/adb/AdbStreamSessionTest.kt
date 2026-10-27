@@ -130,6 +130,60 @@ class AdbStreamSessionTest {
     }
 
     @Test
+    fun readOnlyWatchdogExpiryIsReadTimeoutNotDeadline() {
+        val link = FakeLink(aliveState = true)
+        val stream = FakeStream(emptyList(), link = link)
+        val failure = assertThrows(AdbDeviceException::class.java) {
+            AdbStreamSession.readAll(
+                link = link,
+                stream = stream,
+                maxBytes = 64,
+                expired = { true },
+                afterWrite = false,
+                expiredFailure = AdbDeviceFailure.READ_TIMEOUT,
+            )
+        }
+        assertEquals(AdbDeviceFailure.READ_TIMEOUT, failure.failure)
+        assertTrue(!failure.afterWrite)
+    }
+
+    @Test
+    fun aRealLinkLossIsNotReportedAsReadTimeout() {
+        val link = FakeLink(aliveState = true)
+        val stream = FakeStream(
+            chunks = listOf("abc".toByteArray()),
+            link = link,
+            onEnd = { link.aliveState = false },
+        )
+        val failure = assertThrows(AdbDeviceException::class.java) {
+            AdbStreamSession.readAll(
+                link = link,
+                stream = stream,
+                maxBytes = 64,
+                expired = { false },
+                afterWrite = false,
+                expiredFailure = AdbDeviceFailure.READ_TIMEOUT,
+            )
+        }
+        assertEquals(AdbDeviceFailure.OUTCOME_UNKNOWN, failure.failure)
+        assertTrue(!failure.afterWrite)
+    }
+
+    @Test
+    fun aPartialReadThatNeverCompletedIsNotReturned() {
+        val link = FakeLink(aliveState = true)
+        val stream = FakeStream(
+            chunks = listOf("abc".toByteArray()),
+            link = link,
+            onEnd = { link.aliveState = false },
+        )
+        val failure = assertThrows(AdbDeviceException::class.java) {
+            AdbStreamSession.readAll(link, stream, 64, { false }, afterWrite = false)
+        }
+        assertEquals(AdbDeviceFailure.OUTCOME_UNKNOWN, failure.failure)
+    }
+
+    @Test
     fun interruptedReadIsCancelled() {
         val link = FakeLink(aliveState = true)
         val stream = FakeStream(

@@ -227,6 +227,13 @@ enum class PhoneDriverFailure {
     TIMEOUT,
     CANCELLED,
     OUTCOME_UNKNOWN,
+    /** The read-only hierarchy service reported the fixed AOSP idle-state error, not XML. */
+    HIERARCHY_NOT_IDLE,
+    /**
+     * The read-only ADB service transaction hit its watchdog (open or read). The exact connection
+     * is abandoned and no longer usable for control.
+     */
+    READ_TIMEOUT,
     DRIVER,
 }
 

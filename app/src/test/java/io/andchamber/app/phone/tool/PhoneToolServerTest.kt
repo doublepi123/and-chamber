@@ -3,6 +3,7 @@ package io.andchamber.app.phone.tool
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
+import io.andchamber.app.phone.core.PhoneErrorCode
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.overlay.progress.PhoneMutationDelivery
@@ -15,6 +16,8 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventError
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
 import kotlinx.coroutines.runBlocking
@@ -468,6 +471,77 @@ class PhoneToolServerTest {
             assertTrue(blocked.ok())
             assertEquals("true", blocked.data()["standingBlocked"].toString())
             assertEquals("TAKEOVER", blocked.data()["standingBlockReason"]!!.toString().trim('"'))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a typed native start error and the fixed stage pass through instead of generic START_FAILED`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            val summary = "Order 4111-secret for the person"
+            // The first cause from the native start (for example HIERARCHY_NOT_IDLE or
+            // READ_TIMEOUT on the driver lane) must survive: START_FAILED is only the refusal kind.
+            fixture.taskStarter.startOverride = PhoneTaskStartResult.Refused(
+                refusal = PhoneStandingRefusal.START_FAILED,
+                stage = PhoneTaskStartFailureStage.OBSERVATION,
+                error = PhoneErrorCode.HIERARCHY_NOT_IDLE,
+            )
+            val typed = httpPost(fixture.port, requestBody(summary, TARGET, callId = "r1"))
+
+            assertEquals(200, typed.status)
+            assertFalse(typed.ok())
+            assertEquals("HIERARCHY_NOT_IDLE", typed.code())
+            assertEquals("OBSERVATION", typed.data()["startFailureStage"]!!.toString().trim('"'))
+            assertEquals("only the fixed stage enum leaves the start failure", setOf("startFailureStage"), typed.data().keys)
+            assertEquals(
+                PhoneToolProtocol.fixedMessage(PhoneToolCodes.HIERARCHY_NOT_IDLE),
+                (typed.json["error"] as JsonObject)["message"]!!.toString().trim('"'),
+            )
+            assertFalse("the generic START_FAILED message replaced the typed error", typed.body.contains("could not be started"))
+            assertFalse("the task summary leaked", typed.body.contains(summary))
+            assertFalse("the target package leaked", typed.body.contains(TARGET))
+
+            // A second typed failure proves the mapping does not special-case one code.
+            fixture.taskStarter.startOverride = PhoneTaskStartResult.Refused(
+                refusal = PhoneStandingRefusal.START_FAILED,
+                stage = PhoneTaskStartFailureStage.TARGET_LAUNCH,
+                error = PhoneErrorCode.READ_TIMEOUT,
+            )
+            val timedOut = httpPost(fixture.port, requestBody(summary, TARGET, callId = "r2"))
+            assertEquals("READ_TIMEOUT", timedOut.code())
+            assertEquals("TARGET_LAUNCH", timedOut.data()["startFailureStage"]!!.toString().trim('"'))
+            assertFalse(timedOut.body.contains(summary))
+
+            // The native start was rolled back, so these failures never leave a live lease behind;
+            // the reported epoch is the unchanged pre-start native epoch.
+            assertEquals(0L, typed.epoch())
+            assertNull(fixture.controller.state.value.grant)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a legacy start refusal without a typed error or stage keeps the existing mapping`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+
+            val legacy = httpPost(fixture.port, requestBody("book", TARGET, callId = "r1"))
+
+            assertEquals(200, legacy.status)
+            assertFalse(legacy.ok())
+            assertEquals("START_FAILED", legacy.code())
+            assertNull("no stage metadata is invented for a legacy refusal", legacy.json["data"])
+            assertEquals(
+                "The phone task could not be started. Nothing is running; ask the person to check the phone before trying again.",
+                (legacy.json["error"] as JsonObject)["message"]!!.toString().trim('"'),
+            )
         } finally {
             fixture.close()
         }

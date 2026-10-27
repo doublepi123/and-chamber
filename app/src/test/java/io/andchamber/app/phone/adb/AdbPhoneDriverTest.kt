@@ -864,6 +864,219 @@ class AdbPhoneDriverTest {
     }
 
     @Test
+    fun hierarchyIdleFailureIsTypedAndReturnsNoSnapshot() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            hierarchyFailure = AdbDeviceException(AdbDeviceFailure.HIERARCHY_NOT_IDLE),
+        )
+        val failure = runCatching { driver(device).observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.HIERARCHY_NOT_IDLE,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun aReadTimeoutOnObserveOrCaptureReturnsNoPartialResult() = runBlocking {
+        val observeDevice = FakeDevice(
+            editableHierarchy.toByteArray(),
+            hierarchyFailure = AdbDeviceException(AdbDeviceFailure.READ_TIMEOUT),
+        )
+        val observeFailure =
+            runCatching { driver(observeDevice).observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.READ_TIMEOUT,
+            (observeFailure as PhoneDriverException).failure,
+        )
+
+        val captureDevice = FakeDevice(
+            editableHierarchy.toByteArray(),
+            captureFailure = AdbDeviceException(AdbDeviceFailure.READ_TIMEOUT),
+        )
+        val captureFailure =
+            runCatching { driver(captureDevice).capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.READ_TIMEOUT,
+            (captureFailure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun anUnconfirmableCaptureIsNotReturnedAsAnImage() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            captureFailure = AdbDeviceException(AdbDeviceFailure.OUTCOME_UNKNOWN),
+        )
+        val failure =
+            runCatching { driver(device).capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.OUTCOME_UNKNOWN,
+            (failure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun aReadTimeoutBeforeTheWriteSendsNothing() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            hierarchyFailure = AdbDeviceException(AdbDeviceFailure.READ_TIMEOUT),
+        )
+        assertNotSent(
+            PhoneDriverFailure.READ_TIMEOUT,
+            driver(device).dispatch(
+                request(PhoneDriverAction.Tap(PhonePoint(150, 150))),
+                5_000,
+            ),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun aReadTimeoutAfterTheFocusTapIsUnknownNotSent() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            hierarchyFailure = AdbDeviceException(AdbDeviceFailure.READ_TIMEOUT),
+            failOnHierarchy = 2,
+        )
+        val receipt = driver(device).dispatch(
+            request(PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150))),
+            5_000,
+        )
+        assertUnknown(PhoneDriverFailure.READ_TIMEOUT, receipt)
+        assertEquals(listOf(AdbInputCommand.Tap(150, 150)), device.injected)
+    }
+
+    @Test
+    fun anInjectDeadlineAfterTheWriteStaysUnknownTimeout() = runBlocking {
+        // Mutation semantics stay unchanged by the new read error: a deadline after a possible
+        // write is still UNKNOWN(DEADLINE), never READ_TIMEOUT.
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            injectFailure = AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite = true),
+        )
+        assertUnknown(
+            PhoneDriverFailure.TIMEOUT,
+            driver(device).dispatch(request(PhoneDriverAction.Back), 5_000),
+        )
+    }
+
+    @Test
+    fun nullFocusDuringStartupIsWindowChangedWithoutASnapshot() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(nullFocusWindowState()),
+        )
+        val failure = runCatching { driver(device).observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun nullFocusedAppDuringStartupIsWindowChangedWithoutASnapshot() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(nullAppWindowState()),
+        )
+        val failure = runCatching { driver(device).observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            (failure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun nullFocusBeforeInjectionIsNotSentWindowChanged() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(nullFocusWindowState()),
+        )
+        assertNotSent(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            driver(device).dispatch(
+                request(PhoneDriverAction.Tap(PhonePoint(150, 150))),
+                5_000,
+            ),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun nullFocusAfterTheFocusTapIsUnknownNotSent() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(
+                defaultWindowState,
+                defaultWindowState,
+                nullFocusWindowState(),
+                nullFocusWindowState(),
+            ),
+        )
+        val receipt = driver(device).dispatch(
+            request(PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150))),
+            5_000,
+        )
+        assertUnknown(PhoneDriverFailure.WINDOW_CHANGED, receipt)
+        assertEquals(listOf(AdbInputCommand.Tap(150, 150)), device.injected)
+    }
+
+    @Test
+    fun nullFocusBeforeOrAfterPixelsAreCopiedDiscardsTheCapture() = runBlocking {
+        val before = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(nullFocusWindowState()),
+        )
+        val beforeFailure =
+            runCatching { driver(before).capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            (beforeFailure as PhoneDriverException).failure,
+        )
+
+        val after = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(
+                defaultWindowState,
+                defaultWindowState,
+                nullFocusWindowState(),
+                nullFocusWindowState(),
+            ),
+        )
+        val afterFailure =
+            runCatching { driver(after).capture(binding, 5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            (afterFailure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun aFreshWindowAfterANullTransitionObservesNormally() = runBlocking {
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStates = listOf(
+                nullFocusWindowState(),
+                defaultWindowState,
+                defaultWindowState,
+                defaultWindowState,
+            ),
+        )
+        val driver = driver(device)
+        val first = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.WINDOW_CHANGED,
+            (first as PhoneDriverException).failure,
+        )
+
+        val snapshot = driver.observe(5_000)
+        assertEquals("com.example.app", snapshot.packageName)
+        assertEquals(binding.windowId, snapshot.windowId)
+    }
+
+    @Test
     fun expiredCallDeadlineNeverInjects() = runBlocking {
         val device = FakeDevice(editableHierarchy.toByteArray())
         var calls = 0
@@ -965,6 +1178,19 @@ class AdbPhoneDriverTest {
           mFocusedApp=ActivityRecord{$appToken u0 $pkg/$activity t16}
     """.trimIndent()
 
+    /** The real API 35 startup transition: focus is explicitly null, the app is still present. */
+    private fun nullFocusWindowState(): String = """
+        WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)
+          mCurrentFocus=null
+          mFocusedApp=ActivityRecord{312191b u0 com.example.app/MainActivity t16}
+    """.trimIndent()
+
+    private fun nullAppWindowState(): String = """
+        WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)
+          mCurrentFocus=Window{7068ee4 u0 com.example.app/MainActivity}
+          mFocusedApp=null
+    """.trimIndent()
+
     private fun assertNotSent(expected: PhoneDriverFailure, receipt: PhoneDispatchReceipt) {
         assertTrue("expected NotSent but was $receipt", receipt is PhoneDispatchReceipt.NotSent)
         assertEquals(expected, (receipt as PhoneDispatchReceipt.NotSent).failure)
@@ -986,6 +1212,9 @@ class AdbPhoneDriverTest {
         private val hierarchies: List<ByteArray>? = null,
         private val windowStateProvider: (() -> String)? = null,
         private val windowDetailProvider: ((String) -> String)? = null,
+        private val hierarchyFailure: AdbDeviceException? = null,
+        private val failOnHierarchy: Int = 0,
+        private val captureFailure: AdbDeviceException? = null,
     ) : AdbDevice {
         override var transportSecurity: AdbTransportSecurity = security
             private set
@@ -1002,8 +1231,13 @@ class AdbPhoneDriverTest {
         override fun isConnected(): Boolean = true
 
         override fun hierarchyXml(deadlineMs: Long, maxBytes: Int): ByteArray {
+            val call = hierarchyCount + 1
+            hierarchyCount = call
+            if (hierarchyFailure != null && (failOnHierarchy == 0 || failOnHierarchy == call)) {
+                throw hierarchyFailure
+            }
             val values = hierarchies ?: listOf(hierarchy)
-            return values[minOf(hierarchyCount++, values.lastIndex)]
+            return values[minOf(call - 1, values.lastIndex)]
         }
 
         override fun windowStateText(deadlineMs: Long, maxBytes: Int): String {
@@ -1026,7 +1260,10 @@ class AdbPhoneDriverTest {
 
         override fun displaySizeText(deadlineMs: Long, maxBytes: Int): String = size
 
-        override fun capturePng(deadlineMs: Long, maxBytes: Int): ByteArray = capture
+        override fun capturePng(deadlineMs: Long, maxBytes: Int): ByteArray {
+            captureFailure?.let { throw it }
+            return capture
+        }
 
         override fun inject(command: AdbInputCommand, deadlineMs: Long): AdbInjection {
             injectionCount += 1

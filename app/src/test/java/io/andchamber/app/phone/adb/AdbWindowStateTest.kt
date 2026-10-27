@@ -47,11 +47,12 @@ class AdbWindowStateTest {
         assertThrows(AdbWindowStateException::class.java) {
             AdbWindowStateParser.parse("mFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t1}")
         }
-        assertThrows(AdbWindowStateException::class.java) {
+        val nullFocus = assertThrows(AdbWindowStateException::class.java) {
             AdbWindowStateParser.parse(
                 "mCurrentFocus=null\nmFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t1}",
             )
         }
+        assertEquals(AdbWindowStateFailure.NOT_READY, nullFocus.failure)
         assertThrows(AdbWindowStateException::class.java) {
             AdbWindowStateParser.parse(
                 "mCurrentFocus=Window{1 u0 not_a_package/Main}\n" +
@@ -61,6 +62,127 @@ class AdbWindowStateTest {
         assertThrows(AdbWindowStateException::class.java) {
             AdbWindowStateParser.parse("")
         }
+    }
+
+    @Test
+    fun aCompleteNullCurrentFocusLineIsTypedNotReady() {
+        val error = assertThrows(AdbWindowStateException::class.java) {
+            AdbWindowStateParser.parse(
+                "  mCurrentFocus=null  \n" +
+                    "mFocusedApp=ActivityRecord{312191b u0 com.example.app/.MainActivity t16}",
+            )
+        }
+        assertEquals(AdbWindowStateFailure.NOT_READY, error.failure)
+    }
+
+    @Test
+    fun aCompleteNullFocusedAppLineIsTypedNotReady() {
+        val error = assertThrows(AdbWindowStateException::class.java) {
+            AdbWindowStateParser.parse(
+                "mCurrentFocus=Window{7068ee4 u0 com.example.app/.MainActivity}\n" +
+                    "mFocusedApp=null\r\n",
+            )
+        }
+        assertEquals(AdbWindowStateFailure.NOT_READY, error.failure)
+    }
+
+    @Test
+    fun bothNullFieldLinesFailClosedAsNotReady() {
+        val error = assertThrows(AdbWindowStateException::class.java) {
+            AdbWindowStateParser.parse("mCurrentFocus=null\nmFocusedApp=null")
+        }
+        assertEquals(AdbWindowStateFailure.NOT_READY, error.failure)
+    }
+
+    @Test
+    fun nullWordsOutsideACompleteFieldLineAreNeverNotReady() {
+        fun failure(text: String): AdbWindowStateFailure =
+            assertThrows(AdbWindowStateException::class.java) {
+                AdbWindowStateParser.parse(text)
+            }.failure
+
+        // A suffix or title text is not the official complete field line.
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure(
+                "mCurrentFocus=null (title)\n" +
+                    "mFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t1}",
+            ),
+        )
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure(
+                "mCurrentFocus=nullx\n" +
+                    "mFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t1}",
+            ),
+        )
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure(
+                "mCurrentFocus=Window{1 u0 com.example.app/.Main}\n" +
+                    "mFocusedApp=null t1",
+            ),
+        )
+
+        // A real field line wins; the same words inside another line are not a null field.
+        val parsed = AdbWindowStateParser.parse(
+            "mCurrentFocus=Window{7068ee4 u0 com.example.app/.MainActivity}\n" +
+                "mFocusedApp=ActivityRecord{312191b u0 com.example.app/.MainActivity t16}\n" +
+                "  mAttrs={... title=mCurrentFocus=null}",
+        )
+        assertEquals("com.example.app", parsed.currentFocusPackage)
+    }
+
+    @Test
+    fun missingTruncatedOrMalformedOutputStaysInvalid() {
+        fun failure(text: String): AdbWindowStateFailure =
+            assertThrows(AdbWindowStateException::class.java) {
+                AdbWindowStateParser.parse(text)
+            }.failure
+
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure("mFocusedApp=ActivityRecord{1 u0 com.example.app/.Main t1}"),
+        )
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure("mCurrentFocus=Window{1 u0 com.example.app/.Main}"),
+        )
+        // A null focus alone is not a complete dump when the focused-app field is missing.
+        assertEquals(AdbWindowStateFailure.INVALID, failure("mCurrentFocus=null\n"))
+        // A malformed present field is INVALID even when the other one is explicitly null.
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure(
+                "mCurrentFocus=null\n" +
+                    "mFocusedApp=ActivityRecord{1 u0 not_a_package/Main t1}",
+            ),
+        )
+        assertEquals(AdbWindowStateFailure.INVALID, failure("garbage output"))
+        assertEquals(
+            AdbWindowStateFailure.INVALID,
+            failure("x".repeat(AdbWindowStateParser.MAX_BYTES + 1)),
+        )
+    }
+
+    @Test
+    fun aStableWindowParsesAfterANullTransition() {
+        assertThrows(AdbWindowStateException::class.java) {
+            AdbWindowStateParser.parse(
+                "mCurrentFocus=null\n" +
+                    "mFocusedApp=ActivityRecord{312191b u0 com.example.app/.MainActivity t16}",
+            )
+        }
+
+        val parsed = AdbWindowStateParser.parse(
+            """
+            mCurrentFocus=Window{7068ee4 u0 com.example.app/.MainActivity}
+            mFocusedApp=ActivityRecord{312191b u0 com.example.app/.MainActivity t16}
+            """.trimIndent(),
+        )
+        assertEquals("7068ee4", parsed.currentFocusToken)
+        assertEquals("com.example.app", parsed.currentFocusPackage)
+        assertEquals("16", parsed.focusedAppTask)
     }
 
     @Test

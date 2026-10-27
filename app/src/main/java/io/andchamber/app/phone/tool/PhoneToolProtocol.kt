@@ -1,6 +1,7 @@
 package io.andchamber.app.phone.tool
 
 import io.andchamber.app.phone.core.PhoneLimits
+import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -344,8 +345,13 @@ object PhoneToolProtocol {
         }.getOrNull()
 
     /**
-     * Every envelope carries `version`, `ok`, `action` and the grant `epoch`. `data` is present on
-     * success only; `error.code`/`error.message` are fixed values on failure.
+     * Every envelope carries `version`, `ok`, `action` and the grant `epoch`.
+     *
+     * On success `data` is the supplied payload (an empty object when none is given). On failure
+     * `data` is absent unless [startFailureStage] is given, in which case it contains exactly
+     * `startFailureStage` as the fixed enum name; the generic [data] argument is ignored for a
+     * failure so no arbitrary success-shaped payload can leak. `error.code`/`error.message` are
+     * fixed values on failure.
      */
     fun envelope(
         action: String,
@@ -353,6 +359,7 @@ object PhoneToolProtocol {
         epoch: Long,
         data: JsonObject? = null,
         code: String? = null,
+        startFailureStage: PhoneTaskStartFailureStage? = null,
     ): String =
         buildJsonObject {
             put("version", VERSION)
@@ -370,6 +377,16 @@ object PhoneToolProtocol {
                         put("message", fixedMessage(error))
                     },
                 )
+                // Typed metadata only: the enum name, never page text, labels, an exception or
+                // typed user content. The ordinary success `data` argument is not consulted here.
+                startFailureStage?.let { stage ->
+                    put(
+                        "data",
+                        buildJsonObject {
+                            put("startFailureStage", stage.name)
+                        },
+                    )
+                }
             }
         }.toString()
 
@@ -406,6 +423,10 @@ object PhoneToolProtocol {
             PhoneToolCodes.NOT_CONNECTED -> "The phone is not connected."
             PhoneToolCodes.DRIVER_UNAVAILABLE -> "Phone control is unavailable on this device."
             PhoneToolCodes.DEADLINE -> "The action timed out."
+            PhoneToolCodes.HIERARCHY_NOT_IDLE ->
+                "The phone did not provide a stable hierarchy or page. This does not mean the connection is down. Do not retry in a loop; wait until the page is stable and ask the person to make a new request."
+            PhoneToolCodes.READ_TIMEOUT ->
+                "Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed."
             PhoneToolCodes.CANCELLED -> "Cancelled."
             PhoneToolCodes.SESSION_BUSY ->
                 "Another chat session owns phone control for the current request or grant. Ask the person to grant phone control again if this session should have it."
@@ -581,6 +602,19 @@ object PhoneToolCodes {
     const val NOT_CONNECTED = "NOT_CONNECTED"
     const val DRIVER_UNAVAILABLE = "DRIVER_UNAVAILABLE"
     const val DEADLINE = "DEADLINE"
+
+    /**
+     * Read-only observation never reached a stable hierarchy/page. This is not a connection-loss
+     * claim and never hints at a retry: the page may still be changing.
+     */
+    const val HIERARCHY_NOT_IDLE = "HIERARCHY_NOT_IDLE"
+
+    /**
+     * The read watchdog gave up on this control connection. It is not a mutation outcome and does
+     * not prove the network dropped or that the physical socket close completed.
+     */
+    const val READ_TIMEOUT = "READ_TIMEOUT"
+
     const val CANCELLED = "CANCELLED"
 
     /** Transport-level refusals. They add no capability and grant nothing. */

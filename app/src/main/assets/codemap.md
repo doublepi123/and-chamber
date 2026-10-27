@@ -15,7 +15,7 @@ Packaged static inputs read at runtime by the app, not by the build:
 - **Schema versioned.** `schemaVersion: 1` lets the Kotlin parser reject unknown layouts.
 - **Shim is a plain CJS file.** `android-shim.cjs` wraps `os.networkInterfaces`. If the original throws (`uv_interface_addresses` gives EACCES under SELinux on Android), it returns a synthetic loopback-only `lo` entry. It is `'use strict'`, has no dependencies, and is deliberately small.
 - **Browser plugin is a zero-dependency ESM package.** `browser-tool/index.js` registers one tool, `andchamber_web`, with one action per call. It reads the endpoint file named by `ANDCHAMBER_BROWSER_TOOL_FILE` on every call and never prints the token.
-- **Phone plugin is also zero-dependency ESM.** It reads `ANDCHAMBER_PHONE_TOOL_FILE` on each call, uses V2 execution-context labels, cannot authorize itself, propagates cancellation and returns capture bytes as a file part rather than duplicating them as text.
+- **Phone plugin is also zero-dependency ESM.** It reads `ANDCHAMBER_PHONE_TOOL_FILE` on each call, uses V2 execution-context labels, cannot authorize itself, propagates cancellation and returns capture bytes as a file part rather than duplicating them as text. It forwards fixed typed refusal names and fixed startup `data.startFailureStage` metadata without interpreting or retrying them; `HIERARCHY_NOT_IDLE` and `READ_TIMEOUT` are fixed refusals, not retry hints, and the plugin never retries by itself.
 - **Assets are not compiled.** Files are read as bytes or text, so changing them needs no Kotlin change, only a rebuild.
 
 ## Flow

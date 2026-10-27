@@ -317,6 +317,11 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /GRANT_ACTIVE/);
   assert.match(tool.description, /UNICODE_UNSUPPORTED/);
   assert.match(tool.description, /granted on the phone|native grant/);
+  assert.match(tool.description, /HIERARCHY_NOT_IDLE/);
+  assert.match(tool.description, /does not mean the connection is down/);
+  assert.match(tool.description, /READ_TIMEOUT/);
+  assert.match(tool.description, /reconnect explicitly/);
+  assert.match(tool.description, /never grant automatic recovery/);
   assert.doesNotMatch(tool.description, /shell|intent|package list/i);
 });
 
@@ -426,6 +431,58 @@ test('a refused request keeps the fixed error envelope', async (t) => {
   assert.equal(result.content.length, 1);
   assert.deepEqual(JSON.parse(result.content[0].text), payload);
   assertNoEndpoint(result, server);
+});
+
+test('a typed start failure keeps its structured error and fixed stage, and HTTP bodies are not echoed', async (t) => {
+  // The first native cause (READ_TIMEOUT here) must reach the model as a structured envelope,
+  // never rewritten as generic START_FAILED and never merged with request content.
+  const payload = {
+    version: 1,
+    ok: false,
+    action: 'phone.request',
+    epoch: 4,
+    error: {
+      code: 'READ_TIMEOUT',
+      message:
+        'Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed.',
+    },
+    data: { startFailureStage: 'OBSERVATION' },
+  };
+  const server = await useServer(t, json(payload));
+  endpointDir(t).write(server);
+
+  const result = await tool.execute(
+    { action: 'request', summary: 'Order 4111-secret', packageName: 'com.example.target' },
+    context(),
+  );
+
+  assert.equal(result.content.length, 1);
+  assert.deepEqual(JSON.parse(result.content[0].text), payload);
+  assert.equal(JSON.parse(result.content[0].text).data.startFailureStage, 'OBSERVATION');
+  assert.equal(result.content[0].text.includes('START_FAILED'), false);
+  assert.equal(JSON.stringify(result).includes('4111-secret'), false);
+  assertNoEndpoint(result, server);
+
+  // A non-2xx body may echo request data: only the status is reported.
+  const echo = await useServer(t, (req, res, record) => {
+    res.writeHead(500, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        ...payload,
+        echoedRequest: record.body,
+      }),
+    );
+  });
+  endpointDir(t).write(echo);
+  const failed = await tool.execute(
+    { action: 'request', summary: 'Order 4111-secret', packageName: 'com.example.target' },
+    context(),
+  );
+  assert.deepEqual(failed, {
+    content: [{ type: 'text', text: 'AndChamber phone request failed (HTTP 500).' }],
+  });
+  assert.equal(JSON.stringify(failed).includes('4111-secret'), false);
+  assertNoEndpoint(failed, echo);
 });
 
 test('returns a refused action envelope as text without the token', async (t) => {

@@ -232,6 +232,17 @@ enum class AdbDeviceFailure {
     LIMIT,
     /** A stream was opened but the transport died before normal CLSE completion. */
     OUTCOME_UNKNOWN,
+    /**
+     * The hierarchy service returned the fixed AOSP `ERROR: could not get idle state.` text instead
+     * of XML. The page was not observed; this is not a connection-loss claim.
+     */
+    HIERARCHY_NOT_IDLE,
+    /**
+     * The read-only ADB service transaction hit its watchdog: the exact connection that served it
+     * has been abandoned and is no longer usable for control. This covers an open that expired
+     * before any byte was read as well as a read that expired mid-stream.
+     */
+    READ_TIMEOUT,
     DRIVER,
 }
 

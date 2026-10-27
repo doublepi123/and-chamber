@@ -47,12 +47,18 @@ internal object AdbStreamSession {
     const val INITIAL_BUFFER_BYTES: Int = 64 * 1024
     const val READ_CHUNK_BYTES: Int = 16 * 1024
 
+    /**
+     * [expiredFailure] is the fixed failure for a watchdog expiry while this read is in flight:
+     * read-only services use [AdbDeviceFailure.READ_TIMEOUT], while an injected command keeps
+     * [AdbDeviceFailure.DEADLINE].
+     */
     fun readAll(
         link: AdbIo,
         stream: AdbIoStream,
         maxBytes: Int,
         expired: () -> Boolean,
         afterWrite: Boolean,
+        expiredFailure: AdbDeviceFailure = AdbDeviceFailure.DEADLINE,
     ): ByteArray {
         if (maxBytes <= 0) throw AdbDeviceException(AdbDeviceFailure.LIMIT, afterWrite)
         val output = ByteArrayOutputStream(minOf(maxBytes, INITIAL_BUFFER_BYTES))
@@ -62,7 +68,7 @@ internal object AdbStreamSession {
                 stream.read(buffer, 0, buffer.size)
             } catch (failure: IOException) {
                 if (expired()) {
-                    throw AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite, failure)
+                    throw AdbDeviceException(expiredFailure, afterWrite, failure)
                 }
                 if (!link.alive) {
                     throw AdbDeviceException(AdbDeviceFailure.OUTCOME_UNKNOWN, afterWrite, failure)
@@ -80,7 +86,7 @@ internal object AdbStreamSession {
             if (read < 0) break
             if (read == 0) {
                 if (expired()) {
-                    throw AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite)
+                    throw AdbDeviceException(expiredFailure, afterWrite)
                 }
                 continue
             }
@@ -89,7 +95,7 @@ internal object AdbStreamSession {
             }
             output.write(buffer, 0, read)
         }
-        if (expired()) throw AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite)
+        if (expired()) throw AdbDeviceException(expiredFailure, afterWrite)
         if (!link.alive) {
             // The stream ended, but the connection is no longer established: completion is not
             // confirmable. Never hand a partial image/snapshot back as if it were complete.

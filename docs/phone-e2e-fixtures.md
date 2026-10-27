@@ -56,6 +56,56 @@ fixture requires the marker in the first snapshot and a non-editable node with t
 in the final snapshot; a tool receipt or a cleared editable label cannot satisfy it. The password
 field has no watcher and is never mirrored.
 
+### Bounded busy window (negative cases, test hook only)
+
+`MainActivity` accepts one optional integer launch extra, `fixture_busy_ms`. When the extra is
+present it is stored in the fixture's own preferences (`fixture_hooks` / `busy_ms`) and clamped to
+0..30000 ms. Every later `onResume` reads that stored value and, for that many milliseconds, sends
+`AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED` from the root view every 100 ms. `onPause` and
+`onDestroy` cancel the schedule, and a zero or expired window does not restart on its own.
+
+The hook exists only so a negative case can make the hierarchy deliberately non-idle. It is not a
+production runtime feature, not root and not an AccessibilityService: it adds no permission, sends
+no input, starts no service and changes no layout, resource id, label or `Save` behaviour.
+
+The default is 0, so a fixture with no stored preference behaves exactly as before. The value is
+persisted, and `adb install -r` with the same signing key keeps app data, so a plain reinstall does
+not necessarily clear a window left by an earlier case. Pass an explicit 0 or clear the fixture data
+first:
+
+```sh
+adb -s <emulator-serial> shell pm clear io.example.phonefixture
+adb -s <emulator-serial> shell am start -n io.example.phonefixture/.MainActivity --ei fixture_busy_ms 0
+```
+
+Negative cases are host-operator steps against the synthetic fixture only. Reset the target before
+each case so a previous intent or stored preference cannot leak into it, arm the bounded window, then
+return to the local chat and run the existing `tap_save` model-fixture case unchanged:
+
+```sh
+adb -s <emulator-serial> shell pm clear io.example.phonefixture
+adb -s <emulator-serial> shell am start -n io.example.phonefixture/.MainActivity --ei fixture_busy_ms 6000
+# same with --ei fixture_busy_ms 30000 for the long window
+# then: return to the local chat and send the existing tap_save case
+```
+
+| window | expected result |
+|---|---|
+| 0 or no extra | static page: `tap_save` completes and the counter reads `Saved 1 times` |
+| 6000 ms | busy for the bounded window only, then a stable hierarchy: `tap_save` completes and the counter reads `Saved 1 times` |
+| 30000 ms | the hierarchy does not idle while the request runs: refusal `HIERARCHY_NOT_IDLE`, `taskPresent` false and `connected` true. The target app may have opened, but no usable control task or input action is confirmed. |
+
+Do not run `uiautomator` or any other accessibility dump while the model driver is still in flight:
+it would take over the same accessibility session. Read the fixture counter only after the request
+has returned, and never re-send the action.
+
+The 30000 ms outcome is a safe refusal with an accurate cause. It is not a network disconnect, and it
+is not evidence that the fixture (or the product) supports continuously animating pages; the fixture
+only refuses a non-idle read instead of acting on a stale hierarchy.
+
+Cleanup is `--ei fixture_busy_ms 0` or `pm clear io.example.phonefixture`. With the default zero the
+fixture still needs no permission and makes no network call.
+
 ### Build (offline, SDK/JDK tools only)
 
 ```sh
@@ -392,7 +442,9 @@ This covers:
   and logs keep only the tool name, not question/answer/arguments;
 - loopback HTTP server, model listing, transcript count/no-prompt logging;
 - offline target APK build, signature verification, manifest package/label/launchable activity,
-  absence of `INTERNET`, `fixture_input_echo` resource presence, and `classes.dex` presence.
+  absence of `INTERNET`, `fixture_input_echo` resource presence, and `classes.dex` presence;
+- the target still compiles with the test-only bounded busy window, which adds no permission, no
+  service and no network call.
 
 In the full acceptance run, Node totals were **349 tests: 348 passed, one existing
 stock-ChatContainer fixture skipped, no failures**. The local commands above cover only the fixture

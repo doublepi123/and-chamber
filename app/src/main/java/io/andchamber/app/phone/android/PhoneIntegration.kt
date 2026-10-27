@@ -40,6 +40,7 @@ import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.phone.standing.PhoneStandingResume
 import io.andchamber.app.phone.standing.PhoneStandingScope
 import io.andchamber.app.phone.standing.PhoneStandingView
+import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStartState
 import io.andchamber.app.notify.OpenSessionLink
@@ -659,93 +660,123 @@ internal class PhoneIntegration(
                     return PhoneTaskStartResult.Refused(result.refusal)
             }
         val epoch = granted.epoch
-        // A new save/revoke during admission invalidates this start; revoke only its exact epoch.
-        if (revision != standingRevision ||
-            screenGeneration != phoneScreenGeneration ||
-            state !== standingState
-        ) {
-            revokeEpochIfCurrent(epoch)
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        // Every failure after the grant is a fixed stage; the exact epoch/key rollback is unchanged
+        // and a newer owner is never overwritten by this start's diagnostic.
+        fun failStart(
+            stage: PhoneTaskStartFailureStage,
+            error: PhoneErrorCode?,
+            key: PhoneTaskKey?,
+        ): PhoneTaskStartResult.Refused {
+            publishStandingStartFailure(epoch, key, stage, error)
+            rollbackStandingStart(epoch, key)
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED, stage, error)
         }
-        // The foreground service builds its notification from this remembered lease. Old
-        // completeGrant did the same before serviceStart; setting it only after the service is up
-        // leaves serviceNotificationFor() null and the service can miss its startForeground deadline.
-        val rememberedLease = PhoneLeaseFacts(target, boundedSummary, actionScopes(state.config.actions))
-        lease = rememberedLease
-        if (!startStopEntry(epoch)) {
-            if (lease === rememberedLease) lease = null
-            rollbackStandingStart(epoch, key = null)
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
-        }
-        // A stop control may have run while the stop entry was being proven.
-        val afterStopEntry = controller.state.value
-        if (revision != standingRevision ||
-            screenGeneration != phoneScreenGeneration ||
-            afterStopEntry.grant?.epoch != epoch ||
-            afterStopEntry.paused ||
-            afterStopEntry.standingBlocked ||
-            afterStopEntry.blocked != null
-        ) {
-            if (lease === rememberedLease) lease = null
-            rollbackStandingStart(epoch, key = null)
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
-        }
-        val binding =
-            runCatching { bindStandingTask(epoch, runtimeId, sessionId, boundedSummary, packageName) }
-                .getOrElse {
-                    if (lease === rememberedLease) lease = null
-                    rollbackStandingStart(epoch, key = null)
-                    return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+        val cancelGuard =
+            PhoneStandingStartCancelGuard(epoch) { createdEpoch, key, rememberedLease ->
+                rollbackStandingStart(createdEpoch, key, expectedLease = rememberedLease)
+            }
+        return cancelGuard.transaction {
+            // A new save/revoke during admission invalidates this start; revoke only its exact epoch.
+            if (revision != standingRevision ||
+                screenGeneration != phoneScreenGeneration ||
+                state !== standingState
+            ) {
+                return@transaction failStart(PhoneTaskStartFailureStage.AUTHORITY, error = null, key = null)
+            }
+            // The foreground service builds its notification from this remembered lease. Old
+            // completeGrant did the same before serviceStart; setting it only after the service is up
+            // leaves serviceNotificationFor() null and the service can miss its startForeground deadline.
+            val rememberedLease = PhoneLeaseFacts(target, boundedSummary, actionScopes(state.config.actions))
+            lease = rememberedLease
+            cancelGuard.rememberLease(rememberedLease)
+            if (!startStopEntry(epoch)) {
+                if (lease === rememberedLease) lease = null
+                return@transaction failStart(PhoneTaskStartFailureStage.STOP_ENTRY, error = null, key = null)
+            }
+            // A stop control may have run while the stop entry was being proven.
+            val afterStopEntry = controller.state.value
+            if (revision != standingRevision ||
+                screenGeneration != phoneScreenGeneration ||
+                afterStopEntry.grant?.epoch != epoch ||
+                afterStopEntry.paused ||
+                afterStopEntry.standingBlocked ||
+                afterStopEntry.blocked != null
+            ) {
+                if (lease === rememberedLease) lease = null
+                return@transaction failStart(PhoneTaskStartFailureStage.AUTHORITY, error = null, key = null)
+            }
+            val binding =
+                runCatching { bindStandingTask(epoch, runtimeId, sessionId, boundedSummary, packageName) }
+                    .getOrElse {
+                        if (lease === rememberedLease) lease = null
+                        return@transaction failStart(PhoneTaskStartFailureStage.TASK_BINDING, error = null, key = null)
+                    }
+            val taskKey = PhoneTaskKey(binding.taskId, binding.runtimeId)
+            cancelGuard.bind(taskKey)
+            taskSession = sessionId
+            retainedTaskEpoch = epoch
+            runCatching {
+                store.setTask(PhoneTaskRecord(targetPackage = packageName, summary = boundedSummary, needsCheck = true))
+                mutateFacts {
+                    it.copy(
+                        lease = lease,
+                        task = store.task(),
+                        halt = null,
+                        request = null,
+                        continuation = PhoneContinuation(),
+                        diagnostics = it.diagnostics.copy(lastError = null),
+                    )
                 }
-        taskSession = sessionId
-        retainedTaskEpoch = epoch
-        runCatching {
-            store.setTask(PhoneTaskRecord(targetPackage = packageName, summary = boundedSummary, needsCheck = true))
-            mutateFacts {
-                it.copy(
-                    lease = lease,
-                    task = store.task(),
-                    halt = null,
-                    request = null,
-                    continuation = PhoneContinuation(),
-                    diagnostics = it.diagnostics.copy(lastError = null),
+            }.onFailure {
+                return@transaction failStart(
+                    PhoneTaskStartFailureStage.TASK_RECORD,
+                    error = null,
+                    key = taskKey,
                 )
             }
-        }.onFailure {
-            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
+            continuationDelivery = PhoneContinueDelivery.Idle
+            val launched = runCatching { launchTarget(packageName) }.getOrDefault(false)
+            if (!launched) {
+                return@transaction failStart(
+                    PhoneTaskStartFailureStage.TARGET_LAUNCH,
+                    error = null,
+                    key = taskKey,
+                )
+            }
+            // Only a real foreground observation of the allowed package may answer Started.
+            when (val observed = observeStandingTarget(epoch, sessionId, packageName)) {
+                is PhoneStandingObserveResult.Failed ->
+                    return@transaction failStart(
+                        observed.stage,
+                        observed.error,
+                        taskKey,
+                    )
+                PhoneStandingObserveResult.Observed -> Unit
+            }
+            // A pause/take-over/save during the observation must not leave a task reported as running.
+            val after = controller.state.value
+            if (revision != standingRevision ||
+                screenGeneration != phoneScreenGeneration ||
+                after.grant?.epoch != epoch ||
+                after.paused ||
+                after.standingBlocked ||
+                after.blocked != null
+            ) {
+                return@transaction failStart(
+                    PhoneTaskStartFailureStage.AUTHORITY,
+                    error = null,
+                    key = taskKey,
+                )
+            }
+            standingBinding = prospectiveBinding
+            standingBindingEverUsed = true
+            refreshStandingProjection()
+            PhoneTaskStartResult.Started(
+                epoch = epoch,
+                key = taskKey,
+                state = PhoneTaskStartState.RUNNING,
+            )
         }
-        continuationDelivery = PhoneContinueDelivery.Idle
-        val launched = runCatching { launchTarget(packageName) }.getOrDefault(false)
-        if (!launched) {
-            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
-        }
-        // Only a real foreground observation of the allowed package may answer Started.
-        if (!observeStandingTarget(epoch, sessionId, packageName)) {
-            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
-        }
-        // A pause/take-over/save during the observation must not leave a task reported as running.
-        val after = controller.state.value
-        if (revision != standingRevision ||
-            screenGeneration != phoneScreenGeneration ||
-            after.grant?.epoch != epoch ||
-            after.paused ||
-            after.standingBlocked ||
-            after.blocked != null
-        ) {
-            rollbackStandingStart(epoch, PhoneTaskKey(binding.taskId, binding.runtimeId))
-            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED)
-        }
-        standingBinding = prospectiveBinding
-        standingBindingEverUsed = true
-        refreshStandingProjection()
-        return PhoneTaskStartResult.Started(
-            epoch = epoch,
-            key = PhoneTaskKey(binding.taskId, binding.runtimeId),
-            state = PhoneTaskStartState.RUNNING,
-        )
     }
 
     /**
@@ -784,7 +815,7 @@ internal class PhoneIntegration(
         }
         // A successful startActivity is not proof. Only a real Observe of this exact epoch/session
         // showing the same package may answer Opened; a pause/stop/newer epoch invalidates it.
-        if (!observeStandingTarget(epoch, sessionId, packageName)) {
+        if (observeStandingTarget(epoch, sessionId, packageName) !is PhoneStandingObserveResult.Observed) {
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
         }
         val after = controller.state.value
@@ -1252,12 +1283,22 @@ internal class PhoneIntegration(
                 clearSendingWhenSuperseded()
             }
         }
+        // Cancellation at either suspension point after the new grant must never leave that grant
+        // behind. fail() already performs the exact-owner continuation rollback and delivery state;
+        // the original cancellation is rethrown unchanged.
+        suspend fun <T> withCancelRollback(block: suspend () -> T): T =
+            try {
+                block()
+            } catch (cancelled: CancellationException) {
+                fail()
+                throw cancelled
+            }
         // The foreground service builds its notification from this lease; it must already be
         // non-null before serviceStart, exactly like the first start path.
         lease = halt.lease
         if (revision != standingRevision ||
             screenGeneration != phoneScreenGeneration ||
-            !startStopEntry(epoch)
+            !withCancelRollback { startStopEntry(epoch) }
         ) {
             fail()
             return
@@ -1295,7 +1336,16 @@ internal class PhoneIntegration(
             return
         }
         val launched = runCatching { launchTarget(target.packageName) }.getOrDefault(false)
-        if (!launched || !observeStandingTarget(epoch, session, target.packageName)) {
+        val observed =
+            if (launched) {
+                withCancelRollback { observeStandingTarget(epoch, session, target.packageName) }
+            } else {
+                PhoneStandingObserveResult.Failed(
+                    stage = PhoneTaskStartFailureStage.TARGET_LAUNCH,
+                    error = null,
+                )
+            }
+        if (!launched || observed !is PhoneStandingObserveResult.Observed) {
             fail()
             return
         }
@@ -1433,7 +1483,13 @@ internal class PhoneIntegration(
             )
 
     private suspend fun startStopEntry(epoch: Long): Boolean =
-        runCatching { serviceStart(epoch) && serviceAwaitReady(epoch) }.getOrDefault(false)
+        try {
+            serviceStart(epoch) && serviceAwaitReady(epoch)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
 
     private fun bindStandingTask(
         epoch: Long,
@@ -1455,22 +1511,56 @@ internal class PhoneIntegration(
         return binding
     }
 
+    /**
+     * The one bounded observation used by a start, an open-app and a continuation.
+     *
+     * A single absolute monotonic deadline of [PhoneLimits.MAX_CALL_MS] is taken before the overlay
+     * wait, so the wait and every retry share the same budget. Only window transitions and a target
+     * that is not foreground yet retry; the first terminal typed error (hierarchy busy, read timeout,
+     * deadline, lost connection, cancellation, security refusal, any other driver failure) stops and
+     * is returned unchanged. A real window/package observation is still required before success.
+     */
     private suspend fun observeStandingTarget(
         epoch: Long,
         sessionId: String,
         packageName: String,
-    ): Boolean {
+    ): PhoneStandingObserveResult {
+        val deadlineElapsedMs = clock() + PhoneLimits.MAX_CALL_MS
         // With the overlay selected, the first real driver read must wait until the current epoch's
         // surface is attached and its real window witness is available. Notification-only or no
-        // coordinator keeps the original path. Wait exactly once, before the bounded observe loop;
-        // the loop below still performs the same real driver/window validation on every attempt.
-        val surfaceReady = PhoneOverlayHolder.current()?.awaitDriverSurface(epoch) ?: true
-        if (!surfaceReady) return false
-        repeat(START_OBSERVE_ATTEMPTS) { attempt ->
-            if (attempt > 0) delay(START_OBSERVE_RETRY_MS)
+        // coordinator keeps the original path. Wait exactly once; its bounded API is unchanged and
+        // the elapsed time is charged to the same deadline below.
+        val surfaceReady =
+            try {
+                PhoneOverlayHolder.current()?.awaitDriverSurface(epoch) ?: true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+        if (!surfaceReady) {
+            return PhoneStandingObserveResult.Failed(
+                stage = PhoneTaskStartFailureStage.OVERLAY,
+                error = if (clock() >= deadlineElapsedMs) PhoneErrorCode.DEADLINE else null,
+            )
+        }
+        return observeStandingWithinBudget(
+            deadlineElapsedMs = deadlineElapsedMs,
+            nowElapsedMs = clock,
+            expectedPackage = packageName,
+        ) { remainingMs ->
             val core = controller.state.value
-            if (core.grant?.epoch != epoch || core.paused || core.standingBlocked || core.blocked != null) {
-                return false
+            val localFailure =
+                when {
+                    core.grant?.epoch != epoch -> PhoneErrorCode.EPOCH_CHANGED
+                    core.paused -> PhoneErrorCode.PAUSED
+                    // A native standing stop cancels this observation; it is never retried.
+                    core.standingBlocked -> PhoneErrorCode.CANCELLED
+                    core.blocked != null -> PhoneErrorCode.OUTCOME_UNKNOWN
+                    else -> null
+                }
+            if (localFailure != null) {
+                return@observeStandingWithinBudget PhoneStandingObserveRead.Failed(localFailure)
             }
             val request =
                 PhoneAgentRequest(
@@ -1479,18 +1569,67 @@ internal class PhoneIntegration(
                     sessionLabel = sessionId,
                     action = PhoneAgentAction.Observe,
                 )
-            val observed =
-                runCatching { controller.execute(request, PhoneLimits.DEFAULT_CALL_MS) }
-                    .getOrNull() as? PhoneCallResult.Observed
-                    ?: return@repeat
-            if (observed.observation.binding.packageName == packageName) return true
+            val call =
+                try {
+                    // The shared remaining budget bounds this controller call; it can never start a
+                    // fresh 15 seconds per attempt.
+                    controller.execute(request, remainingMs.coerceIn(1L, PhoneLimits.MAX_CALL_MS))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    return@observeStandingWithinBudget PhoneStandingObserveRead.Failed(PhoneErrorCode.DRIVER_UNAVAILABLE)
+                }
+            when (call) {
+                is PhoneCallResult.Observed ->
+                    PhoneStandingObserveRead.Observed(call.observation.binding.packageName)
+                is PhoneCallResult.Refused -> call.error.toStandingObserveRead()
+                is PhoneCallResult.Dispatched ->
+                    (call.error ?: PhoneErrorCode.DRIVER_UNAVAILABLE).toStandingObserveRead()
+                is PhoneCallResult.Captured ->
+                    PhoneStandingObserveRead.Failed(PhoneErrorCode.DRIVER_UNAVAILABLE)
+            }
         }
-        return false
+    }
+
+    /**
+     * Fixed-stage diagnostic for a start failure. It is published only while this start still owns
+     * the live epoch or its exact task identity; an old start can never overwrite a newer owner's
+     * details. The token contains only the fixed stage/error name, never page/model text or a raw
+     * exception, and the previous `lastError` is never reused to describe this attempt.
+     */
+    private fun publishStandingStartFailure(
+        epoch: Long,
+        key: PhoneTaskKey?,
+        stage: PhoneTaskStartFailureStage,
+        error: PhoneErrorCode?,
+    ) {
+        val core = controller.state.value
+        val identity = taskIdentity.current()
+        val keyMatches =
+            key != null &&
+                identity != null &&
+                identity.first == key.taskId &&
+                identity.second == key.runtimeId
+        // A different identity already owns the task (or a newer one is about to): never publish
+        // this old attempt's diagnostic over it.
+        if (key != null && identity != null && !keyMatches) return
+        val liveEpoch = core.grant?.epoch
+        val owns =
+            when {
+                liveEpoch != null -> liveEpoch == epoch
+                keyMatches -> true
+                else -> false
+            }
+        if (!owns) return
+        mutateFacts {
+            it.copy(diagnostics = it.diagnostics.copy(lastError = standingStartFailureToken(stage, error)))
+        }
     }
 
     private fun rollbackStandingStart(
         epoch: Long,
         key: PhoneTaskKey?,
+        expectedLease: PhoneLeaseFacts? = null,
     ) {
         val identity = taskIdentity.current()
         val keyMatches = key != null && identity != null && identity.first == key.taskId && identity.second == key.runtimeId
@@ -1511,8 +1650,11 @@ internal class PhoneIntegration(
         }
         revokeEpochIfCurrent(epoch)
         serviceStop()
-        // Facts/identity belong to this start only after its own binding was published.
-        val ownsFacts = keyMatches || retainedBefore == epoch
+        // Facts/identity belong to this start only after its own binding was published. A
+        // cancellation cleanup also refuses to clear a lease that is no longer the one this attempt
+        // remembered.
+        val leaseIsOurs = expectedLease == null || lease === expectedLease
+        val ownsFacts = (keyMatches || retainedBefore == epoch) && leaseIsOurs
         if (ownsFacts) {
             if (keyMatches) {
                 taskNative.onTaskBinding(null)
@@ -1533,6 +1675,9 @@ internal class PhoneIntegration(
                 )
             }
             refreshStandingProjection()
+        } else if (expectedLease != null && lease === expectedLease) {
+            // Cancellation before a task binding: only this attempt's remembered lease exists.
+            lease = null
         }
     }
 
@@ -3588,6 +3733,8 @@ internal class PhoneIntegration(
             PhoneErrorCode.WINDOW_CHANGED, PhoneErrorCode.GEOMETRY_CHANGED,
             PhoneErrorCode.STALE_OBSERVATION, PhoneErrorCode.OBSERVATION_REQUIRED,
             PhoneErrorCode.OUT_OF_BOUNDS, PhoneErrorCode.DRIVER_UNAVAILABLE,
+            // Neither is a connection-result error; this only keeps the exhaustive mapping.
+            PhoneErrorCode.HIERARCHY_NOT_IDLE, PhoneErrorCode.READ_TIMEOUT,
             -> PhoneDeviceProblem.Other
         }
 
@@ -3634,10 +3781,6 @@ internal class PhoneIntegration(
 
         /** A restart must either show a non-ready probe or finish within this bound. */
         private const val RESTART_PROBE_TIMEOUT_MS = 60_000L
-
-        /** Bounded settle window for the target launch before a start is called a failure. */
-        private const val START_OBSERVE_ATTEMPTS = 6
-        private const val START_OBSERVE_RETRY_MS = 500L
 
         internal fun launchDefaultApp(context: Context, packageName: String): Boolean =
             runCatching {

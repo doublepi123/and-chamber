@@ -139,6 +139,53 @@ Pause stops new changes; authorized observation can still help inspect an uncert
 information: these revoke the whole lease, including observation. A model's final sentence is not a
   native control-release acknowledgement; use the native controls, or expiry for a finite lease.
 
+## Observation startup and fixed read failures
+
+A start or continuation observes the target inside one shared call budget: at most 15 seconds,
+including any overlay-surface wait and the real remaining time. The budget is never restarted per
+attempt, and only explicit window/geometry/target transitions are retried. A busy hierarchy, a read
+timeout, a security refusal and every other driver failure stop with their first typed error.
+
+The official `uiautomator dump` command waits with a 1-second quiet window and a 10-second global
+bound, and prints the fixed sentence `ERROR: could not get idle state.` when that bound expires
+([AOSP API 35 `DumpCommand.java`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/cmds/uiautomator/cmds/uiautomator/src/com/android/commands/uiautomator/DumpCommand.java)).
+An earlier 5-second startup observation could therefore exhaust its own watchdog on a busy target;
+that watchdog hard-closes the local read connection, and a later observation reported `NOT_CONNECTED`.
+The current shared 15-second budget reports the same busy page as `HIERARCHY_NOT_IDLE` while the
+connection remains usable. This explains the observed emulator transition; it does not establish a
+real user's field cause or exclude every OEM difference.
+
+- `HIERARCHY_NOT_IDLE` only when the whole trimmed hierarchy output is exactly that fixed sentence.
+  A valid XML page that merely contains the words is still parsed normally, and partial/invalid/
+  unknown output stays a fixed driver failure. The XML parser, node caps and window checks are
+  unchanged.
+- `READ_TIMEOUT` means a read-only ADB service transaction (`open` or `read`) was abandoned because
+  its watchdog expired. The exact connection is no longer usable for control; the core publishes the
+  logical disconnect and revokes in the same call, keeps a first `READ_TIMEOUT`, preserves an
+  already-recorded unknown outcome, and fences the revoke to that exact connection so a newer
+  reconnect survives. It does not claim that a physical socket close has completed.
+- The existing hard watchdog still closes the stream and connection to unblock a blocking read. There
+  is no stream-only keepalive and no extension of the total call bound. The outer bound is the fresh
+  remaining plan deadline; the driver gets a margin of at most 500 ms below it only so its own typed
+  failure can be reported first. That is a reporting opportunity, not a guarantee: if the outer
+  bound wins, the caller gets an ordinary `DEADLINE` and no link claim is invented. A monotonic
+  completion/expiry gate prevents a late watchdog from closing after a genuine pre-deadline finish.
+- A transient window-manager state with a complete official `mCurrentFocus=null` or
+  `mFocusedApp=null` line and no matching window is typed `NOT_READY` and mapped to
+  `WINDOW_CHANGED`; it is retried only inside the shared startup budget. Missing fields, truncated
+  or oversized output, bad packages/activities and unknown formats stay fail-closed. No partial
+  window or target nodes are produced, and capture/mutation still verify the window on both sides: a
+  pre-injection `null` is `NotSent(WINDOW_CHANGED)`, while a failure after a possible touch remains
+  `UNKNOWN` and is never replayed.
+- Mutation semantics are unchanged: an `afterWrite`/touched timeout or read failure remains `UNKNOWN`
+  and is never automatically replayed. Cancel after a grant rolls back exactly that epoch/task and
+  propagates the original cancellation; a newer owner is unaffected. The old scope and person-resume
+  paths are unchanged.
+
+A sustained busy page still does not provide a usable hierarchy for agent operations. The typed
+failure is an honest refusal, not support for operating an animated or continuously changing page,
+and must not be marketed as general UI support.
+
 ## Optional system progress overlay
 
 **Progress over other apps** is a separate, default-off native setting. Notifications remain
@@ -294,3 +341,17 @@ emulator evidence only, not API 37/arm64 tablet evidence. A separate regression 
 confirmed that a stopped task still uses its own **Continue** entry after a new-task `need_user`
 pause: one original fixed wake-up, same-session fixture input and an independent target read-back.
 The new no-task resume does not replace that retained-task path.
+
+A later API 35 / x86_64 independent-App acceptance covered the startup read path in four groups:
+static idle start, bounded busy (6 s), sustained busy (30 s) and a forced read fault. The static and
+bounded-busy groups completed a normal request/tap/read-back with `Save` exactly once and the
+connection still connected. The sustained-busy group returned `HIERARCHY_NOT_IDLE` with
+`startFailureStage=OBSERVATION`, no grant and no task, while the connection stayed connected; it made
+exactly one terminal attempt with no blind retry. The forced read fault returned `READ_TIMEOUT` /
+`OBSERVATION` with the logical connection disconnected, phase `NO_GRANT`, no grant and no task, and
+`Save` unchanged. These are API 35 / x86_64 emulator results with the deterministic protocol fixture,
+not real-model reasoning, API 37/arm64 tablet evidence, a physical-device result or a general OEM
+compatibility claim. The fault host was an isolated emulator-only negative and is not evidence about
+App port discovery or a real device's cause; a real user's field typed failure would still be needed
+to judge that environment. Full-suite totals are owned by the separate full-suite validation and are
+not restated here.

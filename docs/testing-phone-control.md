@@ -59,9 +59,66 @@ device.
 | Existing stopped tasks keep their own path | After the resume, a new task called `need_user` and the native screen showed Paused / Need user. The original **Continue beside the chat…** entry stayed enabled; a real tap of that confirmation sent the original native fixed wake-up exactly once, the same chat session received the fixture input, and an independent read-back observed `standing-resume-check` in the target. The new scope resume did not replace this retained-task path, and no continuation prompt was sent by hand. | Passed in a separate regression on the same lane |
 
 The paused-recovery path adds focused JVM coverage and the API 35 probe above; it does not restate
-full-suite totals, which are owned by the release run. No new device instrumentation was executed in
-this round. The stopped-task **Continue** regression is separate evidence on the same lane and does
-not widen the API 37/arm64 or OEM claims.
+full-suite totals, which are owned by the separate full-suite validation. No new device
+instrumentation was executed in this round. The stopped-task **Continue** regression is separate
+evidence on the same lane and does not widen the API 37/arm64 or OEM claims.
+
+### Startup observation and read-failure follow-up (API 35 / x86_64)
+
+This follow-up used the real App on the covered API 35 / x86_64 emulator with a separate debug
+application identity, the synthetic fixture target and the deterministic local protocol fixture. It
+is API 35 emulator evidence only; it is not API 37/arm64 tablet evidence, a physical-device result,
+real-model reasoning or a general OEM compatibility claim. The fault host for the negative case was
+an isolated emulator-only setup: it is not evidence about App port discovery or a real device's
+cause. No new device instrumentation was executed.
+
+Final follow-up checks passed: 2,035 JVM tests (no failures, errors or skips), 360 Node tests
+(359 passed and one existing skip), 72 Python tests, Android lint and debug/AndroidTest APK packaging.
+Lint retained existing warnings/information.
+
+Mechanism note: the official `uiautomator dump` command calls
+`UiAutomation.waitForIdle(1000, 1000 * 10)` and prints the fixed sentence
+`ERROR: could not get idle state.` when that bound expires
+([AOSP API 35 `DumpCommand.java`](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/cmds/uiautomator/cmds/uiautomator/src/com/android/commands/uiautomator/DumpCommand.java)).
+The earlier 5-second startup observation could exhaust the App's hard read watchdog on a busy target;
+the watchdog closed the local read connection and the next observation reported `NOT_CONNECTED`. A
+temporary fixed-code observation probe (since removed) recorded that transition. The current startup
+observation uses one shared 15-second maximum (overlay wait plus real remaining) and retries only
+explicit window transitions, so the same busy page is reported as `HIERARCHY_NOT_IDLE` with the
+connection still connected. This explains the observed emulator transition; it does not claim a real
+user's field cause or exclude every OEM difference.
+
+| Claim | Evidence | Result |
+|---|---|---|
+| Static idle start | Normal request, tap and independent read-back; `Save` increased exactly once; the status remained connected. | Passed |
+| Bounded busy target (6 s) | The same normal start/tap/read-back completed with `Save` exactly once and connected status. The complete tool scenario took 19.655 s because it also ran the later snapshot/tap/read-back; that is not the observation budget, which remains the shared 15 s. | Passed |
+| Sustained busy target (30 s) | The request returned at 13.27 s with `HIERARCHY_NOT_IDLE` and `data.startFailureStage=OBSERVATION`; no grant and no task, while the connection stayed connected. Exactly one terminal attempt was made; focused loop tests confirm there is no blind retry. | Passed |
+| Forced read fault | `READ_TIMEOUT` / `OBSERVATION`; status `connected=false`, phase `NO_GRANT`, grant count 0, `taskPresent=false`, `Save` unchanged. The dedicated fault rule and its temporary fixed-code logging were removed. | Passed |
+
+The 6-second and 30-second labels describe the busy fixture's behaviour window, not an observation
+budget of 30 s or 19.655 s. A sustained busy page still does not expose a usable hierarchy for agent
+operations, so it remains an honest typed refusal rather than full UI support.
+
+Typed classification and retained behavior:
+
+- The hierarchy idle failure is only the whole trimmed fixed sentence. Valid XML containing the same
+  words is still parsed; partial/invalid/unknown output stays a driver failure, and the XML
+  parser/window checks are unchanged.
+- `mCurrentFocus=null` / `mFocusedApp=null` is `NOT_READY` only for a complete official field line
+  with the matching window missing, and maps to `WINDOW_CHANGED` inside the bounded startup retry.
+  Missing, truncated, oversized, malformed or unknown output remains fail-closed; no partial window
+  or target nodes are used.
+- `READ_TIMEOUT` covers a read-service transaction (`open` or `read`) whose watchdog abandoned the
+  exact connection. The core publishes the logical disconnect/revoke in the same call, keeps the
+  first error, preserves an already-recorded unknown outcome, and fences newer connections. It does
+  not claim the physical close has completed.
+- The hard stream+connection watchdog is retained (no stream-only keepalive, no added total time).
+  The outer bound is the fresh remaining plan deadline; the driver's ≤500 ms margin is a reporting
+  opportunity, not a guarantee, so an outer win can still return `DEADLINE`. A monotonic
+  completion/expiry gate prevents a late finish from disarming an already-expired watchdog.
+- Mutation `afterWrite`/touched `UNKNOWN` and no-replay behavior are unchanged; cancel after a grant
+  rolls back exactly that epoch/task and propagates the original cancellation, leaving a newer owner
+  unaffected. The existing scope and person-resume paths are unchanged.
 
 ## Evidence matrix
 
@@ -141,7 +198,13 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
 - The paused-standing follow-up adds focused JVM coverage for the mapper's six reasons/unknown
   combinations, the resume gate's independent refusals, and the real controller resume clearing the
   standing block plus ordinary pause without a grant or replay. Full-suite totals are not restated
-  here; they belong to the release run.
+  here; they belong to the separate full-suite validation.
+- The startup/read-failure follow-up adds focused JVM coverage for the shared observation loop's
+  retry classification, whole-trim hierarchy idle output, null focus/app typing and fail-closed
+  malformed cases, read-timeout logical disconnect and connection-owner fencing, the fresh-remaining
+  budget with its reporting-only margin, the monotonic completion gate, and unchanged mutation
+  unknown/no-replay. It also adds no new device instrumentation. Full-suite totals are owned by the
+  separate full-suite validation.
 
 ## Important regressions retained
 
@@ -160,6 +223,23 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
   stayed enabled, sent the original fixed wake-up once, the same session produced the fixture input
   and an independent target read-back observed it. A different-runtime binding fails closed rather
   than rebinding.
+- Startup observation has one shared 15-second budget (overlay wait plus real remaining), and only
+  explicit window/geometry/target transitions retry. A busy page returns `HIERARCHY_NOT_IDLE`, not a
+  blind retry loop, and the connection remains usable.
+- A hierarchy dump is `HIERARCHY_NOT_IDLE` only when the whole trimmed output is the fixed AOSP
+  sentence; a valid XML label containing the same words is not misclassified.
+- A null official window field (`mCurrentFocus=null`/`mFocusedApp=null`) is `NOT_READY` only for a
+  complete field line with its window match missing and becomes `WINDOW_CHANGED`; malformed,
+  truncated, oversized or unknown output remains fail-closed and produces no partial window/nodes.
+- `READ_TIMEOUT` is a read-service transaction (`open` or `read`) that abandoned the exact
+  connection. The same call publishes the logical disconnect/revoke and keeps the first error;
+  unknown is preserved, a newer reconnect is fenced, the hard watchdog remains, and no physical
+  close completion is claimed.
+- A late finish cannot disarm an expired watchdog: completion is checked against the monotonic
+  deadline. The driver margin is at most 500 ms and is reporting-only; an outer win can still be
+  `DEADLINE`.
+- An `afterWrite`/touched mutation remains `UNKNOWN` and is never replayed; cancel after a grant
+  rolls back exactly that epoch/task and propagates the original cancellation.
 - LibADB 3.1.1 can wait forever after queued data followed by CLSE. The local reader drains its
   buffer/queue before EOF; the test exercises the shipped SDK's hang and the replacement's success.
 - A failed async driver child must not cancel the HTTP parent instead of returning its structured
@@ -222,6 +302,14 @@ consequential task was performed, and no business-success claim is made.
 The new follow-up is API 35 / x86_64 only. It does not establish API 37/arm64 tablet, OEM,
 TalkBack, real-model reasoning or active-lease permission-revocation behavior. The retained tablet
 section is earlier base-flow evidence, not evidence for the new features.
+
+The startup/read-failure follow-up also used only the covered API 35 / x86_64 emulator and a separate
+debug application identity. The fault host was an isolated emulator-only negative; it is not App
+port discovery evidence and does not identify a real device's or user's cause. A real user's field
+typed failure would still be required to judge that environment. Do not copy private paths, ports,
+UIDs, root rules or screenshot/log content into this repository. A sustained busy page still does not
+provide a usable hierarchy, so the typed refusal must not be described as full UI support. Full-suite
+totals are owned by the separate full-suite validation and are not restated here.
 
 The notification permission/AppOp check began with no lease; the run did not revoke permission
 during an active lease. That distinction matters: the no-lease gate is verified, active-lease

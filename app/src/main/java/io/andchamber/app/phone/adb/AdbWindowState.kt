@@ -7,8 +7,24 @@ import io.andchamber.app.phone.core.PhoneNode
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 
+/** Why a window-manager read could not produce the focused window. Callers must fail closed. */
+enum class AdbWindowStateFailure {
+    /**
+     * A complete official field line is explicitly null during a normal window transition (for
+     * example `mCurrentFocus=null` while `mFocusedApp` is still present). No window evidence exists
+     * to use; the caller may retry only inside its existing bounded startup budget.
+     */
+    NOT_READY,
+    /** Missing, truncated, oversized, malformed or otherwise unreliable output. */
+    INVALID,
+}
+
 /** Unreliable or missing window-manager output. Callers must fail closed. */
-class AdbWindowStateException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class AdbWindowStateException(
+    message: String,
+    cause: Throwable? = null,
+    val failure: AdbWindowStateFailure = AdbWindowStateFailure.INVALID,
+) : Exception(message, cause)
 
 /**
  * The two real window-manager identities the driver can verify from a fixed, read-only command:
@@ -39,40 +55,77 @@ object AdbWindowStateParser {
         """mFocusedApp=ActivityRecord\{([0-9a-fA-F]+)\s+u(\d+)\s+([^\s/}]+)/([^\s}]+)\s+t(\d+)\}""",
     )
     private val PACKAGE = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private const val CURRENT_FOCUS_FIELD = "mCurrentFocus"
+    private const val FOCUSED_APP_FIELD = "mFocusedApp"
 
     fun parse(text: String): AdbFocusedWindow {
         if (text.isEmpty() || text.length > MAX_BYTES) {
             throw AdbWindowStateException("window state output is missing or too large")
         }
         val focus = CURRENT_FOCUS.find(text)
-            ?: throw AdbWindowStateException("mCurrentFocus is unavailable")
         val app = FOCUSED_APP.find(text)
-            ?: throw AdbWindowStateException("mFocusedApp is unavailable")
 
-        val focusPackage = focus.groupValues[3]
-        val focusActivity = focus.groupValues[4]
-        val appPackage = app.groupValues[3]
-        val appActivity = app.groupValues[4]
-        if (!PACKAGE.matches(focusPackage) || !PACKAGE.matches(appPackage)) {
-            throw AdbWindowStateException("window state has an invalid package")
+        // A present match is still validated first: malformed data is INVALID even when the other
+        // official field is explicitly null.
+        focus?.let(::validateFocus)
+        app?.let(::validateApp)
+
+        if (focus == null && !hasExactNullFieldLine(text, CURRENT_FOCUS_FIELD)) {
+            throw AdbWindowStateException("mCurrentFocus is unavailable")
         }
-        if (!validActivity(focusActivity) || !validActivity(appActivity)) {
-            throw AdbWindowStateException("window state has an invalid activity")
+        if (app == null && !hasExactNullFieldLine(text, FOCUSED_APP_FIELD)) {
+            throw AdbWindowStateException("mFocusedApp is unavailable")
         }
-        val task = app.groupValues[5]
-        if (task.isBlank() || focus.groupValues[1].isBlank() || app.groupValues[1].isBlank()) {
-            throw AdbWindowStateException("window state tokens are missing")
+        if (focus == null || app == null) {
+            // At least one official field is a complete `=null` line and has no window match. This
+            // is the decisive transient-transition signature; it never yields a partial window.
+            throw AdbWindowStateException(
+                "window focus is not ready",
+                failure = AdbWindowStateFailure.NOT_READY,
+            )
         }
+
         return AdbFocusedWindow(
             currentFocusToken = focus.groupValues[1],
-            currentFocusPackage = focusPackage,
-            currentFocusActivity = focusActivity,
+            currentFocusPackage = focus.groupValues[3],
+            currentFocusActivity = focus.groupValues[4],
             focusedAppToken = app.groupValues[1],
-            focusedAppPackage = appPackage,
-            focusedAppActivity = appActivity,
-            focusedAppTask = task,
+            focusedAppPackage = app.groupValues[3],
+            focusedAppActivity = app.groupValues[4],
+            focusedAppTask = app.groupValues[5],
         )
     }
+
+    private fun validateFocus(match: MatchResult) {
+        if (!PACKAGE.matches(match.groupValues[3])) {
+            throw AdbWindowStateException("window state has an invalid package")
+        }
+        if (!validActivity(match.groupValues[4])) {
+            throw AdbWindowStateException("window state has an invalid activity")
+        }
+        if (match.groupValues[1].isBlank()) {
+            throw AdbWindowStateException("window state tokens are missing")
+        }
+    }
+
+    private fun validateApp(match: MatchResult) {
+        if (!PACKAGE.matches(match.groupValues[3])) {
+            throw AdbWindowStateException("window state has an invalid package")
+        }
+        if (!validActivity(match.groupValues[4])) {
+            throw AdbWindowStateException("window state has an invalid activity")
+        }
+        if (match.groupValues[1].isBlank() || match.groupValues[5].isBlank()) {
+            throw AdbWindowStateException("window state tokens are missing")
+        }
+    }
+
+    /**
+     * True only when one complete, trimmed output line is exactly the official null field. A
+     * window title, a longer line or a suffix that merely contains the words is not this signal.
+     */
+    private fun hasExactNullFieldLine(text: String, field: String): Boolean =
+        text.lineSequence().any { it.trim() == "$field=null" }
 
     private fun validActivity(value: String): Boolean =
         value.isNotBlank() && value.length <= 200 && value.none { it.isISOControl() }

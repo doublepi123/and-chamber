@@ -445,7 +445,6 @@ class PhoneController(
         return supervisorScope {
             val token = CallToken(plan.key, plan.epoch, plan.call is Plan.Call.Dispatch)
             val job = async(start = CoroutineStart.LAZY) {
-                token.started = true
                 runDriver(plan, token)
             }
             val refusal = synchronized(lock) { reserveLocked(plan, token, job) }
@@ -481,9 +480,11 @@ class PhoneController(
                     refused(request, reason)
                 }
             } catch (failure: PhoneDriverException) {
-                noteDriverFailure(failure.failure)
-                if (token.mutation && token.started) {
-                    markOutcomeUnknown(plan.epoch)
+                val mutationStarted = token.mutation && token.started
+                // Record an uncertain mutation before any read-timeout revoke publishes state.
+                if (mutationStarted) markOutcomeUnknown(plan.epoch)
+                noteDriverFailure(failure.failure, plan)
+                if (mutationStarted) {
                     PhoneCallResult.Dispatched(
                         request.requestId,
                         request.epoch,
@@ -695,6 +696,7 @@ class PhoneController(
                 epoch = request.epoch,
                 targetPackage = grant.targetPackage,
                 controlEpoch = controlEpoch,
+                connectionId = state.connectionId,
                 timeoutMs = timeout,
                 deadlineAtMs = now + timeout,
                 call = call,
@@ -777,12 +779,25 @@ class PhoneController(
         }
     }
 
-    private suspend fun runDriver(plan: Plan, token: CallToken): DriverOutcome =
-        withTimeout(plan.timeoutMs) {
+    /**
+     * Restores the original total call deadline: the fresh remaining time from [Plan.deadlineAtMs]
+     * bounds the outer wait, and the driver gets a small margin below it so its own hard watchdog
+     * failure (for example READ_TIMEOUT) can be reported first. This is a reporting opportunity,
+     * not a guarantee: if the outer bound still wins, the caller gets the ordinary DEADLINE and no
+     * claim about the link is made. Mutation admission still stops at [Plan.deadlineAtMs].
+     */
+    private suspend fun runDriver(plan: Plan, token: CallToken): DriverOutcome {
+        val budget = driverCallBudget(plan.deadlineAtMs, clock())
+            ?: throw PhoneDriverException(PhoneDriverFailure.TIMEOUT)
+        return withTimeout(budget.outerTimeoutMs) {
+            // Set only here: a plan that expires before any driver call is refused as a deadline,
+            // never reported as an uncertain mutation.
+            token.started = true
             when (val call = plan.call) {
-                Plan.Call.Observe -> DriverOutcome.Snapshot(driver.observe(plan.timeoutMs))
+                Plan.Call.Observe ->
+                    DriverOutcome.Snapshot(driver.observe(budget.driverTimeoutMs))
                 is Plan.Call.Capture ->
-                    DriverOutcome.Image(driver.capture(call.binding, plan.timeoutMs))
+                    DriverOutcome.Image(driver.capture(call.binding, budget.driverTimeoutMs))
                 is Plan.Call.Dispatch -> DriverOutcome.Receipt(
                     driver.dispatch(
                         PhoneDispatchRequest(
@@ -790,11 +805,12 @@ class PhoneController(
                             action = call.action,
                             guard = injectionGuard(plan, token),
                         ),
-                        plan.timeoutMs,
+                        budget.driverTimeoutMs,
                     ),
                 )
             }
         }
+    }
 
     private fun onSnapshot(
         request: PhoneAgentRequest,
@@ -859,6 +875,22 @@ class PhoneController(
             }
             is PhoneDispatchReceipt.NotSent -> {
                 val post = admissionRefusalLocked(plan, token)
+                if (receipt.failure == PhoneDriverFailure.READ_TIMEOUT) {
+                    // A read-watchdog abandonment is real even when the plan deadline has already
+                    // passed; publish it before any authority return so the controller never keeps
+                    // claiming Connected. The read failure stays the first cause: a later plain
+                    // DEADLINE check must not mask it. A genuine earlier pause/epoch/lease refusal
+                    // still wins, and the disconnect is fenced to this plan's own connection.
+                    noteDriverFailure(receipt.failure, plan)
+                    if (post != null && post != PhoneErrorCode.DEADLINE) {
+                        if (post == PhoneErrorCode.NOT_CONNECTED) {
+                            noteDriverFailure(PhoneDriverFailure.NOT_CONNECTED)
+                        }
+                        if (post == PhoneErrorCode.LEASE_EXPIRED) refresh()
+                        return refused(request, post)
+                    }
+                    return refused(request, PhoneErrorCode.READ_TIMEOUT)
+                }
                 if (post != null) {
                     if (post == PhoneErrorCode.NOT_CONNECTED) {
                         noteDriverFailure(PhoneDriverFailure.NOT_CONNECTED)
@@ -866,15 +898,21 @@ class PhoneController(
                     if (post == PhoneErrorCode.LEASE_EXPIRED) refresh()
                     return refused(request, post)
                 }
-                noteDriverFailure(receipt.failure)
+                noteDriverFailure(receipt.failure, plan)
                 if (receipt.failure in LOST_BINDING_FAILURES) {
                     invalidateObservation(plan.epoch, call.binding)
                 }
                 refused(request, mapFailure(receipt.failure))
             }
             is PhoneDispatchReceipt.Unknown -> {
-                noteDriverFailure(receipt.failure ?: PhoneDriverFailure.OUTCOME_UNKNOWN)
+                // Record the unknown outcome before a read-timeout revoke publishes state: a
+                // mutation whose result is uncertain must still require a person check even when
+                // the same read abandoned the control connection.
                 markOutcomeUnknown(plan.epoch)
+                noteDriverFailure(
+                    receipt.failure ?: PhoneDriverFailure.OUTCOME_UNKNOWN,
+                    plan,
+                )
                 PhoneCallResult.Dispatched(
                     request.requestId,
                     request.epoch,
@@ -1052,13 +1090,42 @@ class PhoneController(
         }
     }
 
-    private fun noteDriverFailure(failure: PhoneDriverFailure) {
-        if (failure == PhoneDriverFailure.NOT_CONNECTED) {
-            val calls = synchronized(lock) {
-                revokeLocked(PhoneEvent.CONNECTION_LOST, disconnect = true)
+    private fun noteDriverFailure(failure: PhoneDriverFailure, plan: Plan? = null) {
+        when (failure) {
+            PhoneDriverFailure.NOT_CONNECTED -> {
+                val calls = synchronized(lock) {
+                    revokeLocked(PhoneEvent.CONNECTION_LOST, disconnect = true)
+                }
+                cancelCall(calls, PhoneErrorCode.NOT_CONNECTED)
             }
-            cancelCall(calls, PhoneErrorCode.NOT_CONNECTED)
+            PhoneDriverFailure.READ_TIMEOUT -> {
+                // The read watchdog already abandoned the exact connection. Publish the real
+                // logical disconnect/revoke in this same call instead of waiting for a later
+                // Observe to report NOT_CONNECTED. The caller still returns READ_TIMEOUT as the
+                // first error. An already recorded unknown-outcome block stays in place.
+                if (plan != null) revokeReadTimeoutOwner(plan)
+            }
+            else -> Unit
         }
+    }
+
+    /**
+     * A READ_TIMEOUT may only revoke the exact connection the failing call was planned against.
+     * A newer reconnect owns control and survives a late old failure; the same (now abandoned)
+     * connection is revoked even if a newer grant reused it, because it can no longer be trusted.
+     */
+    private fun revokeReadTimeoutOwner(plan: Plan) {
+        val calls = synchronized(lock) {
+            if (!readTimeoutOwnsConnection(plan.connectionId, mutableState.value.connectionId)) {
+                return
+            }
+            revokeLocked(
+                event = PhoneEvent.CONNECTION_LOST,
+                disconnect = true,
+                keepUnknownBlock = true,
+            )
+        }
+        cancelCall(calls, PhoneErrorCode.READ_TIMEOUT)
     }
 
     private fun revokeFor(event: PhoneEvent) {
@@ -1071,6 +1138,7 @@ class PhoneController(
         expiredEpoch: Long? = null,
         disconnect: Boolean = false,
         runtimeId: String? = null,
+        keepUnknownBlock: Boolean = false,
     ): ActiveCall? {
         val call = activeCall
         controlEpoch += 1
@@ -1091,7 +1159,7 @@ class PhoneController(
                 runtimeId = runtimeId ?: state.runtimeId,
                 observation = null,
                 paused = false,
-                blocked = null,
+                blocked = if (keepUnknownBlock) state.blocked else null,
                 pausing = false,
             )
         }
@@ -1137,6 +1205,8 @@ class PhoneController(
         PhoneDriverFailure.TIMEOUT -> PhoneErrorCode.DEADLINE
         PhoneDriverFailure.CANCELLED -> PhoneErrorCode.CANCELLED
         PhoneDriverFailure.OUTCOME_UNKNOWN -> PhoneErrorCode.OUTCOME_UNKNOWN
+        PhoneDriverFailure.HIERARCHY_NOT_IDLE -> PhoneErrorCode.HIERARCHY_NOT_IDLE
+        PhoneDriverFailure.READ_TIMEOUT -> PhoneErrorCode.READ_TIMEOUT
         PhoneDriverFailure.DRIVER -> PhoneErrorCode.DRIVER_UNAVAILABLE
     }
 
@@ -1189,6 +1259,8 @@ class PhoneController(
         val epoch: Long,
         val targetPackage: String,
         val controlEpoch: Long,
+        /** Exact connection this call was planned against; fences a late READ_TIMEOUT. */
+        val connectionId: String?,
         val timeoutMs: Long,
         val deadlineAtMs: Long,
         val call: Call,
@@ -1254,3 +1326,39 @@ class PhoneController(
         )
     }
 }
+
+/**
+ * Fresh start budget for one driver call, computed at the moment the driver would start.
+ *
+ * The outer bound is the fresh remaining time to the original plan deadline, so the total call
+ * deadline never grows. The driver gets a margin below it so its own hard watchdog failure (for
+ * example READ_TIMEOUT) can be reported first; this is a reporting opportunity, not a guarantee.
+ * If the outer bound still wins, the caller reports the ordinary DEADLINE and makes no claim about
+ * the link. A null result means the plan deadline already passed and no driver call may start.
+ */
+internal data class DriverCallBudget(
+    val outerTimeoutMs: Long,
+    val driverTimeoutMs: Long,
+)
+
+internal const val DRIVER_FAILURE_MARGIN_MS: Long = 500L
+
+internal fun driverCallBudget(deadlineAtMs: Long, nowMs: Long): DriverCallBudget? {
+    val remaining = deadlineAtMs - nowMs
+    if (remaining <= 0L) return null
+    val margin = minOf(DRIVER_FAILURE_MARGIN_MS, remaining / 10L)
+    return DriverCallBudget(
+        outerTimeoutMs = remaining,
+        driverTimeoutMs = (remaining - margin).coerceAtLeast(1L),
+    )
+}
+
+/**
+ * A READ_TIMEOUT disconnect is authoritative only for the exact connection the failing call was
+ * planned against. A newer reconnect owns control and must survive a late old failure, while the
+ * same (now abandoned) connection is revoked even if a newer grant reused it.
+ */
+internal fun readTimeoutOwnsConnection(
+    planConnectionId: String?,
+    currentConnectionId: String?,
+): Boolean = planConnectionId != null && planConnectionId == currentConnectionId

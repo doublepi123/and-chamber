@@ -54,6 +54,7 @@ const DESCRIPTION = [
   'Only one chat session owns a grant epoch. After another session performs a real action, this session is refused with SESSION_BUSY; do not retry in a loop. Ask the person to grant phone control again if this chat should own it. "status" and task events never claim the epoch by themselves.',
   'A session label is routing only, not authentication; never claim that this tool proves which chat is speaking. Immediately after a native grant, actions may be refused with ROUTE_NOT_PUBLISHED until the phone publishes the confirmed route; wait for the person, do not retry in a loop.',
   '"snapshot", "capture" and "tap" may also fail with NOT_GRANTED, LEASE_EXPIRED, EPOCH_CHANGED, PAUSED, GRANT_ACTIVE, ROUTE_NOT_PUBLISHED, ACTION_NOT_GRANTED, RUNTIME_NOT_READY, DISABLED, NOT_CONNECTED or BUSY. These are fixed refusals, not retry hints.',
+  'HIERARCHY_NOT_IDLE (also possible on "snapshot") means no stable hierarchy/page was observed. It does not mean the connection is down; do not retry in a loop, wait for the page to settle and ask the person for a new explicit request. READ_TIMEOUT means reads timed out and the current control connection is no longer used; the person must check the phone and reconnect explicitly. These codes never grant automatic recovery.',
 ].join(" ");
 
 // Reading the endpoint file:

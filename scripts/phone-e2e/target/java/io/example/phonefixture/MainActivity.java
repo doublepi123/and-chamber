@@ -3,11 +3,14 @@ package io.example.phonefixture;
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityEvent;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -28,18 +31,48 @@ import android.widget.TextView;
  * <p>No network, storage, permissions or real account is used. The password field exists only to
  * prove that a password EditText is a separate, non-editable target; the E2E scenarios never type
  * into it.</p>
+ *
+ * <p>The optional {@code fixture_busy_ms} launch extra arms a bounded busy window: every
+ * {@code onResume} then emits root-view content-change accessibility events for that many
+ * milliseconds, so the harness can exercise a screen that never reaches an idle hierarchy. It is a
+ * test hook only. It adds no permission, sends no input, starts no service and changes no layout,
+ * label or Save behaviour, and a busy window of 0 (the default) behaves exactly as before. See
+ * {@code docs/phone-e2e-fixtures.md}.</p>
  */
 public final class MainActivity extends Activity {
     private static final int ROW_COUNT = 30;
     private static final String INPUT_ECHO_EMPTY = "fixture-input-echo-empty";
 
+    // Test-only busy window. The extra is persisted so a later ordinary launcher start also gets a
+    // bounded window; the value is clamped to 0..30000 ms.
+    private static final String EXTRA_BUSY_MS = "fixture_busy_ms";
+    private static final String HOOK_PREFS = "fixture_hooks";
+    private static final String PREF_BUSY_MS = "busy_ms";
+    private static final int MAX_BUSY_MS = 30000;
+    private static final long BUSY_TICK_MS = 100L;
+
     private int savedCount;
     private TextView counter;
+
+    private LinearLayout rootView;
+    private final Handler busyHandler = new Handler();
+    private long busyDeadlineRealtime;
+
+    private final Runnable busyTick = new Runnable() {
+        @Override
+        public void run() {
+            if (rootView == null) return;
+            if (SystemClock.elapsedRealtime() >= busyDeadlineRealtime) return;
+            rootView.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+            busyHandler.postDelayed(this, BUSY_TICK_MS);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         setTitle(R.string.app_name);
+        applyBusyExtra(getIntent());
 
         LinearLayout root = new LinearLayout(this);
         root.setId(R.id.fixture_root);
@@ -149,6 +182,55 @@ public final class MainActivity extends Activity {
         root.addView(scroll, scrollParams);
 
         setContentView(root);
+        rootView = root;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        applyBusyExtra(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        startBusyWindow();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        stopBusyWindow();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        stopBusyWindow();
+    }
+
+    private void applyBusyExtra(Intent intent) {
+        if (intent == null || !intent.hasExtra(EXTRA_BUSY_MS)) return;
+        int value = intent.getIntExtra(EXTRA_BUSY_MS, 0);
+        if (value < 0) value = 0;
+        if (value > MAX_BUSY_MS) value = MAX_BUSY_MS;
+        getSharedPreferences(HOOK_PREFS, MODE_PRIVATE).edit().putInt(PREF_BUSY_MS, value).apply();
+    }
+
+    private void startBusyWindow() {
+        stopBusyWindow();
+        if (rootView == null) return;
+        int busyMs = getSharedPreferences(HOOK_PREFS, MODE_PRIVATE).getInt(PREF_BUSY_MS, 0);
+        if (busyMs <= 0) return;
+        if (busyMs > MAX_BUSY_MS) busyMs = MAX_BUSY_MS;
+        busyDeadlineRealtime = SystemClock.elapsedRealtime() + busyMs;
+        busyHandler.post(busyTick);
+    }
+
+    private void stopBusyWindow() {
+        busyHandler.removeCallbacks(busyTick);
+        busyDeadlineRealtime = 0L;
     }
 
     private LinearLayout.LayoutParams matchWrap() {

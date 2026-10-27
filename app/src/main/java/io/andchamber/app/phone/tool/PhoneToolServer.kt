@@ -22,6 +22,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.standing.PhoneOpenAppResult
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import io.andchamber.app.phone.standing.PhoneTaskStartResult
 import io.andchamber.app.phone.standing.PhoneTaskStarter
 import kotlinx.coroutines.CancellationException
@@ -683,7 +684,16 @@ class PhoneToolServer(
                 PhoneToolProtocol.envelope(action, true, result.epoch, data)
             }
             is PhoneTaskStartResult.Refused ->
-                failure(action, state.epoch, standingCode(result.refusal))
+                failure(
+                    action,
+                    // The epoch stays the pre-start native epoch. A failed start was rolled back,
+                    // so this is not evidence that no grant existed before the request.
+                    state.epoch,
+                    // The native typed error is the first cause; START_FAILED is only the generic
+                    // standing refusal when the native side had no more specific typed error.
+                    result.error?.name ?: standingCode(result.refusal),
+                    result.stage,
+                )
         }
     }
 
@@ -750,7 +760,17 @@ class PhoneToolServer(
         action: String,
         epoch: Long,
         code: String,
-    ): String = PhoneToolProtocol.envelope(action, ok = false, epoch = epoch, code = code)
+        startFailureStage: PhoneTaskStartFailureStage? = null,
+    ): String =
+        PhoneToolProtocol.envelope(
+            action,
+            ok = false,
+            epoch = epoch,
+            code = code,
+            // The protocol builds the only allowed failure metadata from this typed enum; no
+            // arbitrary JSON object can be attached to a failure.
+            startFailureStage = startFailureStage,
+        )
 
     private fun authorityRefusal(state: PhoneState): String? {
         if (readyLaunch() != launchId) return PhoneToolCodes.RUNTIME_NOT_READY

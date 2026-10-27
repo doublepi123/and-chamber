@@ -114,6 +114,9 @@ class LibAdbDevice(
             if (!AndChamberAdbTls.hasTls(pending)) {
                 throw AdbDeviceException(AdbDeviceFailure.TLS_REQUIRED)
             }
+            // The connection is about to become the installed one: claim normal completion first so
+            // an expiring old watchdog cannot close this newly installed connection afterwards.
+            if (!watchdog.complete()) throw AdbDeviceException(AdbDeviceFailure.DEADLINE)
             val openedLink = LibAdbLink(pending)
             synchronized(lock) {
                 connection = pending
@@ -147,6 +150,9 @@ class LibAdbDevice(
     override fun hierarchyXml(deadlineMs: Long, maxBytes: Int): ByteArray {
         val bytes = readService(AdbCommandSchema.HIERARCHY_DESTINATION, deadlineMs, maxBytes)
         if (bytes.isEmpty()) throw AdbDeviceException(AdbDeviceFailure.DRIVER)
+        // Only the whole fixed AOSP sentence becomes HIERARCHY_NOT_IDLE. Any XML that merely
+        // contains those words still goes to the bounded parser unchanged.
+        AdbHierarchyOutput.failure(bytes)?.let { throw AdbDeviceException(it) }
         return bytes
     }
 
@@ -228,6 +234,11 @@ class LibAdbDevice(
             if (watchdog.expired) {
                 throw AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite = true)
             }
+            // Same completion/deadline gate as a read: a successful injection is not followed by a
+            // late watchdog closing the connection it just used.
+            if (!watchdog.complete()) {
+                throw AdbDeviceException(AdbDeviceFailure.DEADLINE, afterWrite = true)
+            }
             return AdbInjection(written = true)
         } finally {
             watchdog.cancel()
@@ -248,6 +259,8 @@ class LibAdbDevice(
             throw AdbDeviceException(AdbDeviceFailure.NOT_CONNECTED)
         }
         var stream: AdbIoStream? = null
+        // The hard watchdog keeps its old job: close the stream/connection to unblock the read. It
+        // is not replaced by coroutine cancellation or a stream-only close.
         val watchdog = DeadlineWatchdog(deadlineMs) {
             runCatching { stream?.close() }
             runCatching { current.close() }
@@ -261,25 +274,56 @@ class LibAdbDevice(
                 Thread.currentThread().interrupt()
                 throw AdbDeviceException(AdbDeviceFailure.CANCELLED, cause = failure)
             } catch (failure: IOException) {
+                // The read service transaction has already started. If its watchdog expired (even
+                // before the first byte), this call has abandoned the exact connection: it is
+                // READ_TIMEOUT, not an ordinary DEADLINE. Only the pre-call `deadlineMs <= 0`
+                // refusal above stays DEADLINE.
                 throw AdbDeviceException(
-                    if (watchdog.expired) {
-                        AdbDeviceFailure.DEADLINE
+                    if (watchdog.deadlinePassed) {
+                        AdbDeviceFailure.READ_TIMEOUT
                     } else {
                         AdbDeviceFailure.DRIVER
                     },
                     cause = failure,
                 )
             }
-            return AdbStreamSession.readAll(
+            val bytes = AdbStreamSession.readAll(
                 link = io,
                 stream = stream,
                 maxBytes = maxBytes,
-                expired = { watchdog.expired },
+                // The real monotonic deadline decides, not a late-scheduled watchdog thread.
+                expired = { watchdog.deadlinePassed },
                 afterWrite = false,
+                expiredFailure = AdbDeviceFailure.READ_TIMEOUT,
             )
+            // Normal completion racing the deadline: the gate lets exactly one side win, so a late
+            // watchdog can never invalidate this exact link after a successful read.
+            if (!watchdog.complete()) throw AdbDeviceException(AdbDeviceFailure.READ_TIMEOUT)
+            return bytes
+        } catch (failure: AdbDeviceException) {
+            if (failure.failure == AdbDeviceFailure.READ_TIMEOUT) {
+                // Before READ_TIMEOUT leaves this class the exact connection is already abandoned
+                // and unusable for control. The existing hard-close path keeps running on the
+                // watchdog thread; no caller waits for it and a newer connection is never cleared.
+                abandonReadConnection(current)
+            }
+            throw failure
         } finally {
             watchdog.cancel()
             runCatching { stream?.close() }
+        }
+    }
+
+    /**
+     * Drops the references only while they still point at [current]. A reconnect that installed a
+     * newer connection is left alone, including its TLS state.
+     */
+    private fun abandonReadConnection(current: AdbConnection) {
+        synchronized(lock) {
+            if (connection !== current) return
+            connection = null
+            link = null
+            transportSecurity = AdbTransportSecurity.PLAINTEXT
         }
     }
 
@@ -333,19 +377,19 @@ private class DeadlineWatchdog(
     private val onExpire: () -> Unit,
 ) {
     private val deadlineAtMs = System.nanoTime() / 1_000_000L + deadlineMs
-    private var done = false
+    private val gate = DeadlineGate(deadlineAtMs)
 
-    @Volatile
-    var expired: Boolean = false
-        private set
+    val expired: Boolean get() = gate.expired
+
+    /** True once expiry was claimed or the real monotonic deadline has passed. */
+    val deadlinePassed: Boolean get() = gate.deadlinePassed
 
     private val thread = Thread {
         try {
-            while (!done) {
+            while (!gate.expired) {
                 val remaining = deadlineAtMs - System.nanoTime() / 1_000_000L
                 if (remaining <= 0L) {
-                    expired = true
-                    runCatching { onExpire() }
+                    if (gate.expire()) runCatching { onExpire() }
                     return@Thread
                 }
                 Thread.sleep(minOf(remaining, 50L))
@@ -362,8 +406,17 @@ private class DeadlineWatchdog(
     fun remainingMs(): Long =
         (deadlineAtMs - System.nanoTime() / 1_000_000L).coerceAtLeast(1L)
 
+    /**
+     * Claims a normal completion against the real monotonic deadline. False means the deadline
+     * already passed or the watchdog owns the outcome; the watchdog is then left able to hard-close.
+     */
+    fun complete(): Boolean = gate.finish()
+
+    /**
+     * Stops the watchdog only when a normal (pre-deadline) end was claimed. After the deadline this
+     * is a no-op so it cannot steal expiry from a late-scheduled watchdog thread.
+     */
     fun cancel() {
-        done = true
-        thread.interrupt()
+        if (gate.finish()) thread.interrupt()
     }
 }

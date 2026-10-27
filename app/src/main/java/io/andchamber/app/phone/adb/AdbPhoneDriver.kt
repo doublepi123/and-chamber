@@ -889,7 +889,16 @@ class AdbPhoneDriver(
         return try {
             AdbWindowStateParser.parse(text)
         } catch (failure: AdbWindowStateException) {
-            throw PhoneDriverException(PhoneDriverFailure.DRIVER)
+            // A complete official `=null` field line during a window transition is a retryable
+            // window change inside the caller's existing bounded startup budget. Every other
+            // parser failure stays the fixed DRIVER failure.
+            throw PhoneDriverException(
+                if (failure.failure == AdbWindowStateFailure.NOT_READY) {
+                    PhoneDriverFailure.WINDOW_CHANGED
+                } else {
+                    PhoneDriverFailure.DRIVER
+                },
+            )
         }
     }
 
@@ -911,6 +920,8 @@ class AdbPhoneDriver(
         AdbDeviceFailure.AUTH_FAILED -> PhoneDriverFailure.POLICY_DENIED
         AdbDeviceFailure.LIMIT -> PhoneDriverFailure.DRIVER
         AdbDeviceFailure.OUTCOME_UNKNOWN -> PhoneDriverFailure.OUTCOME_UNKNOWN
+        AdbDeviceFailure.HIERARCHY_NOT_IDLE -> PhoneDriverFailure.HIERARCHY_NOT_IDLE
+        AdbDeviceFailure.READ_TIMEOUT -> PhoneDriverFailure.READ_TIMEOUT
         AdbDeviceFailure.DRIVER -> PhoneDriverFailure.DRIVER
     }
 

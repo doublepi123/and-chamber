@@ -1,6 +1,7 @@
 package io.andchamber.app.phone.standing
 
 import io.andchamber.app.phone.core.PhoneActionKind
+import io.andchamber.app.phone.core.PhoneErrorCode
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 
 /** One preauthorized app, for the model's app picker. Never the device's installed-app catalogue. */
@@ -24,6 +25,9 @@ enum class PhoneTaskStartState {
     NEEDS_USER,
 }
 
+/** Fixed startup phases only; never carries page text, packages or raw exception messages. */
+enum class PhoneTaskStartFailureStage { AUTHORITY, STOP_ENTRY, TASK_BINDING, TASK_RECORD, TARGET_LAUNCH, OVERLAY, OBSERVATION }
+
 /**
  * Typed result of one chat request. The model receives [Started.epoch]/[Started.state] (and a fixed
  * bounded message); [Started.key] and the native record stay native. There is no PENDING state: the
@@ -38,7 +42,11 @@ sealed interface PhoneTaskStartResult {
         val message: String? = null,
     ) : PhoneTaskStartResult
 
-    data class Refused(val refusal: PhoneStandingRefusal) : PhoneTaskStartResult
+    data class Refused(
+        val refusal: PhoneStandingRefusal,
+        val stage: PhoneTaskStartFailureStage? = null,
+        val error: PhoneErrorCode? = null,
+    ) : PhoneTaskStartResult
 }
 
 sealed interface PhoneOpenAppResult {

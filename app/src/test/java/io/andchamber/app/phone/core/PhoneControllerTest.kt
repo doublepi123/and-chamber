@@ -7,6 +7,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -775,6 +776,377 @@ class PhoneControllerTest {
     }
 
     @Test
+    fun `a read timeout revokes control in the same call and keeps the first error`() = runTest {
+        val fixture = Fixture()
+        val grant = fixture.active()
+        fixture.driver.observeFailure = PhoneDriverFailure.READ_TIMEOUT
+
+        val call = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "read-timeout"),
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, (call as PhoneCallResult.Refused).error)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.DISCONNECTED, state.connection)
+        assertNull(state.connectionId)
+        assertNull(state.grant)
+        assertNull(state.capabilities)
+        assertNotEquals(grant.epoch, state.epoch)
+        assertEquals(PhoneEvent.CONNECTION_LOST, state.lastEvent)
+    }
+
+    @Test
+    fun `a hierarchy idle failure keeps the connection usable`() = runTest {
+        val fixture = Fixture()
+        val grant = fixture.active()
+        val connectionId = fixture.controller.state.value.connectionId
+        fixture.driver.observeFailure = PhoneDriverFailure.HIERARCHY_NOT_IDLE
+
+        val call = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "not-idle"),
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.HIERARCHY_NOT_IDLE, (call as PhoneCallResult.Refused).error)
+        val refusedState = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.CONNECTED, refusedState.connection)
+        assertEquals(connectionId, refusedState.connectionId)
+        assertEquals(grant.epoch, refusedState.epoch)
+        assertNull(refusedState.observation)
+
+        // The page becoming stable again does not need a new connection or grant.
+        fixture.driver.observeFailure = null
+        fixture.observe("r2")
+        assertEquals(PhoneConnectionState.CONNECTED, fixture.controller.state.value.connection)
+    }
+
+    @Test
+    fun `a capture read timeout publishes the same logical disconnect`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.captureFailure = PhoneDriverFailure.READ_TIMEOUT
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.Capture,
+                requestId = "capture-read-timeout",
+                observation = observation.binding,
+            ),
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, (call as PhoneCallResult.Refused).error)
+        assertEquals(
+            PhoneConnectionState.DISCONNECTED,
+            fixture.controller.state.value.connection,
+        )
+        assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `a normal read keeps the healthy link and epoch`() = runTest {
+        val fixture = Fixture()
+        val grant = fixture.active()
+        val connectionId = fixture.controller.state.value.connectionId
+
+        fixture.observe("r1")
+
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.CONNECTED, state.connection)
+        assertEquals(connectionId, state.connectionId)
+        assertEquals(grant.epoch, state.epoch)
+        assertEquals(PhoneEvent.OBSERVED, state.lastEvent)
+    }
+
+    @Test
+    fun `a mutation read timeout before the write is not sent and revokes`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.dispatchReceipt =
+            PhoneDispatchReceipt.NotSent(PhoneDriverFailure.READ_TIMEOUT)
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "not-sent-read-timeout",
+                observation = observation.binding,
+            ),
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, (call as PhoneCallResult.Refused).error)
+        assertEquals(PhoneDelivery.NOT_SENT, call.delivery)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.DISCONNECTED, state.connection)
+        assertNull("nothing was written, so no unknown block is needed", state.blocked)
+    }
+
+    @Test
+    fun `an uncertain mutation read timeout stays unknown and needs a person check`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.dispatchReceipt =
+            PhoneDispatchReceipt.Unknown(PhoneDriverFailure.READ_TIMEOUT)
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "unknown-read-timeout",
+                observation = observation.binding,
+            ),
+        )
+
+        assertTrue(call is PhoneCallResult.Dispatched)
+        assertEquals(PhoneDelivery.UNKNOWN, (call as PhoneCallResult.Dispatched).delivery)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, call.error)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.DISCONNECTED, state.connection)
+        assertEquals("the person must still check the uncertain write", PhoneBlockReason.UNKNOWN_OUTCOME, state.blocked)
+        assertTrue(state.standingBlocked)
+        assertNull(state.observation)
+        assertEquals("the uncertain action is never replayed", 1, fixture.driver.dispatched.size)
+
+        fixture.controller.acknowledgeUnknownOutcome()
+        assertNull(fixture.controller.state.value.blocked)
+    }
+
+    @Test
+    fun `an inject deadline keeps the connection and unknown outcome`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.dispatchReceipt = PhoneDispatchReceipt.Unknown(PhoneDriverFailure.TIMEOUT)
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "inject-timeout",
+                observation = observation.binding,
+            ),
+        )
+
+        assertTrue(call is PhoneCallResult.Dispatched)
+        assertEquals(PhoneDelivery.UNKNOWN, (call as PhoneCallResult.Dispatched).delivery)
+        assertEquals(PhoneErrorCode.DEADLINE, call.error)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.CONNECTED, state.connection)
+        assertEquals(PhoneBlockReason.UNKNOWN_OUTCOME, state.blocked)
+    }
+
+    @Test
+    fun `a hard read timeout keeps READ_TIMEOUT as the first cause across the next attempt`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        fixture.driver.observeHandler = {
+            // The LibADB hard watchdog expires on the driver budget (the total call minus the
+            // reporting margin) and its fixed failure unwinds there, before the outer bound.
+            delay(fixture.driver.lastObserveDeadline)
+            throw PhoneDriverException(PhoneDriverFailure.READ_TIMEOUT)
+        }
+
+        val first = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "hard-read-timeout"),
+            deadlineMs = 100L,
+        )
+
+        assertTrue(first is PhoneCallResult.Refused)
+        val firstRefused = first as PhoneCallResult.Refused
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, firstRefused.error)
+        assertNotEquals(PhoneErrorCode.DEADLINE, firstRefused.error)
+        assertEquals("driver budget keeps the reporting margin", 90L, fixture.driver.lastObserveDeadline)
+        val afterFirst = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.DISCONNECTED, afterFirst.connection)
+        assertEquals(PhoneEvent.CONNECTION_LOST, afterFirst.lastEvent)
+        assertNull(afterFirst.observation)
+        val observeCallsAfterFirst = fixture.driver.observeCalls
+
+        // The next attempt cannot reach the abandoned connection or overwrite the first cause.
+        fixture.driver.observeFailure = null
+        val next = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.Observe,
+                epoch = afterFirst.epoch,
+                requestId = "next-attempt",
+            ),
+            deadlineMs = 100L,
+        )
+        assertTrue(next is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.NOT_GRANTED, (next as PhoneCallResult.Refused).error)
+        assertEquals(observeCallsAfterFirst, fixture.driver.observeCalls)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, firstRefused.error)
+        assertEquals(PhoneEvent.CONNECTION_LOST, fixture.controller.state.value.lastEvent)
+        assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `the fresh total call budget leaves the driver only the reporting margin`() {
+        val full = driverCallBudget(deadlineAtMs = 6_000L, nowMs = 1_000L)
+        assertEquals(5_000L, full?.outerTimeoutMs)
+        assertEquals(4_500L, full?.driverTimeoutMs)
+
+        val short = driverCallBudget(deadlineAtMs = 1_100L, nowMs = 1_000L)
+        assertEquals(100L, short?.outerTimeoutMs)
+        assertEquals(90L, short?.driverTimeoutMs)
+
+        assertNull("a passed plan deadline must not start the driver", driverCallBudget(6_000L, 6_000L))
+        assertNull(driverCallBudget(6_000L, 6_001L))
+    }
+
+    @Test
+    fun `a plan that expires before the driver starts never calls it`() = runTest {
+        var clockCalls = 0
+        val fixture = Fixture(
+            clockOverride = {
+                clockCalls += 1
+                // plan + reserve have already run; the driver must not start now.
+                if (clockCalls >= 4) 20_000L else 1_000L
+            },
+        )
+        fixture.active()
+        clockCalls = 0
+
+        val call = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "past-deadline"),
+            deadlineMs = 100L,
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.DEADLINE, (call as PhoneCallResult.Refused).error)
+        assertEquals("no driver call may start after the plan deadline", 0, fixture.driver.observeCalls)
+        assertEquals(
+            "a deadline that never reached the driver does not guess a disconnect",
+            PhoneConnectionState.CONNECTED,
+            fixture.controller.state.value.connection,
+        )
+    }
+
+    @Test
+    fun `a snapshot arriving after the total call deadline is refused`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        fixture.driver.observeHandler = {
+            delay(5_100L)
+            fixture.driver.snapshot
+        }
+
+        val call = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "late-snapshot"),
+            deadlineMs = 5_000L,
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.DEADLINE, (call as PhoneCallResult.Refused).error)
+        assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `a capture arriving after the total call deadline is refused`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.captureHandler = {
+            delay(5_100L)
+            fixture.driver.image
+        }
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.Capture,
+                requestId = "late-capture",
+                observation = observation.binding,
+            ),
+            deadlineMs = 5_000L,
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.DEADLINE, (call as PhoneCallResult.Refused).error)
+    }
+
+    @Test
+    fun `a late sent receipt is never reported as sent`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.dispatchHandler = {
+            delay(5_100L)
+            PhoneDispatchReceipt.Sent
+        }
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "late-sent",
+                observation = observation.binding,
+            ),
+            deadlineMs = 5_000L,
+        )
+
+        assertTrue(call is PhoneCallResult.Dispatched)
+        assertEquals(PhoneDelivery.UNKNOWN, (call as PhoneCallResult.Dispatched).delivery)
+        assertEquals(PhoneErrorCode.DEADLINE, call.error)
+        assertEquals(PhoneBlockReason.UNKNOWN_OUTCOME, fixture.controller.state.value.blocked)
+    }
+
+    @Test
+    fun `a NotSent READ_TIMEOUT after the plan deadline still disconnects and keeps the cause`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val observation = fixture.observe("r1")
+        fixture.driver.dispatchHandler = {
+            // The hard read watchdog already abandoned the connection; the controller's own
+            // deadline passes before the receipt is processed.
+            fixture.now = 11_000L
+            PhoneDispatchReceipt.NotSent(PhoneDriverFailure.READ_TIMEOUT)
+        }
+
+        val call = fixture.controller.execute(
+            fixture.request(
+                PhoneAgentAction.TapRef("n1"),
+                requestId = "late-not-sent-read-timeout",
+                observation = observation.binding,
+            ),
+            deadlineMs = 5_000L,
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.READ_TIMEOUT, (call as PhoneCallResult.Refused).error)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.DISCONNECTED, state.connection)
+        assertNull(state.connectionId)
+        assertNull(state.grant)
+    }
+
+    @Test
+    fun `a read timeout only revokes the exact planned connection`() {
+        assertTrue(readTimeoutOwnsConnection("conn-1", "conn-1"))
+        assertFalse("a newer reconnect must survive a late old failure", readTimeoutOwnsConnection("conn-1", "conn-2"))
+        assertFalse(readTimeoutOwnsConnection("conn-1", null))
+        assertFalse(readTimeoutOwnsConnection(null, "conn-1"))
+    }
+
+    @Test
+    fun `an unconfirmable read stays OUTCOME_UNKNOWN and does not fake a disconnect`() = runTest {
+        val fixture = Fixture()
+        val grant = fixture.active()
+        fixture.driver.observeFailure = PhoneDriverFailure.OUTCOME_UNKNOWN
+
+        val call = fixture.controller.execute(
+            fixture.request(PhoneAgentAction.Observe, requestId = "outcome-unknown-read"),
+        )
+
+        assertTrue(call is PhoneCallResult.Refused)
+        assertEquals(PhoneErrorCode.OUTCOME_UNKNOWN, (call as PhoneCallResult.Refused).error)
+        val state = fixture.controller.state.value
+        assertEquals(PhoneConnectionState.CONNECTED, state.connection)
+        assertEquals(grant.epoch, state.epoch)
+        assertNull(state.observation)
+    }
+
+    @Test
     fun `external cancellation propagates and pause still blocks new mutations`() = runTest {
         val fixture = Fixture()
         fixture.active()
@@ -1121,14 +1493,17 @@ class PhoneControllerTest {
         assertEquals("the unknown outcome must not be replayed", 1, fixture.driver.dispatched.size)
     }
 
-    private class Fixture(requestCapacity: Int = 8) {
+    private class Fixture(
+        requestCapacity: Int = 8,
+        clockOverride: (() -> Long)? = null,
+    ) {
         var now = 1_000L
         private var requestIds = 0
         private var observationIds = 0
         val driver = FakePhoneDriver()
         val controller = PhoneController(
             driver = driver,
-            clock = { now },
+            clock = clockOverride ?: { now },
             requestCapacity = requestCapacity,
             newObservationId = { "obs-${++observationIds}" },
         )
@@ -1177,7 +1552,11 @@ class PhoneControllerTest {
         var image = PhoneImage(byteArrayOf(1, 2, 3), "image/png", 1080, 2400)
         var observeCalls = 0
         var captureCalls = 0
+        var lastObserveDeadline = 0L
+        var lastCaptureDeadline = 0L
+        var lastDispatchDeadline = 0L
         var observeHandler: (suspend () -> PhoneSnapshot)? = null
+        var captureHandler: (suspend () -> PhoneImage)? = null
         val dispatched = mutableListOf<PhoneDispatchRequest>()
         var dispatchHandler: (suspend (PhoneDispatchRequest) -> PhoneDispatchReceipt)? = null
         var dispatchReceipt: PhoneDispatchReceipt = PhoneDispatchReceipt.Sent
@@ -1199,6 +1578,7 @@ class PhoneControllerTest {
 
         override suspend fun observe(deadlineMs: Long): PhoneSnapshot {
             observeCalls += 1
+            lastObserveDeadline = deadlineMs
             enteredObserve.complete(Unit)
             observeFailure?.let { throw PhoneDriverException(it) }
             return observeHandler?.invoke() ?: snapshot.copy()
@@ -1209,14 +1589,16 @@ class PhoneControllerTest {
             deadlineMs: Long,
         ): PhoneImage {
             captureCalls += 1
+            lastCaptureDeadline = deadlineMs
             captureFailure?.let { throw PhoneDriverException(it) }
-            return image
+            return captureHandler?.invoke() ?: image
         }
 
         override suspend fun dispatch(
             request: PhoneDispatchRequest,
             deadlineMs: Long,
         ): PhoneDispatchReceipt {
+            lastDispatchDeadline = deadlineMs
             dispatched += request
             enteredDispatch.complete(Unit)
             return dispatchHandler?.invoke(request) ?: dispatchReceipt

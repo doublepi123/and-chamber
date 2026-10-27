@@ -1,5 +1,6 @@
 package io.andchamber.app.phone.tool
 
+import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -456,6 +457,35 @@ class PhoneToolProtocolTest {
     }
 
     @Test
+    fun `hierarchy and read-timeout refusals have distinct fixed non-network messages`() {
+        val hierarchy = PhoneToolProtocol.fixedMessage(PhoneToolCodes.HIERARCHY_NOT_IDLE)
+        val readTimeout = PhoneToolProtocol.fixedMessage(PhoneToolCodes.READ_TIMEOUT)
+
+        assertNotEquals("The phone action failed.", hierarchy)
+        assertNotEquals("The phone action failed.", readTimeout)
+        assertNotEquals(hierarchy, readTimeout)
+        // A read-only observation refusal must not claim there is no task or that the link dropped.
+        assertTrue(hierarchy.contains("does not mean the connection is down"))
+        assertTrue(hierarchy.contains("Do not retry in a loop"))
+        assertTrue(hierarchy.contains("new request"))
+        assertTrue(!hierarchy.contains("There is no confirmed phone task"))
+        // READ_TIMEOUT abandons the connection, but it is not proof of a network/socket close and
+        // must not become an automatic reconnect instruction.
+        assertTrue(readTimeout.contains("no longer used"))
+        assertTrue(readTimeout.contains("does not prove the network is down"))
+        assertTrue(readTimeout.contains("reconnect explicitly"))
+        assertTrue(!readTimeout.contains("There is no confirmed phone task"))
+
+        val secret = "com.example.secret label"
+        for (message in listOf(hierarchy, readTimeout)) {
+            assertTrue("message leaked request content", !message.contains(secret))
+            assertTrue("message leaked a token", !message.contains(TOKEN))
+            assertTrue("message leaked an exception", !message.contains("Exception"))
+            assertTrue("message leaked a site", !message.contains("example.test"))
+        }
+    }
+
+    @Test
     fun `fixed messages are stable and never echo request content`() {
         val secret = "com.example.secret label"
         for (code in listOf(PhoneToolCodes.STALE_OBSERVATION, PhoneToolCodes.SESSION_BUSY, PhoneToolCodes.OUTCOME_UNKNOWN)) {
@@ -476,6 +506,68 @@ class PhoneToolProtocolTest {
         assertEquals(3L, root["epoch"]!!.toString().toLong())
         assertTrue(root.containsKey("error"))
         assertTrue(!root.containsKey("data"))
+    }
+
+    @Test
+    fun `failure envelopes expose only a typed start stage and never arbitrary data`() {
+        val secret = "com.example.secret label"
+        val arbitrary = buildJsonObject {
+            put("label", secret)
+            put("token", TOKEN)
+            put("raw", "java.lang.IllegalStateException at example.test")
+        }
+
+        // A legacy failure has no data key at all.
+        val legacy = PhoneToolProtocol.envelope(
+            action = "phone.request",
+            ok = false,
+            epoch = 4L,
+            code = PhoneToolCodes.START_FAILED,
+        )
+        val legacyRoot = kotlinx.serialization.json.Json.parseToJsonElement(legacy) as kotlinx.serialization.json.JsonObject
+        assertTrue(!legacyRoot.containsKey("data"))
+
+        // An arbitrary success-shaped payload passed to a failure is ignored and cannot leak.
+        val refused = PhoneToolProtocol.envelope(
+            action = "phone.request",
+            ok = false,
+            epoch = 4L,
+            data = arbitrary,
+            code = PhoneToolCodes.READ_TIMEOUT,
+        )
+        val refusedRoot = kotlinx.serialization.json.Json.parseToJsonElement(refused) as kotlinx.serialization.json.JsonObject
+        assertTrue(!refusedRoot.containsKey("data"))
+        assertTrue(!refused.contains(secret))
+        assertTrue(!refused.contains(TOKEN))
+        assertTrue(!refused.contains("Exception"))
+        assertTrue(!refused.contains("example.test"))
+
+        // The typed stage is the only failure metadata, and it is the enum name only.
+        val staged = PhoneToolProtocol.envelope(
+            action = "phone.request",
+            ok = false,
+            epoch = 4L,
+            data = arbitrary,
+            code = PhoneToolCodes.READ_TIMEOUT,
+            startFailureStage = PhoneTaskStartFailureStage.OBSERVATION,
+        )
+        val stagedRoot = kotlinx.serialization.json.Json.parseToJsonElement(staged) as kotlinx.serialization.json.JsonObject
+        val stagedData = stagedRoot["data"] as kotlinx.serialization.json.JsonObject
+        assertEquals(setOf("startFailureStage"), stagedData.keys)
+        assertEquals("OBSERVATION", stagedData["startFailureStage"]!!.toString().trim('"'))
+        assertTrue(!staged.contains(secret))
+        assertTrue(!staged.contains(TOKEN))
+
+        // Success data is unchanged; a stage argument never turns into success metadata.
+        val success = PhoneToolProtocol.envelope(
+            action = "phone.snapshot",
+            ok = true,
+            epoch = 5L,
+            data = buildJsonObject { put("n", 1) },
+            startFailureStage = PhoneTaskStartFailureStage.OBSERVATION,
+        )
+        val successRoot = kotlinx.serialization.json.Json.parseToJsonElement(success) as kotlinx.serialization.json.JsonObject
+        assertEquals("""{"n":1}""", successRoot["data"].toString())
     }
 
     @Test

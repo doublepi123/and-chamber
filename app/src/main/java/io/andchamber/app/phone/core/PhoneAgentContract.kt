@@ -124,6 +124,16 @@ enum class PhoneErrorCode {
     NOT_CONNECTED,
     DRIVER_UNAVAILABLE,
     DEADLINE,
+    /**
+     * Read-only observation never reached a stable hierarchy/page. The connection is not
+     * necessarily lost and the caller must not treat this as a retry hint.
+     */
+    HIERARCHY_NOT_IDLE,
+    /**
+     * A read-only ADB service transaction hit its watchdog (open or read). The connection that
+     * served it has been abandoned and the controller has already revoked control.
+     */
+    READ_TIMEOUT,
     CANCELLED,
 }
 
