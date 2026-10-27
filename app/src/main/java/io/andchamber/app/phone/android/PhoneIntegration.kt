@@ -327,6 +327,7 @@ internal class PhoneIntegration(
             },
             onOpenChat = onOpenChat,
             onContinueInChat = ::continueInChat,
+            onResumeStanding = ::resumeStandingFromUi,
         )
 
     /** Called when the native screen appears: refresh the picker and the stop entry, find ports. */
@@ -1081,6 +1082,83 @@ internal class PhoneIntegration(
             } finally {
                 continuationInFlight = false
             }
+        }
+    }
+
+    /**
+     * The person's explicit "Resume chat use" confirmation. Main thread, synchronous.
+     *
+     * Every guard is checked against fresh native probes and the current controller state before the
+     * controller is touched. A refusal leaves the standing block, binding, configuration and task
+     * memory exactly as they were and only reports the existing "request ignored" feedback. Opening
+     * the screen, reconnecting or the tool becoming ready never reaches this entry.
+     *
+     * A successful resume is the existing native person primitive, so it also clears the ordinary
+     * pause under the same lock. It never grants, replays or changes the saved scope; the next chat
+     * request still passes the full standing policy. The same-runtime binding is deliberately kept.
+     */
+    private fun resumeStandingFromUi() {
+        if (guardBusy()) return
+        val core = controller.state.value
+        val state = standingState
+        val halt = facts.value.halt
+        val presence = runCatching { readiness.runtimePresence() }.getOrDefault(PhoneRuntimePresence.UNKNOWN)
+        val toolReady = runCatching { readiness.toolReady() }.getOrNull()
+        val gate =
+            StandingResumeFacts(
+                available = facts.value.available,
+                enabled = facts.value.enabled,
+                controllerEnabled = core.enabled,
+                config = state?.config,
+                nowWallMs = wallClock(),
+                nowElapsedMs = clock(),
+                endsAtElapsedMs = state?.endsAtElapsedMs ?: 0L,
+                expired = state?.expired == true,
+                runtimeId = core.runtimeId,
+                binding = standingBinding,
+                runtimeRunning = presence == PhoneRuntimePresence.RUNNING,
+                toolReady = toolReady == true,
+                connectionConnected = core.connection == PhoneConnectionState.CONNECTED,
+                stopChannelVerified = notifications.stopChannelState() == PhoneStopChannel.Verified,
+                pending = facts.value.pending,
+                continuationInFlight = continuationInFlight,
+                continuationSending = continuationDelivery == PhoneContinueDelivery.Sending,
+                hasGrant = core.grant != null,
+                hasHalt = halt != null,
+                hasLease = facts.value.lease != null,
+                hasRetainedTask = retainedTaskEpoch != null,
+                hasTaskOwner = taskIdentity.current() != null,
+                inFlightMutation = core.inFlightMutation,
+                pausing = core.pausing,
+                standingBlocked = core.standingBlocked,
+                standingBlockReason = core.standingBlockReason,
+                coreBlocked = core.blocked != null,
+                haltMayStillApply = halt?.lastAction == PhoneLastAction.MayStillApply,
+                haltAcknowledged = halt?.acknowledged == true,
+            )
+        val runtimeId = gate.runtimeId
+        if (standingResumeRefusal(gate) != null || runtimeId == null) {
+            mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
+            return
+        }
+        // The operation itself: only now may pending say "resuming". The resume is synchronous and
+        // clears the block/pause under the controller lock; finally always restores the projection.
+        mutateFacts { it.copy(pending = PhonePending.Resuming, busy = null) }
+        try {
+            val resumed =
+                confirmedStandingResume(gate) {
+                    controller.resumeStandingForPerson(
+                        PhoneStandingResume(
+                            runtimeId = runtimeId,
+                            sessionLabel = standingBinding.sessionLabel ?: taskSession ?: "standing",
+                            taskRevision = standingRevision,
+                        ),
+                    )
+                }
+            if (!resumed) mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
+        } finally {
+            mutateFacts { it.copy(pending = null) }
+            refreshStandingProjection()
         }
     }
 

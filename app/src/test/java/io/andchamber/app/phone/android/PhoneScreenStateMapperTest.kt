@@ -8,6 +8,7 @@ import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneConnectionState
+import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.ui.phone.PhoneActionScope
 import io.andchamber.app.ui.phone.PhoneAutoConnect
 import io.andchamber.app.ui.phone.PhoneControl
@@ -16,6 +17,7 @@ import io.andchamber.app.ui.phone.PhoneHaltReason
 import io.andchamber.app.ui.phone.PhoneLastAction
 import io.andchamber.app.ui.phone.PhoneLink
 import io.andchamber.app.ui.phone.PhonePending
+import io.andchamber.app.ui.phone.PhoneStandingPauseReason
 import io.andchamber.app.ui.phone.PhoneStopChannel
 import io.andchamber.app.ui.phone.PhoneTask
 import io.andchamber.app.ui.phone.PhoneTarget
@@ -323,5 +325,125 @@ class PhoneScreenStateMapperTest {
         val mapped = phoneScreenState(core, facts())
         assertEquals(42L, mapped.diagnostics.observedAtMs)
         assertEquals(12, mapped.diagnostics.observedNodes)
+    }
+
+    private fun standingScreenState() =
+        PhoneStandingState(
+            config =
+                PhoneStandingConfig(
+                    apps = listOf(io.andchamber.app.phone.standing.PhoneStandingApp(target.label, target.packageName)),
+                    actions = setOf(io.andchamber.app.phone.core.PhoneActionKind.TAP),
+                    windowEndsAtWallMs = 10_000L,
+                    perTaskMs = 60_000L,
+                ),
+            endsAtElapsedMs = 5_000L,
+        )
+
+    private fun mapped(
+        core: PhoneState,
+        standingEnabled: Boolean = true,
+        halt: PhoneHaltSnapshot? = null,
+    ) = phoneScreenState(
+        core,
+        facts(halt = halt).copy(
+            standingEnabled = standingEnabled,
+            standingState = standingScreenState(),
+        ),
+        nowElapsedMs = 1_000L,
+    )
+
+    @Test
+    fun `every native standing reason maps to exactly one screen pause reason`() {
+        val expected =
+            mapOf(
+                PhoneStandingBlockReason.NEED_USER to PhoneStandingPauseReason.NeedUser,
+                PhoneStandingBlockReason.TAKEOVER to PhoneStandingPauseReason.TakenOver,
+                PhoneStandingBlockReason.UNKNOWN_OUTCOME to PhoneStandingPauseReason.OutcomeUnknown,
+                PhoneStandingBlockReason.CONNECTION_LOST to PhoneStandingPauseReason.ConnectionLost,
+                PhoneStandingBlockReason.DEVICE_LOCKED to PhoneStandingPauseReason.ScreenLocked,
+                PhoneStandingBlockReason.RUNTIME_CHANGED to PhoneStandingPauseReason.RuntimeChanged,
+            )
+        assertEquals(PhoneStandingBlockReason.entries.toSet(), expected.keys)
+        val core =
+            PhoneState(
+                enabled = true,
+                epoch = 3,
+                connection = PhoneConnectionState.CONNECTED,
+            )
+        expected.forEach { (native, screen) ->
+            val pause =
+                mapped(core.copy(standingBlocked = true, standingBlockReason = native))
+                    .standing
+                    ?.pause
+            assertEquals("reason $native", screen, pause?.reason)
+            // Only the unknown reason itself is fail-closed unchecked here.
+            assertEquals(native == PhoneStandingBlockReason.UNKNOWN_OUTCOME, pause?.outcomeUnchecked)
+        }
+    }
+
+    @Test
+    fun `a scope with no block is never marked paused just because a lease is paused`() {
+        val idle = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
+        assertNull(mapped(idle).standing?.pause)
+        assertNull(mapped(idle.copy(paused = true)).standing?.pause)
+        // A reason without the boolean still counts as a block, and a lost reason is fail closed.
+        val reasonOnly =
+            mapped(idle.copy(standingBlocked = false, standingBlockReason = PhoneStandingBlockReason.TAKEOVER))
+        assertEquals(PhoneStandingPauseReason.TakenOver, reasonOnly.standing?.pause?.reason)
+        val lostReason = mapped(idle.copy(standingBlocked = true, standingBlockReason = null))
+        assertEquals(PhoneStandingPauseReason.OutcomeUnknown, lostReason.standing?.pause?.reason)
+        assertEquals(true, lostReason.standing?.pause?.outcomeUnchecked)
+    }
+
+    @Test
+    fun `an ordinary unknown outcome block is a pause even before a standing reason is recorded`() {
+        val core =
+            PhoneState(
+                enabled = true,
+                epoch = 2,
+                connection = PhoneConnectionState.CONNECTED,
+                blocked = PhoneBlockReason.UNKNOWN_OUTCOME,
+            )
+        val pause = mapped(core).standing?.pause
+        assertEquals(PhoneStandingPauseReason.OutcomeUnknown, pause?.reason)
+        assertEquals(true, pause?.outcomeUnchecked)
+    }
+
+    @Test
+    fun `an unacknowledged may-still-apply halt keeps the pause unchecked`() {
+        val blocked =
+            PhoneState(
+                enabled = true,
+                epoch = 4,
+                connection = PhoneConnectionState.CONNECTED,
+                standingBlocked = true,
+                standingBlockReason = PhoneStandingBlockReason.TAKEOVER,
+            )
+        val open =
+            PhoneHaltSnapshot(
+                lease = lease,
+                reason = PhoneHaltReason.OutcomeUnknown,
+                confirmed = true,
+                lastAction = PhoneLastAction.MayStillApply,
+            )
+        val checked = open.copy(lastAction = PhoneLastAction.UserChecked, acknowledged = true)
+        assertEquals(true, mapped(blocked, halt = open).standing?.pause?.outcomeUnchecked)
+        assertEquals(false, mapped(blocked, halt = checked).standing?.pause?.outcomeUnchecked)
+        // A halt alone is a task fact, not a standing pause: the scope itself has no block.
+        val noBlock = PhoneState(enabled = true, epoch = 4, connection = PhoneConnectionState.CONNECTED)
+        assertNull(mapped(noBlock, halt = open).standing?.pause)
+    }
+
+    @Test
+    fun `the standing surface off never projects a pause`() {
+        val core =
+            PhoneState(
+                enabled = true,
+                epoch = 1,
+                connection = PhoneConnectionState.CONNECTED,
+                standingBlocked = true,
+                standingBlockReason = PhoneStandingBlockReason.RUNTIME_CHANGED,
+            )
+        assertNull(mapped(core, standingEnabled = false).standing)
     }
 }

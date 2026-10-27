@@ -35,6 +35,34 @@ The builtin-question and plain-notice follow-up is recorded in
 earlier base-flow evidence. Do not combine them to claim the new pairing, permanent, question or
 notice features on the tablet.
 
+### Paused standing recovery (API 35 / x86_64)
+
+Release follow-up automation passed 1,970 JVM tests (no failures, errors or skips), 359 Node tests
+(358 passed and one existing skip), 72 Python tests, Android lint and debug/AndroidTest APK packaging.
+Lint retained existing warnings/information. No new device instrumentation was executed.
+
+This follow-up used the covered API 35 / x86_64 emulator, a dedicated debug application identity, the
+synthetic fixture target and a permanent, fixture-only standing scope. It is separate evidence: it
+does not upgrade the earlier tablet/base-flow results, and it was not run on API 37, arm64 or an OEM
+device.
+
+| Claim | Evidence | Result |
+|---|---|---|
+| The reported refusal reproduces on the old build | Save one permanent, fixture-only scope; finish the task; on Home stop and start the local runtime; close the Ended result card; **Find and connect** again. The native screen showed Ready with no task, while the status still carried `standingConfigured=true`, `runtimeReady=true`, `standingBlocked=true` and reason `RUNTIME_CHANGED`; a fresh chat request was refused as `STANDING_BLOCKED`. | Reproduced before the fix |
+| A blocked no-task scope is honestly paused | The same path now shows **Paused** / **Runtime changed** instead of Ready, and the chat cannot start from the scope. | Passed |
+| Cancel is a no-op | Opening the resume dialog and cancelling left the standing block and the task epoch unchanged, with no grant and no task. | Passed |
+| Confirmed resume clears only the pause | Confirming **Resume chat use…** returned the native screen to Ready with no task: `standingBlocked=false`, reason null, phase `NO_GRANT`, `taskPresent=false`, and the same epoch. The chat message count and the fixture transcript count were unchanged, so no chat prompt was sent. | Passed |
+| The saved scope is preserved | The persisted `standing.v1` configuration was exactly equal before and after, including the permanent window and permanent per-task choice. The resume itself did not change the current same-runtime/session binding; the saved revision and deadline were unchanged. | Passed |
+| A fresh request still works normally | After the resume, a new real request started inside the saved scope as `RUNNING`; the target was actually tapped and read back, and its Save counter increased exactly once. | Passed |
+| Fail-closed and no automatic clearing | The gate requires no task, halt, grant, retained task, lease or task identity and no in-flight/pausing/unknown state before it calls the person resume. Unknown outcome, missing/inactive/revoked scope and a different-runtime binding are refused. Opening the screen, reconnecting or RPC readiness never clears the pause. | Passed by focused JVM policy/controller tests |
+| Mapper reasons are exhaustive and truthful | All six native reasons map to the matching screen reason; a lost reason while blocked is shown as `OutcomeUnknown` and is not resumable. A scope with no block is never marked paused merely because it is idle. | Passed by mapper tests |
+| Existing stopped tasks keep their own path | After the resume, a new task called `need_user` and the native screen showed Paused / Need user. The original **Continue beside the chat…** entry stayed enabled; a real tap of that confirmation sent the original native fixed wake-up exactly once, the same chat session received the fixture input, and an independent read-back observed `standing-resume-check` in the target. The new scope resume did not replace this retained-task path, and no continuation prompt was sent by hand. | Passed in a separate regression on the same lane |
+
+The paused-recovery path adds focused JVM coverage and the API 35 probe above; it does not restate
+full-suite totals, which are owned by the release run. No new device instrumentation was executed in
+this round. The stopped-task **Continue** regression is separate evidence on the same lane and does
+not widen the API 37/arm64 or OEM claims.
+
 ## Evidence matrix
 
 | Claim | Evidence | Result |
@@ -110,6 +138,10 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
   historical base-flow evidence only; it is not a new test result and does not cover the new
   fresh-pairing, permanent-scope or question/notice follow-ups. The separate API 35 fixture/emulator
   lane carries the new evidence; the smoke suite does not stand in for pairing or the full tool loop.
+- The paused-standing follow-up adds focused JVM coverage for the mapper's six reasons/unknown
+  combinations, the resume gate's independent refusals, and the real controller resume clearing the
+  standing block plus ordinary pause without a grant or replay. Full-suite totals are not restated
+  here; they belong to the release run.
 
 ## Important regressions retained
 
@@ -118,6 +150,16 @@ long-duration survival, TalkBack, or active permission-revocation coverage.
   discovery follows the pair. An existing receipt's **Find and connect** is a separate path.
 - A permanent standing scope or permanent per-task limit is not a stop exemption. A real overlay
   Takeover ends in `NO_GRANT` and `standingBlocked=TAKEOVER`.
+- A standing block with no task is presented as paused, never Ready. The person resume is gated on
+  current runtime/tool readiness, verified stop entry, an active non-revoked scope, no task/mutation
+  and no unchecked unknown; it keeps the same runtime/session binding and the exact saved scope,
+  deadline, revision and store, and creates no grant or chat prompt. Opening the screen, reconnecting
+  or RPC readiness never clears it.
+- A stopped task still uses the existing **Continue** entry and base readiness; the new resume entry
+  is not a second continuation path. This was rechecked after a new-task `need_user` pause: **Continue**
+  stayed enabled, sent the original fixed wake-up once, the same session produced the fixture input
+  and an independent target read-back observed it. A different-runtime binding fails closed rather
+  than rebinding.
 - LibADB 3.1.1 can wait forever after queued data followed by CLSE. The local reader drains its
   buffer/queue before EOF; the test exercises the shipped SDK's hang and the replacement's success.
 - A failed async driver child must not cancel the HTTP parent instead of returning its structured
@@ -158,6 +200,17 @@ the pair, then use a fresh NSD connection and TLS connect. Repeat with an existi
 and check `leasePermanent=true` / `leaseRemainingMs=null`; then use real Overlay Takeover and verify
 `NO_GRANT` plus `standingBlocked=TAKEOVER`. The builtin-question and plain-notice steps are in
 [the overlay verification](testing-phone-overlay.md).
+
+For the paused-standing follow-up, use the same API 35 / x86_64 test identity and a permanent,
+fixture-only scope. Save once, finish the task, stop and start the local runtime from Home, close the
+Ended result card, then use **Find and connect**. After the fix the native screen must show Paused /
+Runtime changed rather than Ready. Cancelling the resume dialog must leave the block and epoch
+unchanged. Confirming it must clear only the standing block and ordinary pause: the status must show
+no block, no grant and no task, the same epoch, an unchanged `standing.v1` configuration and no new
+chat message or fixture transcript entry. A fresh request must then start as `RUNNING` with a real
+tap/read-back. This path is API 35 / x86_64 only; it is not tablet evidence. The retained-task
+**Continue** regression is recorded as a separate check on the same lane and must not be merged into
+the no-task resume path.
 
 The physical tablet follow-up is limited to the cases above; no general OEM background-lifetime,
 Android 11-wide compatibility, TalkBack or long-duration survival claim is made. The input backend supports only its declared ASCII subset, not Unicode,

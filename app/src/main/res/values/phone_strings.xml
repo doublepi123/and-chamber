@@ -31,6 +31,7 @@
     <string name="phone_device_connected">Connected via wireless debugging</string>
     <string name="phone_device_lost">Connection lost</string>
     <string name="phone_control_none">You (the agent has no access)</string>
+    <string name="phone_control_none_paused">You (chat use paused)</string>
     <string name="phone_control_agent">Agent · %1$s · %2$s left</string>
     <string name="phone_control_paused">Paused · you\'re in control</string>
     <string name="phone_control_pausing">Stopping…</string>
@@ -49,6 +50,7 @@
     <string name="phone_pending_pausing">Pausing…</string>
     <string name="phone_pending_finishing">Ending the task…</string>
     <string name="phone_pending_observing">Reading the screen…</string>
+    <string name="phone_pending_resuming">Resuming chat use…</string>
 
     <!-- Stop controls -->
     <string name="phone_pause">Pause</string>
@@ -338,4 +340,20 @@
     <string name="phone_continue_blocked_not_ready">Available once chat use is ready (see above).</string>
     <string name="phone_continue_blocked_scope">This app isn\'t in your scope. Change the scope first.</string>
     <string name="phone_continue_blocked_generic">Not available right now.</string>
+    <string name="phone_standing_paused_title">Chat use is paused</string>
+    <string name="phone_standing_paused_body">Your setup is kept: no need to pair again or set the scope again. Confirm Resume chat use here, or use the card above to continue a stopped task. Phone requests from the chat are refused until you confirm.</string>
+    <string name="phone_standing_paused_also">Chat use is also paused. Fixing this doesn\'t resume it; you resume it here afterwards.</string>
+    <string name="phone_standing_pause_reason_need_user">The agent asked for you, so it stopped.</string>
+    <string name="phone_standing_pause_reason_taken_over">You took over the phone, so the agent stopped.</string>
+    <string name="phone_standing_pause_reason_outcome_unknown">It isn\'t known whether the last step took effect, so the agent stopped.</string>
+    <string name="phone_standing_pause_reason_connection_lost">The connection or the stop entry dropped, so the agent stopped.</string>
+    <string name="phone_standing_pause_reason_screen_locked">The screen was locked, so the agent stopped.</string>
+    <string name="phone_standing_pause_reason_runtime_changed">The local OpenChamber restarted, so the agent stopped to be safe.</string>
+    <string name="phone_standing_resume">Resume chat use…</string>
+    <string name="phone_standing_resume_confirm_title">Resume chat use?</string>
+    <string name="phone_standing_resume_confirm_body">The chat can then start new tasks inside the scope you saved. This doesn\'t start a task by itself, doesn\'t re-send anything done before, and doesn\'t change the scope or its time limits.</string>
+    <string name="phone_standing_resume_confirm">Resume</string>
+    <string name="phone_standing_resume_use_task">A stopped task is waiting. Continue or end it in the card above.</string>
+    <string name="phone_standing_resume_blocked_task">Available once the current task is over.</string>
+    <string name="phone_standing_resume_blocked_unchecked">A step may already have taken effect and hasn\'t been checked yet. Check the last result first; this entry won\'t clear the pause automatically.</string>
 </resources>

@@ -401,7 +401,12 @@ private fun StatusStrip(
 
             val (controlTone, controlText) =
                 when (val control = state.control) {
-                    PhoneControl.None -> StatusTone.Idle to stringResource(R.string.phone_control_none)
+                    PhoneControl.None ->
+                        StatusTone.Idle to
+                            stringResource(
+                                // Never "ready" beside a pause: say chat use is paused, not just idle.
+                                if (standingPausedWithoutControl(state)) R.string.phone_control_none_paused else R.string.phone_control_none,
+                            )
                     is PhoneControl.Agent ->
                         StatusTone.Busy to
                             if (control.lease.permanent()) {
@@ -699,6 +704,10 @@ internal object PhoneTags {
     const val SAVE_STANDING = "phone.saveStanding"
     const val SAVE_STANDING_CONFIRM = "phone.saveStandingConfirm"
     const val CONTINUE_IN_CHAT = "phone.continueInChat"
+    const val STANDING_PAUSED = "phone.standingPaused"
+    const val STANDING_PAUSED_ALSO = "phone.standingPausedAlso"
+    const val RESUME_STANDING = "phone.resumeStanding"
+    const val RESUME_STANDING_CONFIRM = "phone.resumeStandingConfirm"
     const val CONTINUE_DELIVERY = "phone.continueDelivery"
     const val OBSERVE = "phone.observe"
     const val FEEDBACK = "phone.feedback"

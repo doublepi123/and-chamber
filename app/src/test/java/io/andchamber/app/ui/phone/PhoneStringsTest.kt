@@ -55,6 +55,24 @@ class PhoneStringsTest {
     }
 
     @Test
+    fun `paused copy keeps the setup, needs no re-pairing, and resuming starts or re-sends nothing`() {
+        val zhBody = chinese.getValue("phone_standing_paused_body")
+        listOf("设置还在", "不用重新配对", "不用重新设置范围", "恢复聊天使用", "拒绝").forEach { assertTrue("zh body lacks '$it'", zhBody.contains(it)) }
+        val enBody = english.getValue("phone_standing_paused_body")
+        listOf("setup is kept", "pair again", "scope again", "Resume chat use", "refused").forEach { assertTrue("en body lacks '$it'", enBody.contains(it)) }
+        val zhConfirm = chinese.getValue("phone_standing_resume_confirm_body")
+        listOf("保存的范围", "不会自动开始任务", "不会重发", "不会改动范围和时限").forEach { assertTrue("zh confirm lacks '$it'", zhConfirm.contains(it)) }
+        val enConfirm = english.getValue("phone_standing_resume_confirm_body")
+        listOf("scope you saved", "start a task by itself", "re-send", "change the scope or its time limits").forEach { assertTrue("en confirm lacks '$it'", enConfirm.contains(it)) }
+        // A pause is never worded as ready.
+        listOf("phone_standing_paused_title", "phone_control_none_paused").forEach { key ->
+            assertFalse(chinese.getValue(key).contains("就绪"))
+            assertFalse(english.getValue(key).contains("Ready", ignoreCase = true))
+        }
+        assertTrue(chinese.getValue("phone_standing_pause_reason_runtime_changed").contains("重启"))
+    }
+
+    @Test
     fun `copy never claims a confirmation proves a person`() {
         val all = (english.values + chinese.values).joinToString("\n").lowercase()
         listOf("proves you", "verified human", "证明是你", "确认是本人").forEach { assertTrue("found '$it'", it !in all) }

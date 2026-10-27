@@ -31,6 +31,7 @@
     <string name="phone_device_connected">已通过无线调试连接</string>
     <string name="phone_device_lost">连接已断开</string>
     <string name="phone_control_none">你（代理无权操作）</string>
+    <string name="phone_control_none_paused">你（聊天使用已暂停）</string>
     <string name="phone_control_agent">代理 · %1$s · 剩余 %2$s</string>
     <string name="phone_control_paused">已暂停 · 由你操作</string>
     <string name="phone_control_pausing">正在停止…</string>
@@ -49,6 +50,7 @@
     <string name="phone_pending_pausing">正在暂停…</string>
     <string name="phone_pending_finishing">正在结束任务…</string>
     <string name="phone_pending_observing">正在读取屏幕…</string>
+    <string name="phone_pending_resuming">正在恢复聊天使用…</string>
 
     <!-- 停止控制 -->
     <string name="phone_pause">暂停</string>
@@ -338,4 +340,20 @@
     <string name="phone_continue_blocked_not_ready">聊天使用就绪后才能继续（见上方）。</string>
     <string name="phone_continue_blocked_scope">这个应用不在你的范围里，请先修改范围。</string>
     <string name="phone_continue_blocked_generic">现在不能继续。</string>
+    <string name="phone_standing_paused_title">聊天使用已暂停</string>
+    <string name="phone_standing_paused_body">你的设置还在：不用重新配对，也不用重新设置范围。请在这里确认“恢复聊天使用”；如果有停下的任务，请用上方任务卡继续。在你确认前，聊天里的手机请求都会被拒绝。</string>
+    <string name="phone_standing_paused_also">聊天使用也已暂停。处理好这一项不会自动恢复，之后还需要在这里恢复。</string>
+    <string name="phone_standing_pause_reason_need_user">代理请你来处理，所以先停下了。</string>
+    <string name="phone_standing_pause_reason_taken_over">你接管了手机，所以代理停下了。</string>
+    <string name="phone_standing_pause_reason_outcome_unknown">不确定上一步是否已经生效，所以代理停下了。</string>
+    <string name="phone_standing_pause_reason_connection_lost">连接或停止入口断开过，所以代理停下了。</string>
+    <string name="phone_standing_pause_reason_screen_locked">屏幕锁过，所以代理停下了。</string>
+    <string name="phone_standing_pause_reason_runtime_changed">本机 OpenChamber 重启过，为了安全先停下了。</string>
+    <string name="phone_standing_resume">恢复聊天使用…</string>
+    <string name="phone_standing_resume_confirm_title">恢复聊天使用？</string>
+    <string name="phone_standing_resume_confirm_body">之后聊天可以按你保存的范围开始新任务。这不会自动开始任务，不会重发之前的操作，也不会改动范围和时限。</string>
+    <string name="phone_standing_resume_confirm">恢复</string>
+    <string name="phone_standing_resume_use_task">有一个停下的任务在等你，请在上方卡片里继续或结束它。</string>
+    <string name="phone_standing_resume_blocked_task">当前任务结束后才能恢复。</string>
+    <string name="phone_standing_resume_blocked_unchecked">有一步可能已经生效，还没有核对。请先核对上一步的结果；这里不会自动解除暂停。</string>
 </resources>

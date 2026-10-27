@@ -3,6 +3,7 @@ package io.andchamber.app.phone.android
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneConnectionState
+import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.ui.phone.PhoneActionScope
@@ -25,6 +26,8 @@ import io.andchamber.app.ui.phone.PhoneResultItem
 import io.andchamber.app.ui.phone.PhoneRuntimeStatus
 import io.andchamber.app.ui.phone.PhoneScreenState
 import io.andchamber.app.ui.phone.PhoneStanding
+import io.andchamber.app.ui.phone.PhoneStandingPause
+import io.andchamber.app.ui.phone.PhoneStandingPauseReason
 import io.andchamber.app.ui.phone.PhoneStandingStatus
 import io.andchamber.app.ui.phone.PhoneStopChannel
 import io.andchamber.app.ui.phone.PhoneTarget
@@ -119,7 +122,7 @@ internal fun phoneScreenState(
     val lease = halt?.lease?.toLease(core) ?: facts.lease?.toLease(core)
     val outcomeUnknown = core.blocked == PhoneBlockReason.UNKNOWN_OUTCOME
 
-    val standing = standingProjection(facts, nowElapsedMs)
+    val standing = standingProjection(core, facts, nowElapsedMs)
 
     val control: PhoneControl =
         when {
@@ -214,8 +217,15 @@ internal fun phoneScreenState(
  * The standing card is enabled by [PhoneScreenFacts.standingEnabled]; with no saved configuration it
  * still projects `NotSet` so the person can configure it once. A wall-clock/elapsed expiration or a
  * revoke is reflected truthfully and never as an active authority.
+ *
+ * The native block is projected from the controller's own facts, never inferred from a missing task:
+ * a scope with no block stays without [PhoneStanding.pause]. A `standingBlockReason` without
+ * `standingBlocked` still counts as a block (fail closed), and a null reason while blocked is shown as
+ * [PhoneStandingPauseReason.OutcomeUnknown] instead of guessing. An ordinary unknown-outcome block
+ * also suspends chat use, even before the native coordinator recorded a standing reason.
  */
-private fun standingProjection(
+internal fun standingProjection(
+    core: PhoneState,
     facts: PhoneScreenFacts,
     nowElapsedMs: Long,
 ): PhoneStanding? {
@@ -252,8 +262,47 @@ private fun standingProjection(
         perTaskPermanent = perTaskPermanent,
         runtime = facts.runtimeStatus,
         continuation = facts.continuation,
+        pause = standingPause(core, facts.halt),
     )
 }
+
+/**
+ * The native pause behind [PhoneStanding.pause]. Only explicit stopping facts create one: an ordinary
+ * paused lease (or an idle scope) is not a standing pause by itself.
+ *
+ * `outcomeUnchecked` is fail closed: a core unknown-outcome block, an `UNKNOWN_OUTCOME` standing
+ * reason, a block whose reason was lost, and an unacknowledged "may still apply" halt all prevent a
+ * resume. The person must check the device (and use the recorded task's own path) first.
+ */
+internal fun standingPause(
+    core: PhoneState,
+    halt: PhoneHaltSnapshot?,
+): PhoneStandingPause? {
+    val blocked = core.standingBlocked || core.standingBlockReason != null
+    val reason =
+        when {
+            blocked -> core.standingBlockReason?.toScreenPauseReason() ?: PhoneStandingPauseReason.OutcomeUnknown
+            core.blocked == PhoneBlockReason.UNKNOWN_OUTCOME -> PhoneStandingPauseReason.OutcomeUnknown
+            else -> return null
+        }
+    val outcomeUnchecked =
+        core.blocked != null ||
+            core.standingBlockReason == PhoneStandingBlockReason.UNKNOWN_OUTCOME ||
+            (core.standingBlocked && core.standingBlockReason == null) ||
+            (halt != null && halt.lastAction == PhoneLastAction.MayStillApply && !halt.acknowledged)
+    return PhoneStandingPause(reason = reason, outcomeUnchecked = outcomeUnchecked)
+}
+
+/** Exhaustive mapping: every native reason has exactly one screen reason. */
+private fun PhoneStandingBlockReason.toScreenPauseReason(): PhoneStandingPauseReason =
+    when (this) {
+        PhoneStandingBlockReason.NEED_USER -> PhoneStandingPauseReason.NeedUser
+        PhoneStandingBlockReason.TAKEOVER -> PhoneStandingPauseReason.TakenOver
+        PhoneStandingBlockReason.UNKNOWN_OUTCOME -> PhoneStandingPauseReason.OutcomeUnknown
+        PhoneStandingBlockReason.CONNECTION_LOST -> PhoneStandingPauseReason.ConnectionLost
+        PhoneStandingBlockReason.DEVICE_LOCKED -> PhoneStandingPauseReason.ScreenLocked
+        PhoneStandingBlockReason.RUNTIME_CHANGED -> PhoneStandingPauseReason.RuntimeChanged
+    }
 
 private fun PhoneDiscoveryStatus.toScreenDiscovery(): PhoneDiscovery =
     when (this) {

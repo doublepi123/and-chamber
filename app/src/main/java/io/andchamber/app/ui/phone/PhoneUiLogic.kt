@@ -636,6 +636,13 @@ internal enum class StandingReadiness {
     /** In effect and the runtime loaded the tool: chat requests start directly. */
     Ready,
 
+    /**
+     * Everything else is ready, but the native side suspended chat use ([PhoneStanding.pause]).
+     * Never shown as ready; only a confirmed person resume (or the stopped task's own continue)
+     * ends it.
+     */
+    Paused,
+
     /** In effect, but the running OpenChamber started without the tool. One confirmed restart. */
     NeedsRestart,
 
@@ -654,7 +661,22 @@ internal enum class StandingReadiness {
     Revoked,
 }
 
+/**
+ * What the standing card says, including a native pause: a pause turns an otherwise ready scope
+ * into [StandingReadiness.Paused]. A missing connection, runtime or tool is still named first, so
+ * the person fixes that before the pause is offered for resuming. Expired/revoked stay as they are.
+ */
 internal fun standingReadiness(state: PhoneScreenState): StandingReadiness {
+    val base = standingBaseReadiness(state)
+    return if (base == StandingReadiness.Ready && state.standing?.pause != null) StandingReadiness.Paused else base
+}
+
+/**
+ * Readiness without the native pause; never [StandingReadiness.Paused]. Used by the stopped task's
+ * own continue entry, whose native continuation clears the pause itself, so the pause it causes
+ * can't lock that entry.
+ */
+internal fun standingBaseReadiness(state: PhoneScreenState): StandingReadiness {
     val standing = state.standing ?: return StandingReadiness.NotSet
     return when (standing.status) {
         PhoneStandingStatus.NotSet -> StandingReadiness.NotSet
@@ -715,7 +737,9 @@ internal fun standingBlock(
 internal fun canContinueInChat(state: PhoneScreenState): Boolean {
     val halted = state.control as? PhoneControl.Halted ?: return false
     val standing = state.standing ?: return false
-    return chatCanUsePhone(state) &&
+    // Base readiness: the stop that halted this task also paused chat use, and continuing it is
+    // exactly the native person confirmation that ends that pause.
+    return standingBaseReadiness(state) == StandingReadiness.Ready &&
         halted.confirmed &&
         halted.lastAction != PhoneLastAction.MayStillApply &&
         state.stopChannel == PhoneStopChannel.Verified &&
@@ -725,6 +749,72 @@ internal fun canContinueInChat(state: PhoneScreenState): Boolean {
 }
 
 private fun PhoneControl.Halted.target(): String = lease.target.packageName
+
+/**
+ * "Resume chat use" for a paused standing scope with no stopped or running task. Offered only when
+ * the scope is otherwise ready (active, switched on, connected, tool loaded), the stop entry is
+ * verified, nothing is in progress, and no uncertain action is still unchecked. A stopped task uses
+ * its own continue entry instead. Resuming only lets the chat start new tasks in the same scope.
+ */
+internal fun canResumeStanding(state: PhoneScreenState): Boolean {
+    val standing = state.standing ?: return false
+    val pause = standing.pause ?: return false
+    return standingBaseReadiness(state) == StandingReadiness.Ready &&
+        !pause.outcomeUnchecked &&
+        state.control is PhoneControl.None &&
+        state.task !is PhoneTask.Active &&
+        state.stopChannel == PhoneStopChannel.Verified &&
+        state.pending == null &&
+        standing.continuation.delivery != PhoneContinueDelivery.Sending
+}
+
+/** Why resuming chat use isn't offered right now, in the order the person should fix it. */
+internal enum class StandingResumeBlock {
+    /** A stopped task exists: its own continue entry above is the way on. */
+    StoppedTask,
+
+    /** A task still holds the phone. */
+    TaskRunning,
+
+    /** An uncertain action hasn't been checked; resuming would assert it had no effect. */
+    OutcomeUnchecked,
+
+    /** Connection, runtime or tool isn't ready; the notice already names it. */
+    NotReady,
+
+    StopChannel,
+    Busy,
+}
+
+internal fun standingResumeBlock(state: PhoneScreenState): StandingResumeBlock? {
+    val pause = state.standing?.pause ?: return null
+    return when {
+        state.control is PhoneControl.Halted -> StandingResumeBlock.StoppedTask
+        state.control is PhoneControl.Agent || state.task is PhoneTask.Active -> StandingResumeBlock.TaskRunning
+        pause.outcomeUnchecked -> StandingResumeBlock.OutcomeUnchecked
+        standingBaseReadiness(state) != StandingReadiness.Ready -> StandingResumeBlock.NotReady
+        state.stopChannel != PhoneStopChannel.Verified -> StandingResumeBlock.StopChannel
+        state.pending != null || state.standing.continuation.delivery == PhoneContinueDelivery.Sending -> StandingResumeBlock.Busy
+        else -> null
+    }
+}
+
+/**
+ * The resume dialog's confirm: re-checks the current state at the moment of the tap, then asks
+ * once. The only caller of [PhoneControlActions.onResumeStanding]; never run on open or reconnect.
+ */
+internal fun confirmResumeStanding(
+    state: PhoneScreenState,
+    onResumeStanding: () -> Unit,
+): Boolean {
+    if (!canResumeStanding(state)) return false
+    onResumeStanding()
+    return true
+}
+
+/** The status strip's control line when nobody holds the phone and chat use is paused. */
+internal fun standingPausedWithoutControl(state: PhoneScreenState): Boolean =
+    state.control is PhoneControl.None && standingReadiness(state) == StandingReadiness.Paused
 
 /**
  * In configure-once mode the per-task grant form isn't the step: the standing card is. The grant

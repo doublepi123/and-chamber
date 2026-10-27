@@ -222,4 +222,16 @@ internal fun PhonePending.label(): Int =
         PhonePending.Pausing -> R.string.phone_pending_pausing
         PhonePending.Finishing -> R.string.phone_pending_finishing
         PhonePending.Observing -> R.string.phone_pending_observing
+        PhonePending.Resuming -> R.string.phone_pending_resuming
+    }
+
+@StringRes
+internal fun PhoneStandingPauseReason.label(): Int =
+    when (this) {
+        PhoneStandingPauseReason.NeedUser -> R.string.phone_standing_pause_reason_need_user
+        PhoneStandingPauseReason.TakenOver -> R.string.phone_standing_pause_reason_taken_over
+        PhoneStandingPauseReason.OutcomeUnknown -> R.string.phone_standing_pause_reason_outcome_unknown
+        PhoneStandingPauseReason.ConnectionLost -> R.string.phone_standing_pause_reason_connection_lost
+        PhoneStandingPauseReason.ScreenLocked -> R.string.phone_standing_pause_reason_screen_locked
+        PhoneStandingPauseReason.RuntimeChanged -> R.string.phone_standing_pause_reason_runtime_changed
     }

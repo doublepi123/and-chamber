@@ -6,6 +6,7 @@ import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.ui.phone.PhonePending
 import io.andchamber.app.ui.phone.PhoneRuntimeStatus
 import io.andchamber.app.ui.phone.PhoneToolStatus
 
@@ -249,3 +250,141 @@ internal fun phoneRuntimeStatus(
         }
     return PhoneRuntimeStatus(tool = tool)
 }
+
+/**
+ * Why a person-confirmed standing resume is refused. Each value is one independently failing guard,
+ * so a caller can log or test it without ever calling the controller.
+ */
+internal enum class StandingResumeRefusal {
+    /** No standing block at all: opening the screen, reconnecting or recomposition never resumes. */
+    NOT_PAUSED,
+
+    /** The phone-control experiment / controller is switched off (or unavailable on this device). */
+    DISABLED,
+
+    /** No saved scope, or the person revoked it. */
+    NOT_CONFIGURED,
+
+    /** A finite window is over (wall clock or monotonic projection), or the state is already expired. */
+    EXPIRED,
+
+    /** No current runtime identity, or the runtime/tool handshake is not stable and ready. */
+    NOT_READY,
+
+    /** A different runtime owns the saved session; never silently rebind the scope to another runtime. */
+    BINDING_CHANGED,
+
+    CONNECTION,
+    STOP_CHANNEL,
+
+    /** Another native operation or a wake-up send is in progress. */
+    BUSY,
+
+    /** A live/retained task, lease or task identity still owns the task: use its own continue/end path. */
+    TASK_OWNED,
+
+    /** An action may still be in flight; nothing may be cleared before it settles. */
+    UNSETTLED,
+
+    /** An uncertain outcome has not been checked (including an `UNKNOWN_OUTCOME` standing reason). */
+    UNCHECKED,
+}
+
+/**
+ * Frozen snapshot for [standingResumeRefusal]. Everything is Android-free so the gate can be tested
+ * together with the resume callback and with the real core controller.
+ */
+internal data class StandingResumeFacts(
+    val available: Boolean,
+    val enabled: Boolean,
+    val controllerEnabled: Boolean,
+    val config: PhoneStandingConfig?,
+    val nowWallMs: Long,
+    val nowElapsedMs: Long,
+    val endsAtElapsedMs: Long,
+    val expired: Boolean,
+    val runtimeId: String?,
+    val binding: PhoneStandingBindingState,
+    val runtimeRunning: Boolean,
+    val toolReady: Boolean,
+    val connectionConnected: Boolean,
+    val stopChannelVerified: Boolean,
+    val pending: PhonePending?,
+    val continuationInFlight: Boolean,
+    val continuationSending: Boolean,
+    val hasGrant: Boolean,
+    val hasHalt: Boolean,
+    val hasLease: Boolean,
+    val hasRetainedTask: Boolean,
+    val hasTaskOwner: Boolean,
+    val inFlightMutation: Boolean,
+    val pausing: Boolean,
+    val standingBlocked: Boolean,
+    val standingBlockReason: PhoneStandingBlockReason?,
+    val coreBlocked: Boolean,
+    val haltMayStillApply: Boolean,
+    val haltAcknowledged: Boolean,
+)
+
+/**
+ * The full fresh check before a person-confirmed standing resume. It only reads the frozen facts; a
+ * refusal leaves the controller block, binding, configuration and task memory untouched.
+ *
+ * Order is deliberate: the person fixes the outer readiness first, then the scope, then the binding
+ * and connection, and only then is anything cleared. An expired/revoked scope is never revived and
+ * a different runtime binding is refused instead of being rebound. A task still owned (live,
+ * retained, halted or identified) must go through its own continue/end entry, never this one.
+ */
+internal fun standingResumeRefusal(facts: StandingResumeFacts): StandingResumeRefusal? {
+    if (!facts.standingBlocked && facts.standingBlockReason == null && !facts.coreBlocked) {
+        return StandingResumeRefusal.NOT_PAUSED
+    }
+    if (!facts.available || !facts.enabled || !facts.controllerEnabled) return StandingResumeRefusal.DISABLED
+    val config = facts.config ?: return StandingResumeRefusal.NOT_CONFIGURED
+    if (config.revoked) return StandingResumeRefusal.NOT_CONFIGURED
+    if (!config.isActive(facts.nowWallMs) ||
+        facts.expired ||
+        facts.endsAtElapsedMs <= facts.nowElapsedMs
+    ) {
+        return StandingResumeRefusal.EXPIRED
+    }
+    val runtimeId = facts.runtimeId ?: return StandingResumeRefusal.NOT_READY
+    // Preserve the saved session's isolation: never resume against a different runtime.
+    if (facts.binding.runtimeId != null && facts.binding.runtimeId != runtimeId) {
+        return StandingResumeRefusal.BINDING_CHANGED
+    }
+    if (!facts.runtimeRunning || !facts.toolReady) return StandingResumeRefusal.NOT_READY
+    if (!facts.connectionConnected) return StandingResumeRefusal.CONNECTION
+    if (!facts.stopChannelVerified) return StandingResumeRefusal.STOP_CHANNEL
+    if (facts.pending != null || facts.continuationInFlight || facts.continuationSending) {
+        return StandingResumeRefusal.BUSY
+    }
+    if (facts.hasGrant ||
+        facts.hasHalt ||
+        facts.hasLease ||
+        facts.hasRetainedTask ||
+        facts.hasTaskOwner
+    ) {
+        return StandingResumeRefusal.TASK_OWNED
+    }
+    if (facts.inFlightMutation || facts.pausing) return StandingResumeRefusal.UNSETTLED
+    if (facts.coreBlocked ||
+        facts.standingBlockReason == PhoneStandingBlockReason.UNKNOWN_OUTCOME ||
+        // A block whose reason was lost is unknown, not silently resumable.
+        (facts.standingBlocked && facts.standingBlockReason == null) ||
+        (facts.haltMayStillApply && !facts.haltAcknowledged)
+    ) {
+        return StandingResumeRefusal.UNCHECKED
+    }
+    return null
+}
+
+/**
+ * The one gate-then-resume step. [resume] runs at most once and only after every guard passed, so a
+ * refusal cannot clear a block, pause, binding or task as a side effect. The caller supplies the
+ * existing `resumeStandingForPerson` callback; this helper never grants or replays anything.
+ */
+internal fun confirmedStandingResume(
+    facts: StandingResumeFacts,
+    resume: () -> Boolean,
+): Boolean = standingResumeRefusal(facts) == null && resume()

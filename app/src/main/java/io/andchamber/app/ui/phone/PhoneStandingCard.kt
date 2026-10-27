@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -69,6 +70,7 @@ internal fun PhoneStandingCard(
         Column(modifier = Modifier.padding(PhoneCardPadding), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(stringResource(R.string.phone_standing_title), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
             ReadinessNotice(readiness, standing, actions)
+            if (readiness == StandingReadiness.Paused) StandingPauseBlock(state, actions)
             // Outside the stopped card (which shows it itself): e.g. the task runs again after a
             // continue whose chat wake-up failed. Read-only; "Open the chat" below stays available.
             standingDeliveryNotice(state)?.let { ContinueDeliveryNotice(it, running = state.control is PhoneControl.Agent) }
@@ -119,6 +121,20 @@ private fun ReadinessNotice(
                 body = stringResource(R.string.phone_standing_ready_body),
                 modifier = mod.testTag(PhoneTags.STANDING_READY),
             )
+        StandingReadiness.Paused -> {
+            val pause = standing.pause
+            PhoneNotice(
+                NoticeTone.Warning,
+                Icons.Rounded.WarningAmber,
+                stringResource(R.string.phone_standing_paused_title),
+                body =
+                    listOfNotNull(
+                        pause?.let { stringResource(it.reason.label()) },
+                        stringResource(R.string.phone_standing_paused_body),
+                    ).joinToString(" "),
+                modifier = mod.testTag(PhoneTags.STANDING_PAUSED),
+            )
+        }
         StandingReadiness.NeedsRestart ->
             PhoneNotice(
                 NoticeTone.Warning,
@@ -150,6 +166,11 @@ private fun ReadinessNotice(
         StandingReadiness.Revoked, StandingReadiness.NotSet ->
             BodyText(stringResource(R.string.phone_standing_setup_body))
     }
+    // Paused but something else must be fixed first (that notice is shown above): say the pause
+    // stays, so a reconnect or restart is never read as "ready again".
+    if (readiness != StandingReadiness.Paused && standing.pause != null && standing.status is PhoneStandingStatus.Active) {
+        BodyText(stringResource(R.string.phone_standing_paused_also), modifier = Modifier.testTag(PhoneTags.STANDING_PAUSED_ALSO))
+    }
     standing.runtime.label?.let { BodyText(stringResource(R.string.phone_standing_runtime, it)) }
 
     if (confirmRestart) {
@@ -167,6 +188,65 @@ private fun ReadinessNotice(
         )
     }
 }
+
+/**
+ * The way out of a native pause when no task is stopped: a person taps "Resume chat use…", reads
+ * what it does and confirms. Only that confirm asks the native side; nothing here fires on open,
+ * reconnect or recomposition. A stopped task keeps its own continue entry instead, and an unchecked
+ * uncertain action is never resumable from here.
+ */
+@Composable
+private fun StandingPauseBlock(
+    state: PhoneScreenState,
+    actions: PhoneControlActions,
+) {
+    var confirming by remember { mutableStateOf(false) }
+    val offered = canResumeStanding(state)
+    val block = standingResumeBlock(state)
+    if (block == StandingResumeBlock.StoppedTask) {
+        BodyText(stringResource(R.string.phone_standing_resume_use_task))
+        return
+    }
+    // While a resume runs, the top progress bar says so and the button stays disabled (pending).
+    PhonePrimaryButton(
+        text = stringResource(R.string.phone_standing_resume),
+        onClick = { confirming = true },
+        enabled = offered,
+        icon = Icons.Rounded.PlayArrow,
+        modifier = Modifier.testTag(PhoneTags.RESUME_STANDING),
+    )
+    if (!offered && block != null) BodyText(stringResource(block.message()))
+
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            title = { Text(stringResource(R.string.phone_standing_resume_confirm_title), style = MaterialTheme.typography.titleLarge) },
+            text = { Text(stringResource(R.string.phone_standing_resume_confirm_body), style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirming = false
+                        confirmResumeStanding(state, actions.onResumeStanding)
+                    },
+                    enabled = offered,
+                    modifier = Modifier.testTag(PhoneTags.RESUME_STANDING_CONFIRM),
+                ) { Text(stringResource(R.string.phone_standing_resume_confirm), fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text(stringResource(R.string.cancel)) } },
+        )
+    }
+}
+
+private fun StandingResumeBlock.message(): Int =
+    when (this) {
+        StandingResumeBlock.StoppedTask -> R.string.phone_standing_resume_use_task
+        StandingResumeBlock.TaskRunning -> R.string.phone_standing_resume_blocked_task
+        StandingResumeBlock.OutcomeUnchecked -> R.string.phone_standing_resume_blocked_unchecked
+        StandingResumeBlock.NotReady -> R.string.phone_continue_blocked_not_ready
+        StandingResumeBlock.StopChannel -> R.string.phone_stop_gate_title
+        StandingResumeBlock.Busy -> R.string.phone_block_busy
+    }
 
 @Composable
 private fun ScopeSummary(
@@ -483,7 +563,7 @@ internal fun continueBlockedReason(state: PhoneScreenState): Int {
         halted == null -> R.string.phone_continue_blocked_generic
         !halted.confirmed -> R.string.phone_continue_blocked_settling
         halted.lastAction == PhoneLastAction.MayStillApply -> R.string.phone_continue_blocked_check
-        standingReadiness(state) != StandingReadiness.Ready -> R.string.phone_continue_blocked_not_ready
+        standingBaseReadiness(state) != StandingReadiness.Ready -> R.string.phone_continue_blocked_not_ready
         state.standing?.apps?.none { it.packageName == halted.lease.target.packageName } == true -> R.string.phone_continue_blocked_scope
         else -> R.string.phone_continue_blocked_generic
     }

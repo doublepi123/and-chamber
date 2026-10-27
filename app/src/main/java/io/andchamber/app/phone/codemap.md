@@ -31,7 +31,8 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   service, notification pairing replies, target catalogue/verdicts, bounded auto-port discovery with
   resolve tokens and loopback bind validation, process/epoch intent identities, the validating
   notification Return Activity, standing config persistence (finite or permanent sentinel)/mapping,
-  the lazy tool starter adapter and the one-shot continuation sender.
+  the fail-closed standing pause projection and fresh-gated person resume coordinator, the lazy tool
+  starter adapter and the one-shot continuation sender.
 - `overlay/progress/`: bounded task/event store and native event ports. Task identity is stable across
   grant epochs; model narration stays unverified. Handoff/end require native stop receipts.
 - `overlay/safety/`: dynamic mode gate, real WindowManager witnesses, geometry-generation policy and
@@ -85,6 +86,19 @@ observation and exactly one fixed wake-up prompt through the launch-guarded `Loc
 original session. A failed send is not retried and does not roll back an established task; no model
 or tool text is treated as business success.
 
+A standing block with no retained task is projected as a pause, not as Ready. The mapper maps all six
+native reasons exhaustively, fails closed to `OutcomeUnknown` when a block lost its reason, and does
+not turn an idle or merely paused lease into a standing pause. The person's **Resume chat use…**
+entry is a separate synchronous native action: it re-checks experiment/controller enablement, an
+active non-revoked and non-expired scope, the current running tool-ready runtime, connection, the
+real stop entry, no pending/continuation/in-flight/pausing operation, and no grant/halt/lease/
+retained task/task identity or unchecked unknown. A different-runtime binding is refused rather than
+silently rebound. Only after that gate does the existing `resumeStandingForPerson` clear the standing
+block and ordinary pause under the controller lock; the saved scope, deadline, revision, store and
+same-runtime/session binding are unchanged, and no grant or chat wake-up is created. Screen open,
+reconnect and RPC readiness never auto-clear a pause. A stopped task keeps its existing continuation
+entry and base readiness instead of this resume path.
+
 `ui/phone` uses its own immutable presentation model, mapped by `android/PhoneScreenStateMapper`.
 Connection, authority, task and standing readiness are separate. Reconnecting cannot grant. Unknown
 operations require review and are never automatically replayed. The controller clock is
@@ -128,16 +142,22 @@ Source/license/relink information is in `third_party/phone-adb/`.
 ## Verification boundaries
 
 JVM tests cover state/races/driver/protocol/receipt codecs, standing admission/rollback, permanent
-duration/sentinel handling, discovery endpoint/token/probe policy, registration probe
-retry/cancellation and readiness ownership. Native wiring and UI smoke are under
-`androidTest/.../phone/`. `scripts/phone-e2e/` supplies a synthetic target
+duration/sentinel handling, the standing pause projection/resume gate, discovery endpoint/token/probe
+policy, registration probe retry/cancellation and readiness ownership. Native wiring and UI smoke are
+under `androidTest/.../phone/`. `scripts/phone-e2e/` supplies a synthetic target
 (`io.example.phonefixture`) and a deterministic model protocol, not a fake device driver or model
 reasoning. Covered API 35/x86_64 emulator flows passed, including direct begin, `apps`/`open_app`,
 native continuation, RPC readiness and the first overlay-read wait. The newer auto-port path (fresh
 port probe, real six-digit SystemUI RemoteInput, automatic TLS connect), permanent standing
 save/restart with the real lease flag, and the real built-in single-choice question (HTTP 204, same
 model turn, Save count exactly one, first unknown not positioned/not resent, two clean end-to-end
-runs) are API 35/x86_64 emulator evidence only. A separate API 37/arm64 tablet follow-up covered
-direct input, overlay handoff/continuation, capture and consecutive task ownership; it does not cover
-these newer features. Broad OEM behavior, TalkBack, API 37 new-feature behaviour and real-model
-reasoning quality are not established by that evidence.
+runs) are API 35/x86_64 emulator evidence only. The paused standing recovery (permanent fixture-only
+scope after runtime restart/reconnect, no chat prompt on resume, unchanged scope/epoch, fresh
+`RUNNING` request) is also API 35/x86_64 emulator evidence only. A separate regression on the same
+lane covered a stopped task's existing **Continue** path after a new-task `need_user` pause: one
+fixed wake-up, same-session fixture input and an independent target read-back; the new no-task
+resume does not replace it. A separate API 37/arm64 tablet follow-up covered direct input, overlay
+handoff/continuation, capture and consecutive task ownership; it does not cover these newer features.
+Broad OEM behavior, TalkBack, API 37 new-feature behaviour and real-model reasoning quality are not
+established by that evidence. No new device instrumentation was executed for the paused-recovery
+follow-up; its regression used the synthetic fixture.

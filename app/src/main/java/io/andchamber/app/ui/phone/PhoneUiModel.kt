@@ -108,6 +108,45 @@ internal sealed interface PhoneStandingStatus {
     data object Revoked : PhoneStandingStatus
 }
 
+/**
+ * Why the native side suspended chat use of a saved standing scope. One value per native standing
+ * block reason, so the integration layer can map them exhaustively. Display input only.
+ */
+internal enum class PhoneStandingPauseReason {
+    /** The agent asked for a person (a real need_user event). */
+    NeedUser,
+
+    /** The person took over the phone. */
+    TakenOver,
+
+    /** A dispatched action's outcome is not known. */
+    OutcomeUnknown,
+
+    /** The device link or the stop entry dropped. */
+    ConnectionLost,
+
+    /** The screen was locked. */
+    ScreenLocked,
+
+    /** The local OpenChamber runtime changed (restarted). */
+    RuntimeChanged,
+}
+
+/**
+ * Chat use of the standing scope is suspended until a native person resume. The saved scope itself
+ * is unchanged: no re-pairing and no new scope are needed. Opening this screen, reconnecting or the
+ * tool becoming ready never ends it.
+ */
+@Immutable
+internal data class PhoneStandingPause(
+    val reason: PhoneStandingPauseReason,
+    /**
+     * An uncertain action has not been checked by the person yet. While true, resuming is never
+     * offered. No default on purpose: the integration layer must state it.
+     */
+    val outcomeUnchecked: Boolean,
+)
+
 /** Whether a request to wake the chat after a stop reached it. Never a replay of an action. */
 internal enum class PhoneContinueDelivery { Idle, Sending, Delivered, Failed }
 
@@ -136,6 +175,8 @@ internal data class PhoneStanding(
     val perTaskPermanent: Boolean = false,
     val runtime: PhoneRuntimeStatus = PhoneRuntimeStatus(),
     val continuation: PhoneContinuation = PhoneContinuation(),
+    /** Native standing block, if any. Never Ready while set; only [PhoneControlActions.onResumeStanding] asks to end it. */
+    val pause: PhoneStandingPause? = null,
 )
 
 /** What the person confirmed natively for the standing scope. */
@@ -374,7 +415,8 @@ internal data class PhoneHaltFacts(
     val lastAction: PhoneLastAction,
 )
 
-internal enum class PhonePending { Enabling, Pairing, Connecting, Disconnecting, Granting, Pausing, Finishing, Observing }
+/** [Resuming]: a person-confirmed standing resume ([PhoneControlActions.onResumeStanding]) is running. */
+internal enum class PhonePending { Enabling, Pairing, Connecting, Disconnecting, Granting, Pausing, Finishing, Observing, Resuming }
 
 /** Shown only in the collapsed details. [lastError] is a raw technical line, never a secret. */
 @Immutable
@@ -468,4 +510,10 @@ internal class PhoneControlActions(
      * the chat. The agent observes again first; nothing earlier is re-sent.
      */
     val onContinueInChat: () -> Unit = {},
+    /**
+     * Only after the person confirmed in the dialog: end a standing pause that has no stopped task,
+     * so chat may start new tasks inside the same saved scope. Never starts a task, never re-sends,
+     * never extends or changes the scope. Never called on screen open or reconnect.
+     */
+    val onResumeStanding: () -> Unit = {},
 )

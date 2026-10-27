@@ -105,6 +105,30 @@ the original chat session. The prompt asks the agent to observe again and not re
 A failed wake-up is not retried and does not roll back an already established task; it is not proof of
 business success. There is no automatic restart after process death.
 
+A standing block with no retained task is shown as a **pause**, not as Ready. The screen mapper
+projects only explicit controller facts: all six native blocking reasons map to one screen reason, a
+blocked state whose reason was lost fails closed as `OutcomeUnknown`, and an ordinary paused lease
+alone never becomes a standing pause. An unchecked unknown outcome, or a "may still apply" halt the
+person has not acknowledged, keeps the pause non-resumable.
+
+The paused card's **Resume chat use…** entry is a separate person-confirmed native action, never a
+reconnect or screen-open side effect. Before it touches the controller it re-checks the entire state:
+the experiment and controller are enabled; the saved scope is still active, not revoked or expired;
+the current runtime identity is present, running and tool-ready; the device link is connected; the
+foreground stop entry is actually verified; no native operation, continuation send, mutation or pause
+is settling; and there is no live/retained task, lease, halt or task identity. A binding that names a
+different runtime is refused instead of being silently rebound. The same
+`resumeStandingForPerson` primitive then clears the standing block and the ordinary pause under the
+controller lock; the saved scope, deadline, revision, store, same-runtime/session binding and isolation
+are unchanged. The entry creates no grant and sends no chat wake-up. A fresh request still passes the
+full standing policy and binds normally.
+
+A stopped task that still has its halt/lease/task identity does not use this entry: it continues
+through the existing continuation path and its own base readiness, so the pause caused by its own
+stop does not lock that path. Opening the native screen, reconnecting or the tool becoming ready
+never clears a pause. An unknown outcome, a missing/revoked/inactive scope, or a lost reason stays
+fail closed; no new acknowledgement shortcuts this entry into resuming.
+
 Stopping does not undo a dispatched operation. If an outcome is unknown, check the target app
 before deciding what to do next; the app does not replay it automatically. A tool acknowledgement
 does not prove that the person's business task completed. Task results remain unconfirmed without
@@ -203,6 +227,7 @@ collapsed and nothing is resent. Source boundaries are
 | Android coordination | `phone/android/PhoneIntegration.kt`, `PhoneControlService.kt`, `PhoneControlNotifications.kt` |
 | Wireless-debugging discovery | `phone/android/PhoneDiscoveryService.kt`, `PhonePortDiscovery.kt`, `PhoneDiscoveryPolicy.kt` |
 | Standing configuration/lifecycle | `phone/standing/PhoneStanding.kt`, `PhoneTaskStarter.kt`, `phone/android/PhoneStandingConfig.kt`, `PhoneIntegrationTaskStarter.kt`, `phone/core/PhoneTimeLimits.kt` |
+| Standing pause projection and resume gate | `phone/android/PhoneScreenStateMapper.kt`, `PhoneStandingConfig.kt` (`StandingResumeFacts`/`standingResumeRefusal`), `PhoneIntegration.kt` (person resume) |
 | Temporary pairing input | `phone/android/PhonePairingSession.kt`, `PhonePairingActionReceiver.kt` |
 | Notification question/notice bridge | `notify/SessionPromptProjection.kt`, `phone/android/overlay/PhoneTaskConversation.kt` |
 | Admission and task state | `phone/core/PhoneController.kt`, `PhoneContract.kt`, `PhoneState.kt`, `PhoneTargetPolicy.kt` |
@@ -260,3 +285,12 @@ separately and cover only the earlier basic flows; they do not establish the new
 or question-bridge features. Neither run establishes broad OEM behaviour, TalkBack or real-model
 reasoning. The notification check began with no live lease; no active-lease permission-revoke claim
 is made. Detailed counts and evidence are in [testing-phone-control.md](testing-phone-control.md).
+
+A separate API 35 / x86_64 emulator follow-up covers the paused standing recovery: a permanent,
+fixture-only scope that became Ready-with-no-task but was still refused as `STANDING_BLOCKED` after a
+runtime restart and reconnect shows `Paused (RuntimeChanged)` after the fix, and only a confirmed
+person resume clears it without a grant, replay, scope/binding change or chat prompt. This is API 35
+emulator evidence only, not API 37/arm64 tablet evidence. A separate regression on the same lane
+confirmed that a stopped task still uses its own **Continue** entry after a new-task `need_user`
+pause: one original fixed wake-up, same-session fixture input and an independent target read-back.
+The new no-task resume does not replace that retained-task path.
