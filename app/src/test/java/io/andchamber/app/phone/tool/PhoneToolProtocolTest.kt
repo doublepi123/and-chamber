@@ -190,6 +190,15 @@ class PhoneToolProtocolTest {
 
         assertTrue("status takes no parameters", refused(toolBody(input = input("status", extra = mapOf("x" to 1)))))
         assertTrue("snapshot takes no parameters", refused(toolBody(input = input("snapshot", extra = mapOf("ref" to "n1")))))
+        // Context the model copies from status/snapshot is ignored, not a refusal of the whole call.
+        assertTrue(
+            "snapshot ignores a copied epoch",
+            !refused(toolBody(input = input("snapshot", extra = mapOf("epoch" to 3)))),
+        )
+        assertTrue(
+            "status ignores copied epoch/observationId",
+            !refused(toolBody(input = input("status", extra = mapOf("epoch" to 3, "observationId" to "obs-1")))),
+        )
         assertTrue(
             "tap cannot mix a ref with coordinates",
             refused(
@@ -318,8 +327,8 @@ class PhoneToolProtocolTest {
             ),
         )
         assertTrue(
-            "status takes no epoch",
-            refused(toolBody(input = input("status", extra = mapOf("epoch" to 1L)))),
+            "status ignores a copied epoch",
+            !refused(toolBody(input = input("status", extra = mapOf("epoch" to 1L)))),
         )
         assertTrue(
             "progress needs an epoch",
@@ -367,8 +376,8 @@ class PhoneToolProtocolTest {
             ),
         )
         assertTrue(
-            "progress takes no observation",
-            refused(
+            "progress ignores a copied observationId",
+            !refused(
                 toolBody(
                     input = input(
                         "progress",

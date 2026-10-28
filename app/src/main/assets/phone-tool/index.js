@@ -215,7 +215,7 @@ export default {
               type: "integer",
               minimum: 0,
               description:
-                'Current task epoch from "request" or "status". Required for "progress", "need_user" and "finish".',
+                'Current task epoch from "request" or "status". Required for "progress", "need_user" and "finish"; other actions do not need it and ignore it.',
             },
             phase: {
               type: "string",

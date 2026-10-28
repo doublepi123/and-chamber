@@ -419,7 +419,8 @@ object PhoneToolProtocol {
             PhoneToolCodes.UNSUPPORTED_ACTION -> "Unsupported action."
             PhoneToolCodes.UNICODE_UNSUPPORTED -> "This text cannot be entered on this device."
             PhoneToolCodes.ACTION_NOT_GRANTED -> "That action is not included in the grant."
-            PhoneToolCodes.INVALID_REQUEST -> "Invalid request."
+            PhoneToolCodes.INVALID_REQUEST ->
+                "The fields for this action are not valid. Nothing was done. Fix the call and try again: \"snapshot\", \"status\" and \"apps\" take no other fields; \"tap\" takes observationId plus either ref or both x and y; \"progress\", \"need_user\" and \"finish\" need the current epoch from status."
             PhoneToolCodes.OUT_OF_BOUNDS -> "The point is outside the current screen. Take a new snapshot."
             PhoneToolCodes.OVERLAY_OBSTRUCTED ->
                 "That point or swipe would land on the AndChamber progress capsule, so nothing was sent. Control is still active. Choose another point, scroll the target into the open area, or ask the person to move the capsule."
@@ -566,11 +567,20 @@ object PhoneToolProtocol {
         if (value !in 0..MAX_COORDINATE) throw Refused()
     }
 
+    /**
+     * Context keys a model commonly copies from `status`/`snapshot` into the next call. They carry
+     * no authority here (epoch admission and observation binding are checked separately where they
+     * matter), so an action that does not use them ignores them instead of refusing the whole call.
+     */
+    private val IGNORED_CONTEXT_KEYS = setOf("epoch", "observationId")
+
     private fun requireKeys(
         input: JsonObject,
         allowed: Set<String>,
     ) {
-        if (input.keys.any { it != "action" && it !in allowed }) throw Refused()
+        if (input.keys.any { it != "action" && it !in allowed && it !in IGNORED_CONTEXT_KEYS }) {
+            throw Refused()
+        }
         if ("action" !in input || input["action"]?.jsonPrimitive?.takeIf { it.isString } == null) throw Refused()
     }
 

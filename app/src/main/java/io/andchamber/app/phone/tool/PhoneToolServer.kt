@@ -303,7 +303,9 @@ class PhoneToolServer(
                     epoch = state.epoch,
                     code = PhoneToolCodes.INVALID_REQUEST,
                 ),
-                400,
+                // A well-formed call with wrong fields is an ordinary refusal the model must read.
+                // An HTTP error would reach the model only as "HTTP 400" and hide the fixed reason.
+                200,
             )
             return
         }

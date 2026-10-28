@@ -99,7 +99,7 @@ class PhoneToolServerTest {
                 fixture.port,
                 toolBody("ses-b", "s3", input("status", extra = mapOf("ref" to "n1"))),
             )
-            assertEquals(400, strict.status)
+            assertEquals(200, strict.status)
             assertEquals("INVALID_REQUEST", strict.code())
 
             fixture.granted()
@@ -375,7 +375,7 @@ class PhoneToolServerTest {
             assertEquals(listOf(TARGET), fixture.taskStarter.opened)
 
             val missing = httpPost(fixture.port, toolBody("ses-a", "o3", input("open_app")))
-            assertEquals(400, missing.status)
+            assertEquals(200, missing.status)
             assertEquals("INVALID_REQUEST", missing.code())
 
             fixture.taskStarter.availableFlag = false
@@ -449,10 +449,10 @@ class PhoneToolServerTest {
             assertEquals(0, fixture.taskStarter.requests.size)
 
             val blank = httpPost(fixture.port, requestBody("   ", TARGET))
-            assertEquals(400, blank.status)
+            assertEquals(200, blank.status)
             assertEquals("INVALID_REQUEST", blank.code())
             val missingPackage = httpPost(fixture.port, requestBody("book"))
-            assertEquals(400, missingPackage.status)
+            assertEquals(200, missingPackage.status)
             assertEquals("INVALID_REQUEST", missingPackage.code())
             val extra = httpPost(
                 fixture.port,
@@ -462,7 +462,7 @@ class PhoneToolServerTest {
                     input("request", extra = mapOf("summary" to "book", "packageName" to TARGET, "ref" to "n1")),
                 ),
             )
-            assertEquals(400, extra.status)
+            assertEquals(200, extra.status)
             assertEquals("INVALID_REQUEST", extra.code())
 
             fixture.taskStarter.availableFlag = false
@@ -913,7 +913,7 @@ class PhoneToolServerTest {
                 fixture.port,
                 toolBody("ses-a", "ev-0", input("progress", extra = mapOf("phase" to "x"))),
             )
-            assertEquals(400, missingEpoch.status)
+            assertEquals(200, missingEpoch.status)
             assertEquals("INVALID_REQUEST", missingEpoch.code())
 
             val stale = httpPost(
