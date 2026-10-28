@@ -112,15 +112,28 @@ class AdbFixtureWindowInstrumentationTest {
             val saved = observeUntil(service) { snapshot ->
                 snapshot.nodes.any { it.label == "Saved 1 times" }
             }
-            val staleAfterSave = runCatching {
+            // Same real window, only a label changed: live pages keep changing, so this is not
+            // a stale window. A tap by ref still needs its element at the observed bounds.
+            val sameWindowAfterSave = runCatching {
                 runBlocking { service.capture(mainBinding, CONNECT_DEADLINE_MS) }
             }.exceptionOrNull()
-            check(staleAfterSave is PhoneDriverException &&
-                staleAfterSave.failure == PhoneDriverFailure.WINDOW_CHANGED
-            ) {
-                "content change did not invalidate the old binding: $staleAfterSave"
+            check(sameWindowAfterSave == null) {
+                "a content-only change refused the same window: $sameWindowAfterSave"
             }
-            println("check=fixture_content_stale_rejected result=pass")
+            val missingTarget = dispatch(
+                service,
+                mainBinding,
+                PhoneDriverAction.Tap(
+                    point(save),
+                    target = io.andchamber.app.phone.core.PhoneRect(0, 0, 1, 1),
+                ),
+            )
+            check(missingTarget is PhoneDispatchReceipt.NotSent &&
+                missingTarget.failure == PhoneDriverFailure.WINDOW_CHANGED
+            ) {
+                "a tap whose element is gone was not refused: $missingTarget"
+            }
+            println("check=fixture_content_change_same_window result=pass")
 
             val savedBinding = binding(saved)
             val next = saved.nodes.first { it.label.equals("Next page", ignoreCase = true) }

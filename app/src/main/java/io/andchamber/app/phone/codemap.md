@@ -24,7 +24,8 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   the `PhoneTaskStarter` port. Permanent window/per-task values remain configuration and are still
   bounded by a finite scope end; the model/tool surface cannot construct a scope or grant itself.
 - `adb/`: local-host policy, pairing receipts, fixed command schema, bounded XML/window parsing,
-  window/content witnesses, native device transport and driver. Fixed typed read failures:
+  window/content witnesses (actions compare only the real-window part; a tap by ref also needs its
+  element at the observed bounds), native device transport and driver. Fixed typed read failures:
   `AdbDeviceFailure.HIERARCHY_NOT_IDLE` for the whole-trim fixed idle sentence or a dump that
   stays empty after bounded in-deadline re-reads (an overlapping on-device dump holds UiAutomation),
   `AdbWindowStateFailure.NOT_READY` only for a complete null `mCurrentFocus`/`mFocusedApp` field line

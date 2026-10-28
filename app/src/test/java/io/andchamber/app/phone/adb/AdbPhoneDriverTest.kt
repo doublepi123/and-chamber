@@ -178,7 +178,7 @@ class AdbPhoneDriverTest {
     }
 
     @Test
-    fun samePackageMovedElementInvalidatesTheBinding() = runBlocking {
+    fun aTapByRefNeedsItsElementAtTheObservedBounds() = runBlocking {
         val moved = editableHierarchy.replace(
             "bounds=\"[100,100][900,200]\"",
             "bounds=\"[100,120][900,220]\"",
@@ -187,10 +187,32 @@ class AdbPhoneDriverTest {
         assertNotSent(
             PhoneDriverFailure.WINDOW_CHANGED,
             driver(device).dispatch(
-                request(PhoneDriverAction.Tap(PhonePoint(150, 150))),
+                request(
+                    PhoneDriverAction.Tap(PhonePoint(500, 150), target = PhoneRect(100, 100, 900, 200)),
+                ),
                 5_000,
             ),
         )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun ordinaryContentChangesInTheSameWindowDoNotBlockATap() = runBlocking {
+        // A live page: a countdown label changed and an unrelated element moved, same real window.
+        val live = editableHierarchy
+            .replace("content-desc=\"Send\"", "content-desc=\"Send 00:59\"")
+            .replace("bounds=\"[100,300][900,400]\"", "bounds=\"[100,320][900,420]\"")
+        val device = FakeDevice(live.toByteArray())
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver(device).dispatch(
+                request(
+                    PhoneDriverAction.Tap(PhonePoint(200, 550), target = PhoneRect(100, 500, 300, 600)),
+                ),
+                5_000,
+            ),
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(200, 550)), device.injected)
     }
 
     @Test

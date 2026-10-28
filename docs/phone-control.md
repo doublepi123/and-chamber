@@ -331,7 +331,10 @@ starter; a legacy manually confirmed task may still allow first-action routing. 
 never authentication.
 
 Driver operations are single-slot and bounded. Mutations use controller-issued admission guards
-and current window/content witnesses; a successful mutation expires the observation. Capture checks
+and the current real-window witness; a successful mutation expires the observation. Ordinary content
+changes inside the same window (countdowns, banners, labels) do not refuse an action, but a new
+activity/dialog, rotation or display change does, and a tap by ref requires a live element at
+exactly the observed bounds. Capture checks
 the target before and after collecting bytes and discards inconsistent results. These are conservative
 checks, not an atomic transaction with another Android app. Unreadable window state fails closed.
 

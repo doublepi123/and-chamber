@@ -611,7 +611,7 @@ class PhoneController(
                     }
                     Plan.Call.Dispatch(
                         binding = binding,
-                        action = PhoneDriverAction.Tap(PhonePoint(rect.centerX, rect.centerY)),
+                        action = PhoneDriverAction.Tap(PhonePoint(rect.centerX, rect.centerY), target = rect),
                         kind = PhoneActionKind.TAP,
                     )
                 }

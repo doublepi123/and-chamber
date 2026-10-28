@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.SystemClock
 import io.andchamber.app.phone.core.PhoneCapabilities
 import io.andchamber.app.phone.core.PhoneConnection
+import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
 import io.andchamber.app.phone.core.PhoneDispatchRequest
 import io.andchamber.app.phone.core.PhoneDriver
@@ -40,8 +41,10 @@ import kotlinx.coroutines.withContext
  * generated from the fixed schema in [AdbCommandSchema].
  *
  * The value in [PhoneSnapshot.windowId] is a digest of both the real window-manager identity
- * (mCurrentFocus and mFocusedApp tokens) and the observed node content. A same-package new activity,
- * a dialog, a moved element or changed label therefore invalidates the binding. The window identity
+ * (mCurrentFocus and mFocusedApp tokens) and the observed node content. Actions compare only the
+ * window part: a same-package new activity, dialog, rotation or display change invalidates the
+ * binding, while ordinary live content changes (timers, banners, labels) do not. A tap by ref still
+ * requires a live element at exactly the observed bounds. The window identity
  * is read before and after observation/capture; an unreliable `dumpsys window` result fails closed.
  * Check and injection are still separate steps, not a cross-process atomic transaction.
  */
@@ -177,7 +180,7 @@ class AdbPhoneDriver(
         // Re-read the real window after the screenshot. If it changed while pixels were being
         // copied, discard the image instead of returning another window's content.
         val after = verifyLiveWindow(binding, startedAt, deadlineMs)
-        if (before.snapshot.windowId != after.snapshot.windowId) {
+        if (windowDigest(before.snapshot.windowId) != windowDigest(after.snapshot.windowId)) {
             throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
         }
         val size = AdbPng.readSize(bytes)
@@ -225,7 +228,7 @@ class AdbPhoneDriver(
             }
             val bytes = device.capturePng(left(startedAt, deadlineMs), captureMaxBytes)
             val after = verifyLiveWindow(binding, startedAt, deadlineMs)
-            if (before.snapshot.windowId != after.snapshot.windowId) {
+            if (windowDigest(before.snapshot.windowId) != windowDigest(after.snapshot.windowId)) {
                 throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
             }
             val size = AdbPng.readSize(bytes)
@@ -341,6 +344,11 @@ class AdbPhoneDriver(
             is PhoneDriverAction.Tap -> {
                 if (!action.at.isWithin(binding.geometry)) {
                     return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.INVALID_REQUEST)
+                }
+                try {
+                    requireLiveTarget(live, action.target)
+                } catch (failure: PhoneDriverException) {
+                    return@withContext PhoneDispatchReceipt.NotSent(failure.failure)
                 }
                 listOf(overlayStep(AdbInputCommand.Tap(action.at.x, action.at.y), action))
             }
@@ -809,10 +817,25 @@ class AdbPhoneDriver(
         if (live.hierarchy.rotation != binding.rotation || live.geometry != binding.geometry) {
             throw PhoneDriverException(PhoneDriverFailure.GEOMETRY_CHANGED)
         }
-        if (live.snapshot.windowId != binding.windowId) {
+        // Only the real window identity (focus/app tokens, activity, package, rotation, display)
+        // must match. Page content is allowed to keep changing (countdowns, banners, prices):
+        // requiring an identical content digest made ordinary live pages impossible to act on.
+        if (windowDigest(live.snapshot.windowId) != windowDigest(binding.windowId)) {
             throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
         }
         return live
+    }
+
+    private fun windowDigest(windowId: String): String =
+        AdbWindowWitness.parse(windowId)?.windowDigest
+            ?: throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
+
+    /** A tap by ref still needs a live element at exactly the observed bounds. */
+    private fun requireLiveTarget(live: LiveWindow, target: PhoneRect?) {
+        if (target == null) return
+        if (live.snapshot.nodes.none { it.bounds == target }) {
+            throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
+        }
     }
 
     private fun verifyInputFollowup(
@@ -835,7 +858,7 @@ class AdbPhoneDriver(
             geometry = live.geometry,
             nodes = live.snapshot.nodes,
         )
-        if (actual.windowDigest != expected.windowDigest) {
+        if (actual.windowDigest != expected.windowDigest) { // content may legitimately change
             throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
         }
         if (live.hierarchy.packageName != binding.packageName ||

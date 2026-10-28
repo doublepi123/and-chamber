@@ -180,7 +180,12 @@ data class PhoneDispatchRequest(
 
 /** The only injectable actions. Coordinates are display pixels bound to the observation geometry. */
 sealed interface PhoneDriverAction {
-    data class Tap(val at: PhonePoint) : PhoneDriverAction
+    /**
+     * [target] is the observed element bounds for a tap by ref. Pages keep changing (timers,
+     * carousels, labels), so the driver does not require identical content; it requires the same
+     * real window and, when [target] is set, a live element with exactly these bounds.
+     */
+    data class Tap(val at: PhonePoint, val target: PhoneRect? = null) : PhoneDriverAction
 
     data class Swipe(
         val from: PhonePoint,
