@@ -147,11 +147,8 @@ public final class TestOverlayActivity extends Activity {
         IntentFilter filter = new IntentFilter(ACTION_CONTROL);
         // Platform API only: this activity runs in the test APK's own process, where androidx.core
         // classes from the app under test are not on the class path.
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(control, filter, android.content.Context.RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(control, filter);
-        }
+        // minSdk is below 33, but this test-only probe runs only on the API 35+ emulator.
+        registerReceiver(control, filter, android.content.Context.RECEIVER_EXPORTED);
         receiverRegistered = true;
     }
 
