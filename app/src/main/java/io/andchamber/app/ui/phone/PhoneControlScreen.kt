@@ -31,6 +31,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -167,6 +168,9 @@ internal fun PhoneControlScreen(
 
                 // A failed request explained right above the card it came from, in fixed words.
                 FeedbackNotice(phoneFeedback(state), modifier = Modifier.padding(top = 12.dp))
+
+                // The agent's own clean finish: one light note above the normal step, not a card.
+                agentFinishNote(state)?.let { AgentFinishNote(it, actions, modifier = Modifier.padding(top = 12.dp)) }
 
                 AnimatedContent(
                     targetState = step,
@@ -384,6 +388,37 @@ private fun FeedbackNotice(
     }
 }
 
+/**
+ * "The agent reported it's done": a light, dismissible note. The result is still unverified, so it
+ * offers a look in the app; no summary text, no verification claim, no grant.
+ */
+@Composable
+private fun AgentFinishNote(
+    result: PhoneTaskResult,
+    actions: PhoneControlActions,
+    modifier: Modifier = Modifier,
+) {
+    val target = result.target
+    PhoneNotice(
+        tone = NoticeTone.Info,
+        icon = Icons.Rounded.CheckCircle,
+        title = stringResource(R.string.phone_agent_finish_title),
+        body = stringResource(R.string.phone_agent_finish_body, target?.label ?: stringResource(R.string.phone_agent_finish_app_fallback)),
+        modifier = modifier.testTag(PhoneTags.AGENT_FINISH),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (target != null) {
+                TextButton(onClick = { actions.onOpenTarget(target.packageName) }) {
+                    Text(stringResource(R.string.phone_open_target, target.label))
+                }
+            }
+            TextButton(onClick = actions.onDismissResult, modifier = Modifier.testTag(PhoneTags.AGENT_FINISH_DISMISS)) {
+                Text(stringResource(R.string.phone_agent_finish_dismiss))
+            }
+        }
+    }
+}
+
 /** Three separate facts: is the device linked, who is in control, and what task exists. */
 @Composable
 private fun StatusStrip(
@@ -435,7 +470,9 @@ private fun StatusStrip(
                 when (val task = state.task) {
                     PhoneTask.None -> StatusTone.Idle to stringResource(R.string.phone_task_none)
                     is PhoneTask.Active -> StatusTone.Live to task.summary
-                    is PhoneTask.Ended -> StatusTone.Idle to stringResource(R.string.phone_task_ended)
+                    is PhoneTask.Ended ->
+                        StatusTone.Idle to
+                            stringResource(if (task.result.agentReported) R.string.phone_task_agent_done else R.string.phone_task_ended)
                 }
             StatusLine(stringResource(R.string.phone_status_task), taskText, taskTone)
         }
@@ -709,6 +746,8 @@ internal object PhoneTags {
     const val SAVE_STANDING_CONFIRM = "phone.saveStandingConfirm"
     const val CONTINUE_IN_CHAT = "phone.continueInChat"
     const val HALT_NEED_USER = "phone.haltNeedUser"
+    const val AGENT_FINISH = "phone.agentFinish"
+    const val AGENT_FINISH_DISMISS = "phone.agentFinishDismiss"
     const val STANDING_RESUME_FRESH = "phone.standingResumeFresh"
     const val STANDING_PAUSED = "phone.standingPaused"
     const val STANDING_PAUSED_ALSO = "phone.standingPausedAlso"

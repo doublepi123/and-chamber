@@ -35,10 +35,17 @@ internal fun phoneStep(state: PhoneScreenState): PhoneStep =
         !state.enabled -> PhoneStep.Off
         state.control is PhoneControl.Agent -> PhoneStep.Running
         state.control is PhoneControl.Halted -> PhoneStep.Halted
-        state.task is PhoneTask.Ended -> PhoneStep.Result
+        state.task is PhoneTask.Ended && !state.task.result.agentReported -> PhoneStep.Result
         state.device.link != PhoneLink.Connected -> PhoneStep.Connect
         else -> PhoneStep.Grant
     }
+
+/**
+ * The agent's own clean finish: shown as a one-line, dismissible note above the normal step. It is
+ * still unverified; it just does not take over the screen like a stopped or uncertain end.
+ */
+internal fun agentFinishNote(state: PhoneScreenState): PhoneTaskResult? =
+    (state.task as? PhoneTask.Ended)?.result?.takeIf { it.agentReported }
 
 /** Why an app can't be chosen. Mirrors the controller's refusal list; the controller still decides. */
 internal enum class TargetBlock { Host, System, Invalid, Sensitive }

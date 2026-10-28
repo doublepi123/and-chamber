@@ -48,6 +48,8 @@ internal class PhoneOverlayTaskCoordinator(
                         PhoneTaskStopIntent.TAKEOVER ->
                             integration.stopTaskExact(binding, PhoneProgressReason.TAKEOVER)
                         PhoneTaskStopIntent.END -> integration.endTaskExact(binding)
+                        PhoneTaskStopIntent.MODEL_FINISH ->
+                            integration.endTaskExact(binding, agentReported = true)
                     }
                 },
         )

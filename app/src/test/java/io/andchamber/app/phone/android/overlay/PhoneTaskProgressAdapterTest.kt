@@ -50,7 +50,7 @@ class PhoneTaskProgressAdapterTest {
             calls++
             lastEpoch = binding.epoch
             intents += intent
-            if (intent == PhoneTaskStopIntent.END) {
+            if (intent == PhoneTaskStopIntent.END || intent == PhoneTaskStopIntent.MODEL_FINISH) {
                 // The integration also persists the needs-check record for an already stopped task;
                 // a different live epoch is never ended by an old binding.
                 if (liveEpoch != null && liveEpoch != binding.epoch) return null
@@ -212,7 +212,7 @@ class PhoneTaskProgressAdapterTest {
         // A model finish must really end the native task (needs-check record), not just take over.
         assertEquals(2, fixture.stop.calls)
         assertEquals(
-            listOf(PhoneTaskStopIntent.TAKEOVER, PhoneTaskStopIntent.END),
+            listOf(PhoneTaskStopIntent.TAKEOVER, PhoneTaskStopIntent.MODEL_FINISH),
             fixture.stop.intents,
         )
         // The end is not a fabricated "you requested a stop": only the need_user takeover requested.
@@ -233,7 +233,7 @@ class PhoneTaskProgressAdapterTest {
             fixture.adapter.handleOnMain(keyA, 1, session, PhoneTaskEvent.Finish("f1", "done"))
 
         assertTrue(reply is PhoneTaskEventReply.EndedPendingCheck)
-        assertEquals(listOf(PhoneTaskStopIntent.END), fixture.stop.intents)
+        assertEquals(listOf(PhoneTaskStopIntent.MODEL_FINISH), fixture.stop.intents)
         val snapshot = view(fixture).snapshot
         assertEquals(PhoneTaskState.ENDED_PENDING_CHECK, snapshot.state)
         assertTrue(snapshot.finishReported)

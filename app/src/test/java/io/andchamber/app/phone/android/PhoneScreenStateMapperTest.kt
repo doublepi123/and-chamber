@@ -302,6 +302,21 @@ class PhoneScreenStateMapperTest {
     }
 
     @Test
+    fun `only a clean agent finish becomes a light unverified note`() {
+        val core = PhoneState(enabled = true, epoch = 0)
+        val clean = PhoneTaskRecord(target.packageName, "write a note", needsCheck = true, agentReported = true)
+        val light = phoneScreenState(core, facts(task = clean)).task as PhoneTask.Ended
+        assertTrue(light.result.agentReported)
+        assertTrue(light.result.items.isEmpty())
+
+        // A halt reason (take-over, unknown, person stop) always keeps the full check card.
+        val halted = clean.copy(haltReason = "OutcomeUnknown")
+        assertFalse((phoneScreenState(core, facts(task = halted)).task as PhoneTask.Ended).result.agentReported)
+        val plain = clean.copy(agentReported = false)
+        assertFalse((phoneScreenState(core, facts(task = plain)).task as PhoneTask.Ended).result.agentReported)
+    }
+
+    @Test
     fun `the missing agent-tool step is a persistent technical token`() {
         val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
         val running =

@@ -167,6 +167,8 @@ internal fun phoneScreenState(
                         summary = record.summary,
                         // No step was re-read in the target app, so nothing may be called verified.
                         items = emptyList<PhoneResultItem>(),
+                        // Only a clean agent finish; any halt reason keeps the full check card.
+                        agentReported = record.agentReported && record.haltReason == null,
                     ),
                 )
             else -> PhoneTask.None

@@ -259,7 +259,11 @@ checks, not `FLAG_SECURE`, establish the supported exclusion behavior.
 The tool has three additional closed actions, all requiring the published session route and explicit
 current `epoch`: `progress(phase)`, `need_user(reason)` and `finish(summary)`. Their bounded text is
 an unverified agent note, not native evidence. `need_user` revokes first, then displays the handoff;
-`finish` ends control and saves a result needing review, not a verified business success. Ordinary
+`finish` ends control and saves a result needing review, not a verified business success. When the
+model finishes on a clean live grant (no halt, no unknown block, nothing in flight), the native screen
+shows only a light, dismissible "reported done, not verified" note instead of the full check card;
+person ends, take-overs and uncertain stops keep the full card. A closed result record alone does not
+count as a task owner for the post-restart standing resume. Ordinary
 model prose has no such authority. Automatic detection of every login/sensitive page is not provided.
 
 The display service follows the task/result rather than the lease and has bounded retention.

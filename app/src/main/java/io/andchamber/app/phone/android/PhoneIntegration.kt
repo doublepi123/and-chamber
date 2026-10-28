@@ -542,7 +542,10 @@ internal class PhoneIntegration(
      * touched and no grant is created. The ack only says new operations and late reads are blocked;
      * sent actions may still apply. A wrong key/epoch returns null and persists nothing.
      */
-    internal fun endTaskExact(binding: PhoneOverlayTaskBinding): PhoneStopAcknowledgement? {
+    internal fun endTaskExact(
+        binding: PhoneOverlayTaskBinding,
+        agentReported: Boolean = false,
+    ): PhoneStopAcknowledgement? {
         if (!taskIdentity.matches(binding.taskId, binding.runtimeId)) return null
         val core = controller.state.value
         val grant = core.grant
@@ -554,7 +557,15 @@ internal class PhoneIntegration(
             ) {
                 return null
             }
-            finish()
+            // Light note only for the agent's own finish on a clean live grant: no stop, no unknown
+            // block, nothing in flight. Every other end keeps the full "check the result" card.
+            val clean =
+                agentReported &&
+                    facts.value.halt == null &&
+                    core.blocked == null &&
+                    !core.inFlightMutation &&
+                    !core.pausing
+            finish(agentReported = clean)
             if (controller.state.value.grant != null) return null
             return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)
         }
@@ -579,6 +590,7 @@ internal class PhoneIntegration(
                 needsCheck = true,
                 haltReason = halt?.reason?.name ?: record.haltReason,
                 acknowledged = halt?.acknowledged == true || record.acknowledged,
+                agentReported = false,
             ),
         )
         taskSession = null
@@ -2790,7 +2802,7 @@ internal class PhoneIntegration(
      * record (target, summary, needs-check) for the result card; it never claims a verified result.
      * Internal callers do not publish a native end fact here; the native UI entry does that once.
      */
-    private fun finish() {
+    private fun finish(agentReported: Boolean = false) {
         invalidateGrantAttempt()
         val remembered = lease
         controller.pause()
@@ -2802,6 +2814,7 @@ internal class PhoneIntegration(
                     needsCheck = true,
                     haltReason = facts.value.halt?.reason?.name,
                     acknowledged = facts.value.halt?.acknowledged == true,
+                    agentReported = agentReported && facts.value.halt == null,
                 ),
             )
         }
@@ -3049,7 +3062,9 @@ internal class PhoneIntegration(
                 hasHalt = facts.value.halt != null,
                 hasRetainedTask = retainedTaskEpoch != null,
                 hasLease = facts.value.lease != null,
-                hasTaskOwner = facts.value.task != null || taskIdentity.current() != null,
+                // A closed result card (record only, no halt/retained epoch/identity/lease) is
+                // evidence for the person, not a task that owns the scope: it never blocks this.
+                hasTaskOwner = taskIdentity.current() != null,
             )
         if (mayClear && runtimeId != null) {
             controller.resumeStanding(
@@ -3867,6 +3882,7 @@ internal class PhoneIntegration(
                 needsCheck = true,
                 haltReason = reason.name,
                 acknowledged = acknowledged,
+                agentReported = false,
             ),
         )
         refreshContinuation()

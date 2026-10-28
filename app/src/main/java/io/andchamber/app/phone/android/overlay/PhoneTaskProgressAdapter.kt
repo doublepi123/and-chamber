@@ -30,6 +30,9 @@ internal data class PhoneTaskProgressView(
 internal enum class PhoneTaskStopIntent {
     TAKEOVER,
     END,
+
+    /** The model's own `finish`: an END that the native side may show as a light, unverified note. */
+    MODEL_FINISH,
 }
 
 /**
@@ -344,7 +347,7 @@ internal class PhoneTaskProgressAdapter(
                 is PhoneTaskEvent.Finish -> {
                     // A model finish must really end the native task (persist the needs-check record),
                     // not merely take the lease over.
-                    val ack = confirmedStopLocked(current, snapshot, PhoneTaskStopIntent.END)
+                    val ack = confirmedStopLocked(current, snapshot, PhoneTaskStopIntent.MODEL_FINISH)
                         ?: return PhoneTaskEventReply.HaltUnconfirmed()
                     val apply =
                         store.recordModelFinish(event.eventId, key, epoch, sessionLabel, event.summary, ack)

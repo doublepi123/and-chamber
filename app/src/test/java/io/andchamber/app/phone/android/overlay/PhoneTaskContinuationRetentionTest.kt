@@ -39,7 +39,7 @@ class PhoneTaskContinuationRetentionTest {
             binding: PhoneOverlayTaskBinding,
             intent: PhoneTaskStopIntent,
         ): PhoneStopAcknowledgement? {
-            if (intent == PhoneTaskStopIntent.END) {
+            if (intent == PhoneTaskStopIntent.END || intent == PhoneTaskStopIntent.MODEL_FINISH) {
                 if (liveEpoch != null && liveEpoch != binding.epoch) return null
                 liveEpoch = null
                 return PhoneStopAcknowledgement(newOperationsBlocked = true, lateReadsBlocked = true)

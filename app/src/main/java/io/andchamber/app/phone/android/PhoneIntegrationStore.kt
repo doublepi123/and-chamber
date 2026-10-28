@@ -57,6 +57,11 @@ data class PhoneTaskRecord(
     val haltReason: String? = null,
     /** True once a person marked an uncertain last action as checked. */
     val acknowledged: Boolean = false,
+    /**
+     * The agent's own finish while it held a clean live grant (no halt, nothing in flight). Still
+     * unverified; it only lets the screen show a light note instead of the full check step.
+     */
+    val agentReported: Boolean = false,
 )
 
 /** SharedPreferences-backed production store. One small file, no secrets. */
@@ -80,6 +85,7 @@ class PrefsPhoneIntegrationStore(
             needsCheck = prefs.getBoolean(KEY_TASK_NEEDS_CHECK, true),
             haltReason = prefs.getString(KEY_TASK_HALT, null),
             acknowledged = prefs.getBoolean(KEY_TASK_ACK, false),
+            agentReported = prefs.getBoolean(KEY_TASK_AGENT_REPORTED, false),
         )
     }
 
@@ -97,6 +103,7 @@ class PrefsPhoneIntegrationStore(
             .putBoolean(KEY_TASK_NEEDS_CHECK, record.needsCheck)
             .putString(KEY_TASK_HALT, record.haltReason)
             .putBoolean(KEY_TASK_ACK, record.acknowledged)
+            .putBoolean(KEY_TASK_AGENT_REPORTED, record.agentReported)
             .apply()
     }
 
@@ -108,6 +115,7 @@ class PrefsPhoneIntegrationStore(
             .remove(KEY_TASK_NEEDS_CHECK)
             .remove(KEY_TASK_HALT)
             .remove(KEY_TASK_ACK)
+            .remove(KEY_TASK_AGENT_REPORTED)
             .apply()
     }
 
@@ -129,6 +137,7 @@ class PrefsPhoneIntegrationStore(
         const val KEY_TASK_NEEDS_CHECK = "task.needsCheck"
         const val KEY_TASK_HALT = "task.halt"
         const val KEY_TASK_ACK = "task.acknowledged"
+        const val KEY_TASK_AGENT_REPORTED = "task.agentReported"
         const val KEY_STANDING = "standing.v1"
 
         val PACKAGE_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")

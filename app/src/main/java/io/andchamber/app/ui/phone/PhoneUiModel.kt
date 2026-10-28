@@ -421,6 +421,12 @@ internal data class PhoneTaskResult(
     val target: PhoneTarget?,
     val summary: String,
     val items: List<PhoneResultItem>,
+    /**
+     * The agent itself reported the task finished while it still held a clean live grant (no stop,
+     * no uncertain action). Still not verified, but it needs only a light, dismissible note instead
+     * of the full "check the result" step. False for every person stop, take-over or uncertain end.
+     */
+    val agentReported: Boolean = false,
 )
 
 /** One reported step. [text] is the agent's own words, shown as-is. */
