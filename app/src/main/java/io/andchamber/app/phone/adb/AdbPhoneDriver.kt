@@ -723,9 +723,7 @@ class AdbPhoneDriver(
             PhoneDriverAction.Back ->
                 OverlaySafetyPolicy.backRefusal(witness, now)
         }
-        if (refusal != null) {
-            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
-        }
+        if (refusal != null) throw PhoneDriverException(overlayRefusalFailure(refusal))
         return expectation
     }
 
@@ -886,11 +884,17 @@ class AdbPhoneDriver(
         val now = clock()
         val refusal = OverlaySafetyPolicy.identityRefusal(witness, stored, now)
             ?: OverlaySafetyPolicy.inputFocusRefusal(witness, focus, now)
-        if (refusal != null) {
-            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
-        }
+        if (refusal != null) throw PhoneDriverException(overlayRefusalFailure(refusal))
         return expectation
     }
+
+    /** An action that would only hit the visible overlay is refused alone, not as overlay loss. */
+    private fun overlayRefusalFailure(refusal: io.andchamber.app.phone.overlay.safety.OverlayRefusal): PhoneDriverFailure =
+        if (OverlaySafetyPolicy.isObstruction(refusal)) {
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED
+        } else {
+            PhoneDriverFailure.POLICY_DENIED
+        }
 
     private fun inputTarget(nodes: List<PhoneNode>, focus: PhonePoint): PhoneNode? =
         nodes.asSequence()

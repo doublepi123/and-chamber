@@ -1200,6 +1200,7 @@ class PhoneController(
         PhoneDriverFailure.WINDOW_CHANGED -> PhoneErrorCode.WINDOW_CHANGED
         PhoneDriverFailure.GEOMETRY_CHANGED -> PhoneErrorCode.GEOMETRY_CHANGED
         PhoneDriverFailure.POLICY_DENIED -> PhoneErrorCode.TARGET_FORBIDDEN
+        PhoneDriverFailure.OVERLAY_OBSTRUCTED -> PhoneErrorCode.OVERLAY_OBSTRUCTED
         PhoneDriverFailure.INVALID_REQUEST -> PhoneErrorCode.INVALID_REQUEST
         PhoneDriverFailure.ADMISSION_REFUSED -> PhoneErrorCode.CANCELLED
         PhoneDriverFailure.TIMEOUT -> PhoneErrorCode.DEADLINE

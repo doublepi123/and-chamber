@@ -121,6 +121,8 @@ enum class PhoneErrorCode {
     ACTION_NOT_GRANTED,
     INVALID_REQUEST,
     OUT_OF_BOUNDS,
+    /** The point/swipe/focus would land on the visible AndChamber overlay; nothing was sent. */
+    OVERLAY_OBSTRUCTED,
     NOT_CONNECTED,
     DRIVER_UNAVAILABLE,
     DEADLINE,

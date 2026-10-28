@@ -491,12 +491,13 @@ class AdbPhoneDriverTest {
             PhoneDispatchReceipt.Sent,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
         )
+        // Hitting the visible capsule refuses only this action; it is not an overlay loss.
         assertNotSent(
-            PhoneDriverFailure.POLICY_DENIED,
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
         )
         assertNotSent(
-            PhoneDriverFailure.POLICY_DENIED,
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
             driver.dispatch(
                 request(
                     PhoneDriverAction.Swipe(PhonePoint(0, 480), PhonePoint(500, 480), 200),
@@ -509,7 +510,9 @@ class AdbPhoneDriverTest {
     }
 
     @Test
-    fun overlayRevisionChangeInvalidatesTheOldObservation() = runBlocking {
+    fun aCosmeticOverlayRevisionDoesNotStopTheTask() = runBlocking {
+        // A chat notice, expand/collapse or drag bumps the display revision. The real frame is
+        // re-read for every action, so an outside tap still goes through.
         val overlay = FakeOverlay()
         val device = FakeDevice(
             editableHierarchy.toByteArray(),
@@ -519,6 +522,24 @@ class AdbPhoneDriverTest {
         val driver = overlayDriver(device, overlay)
         val binding = bindingFor(driver.observe(5_000))
         overlay.revision += 1
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(50, 50)), device.injected)
+    }
+
+    @Test
+    fun aNewOverlayOwnerStillInvalidatesTheOldObservation() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        overlay.generation += 1
         assertNotSent(
             PhoneDriverFailure.POLICY_DENIED,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
@@ -583,7 +604,7 @@ class AdbPhoneDriverTest {
         val driver = overlayDriver(device, overlay)
         val binding = bindingFor(driver.observe(5_000))
         assertNotSent(
-            PhoneDriverFailure.POLICY_DENIED,
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
             driver.dispatch(
                 request(
                     PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150)),

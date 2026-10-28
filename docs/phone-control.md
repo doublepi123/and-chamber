@@ -256,6 +256,12 @@ restores the latest native state and waits for the first frame. A cancelled or t
 cannot silently leave a permanent hidden state or resurrect an older owner. Actual WindowManager
 checks, not `FLAG_SECURE`, establish the supported exclusion behavior.
 
+An action whose point, swipe or input focus would land on the visible capsule is refused alone as
+`OVERLAY_OBSTRUCTED`: nothing is sent, control stays live, and it is not an overlay-loss stop. The
+capsule's display revision (a chat notice, expand/collapse, drag) is not part of the observation
+identity; each action re-reads the real frame and checks against it. A new display owner or
+generation, a hidden/unverifiable window or a display change still fails closed as before.
+
 The tool has three additional closed actions, all requiring the published session route and explicit
 current `epoch`: `progress(phase)`, `need_user(reason)` and `finish(summary)`. Their bounded text is
 an unverified agent note, not native evidence. `need_user` revokes first, then displays the handoff;

@@ -141,7 +141,7 @@ class OverlaySafetyP0InstrumentationTest {
 
             val center = PhonePoint(bounds.centerX, bounds.centerY)
             assertNotSent(
-                PhoneDriverFailure.POLICY_DENIED,
+                PhoneDriverFailure.OVERLAY_OBSTRUCTED,
                 runBlocking {
                     service.dispatch(
                         PhoneDispatchRequest(
@@ -167,7 +167,7 @@ class OverlaySafetyP0InstrumentationTest {
                 },
             )
             assertNotSent(
-                PhoneDriverFailure.POLICY_DENIED,
+                PhoneDriverFailure.OVERLAY_OBSTRUCTED,
                 runBlocking {
                     service.dispatch(
                         PhoneDispatchRequest(
@@ -185,22 +185,40 @@ class OverlaySafetyP0InstrumentationTest {
             )
             println("check=overlay_endpoint_exclusion result=pass")
 
-            barrier.move(x = 500, y = 1000, width = 160, height = 160)
+            // Moving/expanding the capsule bumps its display revision. That alone no longer stops
+            // control: every action re-reads the real frame. The old point is now under the moved
+            // capsule and is refused as an obstruction; a point outside the new frame still goes.
+            barrier.move(x = 0, y = 900, width = 200, height = 200)
             barrier.awaitVisible(timeoutMs = 5_000L)
+            val moved = barrier.lastWindow()?.bounds ?: error("moved overlay frame missing")
+            println("diag=overlay_moved bounds=$moved")
             assertNotSent(
-                PhoneDriverFailure.POLICY_DENIED,
+                PhoneDriverFailure.OVERLAY_OBSTRUCTED,
                 runBlocking {
                     service.dispatch(
                         PhoneDispatchRequest(
                             binding,
-                            PhoneDriverAction.Tap(PhonePoint(50, 1000)),
+                            PhoneDriverAction.Tap(PhonePoint(moved.centerX, moved.centerY)),
                             PhoneAdmissionGuard { null },
                         ),
                         15_000L,
                     )
                 },
             )
-            println("check=overlay_revision_invalidated result=pass")
+            assertEquals(
+                PhoneDispatchReceipt.Sent,
+                runBlocking {
+                    service.dispatch(
+                        PhoneDispatchRequest(
+                            binding,
+                            PhoneDriverAction.Tap(PhonePoint(moved.right + 300, moved.centerY)),
+                            PhoneAdmissionGuard { null },
+                        ),
+                        15_000L,
+                    )
+                },
+            )
+            println("check=overlay_revision_rechecked_against_fresh_frame result=pass")
 
             // Put the overlay exactly over the fixture's editable text field
             // ([42,360][1038,478] in screen coordinates; overlay y is still app-window space).
@@ -214,7 +232,7 @@ class OverlaySafetyP0InstrumentationTest {
             val fresh = runBlocking { service.observe(15_000L) }
             val freshBinding = binding(fresh)
             assertNotSent(
-                PhoneDriverFailure.POLICY_DENIED,
+                PhoneDriverFailure.OVERLAY_OBSTRUCTED,
                 runBlocking {
                     service.dispatch(
                         PhoneDispatchRequest(

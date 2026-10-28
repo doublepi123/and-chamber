@@ -226,6 +226,11 @@ enum class PhoneDriverFailure {
     WINDOW_CHANGED,
     GEOMETRY_CHANGED,
     POLICY_DENIED,
+    /**
+     * The point, swipe or focus would hit the visible AndChamber overlay. Only this action is
+     * refused; the overlay is visible and fine, so this is never an overlay-loss stop.
+     */
+    OVERLAY_OBSTRUCTED,
     INVALID_REQUEST,
     /** The controller-issued admission guard refused immediately before injection. */
     ADMISSION_REFUSED,

@@ -242,10 +242,17 @@ class OverlaySafetyContractTest {
             OverlayRefusal.GENERATION_CHANGED,
             OverlaySafetyPolicy.identityRefusal(witness, observation.copy(generation = 4), 500),
         )
+        // A cosmetic display revision (chat notice, expand, drag) is not an identity change: each
+        // action re-reads the real frame and checks the point against it.
         assertEquals(
-            OverlayRefusal.REVISION_CHANGED,
+            null,
             OverlaySafetyPolicy.identityRefusal(witness, observation.copy(revision = 8), 500),
         )
+        assertTrue(OverlaySafetyPolicy.isObstruction(OverlayRefusal.POINT_IN_OVERLAY))
+        assertTrue(OverlaySafetyPolicy.isObstruction(OverlayRefusal.SWIPE_CROSSES_OVERLAY))
+        assertTrue(OverlaySafetyPolicy.isObstruction(OverlayRefusal.OVERLAY_FOCUSED))
+        assertFalse(OverlaySafetyPolicy.isObstruction(OverlayRefusal.UNAVAILABLE))
+        assertFalse(OverlaySafetyPolicy.isObstruction(OverlayRefusal.STALE))
         assertEquals(
             OverlayRefusal.GEOMETRY_CHANGED,
             OverlaySafetyPolicy.identityRefusal(

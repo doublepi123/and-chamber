@@ -4003,7 +4003,7 @@ internal class PhoneIntegration(
             PhoneErrorCode.ACTION_NOT_GRANTED, PhoneErrorCode.TARGET_MISMATCH,
             PhoneErrorCode.WINDOW_CHANGED, PhoneErrorCode.GEOMETRY_CHANGED,
             PhoneErrorCode.STALE_OBSERVATION, PhoneErrorCode.OBSERVATION_REQUIRED,
-            PhoneErrorCode.OUT_OF_BOUNDS, PhoneErrorCode.DRIVER_UNAVAILABLE,
+            PhoneErrorCode.OUT_OF_BOUNDS, PhoneErrorCode.OVERLAY_OBSTRUCTED, PhoneErrorCode.DRIVER_UNAVAILABLE,
             // Neither is a connection-result error; this only keeps the exhaustive mapping.
             PhoneErrorCode.HIERARCHY_NOT_IDLE, PhoneErrorCode.READ_TIMEOUT,
             -> PhoneDeviceProblem.Other

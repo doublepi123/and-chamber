@@ -145,8 +145,13 @@ public final class TestOverlayActivity extends Activity {
 
     private void registerControlReceiver() {
         IntentFilter filter = new IntentFilter(ACTION_CONTROL);
-        androidx.core.content.ContextCompat.registerReceiver(
-                this, control, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED);
+        // Platform API only: this activity runs in the test APK's own process, where androidx.core
+        // classes from the app under test are not on the class path.
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(control, filter, android.content.Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(control, filter);
+        }
         receiverRegistered = true;
     }
 

@@ -421,6 +421,8 @@ object PhoneToolProtocol {
             PhoneToolCodes.ACTION_NOT_GRANTED -> "That action is not included in the grant."
             PhoneToolCodes.INVALID_REQUEST -> "Invalid request."
             PhoneToolCodes.OUT_OF_BOUNDS -> "The point is outside the current screen. Take a new snapshot."
+            PhoneToolCodes.OVERLAY_OBSTRUCTED ->
+                "That point or swipe would land on the AndChamber progress capsule, so nothing was sent. Control is still active. Choose another point, scroll the target into the open area, or ask the person to move the capsule."
             PhoneToolCodes.NOT_CONNECTED -> "The phone is not connected."
             PhoneToolCodes.DRIVER_UNAVAILABLE ->
                 "The phone returned output that could not be read for this call. This does not prove the device is unsupported or that the connection is down, and it does not confirm whether an earlier action applied. Do not repeat a mutating action; take a fresh snapshot, and if this keeps happening ask the person to check the phone."
@@ -601,6 +603,7 @@ object PhoneToolCodes {
     const val ACTION_NOT_GRANTED = "ACTION_NOT_GRANTED"
     const val INVALID_REQUEST = "INVALID_REQUEST"
     const val OUT_OF_BOUNDS = "OUT_OF_BOUNDS"
+    const val OVERLAY_OBSTRUCTED = "OVERLAY_OBSTRUCTED"
     const val NOT_CONNECTED = "NOT_CONNECTED"
     const val DRIVER_UNAVAILABLE = "DRIVER_UNAVAILABLE"
     const val DEADLINE = "DEADLINE"

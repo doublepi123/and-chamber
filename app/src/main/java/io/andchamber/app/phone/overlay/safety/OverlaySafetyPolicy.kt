@@ -38,10 +38,21 @@ object OverlaySafetyPolicy {
         visibleRefusal(witness, nowMs)?.let { return it }
         if (witness.owner != observation.owner) return OverlayRefusal.OWNER_CHANGED
         if (witness.generation != observation.generation) return OverlayRefusal.GENERATION_CHANGED
-        if (witness.revision != observation.revision) return OverlayRefusal.REVISION_CHANGED
+        // The display revision moves on every cosmetic change (a chat notice, expand/collapse, a
+        // drag). It is not part of the identity: each action re-reads the real window frame, and the
+        // point/swipe/focus checks use that fresh frame. Owner, generation and display still match.
         if (witness.display != observation.display) return OverlayRefusal.GEOMETRY_CHANGED
         return null
     }
+
+    /**
+     * True when the refusal only says "this coordinate/segment/focus is under the overlay". The
+     * overlay itself is fine; only this action is refused. Never a visibility loss.
+     */
+    fun isObstruction(refusal: OverlayRefusal): Boolean =
+        refusal == OverlayRefusal.POINT_IN_OVERLAY ||
+            refusal == OverlayRefusal.SWIPE_CROSSES_OVERLAY ||
+            refusal == OverlayRefusal.OVERLAY_FOCUSED
 
     fun tapRefusal(
         witness: OverlayWitness,
