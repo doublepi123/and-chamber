@@ -63,8 +63,10 @@ document.
 4. Save the standing scope: apps, action classes, window and per-task duration. Saving does not
    grant or launch anything, and it works before the running launcher has loaded the plugin.
 5. Once the new runtime is actually running and the tool handshake is ready, the first valid chat
-   request binds the scope to that runtime and chat session. Later requests must use the same runtime
-   and session; another session receives a mismatch refusal. Every task has a fresh epoch.
+   request binds the scope to that runtime and chat session. While that chat's task is live or
+   retained, another session receives a mismatch refusal. Once the task has ended, any chat on the
+   same runtime may start the next task, which moves the session binding to that chat; a different
+   runtime is still refused. Every task has a fresh epoch.
 6. In chat, `request` starts directly inside the scope with a bounded summary and one preauthorized
    package. The native side checks the scope, proves a foreground stop entry, creates the task/lease,
    launches that package and performs a real foreground observation before replying
@@ -250,17 +252,25 @@ makes the start/continuation fail and rolls back exactly that lease; it is not r
 sleep or an unprotected read. Notification-only/no-coordinator paths keep the original driver path.
 
 Overlay loss is reported as an honest stop-channel or visibility failure, never as a person takeover.
-The exact lease is stopped and the retained task facts stay for native recovery. Normal read
-hide/restore is a separate success path: it removes the surface temporarily, verifies absence,
-restores the latest native state and waits for the first frame. A cancelled or timed-out restore
-cannot silently leave a permanent hidden state or resurrect an older owner. Actual WindowManager
-checks, not `FLAG_SECURE`, establish the supported exclusion behavior.
+The exact lease is stopped and the retained task facts stay for native recovery. Normal observation
+no longer removes the surface: the capsule is not focusable, so the focused app's hierarchy dump never
+contains it, and hiding/re-showing on every snapshot only made it flicker. Observation instead
+requires a fresh real-window VISIBLE witness before and after the read, and a mode change during the
+read discards the snapshot. Capture is the only hide/restore path: it removes the surface temporarily,
+verifies absence, restores the latest native state and waits for the first frame, because a screenshot
+must not contain the capsule's summary or notices. A cancelled or timed-out restore cannot silently
+leave a permanent hidden state or resurrect an older owner. Actual WindowManager checks, not
+`FLAG_SECURE`, establish the supported exclusion behavior.
 
-An action whose point, swipe or input focus would land on the visible capsule is refused alone as
-`OVERLAY_OBSTRUCTED`: nothing is sent, control stays live, and it is not an overlay-loss stop. The
-capsule's display revision (a chat notice, expand/collapse, drag) is not part of the observation
-identity; each action re-reads the real frame and checks against it. A new display owner or
-generation, a hidden/unverifiable window or a display change still fails closed as before.
+An action whose point, swipe or input focus would land on the visible capsule asks the overlay to move
+first; only if the capsule is still in the way is the action refused alone as `OVERLAY_OBSTRUCTED`:
+nothing is sent, control stays live, and it is not an overlay-loss stop. One bounded make-way attempt
+per dispatch may collapse the panel and relayout the capsule to the opposite edge at the same height,
+then to the vertical half farthest from the avoided point/segment; it never grants, renews, resumes or
+revokes, and it is never stored as the person's own drag position, so their remembered posture still
+wins next time. The capsule's display revision (a chat notice, expand/collapse, drag) is not part of
+the observation identity; each action re-reads the real frame and checks against it. A new display
+owner or generation, a hidden/unverifiable window or a display change still fails closed as before.
 
 The tool has three additional closed actions, all requiring the published session route and explicit
 current `epoch`: `progress(phase)`, `need_user(reason)` and `finish(summary)`. Their bounded text is
@@ -277,9 +287,10 @@ Collapse keeps following. Ending requires confirmation and native revocation; on
 result card be closed. Closing the overlay result does not delete the native needs-check record.
 
 Driver checks bind actual window tokens/frames to the manager's owner and geometry generation.
-Tap/input focus and the entire swipe segment must not intersect the overlay. Move the capsule and
-obtain a fresh observation if it covers the intended target; the agent cannot operate its own control
-surface. A declared overlay mode never silently becomes an unprotected notification-only operation.
+Tap/input focus and the entire swipe segment must not intersect the overlay. The driver asks the
+capsule to move once per action when it covers the intended target, and refuses with
+`OVERLAY_OBSTRUCTED` if it is still in the way; the agent cannot operate its own control surface. A
+declared overlay mode never silently becomes an unprotected notification-only operation.
 
 Known permission/display loss fails closed without automatic resumption. Notifications are a recovery
 path, not proof of delivery or acknowledgement. Window checks cannot detect every OEM/system hiding

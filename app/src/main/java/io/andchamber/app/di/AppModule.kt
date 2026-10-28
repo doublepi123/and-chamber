@@ -307,6 +307,10 @@ val appModule =
                 authorityEpoch = { PhoneOverlayHolder.current()?.driverAuthorityEpoch() },
                 displayOwner = { PhoneOverlayHolder.current()?.driverDisplayOwner() },
                 onSafetyLost = { _, _ -> PhoneOverlayHolder.current()?.onDriverOverlayLost() },
+                makeWay = { avoid, currentFrame, deadlineMs ->
+                    PhoneOverlayHolder.current()
+                        ?.driverMakeWay(avoid, currentFrame, deadlineMs) ?: false
+                },
             )
         }
 

@@ -46,18 +46,33 @@ class PhoneStandingConfigTest {
     }
 
     @Test
-    fun `first request binds a runtime and session and then rejects another session`() {
+    fun `another chat is busy only while the bound chat still owns a task`() {
         assertNull(refusal(binding = emptyBinding, session = "ses-a"))
         val bound = PhoneStandingBindingState(runtimeId = "launch-1", sessionLabel = "ses-a")
         assertNull(refusal(binding = bound, session = "ses-a"))
-        assertEquals(
-            PhoneStandingRefusal.SESSION_MISMATCH,
-            refusal(binding = bound, session = "ses-b"),
-        )
+        // While ses-a's task is live or retained, another chat cannot take it.
+        assertEquals(PhoneStandingRefusal.SESSION_MISMATCH, refusal(binding = bound, session = "ses-b", live = true))
+        assertEquals(PhoneStandingRefusal.SESSION_MISMATCH, refusal(binding = bound, session = "ses-b", retained = true))
+        // After that task ended, another chat on the same runtime may start the next task.
+        assertNull(refusal(binding = bound, session = "ses-b"))
+        // A stop block still applies to every chat.
+        assertEquals(PhoneStandingRefusal.STANDING_BLOCKED, refusal(binding = bound, session = "ses-b", blocked = true))
+        // The runtime binding never moves.
         assertEquals(
             PhoneStandingRefusal.RUNTIME_CHANGED,
-            refusal(binding = bound, session = "ses-a", runtimeId = "launch-2"),
+            refusal(binding = bound, session = "ses-b", runtimeId = "launch-2"),
         )
+    }
+
+    @Test
+    fun `the next task rebinds the session but never the runtime`() {
+        assertEquals(
+            PhoneStandingBindingState("launch-1", "ses-a"),
+            standingNextBinding(emptyBinding, "launch-1", "ses-a"),
+        )
+        val bound = PhoneStandingBindingState("launch-1", "ses-a")
+        assertEquals(bound, standingNextBinding(bound, "launch-1", "ses-a"))
+        assertEquals(PhoneStandingBindingState("launch-1", "ses-b"), standingNextBinding(bound, "launch-1", "ses-b"))
     }
 
     @Test

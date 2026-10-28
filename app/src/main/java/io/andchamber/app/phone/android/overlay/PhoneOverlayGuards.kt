@@ -1,5 +1,6 @@
 package io.andchamber.app.phone.android.overlay
 
+import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -213,6 +214,91 @@ internal fun overlayGeometryUpdate(
     } else {
         current.withDrag(reflowed.side, reflowed.offsetY)
     }
+
+/**
+ * One automatic occlusion escape chosen by [overlayMakeWayPlacement]. It is layout only: never a
+ * grant, a stop, a reminder of the person's posture, or a visibility claim.
+ */
+internal data class PhoneOverlayMakeWayChoice(
+    val side: PhoneOverlaySide,
+    val offsetY: Int,
+)
+
+/**
+ * Pure placement choice for the driver's automatic "move out of the way" request.
+ *
+ * The predicted capsule frame is [frameWidthPx] x [frameHeightPx] at the clamped position for each
+ * candidate (the same [overlayPlacement] clamp the live window uses). Candidates, in order:
+ * 1. the opposite edge at the current height (usually enough and keeps the vertical posture);
+ * 2. the same edge at the vertical half farthest from the avoided rectangles;
+ * 3. the opposite edge at that same far half.
+ *
+ * A candidate is accepted only when its predicted frame lies inside the display and intersects none
+ * of [avoid]. `null` means no candidate is clear; the driver then refuses the action instead of
+ * injecting. Nothing here reads a window, grants or persists anything.
+ */
+internal fun overlayMakeWayPlacement(
+    currentSide: PhoneOverlaySide,
+    currentTopPx: Int,
+    frameWidthPx: Int,
+    frameHeightPx: Int,
+    geometry: PhoneOverlayGeometry,
+    avoid: List<PhoneRect>,
+): PhoneOverlayMakeWayChoice? {
+    if (avoid.isEmpty()) return null
+    val width = frameWidthPx.coerceIn(1, geometry.screenWidthPx)
+    val height = frameHeightPx.coerceIn(1, geometry.screenHeightPx)
+
+    fun clampedTop(offsetY: Int): Int =
+        overlayPlacement(
+            PhoneOverlayWindowState(
+                ownerKey = MAKE_WAY_PLACEMENT_OWNER,
+                expanded = false,
+                offsetY = offsetY,
+            ),
+            geometry,
+        ).topPx
+
+    fun frame(side: PhoneOverlaySide, topPx: Int): PhoneRect {
+        val left =
+            if (side == PhoneOverlaySide.LEFT) {
+                geometry.sideMarginPx
+            } else {
+                geometry.screenWidthPx - geometry.sideMarginPx - width
+            }
+        return PhoneRect(left, topPx, left + width, topPx + height)
+    }
+
+    fun clear(side: PhoneOverlaySide, topPx: Int): Boolean {
+        val candidate = frame(side, topPx)
+        if (candidate.left < 0 || candidate.right > geometry.screenWidthPx) return false
+        return avoid.none { overlayRectsIntersect(candidate, it) }
+    }
+
+    val opposite =
+        if (currentSide == PhoneOverlaySide.LEFT) PhoneOverlaySide.RIGHT else PhoneOverlaySide.LEFT
+    val sameHeight = clampedTop(currentTopPx)
+    if (clear(opposite, sameHeight)) {
+        return PhoneOverlayMakeWayChoice(opposite, sameHeight)
+    }
+    val lowestTop = clampedTop(Int.MAX_VALUE)
+    val highestTop = clampedTop(Int.MIN_VALUE)
+    val avoidCenterY = (avoid.minOf { it.top } + avoid.maxOf { it.bottom }) / 2
+    val farTop = if (avoidCenterY <= (highestTop + lowestTop) / 2) lowestTop else highestTop
+    if (clear(currentSide, farTop)) return PhoneOverlayMakeWayChoice(currentSide, farTop)
+    if (clear(opposite, farTop)) return PhoneOverlayMakeWayChoice(opposite, farTop)
+    return null
+}
+
+private const val MAKE_WAY_PLACEMENT_OWNER = "make-way"
+
+/** Half-open rectangle intersection: touching edges do not count as covering. */
+private fun overlayRectsIntersect(
+    first: PhoneRect,
+    second: PhoneRect,
+): Boolean =
+    first.left < second.right && second.left < first.right &&
+        first.top < second.bottom && second.top < first.bottom
 
 /**
  * Confirming "I saw it" is only accepted after the demo's take-over really reached the native side.

@@ -61,7 +61,7 @@ internal enum class OverlaySource {
     /** Dispatched, but whether it took effect is unknown. */
     SentUnknown,
 
-    /** The agent's own words or request. Not verified. */
+    /** The agent's own words or request. */
     AgentNote,
 }
 

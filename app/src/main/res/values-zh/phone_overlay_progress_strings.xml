@@ -34,6 +34,6 @@
     <string name="phone_overlay_progress_reason_delivery_unknown">是否发出未知</string>
     <string name="phone_overlay_progress_reason_verified_done">已核对：完成</string>
     <string name="phone_overlay_progress_reason_verified_not_done">已核对：未完成</string>
-    <string name="phone_overlay_progress_reason_model_reported">未经核实的报告</string>
+    <string name="phone_overlay_progress_reason_model_reported">代理报告</string>
     <string name="phone_overlay_progress_reason_need_user">轮到你处理</string>
 </resources>

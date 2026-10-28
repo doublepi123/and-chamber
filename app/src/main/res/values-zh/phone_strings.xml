@@ -328,7 +328,7 @@
     <string name="phone_continue_confirm_body">代理会先重新查看屏幕，再在你设定的范围内继续。之前做过的操作不会重发。会通知聊天继续。</string>
     <string name="phone_continue_need_user_title">代理请求你处理</string>
     <string name="phone_continue_need_user_body">请自己完成这一步，再回这里继续。代理看不到你输入的内容。</string>
-    <string name="phone_continue_agent_note">代理说明（未核验）：%1$s</string>
+    <string name="phone_continue_agent_note">代理说明：%1$s</string>
     <string name="phone_continue_sending">正在通知聊天继续…</string>
     <string name="phone_continue_delivered_title">已通知聊天继续</string>
     <string name="phone_continue_delivered_body">可以在聊天或浮窗里看进展。</string>
@@ -377,9 +377,9 @@
     <string name="phone_continue_blocked_sending">上一次继续还在处理中。</string>
     <string name="phone_continue_blocked_already">这次停止已经继续过了，聊天只会被提醒一次。请到聊天里查看。</string>
     <string name="phone_standing_resume_new_task">原任务已不在。恢复后，请回聊天发起新任务。</string>
-    <string name="phone_task_agent_done">已完成（未核实）</string>
+    <string name="phone_task_agent_done">已完成</string>
     <string name="phone_agent_finish_title">代理报告已完成</string>
-    <string name="phone_agent_finish_body">结果未自动核实，必要时在 %1$s 里看一下。</string>
+    <string name="phone_agent_finish_body">想看结果可以打开 %1$s。</string>
     <string name="phone_agent_finish_app_fallback">应用</string>
     <string name="phone_agent_finish_dismiss">知道了</string>
 </resources>

@@ -328,7 +328,7 @@
     <string name="phone_continue_confirm_body">The agent looks at the screen again first and continues inside your scope. Nothing it did before is re-sent. The chat is told to carry on.</string>
     <string name="phone_continue_need_user_title">The agent asked for you</string>
     <string name="phone_continue_need_user_body">Do that step yourself, then continue here. The agent doesn\'t see what you type.</string>
-    <string name="phone_continue_agent_note">Agent note (not verified): %1$s</string>
+    <string name="phone_continue_agent_note">Agent note: %1$s</string>
     <string name="phone_continue_sending">Telling the chat to continue…</string>
     <string name="phone_continue_delivered_title">The chat was told to continue</string>
     <string name="phone_continue_delivered_body">Follow it in the chat or the overlay.</string>
@@ -377,9 +377,9 @@
     <string name="phone_continue_blocked_sending">The last continue is still being handled.</string>
     <string name="phone_continue_blocked_already">This stop was already continued, and the chat is told only once. Look in the chat.</string>
     <string name="phone_standing_resume_new_task">The original task is gone. After resuming, ask in the chat to start a new one.</string>
-    <string name="phone_task_agent_done">Done (not verified)</string>
+    <string name="phone_task_agent_done">Done</string>
     <string name="phone_agent_finish_title">The agent reported it\'s done</string>
-    <string name="phone_agent_finish_body">The result wasn\'t checked automatically. If needed, take a look in %1$s.</string>
+    <string name="phone_agent_finish_body">Open %1$s to see the result if you want.</string>
     <string name="phone_agent_finish_app_fallback">the app</string>
     <string name="phone_agent_finish_dismiss">Got it</string>
 </resources>

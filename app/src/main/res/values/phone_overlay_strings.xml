@@ -16,6 +16,9 @@
     <string name="phone_overlay_minutes_left">%1$d min left</string>
     <string name="phone_overlay_no_time_limit">No time limit</string>
     <string name="phone_overlay_prompt_capsule">The chat has a question · tap to answer</string>
+    <string name="phone_overlay_capsule_progress_none">No step yet</string>
+    <string name="phone_overlay_capsule_running">Running</string>
+    <string name="phone_overlay_capsule_paused">Paused</string>
     <string name="phone_overlay_prompt_default_label">Question from the chat</string>
     <string name="phone_overlay_prompt_pick_hint">Pick one answer, then tap Send. Nothing is sent until you do.</string>
     <string name="phone_overlay_prompt_send">Send answer</string>
@@ -79,7 +82,7 @@
     <string name="phone_overlay_src_confirmed">Native confirmation</string>
     <string name="phone_overlay_src_sent">Sent · doesn\'t mean done</string>
     <string name="phone_overlay_src_sent_unknown">Sent · result unknown</string>
-    <string name="phone_overlay_src_agent">Agent note · not verified</string>
+    <string name="phone_overlay_src_agent">Agent note</string>
     <string name="phone_overlay_just_now">just now</string>
     <string name="phone_overlay_seconds_ago">%1$d s ago</string>
     <string name="phone_overlay_minutes_ago">%1$d min ago</string>
@@ -91,7 +94,7 @@
     <string name="phone_overlay_paused_notice">No new actions are accepted; the last one still needs checking. The agent can still observe this app until you take over, open AndChamber or end the task.</string>
     <string name="phone_overlay_taking_notice">Until confirmed, the last action may still take effect. No need to press again.</string>
     <string name="phone_overlay_taken_notice">New observation and actions are off; the last action still needs checking. The agent won\'t take control back by itself.</string>
-    <string name="phone_overlay_need_user_pending_notice">The agent asked for a person (its note isn\'t verified). Until this is confirmed, don\'t type anything sensitive here.</string>
+    <string name="phone_overlay_need_user_pending_notice">The agent asked for a person. Until this is confirmed, don\'t type anything sensitive here.</string>
     <string name="phone_overlay_need_user_notice">Your turn: new observation and actions are off; the last action still needs checking. Do this step yourself, and don\'t send passwords to the agent.</string>
     <string name="phone_overlay_need_user_foot">This comes from the agent\'s request. AndChamber doesn\'t detect every login or sensitive page.</string>
     <string name="phone_overlay_unknown_notice">An action was sent, but whether it took effect couldn\'t be confirmed. It may already have happened.</string>

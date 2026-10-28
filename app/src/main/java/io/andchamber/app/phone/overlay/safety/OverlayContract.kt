@@ -131,7 +131,9 @@ enum class OverlayRefusal {
  * It restores on cancellation/exception too. An intentional hide is a display operation, not a
  * connection loss and not a lease revoke. [phase] is only CAPTURE_HIDDEN or COLLECTION_HIDDEN.
  * The driver independently verifies from `dumpsys window` that the token no longer has a visible
- * surface before reading/capturing; a manager returning early without hiding fails closed.
+ * surface before capturing; a manager returning early without hiding fails closed. Observe does not
+ * use this path in overlay mode: the overlay stays visible while the focused app's hierarchy is
+ * read (the capsule is never the focused window and cannot appear in that dump).
  */
 interface PhoneOverlayBarrier {
     /**
@@ -152,6 +154,29 @@ interface PhoneOverlayBarrier {
      * an [OverlayExpectation] may return `snapshot.asExpectation()` instead.
      */
     fun expectation(deadlineMs: Long): OverlayExpectation
+
+    /**
+     * One bounded occlusion escape for the driver's own capsule, requested before an injection.
+     *
+     * The driver calls this only in overlay mode, after a fresh witness shows that the action's tap
+     * or input-focus point, or its whole swipe segment, would land on the visible capsule. [avoid]
+     * holds the rectangles the capsule must leave clear: a small square around each point, or the
+     * expanded bounding box of a swipe segment (so a capsule outside it cannot cross the segment).
+     * [currentFrame] is the real frame the driver just witnessed, and [deadlineMs] is an absolute
+     * elapsedRealtime deadline that also bounds the wait for the applied layout.
+     *
+     * The manager may collapse its panel and move the capsule; it must not grant, renew, resume or
+     * revoke anything, and an automatic move is never stored as the person's own drag position.
+     * `true` means the manager applied a layout that leaves every [avoid] rectangle clear. `false`
+     * means it did not; the driver then re-validates with a fresh witness and refuses the action as
+     * `OVERLAY_OBSTRUCTED` without injecting anything. A default `false` keeps every implementation
+     * that does not support an automatic move fail-closed.
+     */
+    suspend fun makeWay(
+        avoid: List<PhoneRect>,
+        currentFrame: PhoneRect,
+        deadlineMs: Long,
+    ): Boolean = false
 
     suspend fun <T> withContentHidden(
         owner: String,

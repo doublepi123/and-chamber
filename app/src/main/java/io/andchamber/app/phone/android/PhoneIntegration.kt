@@ -693,12 +693,7 @@ internal class PhoneIntegration(
         val target = standingTarget(packageName)
         val boundedSummary = summary.trim().take(PhoneLimits.MAX_NODE_LABEL_CHARS)
         if (boundedSummary.isEmpty()) return PhoneTaskStartResult.Refused(PhoneStandingRefusal.INVALID)
-        val prospectiveBinding =
-            if (standingBinding.runtimeId == null && standingBinding.sessionLabel == null) {
-                PhoneStandingBindingState(runtimeId = runtimeId, sessionLabel = sessionId)
-            } else {
-                standingBinding
-            }
+        val prospectiveBinding = standingNextBinding(standingBinding, runtimeId, sessionId)
         val scope =
             PhoneStandingScope(
                 runtimeId = runtimeId,

@@ -48,7 +48,7 @@ class PhoneAgentFinishNoteTest {
     }
 
     @Test
-    fun `finish note copy exists in both languages and never claims verification`() {
+    fun `finish note copy exists in both languages without a verification label`() {
         val en = load("values/phone_strings.xml")
         val zh = load("values-zh/phone_strings.xml")
         val keys = listOf("phone_task_agent_done", "phone_agent_finish_title", "phone_agent_finish_body", "phone_agent_finish_app_fallback", "phone_agent_finish_dismiss")
@@ -57,11 +57,10 @@ class PhoneAgentFinishNoteTest {
             assertTrue("zh lacks $k", zh[k].orEmpty().isNotBlank())
         }
         assertEquals("代理报告已完成", zh["phone_agent_finish_title"])
-        assertEquals("已完成（未核实）", zh["phone_task_agent_done"])
+        assertEquals("已完成", zh["phone_task_agent_done"])
         assertEquals("知道了", zh["phone_agent_finish_dismiss"])
-        assertTrue(zh.getValue("phone_agent_finish_body").contains("未自动核实"))
-        assertTrue(en.getValue("phone_agent_finish_body").contains("checked automatically"))
-        assertTrue(en.getValue("phone_task_agent_done").contains("not verified"))
+        assertFalse(zh.getValue("phone_agent_finish_body").contains("核实"))
+        assertFalse(en.getValue("phone_task_agent_done").contains("verified"))
         // The plain "ended, check the result" wording is still there for the other ends.
         assertTrue(zh.getValue("phone_task_ended").contains("请核对结果"))
         assertFalse(zh.getValue("phone_agent_finish_title").contains("已核实"))

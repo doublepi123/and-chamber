@@ -16,6 +16,9 @@
     <string name="phone_overlay_minutes_left">剩 %1$d 分</string>
     <string name="phone_overlay_no_time_limit">不限时</string>
     <string name="phone_overlay_prompt_capsule">聊天有个问题 · 点开回答</string>
+    <string name="phone_overlay_capsule_progress_none">还没有步骤</string>
+    <string name="phone_overlay_capsule_running">代理操作中</string>
+    <string name="phone_overlay_capsule_paused">已暂停</string>
     <string name="phone_overlay_prompt_default_label">来自聊天的问题</string>
     <string name="phone_overlay_prompt_pick_hint">选一个答案，再点“发送答案”。点之前不会发送任何东西。</string>
     <string name="phone_overlay_prompt_send">发送答案</string>
@@ -79,7 +82,7 @@
     <string name="phone_overlay_src_confirmed">原生确认</string>
     <string name="phone_overlay_src_sent">已发出 · 不代表完成</string>
     <string name="phone_overlay_src_sent_unknown">已发出 · 结果不明</string>
-    <string name="phone_overlay_src_agent">代理说明 · 未核验</string>
+    <string name="phone_overlay_src_agent">代理说明</string>
     <string name="phone_overlay_just_now">刚刚</string>
     <string name="phone_overlay_seconds_ago">%1$d 秒前</string>
     <string name="phone_overlay_minutes_ago">%1$d 分钟前</string>
@@ -91,7 +94,7 @@
     <string name="phone_overlay_paused_notice">不再接受新操作；上一操作仍需核对。在你接管、回 AndChamber 或结束任务前，代理仍可观察这个应用。</string>
     <string name="phone_overlay_taking_notice">确认前，上一操作可能仍在生效。不用再点。</string>
     <string name="phone_overlay_taken_notice">新观察和操作已禁用；上一操作仍需核对。代理不会自己拿回控制。</string>
-    <string name="phone_overlay_need_user_pending_notice">代理请求人工处理（代理说明，未核验）。确认前，请先不要在这里输入敏感内容。</string>
+    <string name="phone_overlay_need_user_pending_notice">代理请求人工处理。确认前，请先不要在这里输入敏感内容。</string>
     <string name="phone_overlay_need_user_notice">由你处理：新观察和操作已禁用；上一操作仍需核对。请自己完成这一步，不要把密码发给代理。</string>
     <string name="phone_overlay_need_user_foot">这来自代理的请求。AndChamber 不能识别所有登录或敏感页面。</string>
     <string name="phone_overlay_unknown_notice">操作已发出，但没能确认是否生效，可能已经发生。</string>

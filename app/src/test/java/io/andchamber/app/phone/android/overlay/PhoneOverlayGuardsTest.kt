@@ -1,9 +1,11 @@
 package io.andchamber.app.phone.android.overlay
 
+import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -142,6 +144,117 @@ class PhoneOverlayGuardsTest {
         // The verified notification mode is always selectable.
         assertTrue(overlayModeSelectionAllowed(PhoneOverlayMode.NOTIFICATION_ONLY, PhoneOverlayGate.NEEDS_PERMISSION, demoSeen = false))
         assertTrue(overlayModeSelectionAllowed(PhoneOverlayMode.OFF, PhoneOverlayGate.READY, demoSeen = false))
+    }
+    @Test
+    fun `an automatic make way picks the opposite edge at the same height first`() {
+        val geometry = PhoneOverlayGeometry(
+            screenWidthPx = 1080,
+            screenHeightPx = 2400,
+            topInsetPx = 0,
+            bottomInsetPx = 0,
+            sideMarginPx = 40,
+            collapsedHeightPx = 150,
+            expandedHeightPx = 900,
+            expandedWidthPx = 800,
+        )
+        // The capsule is on the right edge around y=1000; the avoided rect is under it.
+        val avoid = listOf(PhoneRect(900, 980, 1080, 1180))
+        val choice = overlayMakeWayPlacement(
+            currentSide = PhoneOverlaySide.RIGHT,
+            currentTopPx = 1000,
+            frameWidthPx = 160,
+            frameHeightPx = 150,
+            geometry = geometry,
+            avoid = avoid,
+        )
+        assertEquals(PhoneOverlayMakeWayChoice(PhoneOverlaySide.LEFT, 1000), choice)
+    }
+
+    @Test
+    fun `a make way moves to the vertical half farthest from the obstruction`() {
+        val geometry = PhoneOverlayGeometry(
+            screenWidthPx = 1080,
+            screenHeightPx = 2400,
+            topInsetPx = 0,
+            bottomInsetPx = 0,
+            sideMarginPx = 40,
+            collapsedHeightPx = 150,
+            expandedHeightPx = 900,
+            expandedWidthPx = 800,
+        )
+        // Both edges at y≈1000 are covered; the obstruction sits high, so the bottom half wins.
+        val avoid = listOf(PhoneRect(0, 960, 1080, 1200))
+        val choice = overlayMakeWayPlacement(
+            currentSide = PhoneOverlaySide.RIGHT,
+            currentTopPx = 1000,
+            frameWidthPx = 160,
+            frameHeightPx = 150,
+            geometry = geometry,
+            avoid = avoid,
+        )
+        assertEquals(PhoneOverlaySide.RIGHT, choice?.side)
+        // Lowest allowed top: 2400 - 0 - 150 - 40 = 2210.
+        assertEquals(2210, choice?.offsetY)
+    }
+
+    @Test
+    fun `a make way refuses when no placement avoids the whole screen`() {
+        val geometry = PhoneOverlayGeometry(
+            screenWidthPx = 1080,
+            screenHeightPx = 2400,
+            topInsetPx = 50,
+            bottomInsetPx = 0,
+            sideMarginPx = 40,
+            collapsedHeightPx = 150,
+            expandedHeightPx = 900,
+            expandedWidthPx = 800,
+        )
+        assertNull(
+            overlayMakeWayPlacement(
+                currentSide = PhoneOverlaySide.RIGHT,
+                currentTopPx = 1000,
+                frameWidthPx = 160,
+                frameHeightPx = 150,
+                geometry = geometry,
+                avoid = listOf(PhoneRect(0, 0, 1080, 2400)),
+            ),
+        )
+        assertNull(
+            "an empty avoid list is not a reason to move anything",
+            overlayMakeWayPlacement(
+                currentSide = PhoneOverlaySide.RIGHT,
+                currentTopPx = 1000,
+                frameWidthPx = 160,
+                frameHeightPx = 150,
+                geometry = geometry,
+                avoid = emptyList(),
+            ),
+        )
+    }
+
+    @Test
+    fun `a make way never predicts a frame outside the display`() {
+        val geometry = PhoneOverlayGeometry(
+            screenWidthPx = 1080,
+            screenHeightPx = 2400,
+            topInsetPx = 0,
+            bottomInsetPx = 0,
+            sideMarginPx = 40,
+            collapsedHeightPx = 150,
+            expandedHeightPx = 900,
+            expandedWidthPx = 800,
+        )
+        // A frame as wide as the display cannot sit on an edge with the side margin: no candidate.
+        assertNull(
+            overlayMakeWayPlacement(
+                currentSide = PhoneOverlaySide.RIGHT,
+                currentTopPx = 1000,
+                frameWidthPx = 1080,
+                frameHeightPx = 150,
+                geometry = geometry,
+                avoid = listOf(PhoneRect(0, 900, 1080, 1300)),
+            ),
+        )
     }
 
 }

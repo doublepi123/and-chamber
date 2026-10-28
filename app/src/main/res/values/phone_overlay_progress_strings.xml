@@ -34,6 +34,6 @@
     <string name="phone_overlay_progress_reason_delivery_unknown">Delivery unknown</string>
     <string name="phone_overlay_progress_reason_verified_done">Checked: done</string>
     <string name="phone_overlay_progress_reason_verified_not_done">Checked: not done</string>
-    <string name="phone_overlay_progress_reason_model_reported">Unverified report</string>
+    <string name="phone_overlay_progress_reason_model_reported">Agent report</string>
     <string name="phone_overlay_progress_reason_need_user">Your turn</string>
 </resources>

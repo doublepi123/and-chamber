@@ -484,14 +484,17 @@ class AdbPhoneDriverTest {
         val driver = overlayDriver(device, overlay)
         val snapshot = driver.observe(5_000)
         val binding = bindingFor(snapshot)
-        assertTrue(overlay.hiddenCalls >= 1)
-        assertTrue(overlay.restoreCalls >= 1)
+        // Observe keeps the capsule visible: it is never the focused window, so its nodes cannot be
+        // in the focused app's dump. Hiding for every snapshot only made it flicker.
+        assertEquals(0, overlay.hiddenCalls)
+        assertEquals(0, overlay.restoreCalls)
 
         assertEquals(
             PhoneDispatchReceipt.Sent,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
         )
-        // Hitting the visible capsule refuses only this action; it is not an overlay loss.
+        // Hitting the visible capsule refuses only this action; it is not an overlay loss. The fake
+        // manager does not move, so the make-way attempt ends in the same refusal.
         assertNotSent(
             PhoneDriverFailure.OVERLAY_OBSTRUCTED,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
@@ -507,6 +510,7 @@ class AdbPhoneDriverTest {
             ),
         )
         assertEquals(listOf(AdbInputCommand.Tap(50, 50)), device.injected)
+        assertEquals(2, overlay.makeWayCalls)
     }
 
     @Test
@@ -568,6 +572,26 @@ class AdbPhoneDriverTest {
             (failure as PhoneDriverException).failure,
         )
         assertTrue(device.injected.isEmpty())
+        assertEquals("a hidden overlay is never asked to move", 0, overlay.makeWayCalls)
+    }
+
+    @Test
+    fun observeRequiresTheOverlayToStayVisibleAcrossTheRead() = runBlocking {
+        val overlay = FakeOverlay()
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        // The pre-read witness already returned its frame; the capsule vanishes before the post check.
+        device.onWindowDetail = { overlay.visible = false }
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertEquals(0, overlay.hiddenCalls)
     }
 
     @Test
@@ -583,7 +607,8 @@ class AdbPhoneDriverTest {
         val image = driver.capture(binding, 5_000)
         assertEquals(1080, image.width)
         assertEquals(2400, image.height)
-        assertTrue(overlay.hiddenCalls >= 2)
+        // Capture still hides: the screenshot must not contain the capsule's summary/notices.
+        assertTrue(overlay.hiddenCalls >= 1)
 
         overlay.honest = false
         val failure = runCatching { driver.capture(binding, 5_000) }.exceptionOrNull()
@@ -594,7 +619,157 @@ class AdbPhoneDriverTest {
     }
 
     @Test
+    fun anObstructedTapAsksTheOverlayToMoveAndThenInjectsExactlyOnce() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.makeWayResult = true
+        overlay.onMakeWay = { _, _ -> overlay.bounds = PhoneRect(0, 900, 160, 1060) }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
+        )
+        assertEquals(1, overlay.makeWayCalls)
+        assertEquals(PhoneRect(100, 400, 260, 560), overlay.makeWayFrame)
+        // The avoid rect is a small square around the tap point.
+        val avoid = overlay.makeWayAvoid.single()
+        assertTrue(avoid.left < 150 && 150 < avoid.right && avoid.top < 450 && 450 < avoid.bottom)
+        assertEquals("nothing is injected before the move", 1, device.injected.size)
+        assertEquals(listOf(AdbInputCommand.Tap(150, 450)), device.injected)
+        assertEquals("observe kept the capsule visible", 0, overlay.hiddenCalls)
+    }
+
+    @Test
+    fun aMakeWayThatDoesNotMoveTheCapsuleLeavesTheTapNotSent() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.makeWayResult = false
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertNotSent(
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
+        )
+        assertEquals(1, overlay.makeWayCalls)
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun aCapsuleThatStillCoversThePointAfterMovingKeepsTheTapNotSent() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.makeWayResult = true
+        // It moved, but the new frame still covers the tap point.
+        overlay.onMakeWay = { _, _ -> overlay.bounds = PhoneRect(140, 440, 700, 700) }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertNotSent(
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
+        )
+        assertEquals("exactly one make-way attempt per dispatch", 1, overlay.makeWayCalls)
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun anObstructedSwipeAsksTheOverlayToMoveItsWholeSegmentClear() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.makeWayResult = true
+        overlay.onMakeWay = { _, _ -> overlay.bounds = PhoneRect(0, 1000, 160, 1160) }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(
+                request(
+                    PhoneDriverAction.Swipe(PhonePoint(0, 480), PhonePoint(500, 480), 200),
+                    binding,
+                ),
+                5_000,
+            ),
+        )
+        // The avoid rect covers the whole segment, both endpoints included.
+        val avoid = overlay.makeWayAvoid.single()
+        assertTrue(avoid.left <= 0 && avoid.right >= 500)
+        assertTrue(avoid.top < 480 && 480 < avoid.bottom)
+        assertEquals(listOf(AdbInputCommand.Swipe(0, 480, 500, 480, 200)), device.injected)
+    }
+
+    @Test
+    fun anObstructedInputFocusClearsTheFocusPointBeforeTheTextStep() = runBlocking {
+        val overlay = FakeOverlay(bounds = PhoneRect(100, 100, 300, 200))
+        overlay.makeWayResult = true
+        overlay.onMakeWay = { _, _ -> overlay.bounds = PhoneRect(0, 900, 160, 1060) }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(
+                request(PhoneDriverAction.Input("hello", focus = PhonePoint(150, 150)), binding),
+                5_000,
+            ),
+        )
+        assertEquals(1, overlay.makeWayCalls)
+        val avoid = overlay.makeWayAvoid.single()
+        assertTrue(avoid.left < 150 && 150 < avoid.right && avoid.top < 150 && 150 < avoid.bottom)
+        assertEquals(
+            listOf(AdbInputCommand.Tap(150, 150), AdbInputCommand.Text("hello")),
+            device.injected,
+        )
+    }
+
+    @Test
+    fun aFocusLessInputAndBackNeverAskTheOverlayToMove() = runBlocking {
+        val overlay = FakeOverlay(bounds = PhoneRect(100, 400, 260, 560))
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Input("hello"), binding), 5_000),
+        )
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Back, binding), 5_000),
+        )
+        assertEquals(0, overlay.makeWayCalls)
+        assertEquals(
+            listOf(AdbInputCommand.Text("hello"), AdbInputCommand.Back),
+            device.injected,
+        )
+    }
+
+    @Test
     fun overlayInputFocusInsideItsRectIsRefusedBeforeInjection() = runBlocking {
+
         val overlay = FakeOverlay(bounds = PhoneRect(100, 100, 300, 200))
         val device = FakeDevice(
             editableHierarchy.toByteArray(),
@@ -642,6 +817,7 @@ class AdbPhoneDriverTest {
         assertEquals(1080, driver.capture(binding, 5_000).width)
         assertEquals(0, overlay.hiddenCalls)
         assertEquals("notification mode must not read the overlay claim", 0, overlay.expectationCalls)
+        assertEquals("notification mode never asks the overlay to move", 0, overlay.makeWayCalls)
     }
 
     @Test
@@ -740,7 +916,10 @@ class AdbPhoneDriverTest {
             PhoneDriverFailure.POLICY_DENIED,
             (failure as PhoneDriverException).failure,
         )
-        assertTrue(overlay.restoreCalls >= 1)
+        // Observation no longer hides, so there is no restore either; the mode-change discard is
+        // still required.
+        assertEquals(0, overlay.hiddenCalls)
+        assertEquals(0, overlay.restoreCalls)
     }
 
     @Test
@@ -808,8 +987,10 @@ class AdbPhoneDriverTest {
                 overlay.bounds = PhoneRect(0, 0, 1080, 2400)
             }
         }
+        // The make-way probe validated the old frame; the injection-time witness now sees the point
+        // under the capsule, so this is the ordinary obstruction refusal and nothing is injected.
         assertNotSent(
-            PhoneDriverFailure.POLICY_DENIED,
+            PhoneDriverFailure.OVERLAY_OBSTRUCTED,
             driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
         )
         assertTrue("the old WM witness must not authorize an injection", device.injected.isEmpty())
@@ -851,11 +1032,11 @@ class AdbPhoneDriverTest {
         )
         val driver = overlayDriver(device, overlay)
         val binding = bindingFor(driver.observe(5_000))
-        var detailCalls = 0
+        var moved = false
         device.onWindowDetail = {
-            detailCalls += 1
-            if (detailCalls == 2) {
+            if (!moved && device.injected.isNotEmpty()) {
                 // The text step re-validated against the old frame; the overlay now revises.
+                moved = true
                 overlay.revision += 1
                 overlay.bounds = PhoneRect(0, 0, 1080, 2400)
             }
@@ -1342,6 +1523,25 @@ class AdbPhoneDriverTest {
         var expectationCalls: Int = 0
         var requiredCalls: Int = 0
         var onRequired: ((Int) -> Unit)? = null
+
+        /** Automatic make-way requests the driver really made for this fake. */
+        var makeWayCalls: Int = 0
+        var makeWayAvoid: List<PhoneRect> = emptyList()
+        var makeWayFrame: PhoneRect? = null
+        var makeWayResult: Boolean = false
+        var onMakeWay: ((List<PhoneRect>, PhoneRect) -> Unit)? = null
+
+        override suspend fun makeWay(
+            avoid: List<PhoneRect>,
+            currentFrame: PhoneRect,
+            deadlineMs: Long,
+        ): Boolean {
+            makeWayCalls += 1
+            makeWayAvoid = avoid
+            makeWayFrame = currentFrame
+            onMakeWay?.invoke(avoid, currentFrame)
+            return makeWayResult
+        }
 
         override fun required(deadlineMs: Long): Boolean {
             requiredCalls += 1

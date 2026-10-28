@@ -3,6 +3,7 @@ package io.andchamber.app.phone.android.overlay
 import io.andchamber.app.phone.overlay.safety.OverlayExpectation
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
+import io.andchamber.app.phone.core.PhoneRect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -58,12 +59,14 @@ class PhoneOverlayDriverBridgeTest {
         epoch: () -> Long? = { 7L },
         owner: () -> String? = { "grant-7:2" },
         lost: MutableList<Pair<Long, String?>> = mutableListOf(),
+        makeWay: (suspend (List<PhoneRect>, PhoneRect, Long) -> Boolean) = { _, _, _ -> false },
     ) = PhoneOverlayDriverBridge(
         overlayRequired = required,
         manager = manager,
         authorityEpoch = epoch,
         displayOwner = owner,
         onSafetyLost = { e, o -> lost += e to o },
+        makeWay = makeWay,
         mainDispatcher = Dispatchers.Unconfined,
     )
 
@@ -140,6 +143,32 @@ class PhoneOverlayDriverBridgeTest {
         assertEquals(42, result)
         assertEquals(listOf(OverlayPhase.COLLECTION_HIDDEN), manager.hiddenPhases)
         assertTrue(lost.isEmpty())
+    }
+
+    @Test
+    fun `make way delegates to the native request and is false without authority or on a throw`() = runTest {
+        val avoid = listOf(PhoneRect(90, 440, 110, 460))
+        val frame = PhoneRect(100, 400, 260, 560)
+        var calls = 0
+        val accepted = bridge(
+            required = { true },
+            makeWay = { rectangles, current, deadline ->
+                calls += 1
+                assertEquals(avoid, rectangles)
+                assertEquals(frame, current)
+                assertEquals(9_000L, deadline)
+                true
+            },
+        )
+
+        assertTrue(accepted.makeWay(avoid, frame, 9_000L))
+        assertEquals(1, calls)
+
+        val refused = bridge(required = { true })
+        assertFalse(refused.makeWay(avoid, frame, 9_000L))
+
+        val throwing = bridge(required = { true }, makeWay = { _, _, _ -> error("no coordinator") })
+        assertFalse("a throwing make-way is a refusal, never a driver exception", throwing.makeWay(avoid, frame, 9_000L))
     }
 
     @Test

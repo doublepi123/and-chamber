@@ -433,7 +433,7 @@ object PhoneToolProtocol {
                 "Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed, and this tool cannot recover it automatically."
             PhoneToolCodes.CANCELLED -> "Cancelled."
             PhoneToolCodes.SESSION_BUSY ->
-                "Another chat session owns phone control for the current request or grant. Ask the person to grant phone control again if this session should have it."
+                "Another chat session's phone task is still running or waiting. Do not retry in a loop. After that task ends (or the person ends it on the phone), this session can send a new request; no new setup is needed."
             PhoneToolCodes.ROUTE_NOT_PUBLISHED ->
                 "Phone control is not ready for this grant yet. Do not retry in a loop; the person must confirm the task in AndChamber phone control."
             PhoneToolCodes.NO_TASK -> "There is no confirmed phone task for this epoch."

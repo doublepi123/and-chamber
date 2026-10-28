@@ -1,8 +1,10 @@
 package io.andchamber.app.phone.android.overlay
 
+import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.overlay.safety.OverlayExpectation
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +27,10 @@ import kotlinx.coroutines.launch
  * posts to the main thread and only reports a safety loss if that same epoch/owner is still current.
  * A failure of an old operation can therefore never revoke a newer grant. The callback only asks the
  * native side to revoke; it never claims that an in-flight action was rolled back.
+ *
+ * [makeWay] is the driver's bounded occlusion escape: it delegates to the already-built coordinator,
+ * which may only move its own capsule for the current live task. A throw or a missing coordinator is
+ * a `false` (the driver then refuses the obstructed action), never an exception into the driver.
  */
 internal class PhoneOverlayDriverBridge(
     private val overlayRequired: () -> Boolean,
@@ -32,9 +38,13 @@ internal class PhoneOverlayDriverBridge(
     private val authorityEpoch: () -> Long?,
     private val displayOwner: () -> String?,
     private val onSafetyLost: (epoch: Long, owner: String?) -> Unit,
+    /** Native make-way request; never grants, renews, resumes or revokes. */
+    makeWay: suspend (List<PhoneRect>, PhoneRect, Long) -> Boolean = { _, _, _ -> false },
     /** A post, not an inline call: the failed driver operation and the controller result settle first. */
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : PhoneOverlayBarrier {
+    private val requestMakeWay = makeWay
+
     /** Immutable authority captured before one driver operation. */
     data class OperationGuard(
         val epoch: Long?,
@@ -71,6 +81,20 @@ internal class PhoneOverlayDriverBridge(
             manager() ?: throw IllegalStateException("overlay manager is not available")
         return surface.withContentHidden(owner, generation, revision, phase, deadlineMs, block)
     }
+
+    /** Native-only capsule move; any failure is a plain `false`, not a safety loss. */
+    override suspend fun makeWay(
+        avoid: List<PhoneRect>,
+        currentFrame: PhoneRect,
+        deadlineMs: Long,
+    ): Boolean =
+        try {
+            requestMakeWay(avoid, currentFrame, deadlineMs)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
 
     /**
      * Called after a POLICY_DENIED from an overlay-required operation (observe/capture/dispatch).

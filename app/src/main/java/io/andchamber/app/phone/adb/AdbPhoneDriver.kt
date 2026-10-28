@@ -47,6 +47,14 @@ import kotlinx.coroutines.withContext
  * requires a live element at exactly the observed bounds. The window identity
  * is read before and after observation/capture; an unreliable `dumpsys window` result fails closed.
  * Check and injection are still separate steps, not a cross-process atomic transaction.
+ *
+ * Overlay mode: observation and actions keep the capsule visible. The capsule is never the focused
+ * window, so it cannot appear in the focused app's hierarchy dump. A fresh real-window witness is
+ * required before and after the read, each injection and the capture hide. When a tap/focus point or
+ * swipe segment would land on the capsule, one bounded make-way request asks the manager to move it
+ * first; the action is only refused as `OVERLAY_OBSTRUCTED` if it is still in the way afterwards.
+ * Capture still hides the window for the pixels, because the screenshot must not contain the
+ * capsule's summary or notices.
  */
 class AdbPhoneDriver(
     private val device: AdbDevice,
@@ -436,6 +444,33 @@ class AdbPhoneDriver(
                 listOf(overlayStep(AdbInputCommand.Back, request.action))
         }
 
+        // Occlusion auto make-way, before anything is injected. One bounded attempt per dispatch:
+        // the step validations below still run (and re-read a fresh witness), so a capsule that did
+        // not move, or moved back, is refused as OVERLAY_OBSTRUCTED with nothing sent.
+        if (overlayMode) {
+            try {
+                makeWayIfObstructed(
+                    action = request.action,
+                    binding = binding,
+                    observation = storedOverlay!!,
+                    startedAt = started,
+                    deadlineMs = deadlineMs,
+                )
+            } catch (failure: AdbDeviceException) {
+                return@withContext PhoneDispatchReceipt.NotSent(mapFailure(failure.failure))
+            } catch (failure: PhoneDriverException) {
+                return@withContext PhoneDispatchReceipt.NotSent(failure.failure)
+            } catch (failure: AdbHierarchyException) {
+                return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.DRIVER)
+            } catch (failure: AdbWindowStateException) {
+                return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.DRIVER)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@withContext PhoneDispatchReceipt.NotSent(PhoneDriverFailure.DRIVER)
+            }
+        }
+
         var touched = false
         for (step in steps) {
             step.before?.let { before ->
@@ -553,6 +588,20 @@ class AdbPhoneDriver(
         synchronized(overlayObservations) { overlayObservations.remove(windowId) }
     }
 
+    /**
+     * Overlay-mode observation keeps the overlay visible.
+     *
+     * The capsule is `FLAG_NOT_FOCUSABLE`, so it is never the focused window: `uiautomator dump` only
+     * returns the focused app's nodes and [readLiveWindow] additionally requires the focus package to
+     * be the hierarchy package. Removing and re-adding the window on every snapshot therefore only
+     * made the capsule flicker; it never kept its own nodes out of the read.
+     *
+     * The protection is the real window witness instead: the manager must intend a VISIBLE window
+     * with a discoverable token, a fresh visible witness is required before and after the read, and a
+     * mode change while the read is in flight discards the snapshot. The witness is remembered for
+     * the following action/capture checks exactly as before. Capture still hides (see
+     * [captureWithOverlay]) because pixels would otherwise contain the capsule.
+     */
     private suspend fun observeWithOverlay(
         startedAt: Long,
         deadlineMs: Long,
@@ -561,28 +610,20 @@ class AdbPhoneDriver(
         if (expectation.phase != OverlayPhase.VISIBLE || expectation.windowToken == null) {
             throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
         }
-        val snapshot = withOverlayHidden(
+        val live = readLiveWindow(startedAt, deadlineMs)
+        val pre = readOverlayWitness(
             expectation = expectation,
-            phase = OverlayPhase.COLLECTION_HIDDEN,
-            deadlineAtMs = startedAt + deadlineMs,
-        ) {
-            val live = readLiveWindow(startedAt, deadlineMs)
-            val hidden = readOverlayWitness(
-                expectation = expectation,
-                display = live.geometry,
-                startedAt = startedAt,
-                deadlineMs = deadlineMs,
-                forcedHiddenPhase = OverlayPhase.COLLECTION_HIDDEN,
-            )
-            if (hidden.phase != OverlayPhase.COLLECTION_HIDDEN) {
-                throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
-            }
-            live.snapshot
+            display = live.geometry,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
+        if (OverlaySafetyPolicy.visibleRefusal(pre, clock()) != null) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
         }
         val postExpectation = overlayExpectation(startedAt + deadlineMs)
         val post = readOverlayWitness(
             expectation = postExpectation,
-            display = snapshot.geometry,
+            display = live.geometry,
             startedAt = startedAt,
             deadlineMs = deadlineMs,
         )
@@ -594,8 +635,8 @@ class AdbPhoneDriver(
             // snapshot whose final mode is no longer the frozen one.
             throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
         }
-        rememberOverlay(snapshot.windowId, post)
-        return snapshot
+        rememberOverlay(live.snapshot.windowId, post)
+        return live.snapshot
     }
 
     private suspend fun <T> withOverlayHidden(
@@ -726,6 +767,92 @@ class AdbPhoneDriver(
         if (refusal != null) throw PhoneDriverException(overlayRefusalFailure(refusal))
         return expectation
     }
+
+    /**
+     * Asks the manager to move its own capsule clear of this action before anything is injected.
+     *
+     * Overlay mode only, and only when a fresh witness says the action would hit the capsule: the tap
+     * point, the input focus point, or the whole swipe segment. [overlayAvoidRects] supplies a small
+     * square around each point and the expanded bounding box of a swipe segment. The current real
+     * frame and the absolute call deadline go to [PhoneOverlayBarrier.makeWay]; that call is bounded
+     * by the same deadline and may only re-layout this manager's own window.
+     *
+     * Nothing is injected here. A non-obstruction refusal still fails closed as before. After a
+     * make-way attempt (or a refused one) the ordinary per-step `before` validation re-reads a fresh
+     * witness; if the capsule is still in the way the action is refused as OVERLAY_OBSTRUCTED.
+     */
+    private suspend fun makeWayIfObstructed(
+        action: PhoneDriverAction,
+        binding: PhoneObservationBinding,
+        observation: OverlayObservation,
+        startedAt: Long,
+        deadlineMs: Long,
+    ) {
+        val avoid = overlayAvoidRects(action) ?: return
+        val expectation = overlayExpectation(startedAt + deadlineMs)
+        val witness = readOverlayWitness(
+            expectation = expectation,
+            display = binding.geometry,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
+        val now = clock()
+        val refusal = OverlaySafetyPolicy.identityRefusal(witness, observation, now)
+            ?: when (action) {
+                is PhoneDriverAction.Tap -> OverlaySafetyPolicy.tapRefusal(witness, action.at, now)
+                is PhoneDriverAction.Swipe ->
+                    OverlaySafetyPolicy.swipeRefusal(witness, action.from, action.to, now)
+                is PhoneDriverAction.Input ->
+                    OverlaySafetyPolicy.inputFocusRefusal(witness, action.focus, now)
+                PhoneDriverAction.Back -> null
+            }
+        if (refusal == null) return
+        if (!OverlaySafetyPolicy.isObstruction(refusal)) {
+            throw PhoneDriverException(overlayRefusalFailure(refusal))
+        }
+        val currentFrame = witness.actualBounds.firstOrNull()
+            ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        val barrier = overlayBarrier ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        try {
+            barrier.makeWay(
+                avoid = avoid,
+                currentFrame = currentFrame,
+                deadlineMs = startedAt + deadlineMs,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // A manager that cannot move is not a stop and not a loss: the per-step validation below
+            // still refuses the obstruction without injecting anything.
+        }
+    }
+
+    /**
+     * The rectangles the capsule must leave clear for this action: a small square around a tap or
+     * input-focus point, or the whole expanded segment box of a swipe (so a capsule outside the box
+     * cannot cross the segment). Back and focus-less text input have no coordinate and need none.
+     */
+    private fun overlayAvoidRects(action: PhoneDriverAction): List<PhoneRect>? =
+        when (action) {
+            is PhoneDriverAction.Tap -> listOf(pointClearance(action.at))
+            is PhoneDriverAction.Swipe -> listOf(segmentClearance(action.from, action.to))
+            is PhoneDriverAction.Input -> action.focus?.let { listOf(pointClearance(it)) }
+            PhoneDriverAction.Back -> null
+        }
+
+    private fun pointClearance(point: PhonePoint): PhoneRect = PhoneRect(
+        left = point.x - MAKE_WAY_POINT_MARGIN_PX,
+        top = point.y - MAKE_WAY_POINT_MARGIN_PX,
+        right = point.x + MAKE_WAY_POINT_MARGIN_PX,
+        bottom = point.y + MAKE_WAY_POINT_MARGIN_PX,
+    )
+
+    private fun segmentClearance(from: PhonePoint, to: PhonePoint): PhoneRect = PhoneRect(
+        left = minOf(from.x, to.x) - MAKE_WAY_POINT_MARGIN_PX,
+        top = minOf(from.y, to.y) - MAKE_WAY_POINT_MARGIN_PX,
+        right = maxOf(from.x, to.x) + MAKE_WAY_POINT_MARGIN_PX,
+        bottom = maxOf(from.y, to.y) + MAKE_WAY_POINT_MARGIN_PX,
+    )
 
     /**
      * The last check before a real injection. It never re-reads the WM frame and never retries a
@@ -984,5 +1111,8 @@ class AdbPhoneDriver(
 
         private const val FOCUS_SETTLE_MS = 120L
         private const val MAX_OVERLAY_OBSERVATIONS = 8
+
+        /** Clearance around a tap/focus point and around a swipe segment for a make-way request. */
+        private const val MAKE_WAY_POINT_MARGIN_PX = 8
     }
 }

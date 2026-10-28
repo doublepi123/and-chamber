@@ -6,6 +6,7 @@ import io.andchamber.app.phone.android.PhoneIntegration
 import io.andchamber.app.notify.SessionPromptDeliveryState
 import io.andchamber.app.notify.SessionPromptPort
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
+import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.overlay.safety.OverlayPhase
 import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
 import io.andchamber.app.ui.phone.PhoneControl
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Native adapter between the phone controller and the overlay window.
@@ -441,6 +443,51 @@ internal class PhoneOverlayCoordinator(
             }
             false
         }
+
+    /**
+     * Driver-only occlusion escape for the current live task capsule.
+     *
+     * It only relayouts this manager's own window: no grant, renewal, resume, stop or revoke, and no
+     * action on behalf of the agent. It runs on Main and only for the exact current live lease owner;
+     * a demo capsule, a notification-only mode, a missing/hidden surface or a stale owner returns
+     * false without touching anything. An expanded panel is collapsed, then the layout is chosen by
+     * [overlayMakeWayPlacement] and applied through the normal surface update path. `true` is
+     * returned only after the first frame of that layout really arrived.
+     *
+     * The automatic move is deliberately not stored in [positionMemory]: it is an occlusion escape,
+     * not the person's posture, so their own remembered drag position still wins for the next task.
+     */
+    internal suspend fun driverMakeWay(
+        avoid: List<PhoneRect>,
+        currentFrame: PhoneRect,
+        deadlineMs: Long,
+    ): Boolean = withContext(Dispatchers.Main.immediate) {
+        if (avoid.isEmpty()) return@withContext false
+        val liveEpoch = integration.liveLeaseEpoch() ?: return@withContext false
+        if (settings.mode() != PhoneOverlayMode.OVERLAY) return@withContext false
+        if (state.ownerKey != grantOwner(liveEpoch)) return@withContext false
+        if (nativeVisible || !surface.isShown || surface.isHiddenForRead) return@withContext false
+        val geometry = surface.geometryNow() ?: return@withContext false
+        if (deadlineMs - clock() <= 0L) return@withContext false
+        val collapsed = if (state.expanded) state.withExpanded(false) else state
+        val placement = overlayPlacement(collapsed, geometry)
+        val choice =
+            overlayMakeWayPlacement(
+                currentSide = state.side,
+                currentTopPx = placement.topPx,
+                frameWidthPx = currentFrame.width,
+                // An expanded panel collapses first; the collapsed capsule is never taller.
+                frameHeightPx = placement.heightPx,
+                geometry = geometry,
+                avoid = avoid,
+            ) ?: return@withContext false
+        val moved = collapsed.withDrag(choice.side, choice.offsetY)
+        if (moved == state) return@withContext false
+        applyState(moved)
+        val remaining = deadlineMs - clock()
+        if (remaining <= 0L) return@withContext false
+        withTimeoutOrNull(remaining) { surface.awaitFrame() } ?: false
+    }
 
     /**
      * Known overlay loss reported by the driver bridge after it froze and re-checked the same

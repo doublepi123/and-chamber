@@ -115,10 +115,31 @@ internal fun standingRequestRefusal(
         config == null || config.revoked -> PhoneStandingRefusal.NOT_CONFIGURED
         !config.isActive(nowWallMs) -> PhoneStandingRefusal.EXPIRED
         binding.runtimeId != null && runtimeId != binding.runtimeId -> PhoneStandingRefusal.RUNTIME_CHANGED
-        binding.sessionLabel != null && sessionId != binding.sessionLabel -> PhoneStandingRefusal.SESSION_MISMATCH
+        // Another chat is only "busy" while the bound chat still owns a live or retained task. Once
+        // that task really ended, any chat on the same runtime may start the next task, which then
+        // rebinds the scope to itself (see [standingNextBinding]).
+        binding.sessionLabel != null && sessionId != binding.sessionLabel &&
+            (hasLiveTask || hasRetainedTask) -> PhoneStandingRefusal.SESSION_MISMATCH
         blocked -> PhoneStandingRefusal.STANDING_BLOCKED
         hasLiveTask || hasRetainedTask -> PhoneStandingRefusal.TASK_ACTIVE
         else -> null
+    }
+
+/**
+ * The binding a new admitted task starts with: the first use binds runtime + session; a later task
+ * from another chat on the same runtime (only admitted with no live/retained task) moves the session
+ * binding to that chat. The runtime binding never moves.
+ */
+internal fun standingNextBinding(
+    current: PhoneStandingBindingState,
+    runtimeId: String,
+    sessionId: String,
+): PhoneStandingBindingState =
+    when {
+        current.runtimeId == null && current.sessionLabel == null ->
+            PhoneStandingBindingState(runtimeId = runtimeId, sessionLabel = sessionId)
+        current.sessionLabel != sessionId -> current.copy(sessionLabel = sessionId)
+        else -> current
     }
 
 /**

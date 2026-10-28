@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -110,11 +111,36 @@ private fun OverlayCapsule(
     actions: PhoneOverlayActions,
     now: Long,
 ) {
-    val lines = capsuleLines(state, now)
+    val progress = capsuleProgress(state)
+    val live = progress != CapsuleProgress.None
     val moveLeft = stringResource(R.string.phone_overlay_move_left)
     val moveRight = stringResource(R.string.phone_overlay_move_right)
     val expandCd = stringResource(R.string.phone_overlay_expand_cd)
-    val stateLine = lines.first
+    val lines = capsuleLines(state, now)
+    val meta = capsuleMeta(state, now)
+    val metaText =
+        listOfNotNull(
+            meta.sentCount?.let { stringResource(R.string.phone_overlay_sent_count, it) },
+            meta.minutesLeft?.let { stringResource(R.string.phone_overlay_minutes_left, it) },
+        ).joinToString(" · ")
+    val (shownProgress, spokenProgress) =
+        when (progress) {
+            is CapsuleProgress.Latest -> progress.text to progress.full
+            else -> stringResource(R.string.phone_overlay_capsule_progress_none).let { it to it }
+        }
+    // Classic phases: only the phase line, announced on change (never the ticking count/time).
+    // Live phases: the full phase title, facts and newest step, readable in full when the person
+    // moves to the capsule, but not a live region, so a new step is never read out on its own.
+    // The body stays one node across phases, so leaving a live phase (need you, taken over,
+    // unknown…) is announced again.
+    val description =
+        if (live) {
+            // lines.second is the full fact line (count + time, "No time limit" included) or the
+            // paused/pausing sub-line, so nothing shortened on screen is lost for TalkBack.
+            listOf(lines.first, lines.second, spokenProgress).filter { it.isNotBlank() }.joinToString(". ")
+        } else {
+            lines.first
+        }
     Surface(
         shape = CapsuleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -134,49 +160,104 @@ private fun OverlayCapsule(
     ) {
         Row(modifier = Modifier.heightIn(min = 56.dp).padding(start = 2.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             DragHandle(actions)
-            Row(
+            Box(
                 modifier =
                     Modifier
-                        .weight(1f, fill = false)
+                        .weight(1f, fill = live)
                         .heightIn(min = 48.dp)
                         .clickable(onClickLabel = expandCd) { actions.onExpand() }
-                        // Only the phase is exposed and announced; line 2 (the minute countdown and
-                        // count) is left out so it is never read out on each tick. The panel has it.
                         .clearAndSetSemantics {
-                            contentDescription = stateLine
-                            liveRegion = LiveRegionMode.Polite
+                            contentDescription = description
+                            if (!live) liveRegion = LiveRegionMode.Polite
                             onClick(label = expandCd) { actions.onExpand(); true }
                         }
                         .testTag(OverlayTags.CAPSULE_BODY)
-                        .padding(horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                        .padding(horizontal = 6.dp, vertical = if (live) 6.dp else 0.dp),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                StatusDot(tone = phaseTone(state.phase), size = 8.dp)
-                Spacer(Modifier.width(6.dp))
-                Column(modifier = Modifier.weight(1f, fill = false)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            lines.first,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        if (state.demo) DemoTag()
-                    }
-                    Text(
-                        lines.second,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                if (live) {
+                    LiveCapsuleText(state, metaText, shownProgress)
+                } else {
+                    ClassicCapsuleText(state, lines)
                 }
             }
             Spacer(Modifier.width(4.dp))
-            CapsulePrimary(state, actions)
+            CapsulePrimary(state, actions, compact = live)
         }
+    }
+}
+
+/** Stopped/waiting/unknown/ended phases: phase title + fixed sub-line, unchanged. */
+@Composable
+private fun ClassicCapsuleText(
+    state: PhoneOverlayState,
+    lines: Pair<String, String>,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        StatusDot(tone = phaseTone(state.phase), size = 8.dp)
+        Spacer(Modifier.width(6.dp))
+        Column(modifier = Modifier.weight(1f, fill = false)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    lines.first,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (state.demo) DemoTag()
+            }
+            Text(
+                lines.second,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/**
+ * Running / pausing / paused: a short status word with the compact facts ("3 sent · 4 min left";
+ * no time text for a permanent lease), then the newest step on up to two lines with the width.
+ */
+@Composable
+private fun LiveCapsuleText(
+    state: PhoneOverlayState,
+    metaText: String,
+    progress: String,
+) {
+    Column(verticalArrangement = Arrangement.Center) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(tone = phaseTone(state.phase), size = 8.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                stringResource(capsuleLiveTitle(state.phase)),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+            if (metaText.isNotEmpty()) {
+                Text(
+                    " · $metaText",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+        }
+        Text(
+            progress,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp).testTag(OverlayTags.CAPSULE_PROGRESS),
+        )
     }
 }
 
@@ -210,10 +291,21 @@ private fun DragHandle(actions: PhoneOverlayActions) {
 private fun CapsulePrimary(
     state: PhoneOverlayState,
     actions: PhoneOverlayActions,
+    /** Live capsule: Take over is a 48 dp icon button, so the progress gets the width. */
+    compact: Boolean = false,
 ) {
     when (overlayPrimary(state.phase)) {
         OverlayPrimary.TakeOver -> {
             val cd = stringResource(R.string.phone_overlay_take_over_cd)
+            if (compact) {
+                FilledIconButton(
+                    onClick = actions.onTakeOver,
+                    modifier = Modifier.size(48.dp).semantics { contentDescription = cd }.testTag(OverlayTags.PRIMARY),
+                ) {
+                    Icon(Icons.Rounded.PanTool, contentDescription = null, modifier = Modifier.size(20.dp))
+                }
+                return
+            }
             Button(
                 onClick = actions.onTakeOver,
                 shape = RoundedCornerShape(24.dp),
@@ -847,6 +939,7 @@ private fun EndConfirm(actions: PhoneOverlayActions) {
 internal object OverlayTags {
     const val CAPSULE = "overlay.capsule"
     const val CAPSULE_BODY = "overlay.capsuleBody"
+    const val CAPSULE_PROGRESS = "overlay.capsuleProgress"
     const val DRAG = "overlay.drag"
     const val PRIMARY = "overlay.primary"
     const val PANEL = "overlay.panel"

@@ -129,6 +129,81 @@ internal fun showsPanel(state: PhoneOverlayState): Boolean =
 internal fun recentEvents(events: List<OverlayEvent>): List<OverlayEvent> =
     events.sortedByDescending { it.atMs }.take(3)
 
+/** The collapsed capsule's extra progress line. Built only from [PhoneOverlayState.events]. */
+internal sealed interface CapsuleProgress {
+    /** Not a live phase (or a demo / an open question): no extra line, the capsule is unchanged. */
+    data object None : CapsuleProgress
+
+    /** Live, but no event yet. The line is still reserved so the capsule doesn't resize later. */
+    data object Waiting : CapsuleProgress
+
+    /**
+     * The newest event: the agent's own words or fixed native wording, shown as-is. [text] is
+     * flattened and bounded for the (two-line) capsule; [full] is the whole flattened text, for the
+     * accessibility description.
+     */
+    data class Latest(val text: String, val full: String = text) : CapsuleProgress
+}
+
+/** Upper bound for the capsule's progress text before the UI's own two-line ellipsis. */
+internal const val CAPSULE_PROGRESS_MAX_CHARS = 90
+
+/**
+ * The compact facts next to the short live title: dispatches so far, and minutes left only for a
+ * finite lease (a permanent lease shows no time text at all).
+ */
+internal data class CapsuleMeta(val sentCount: Int?, val minutesLeft: Int?)
+
+internal fun capsuleMeta(
+    state: PhoneOverlayState,
+    nowMs: Long,
+): CapsuleMeta =
+    CapsuleMeta(
+        sentCount = state.sentCount,
+        minutesLeft = if (state.leasePermanent) null else overlayMinutesLeft(state.leaseEndsAtMs, nowMs),
+    )
+
+/** The live capsule's short title: a word, not a sentence, so the progress gets the width. */
+internal fun capsuleLiveTitle(phase: OverlayPhase): Int =
+    when (phase) {
+        OverlayPhase.Pausing -> io.andchamber.app.R.string.phone_overlay_pausing
+        OverlayPhase.Paused -> io.andchamber.app.R.string.phone_overlay_capsule_paused
+        else -> io.andchamber.app.R.string.phone_overlay_capsule_running
+    }
+
+/** Phases where the agent still holds the lease: only these get the live progress line. */
+private val CAPSULE_PROGRESS_PHASES = setOf(OverlayPhase.Running, OverlayPhase.Pausing, OverlayPhase.Paused)
+
+/**
+ * The capsule's live progress line: the newest event (the same list the panel's "Recent" shows).
+ * Stopped, waiting, unknown and ended phases keep their current wording; the demo never shows a
+ * real feed, and an open question from the chat keeps the capsule's attention.
+ */
+internal fun capsuleProgress(state: PhoneOverlayState): CapsuleProgress {
+    if (state.demo || state.phase !in CAPSULE_PROGRESS_PHASES) return CapsuleProgress.None
+    if (state.prompt?.let(::promptCanSubmit) == true) return CapsuleProgress.None
+    // Newest first by time; on a tie the list's own order (newest first) wins.
+    val latest = state.events.maxByOrNull { it.atMs } ?: return CapsuleProgress.Waiting
+    val text = capsuleOneLine(latest.text) ?: return CapsuleProgress.Waiting
+    return CapsuleProgress.Latest(text, full = capsuleOneLine(latest.text, Int.MAX_VALUE) ?: text)
+}
+
+/** Collapses whitespace/newlines to one line and bounds it; null for blank text. */
+internal fun capsuleOneLine(
+    text: String,
+    max: Int = CAPSULE_PROGRESS_MAX_CHARS,
+): String? {
+    val flat = text.replace(WHITESPACE, " ").trim()
+    if (flat.isEmpty()) return null
+    if (flat.length <= max) return flat
+    var end = max - 1
+    // Never split a surrogate pair.
+    if (end > 0 && flat[end - 1].isHighSurrogate()) end -= 1
+    return flat.substring(0, end).trimEnd() + "…"
+}
+
+private val WHITESPACE = Regex("\\s+")
+
 /** Groups for the result card: native facts, sent actions, agent words. Each keeps newest first. */
 internal data class ResultGroups(
     val native: List<OverlayEvent>,

@@ -229,6 +229,20 @@ internal class PhoneOverlaySurfaceHost(
         touchFreshness()
     }
 
+    /**
+     * Waits for the next real frame of the currently attached window. Used after an automatic
+     * make-way layout so the caller reports a move only once it was applied. False when nothing is
+     * attached; the caller's own deadline bounds the wait (a view that never draws leaves it
+     * suspended until that bound).
+     */
+    internal suspend fun awaitFrame(): Boolean {
+        val current = view ?: return false
+        return withContext(Dispatchers.Main.immediate) {
+            awaitOverlayFirstFrame(current)
+            view === current
+        }
+    }
+
     /** Removes the window and invalidates every pending restore for this display owner. */
     fun detach() {
         checkMainThread()
@@ -673,7 +687,7 @@ internal class PhoneOverlaySurfaceHost(
             topInsetPx = insets.first,
             bottomInsetPx = insets.second,
             sideMarginPx = (16 * density).toInt(),
-            collapsedHeightPx = (56 * density).toInt(),
+            collapsedHeightPx = (72 * density).toInt(),
             expandedHeightPx = (360 * density).toInt(),
             expandedWidthPx = (320 * density).toInt(),
         )

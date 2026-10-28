@@ -38,7 +38,7 @@ internal fun overlayProgressMatchesSurface(displayEpoch: Long?, progressEpoch: L
  * screen and controller use; wall time is never mixed in.
  *
  * [progress] is the native-only task projection. Its events are sanitized facts (no page text, input,
- * nodes or pixels) plus the model's bounded unverified notes; [sentCount] counts accepted native SENT
+ * nodes or pixels) plus the model's own bounded notes; [sentCount] counts accepted native SENT
  * facts only. The task summary stays the confirmed one and is folded by the panel.
  */
 internal class PhoneOverlayDesignerContent(
@@ -109,7 +109,7 @@ internal class PhoneOverlayDesignerContent(
     private fun overlayEvent(event: PhoneProgressEvent): OverlayEvent =
         OverlayEvent(
             // Native events carry typed facts only, never free text. Model events keep their own
-            // bounded unverified words.
+            // own bounded words.
             text =
                 event.text?.takeIf { it.isNotBlank() } ?: stringResource(
                     R.string.phone_overlay_progress_event,

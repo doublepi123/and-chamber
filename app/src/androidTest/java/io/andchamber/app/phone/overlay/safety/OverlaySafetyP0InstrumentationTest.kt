@@ -110,17 +110,23 @@ class OverlaySafetyP0InstrumentationTest {
                     "bounds=${barrier.lastWindow()?.bounds}",
             )
 
-            val snapshot = runBlocking { service.observe(15_000L) }
+            // The probe activity sends itself to the back after adding the overlay, so window focus
+            // may still be moving back to the fixture. Like the production startup observe loop, only
+            // an explicit window transition is retried, within a bounded budget.
+            val snapshot = observeAfterFocusSettles(service)
             assertEquals(FIXTURE, snapshot.packageName)
             val binding = binding(snapshot)
-            assertTrue(barrier.hiddenCalls >= 1)
-            assertTrue(barrier.restoreCalls >= 1)
-            println("check=overlay_observe_hidden result=pass")
+            // Observation keeps the capsule visible: it is never the focused window, so it can never
+            // appear in the focused app's hierarchy dump. Hiding on every snapshot only flickered.
+            assertEquals("observe must keep the overlay visible", 0, barrier.hiddenCalls)
+            assertEquals("observe must not restore a hidden window", 0, barrier.restoreCalls)
+            println("check=overlay_observe_visible result=pass")
 
             val overlay = barrier.lastWindow() ?: error("overlay window missing")
             val bounds = overlay.bounds ?: error("overlay frame missing")
             val rawBytes = second.capturePng(15_000L)
             val hiddenImage = runBlocking { service.capture(binding, 15_000L) }
+            assertTrue("capture still hides the capsule from its own pixels", barrier.hiddenCalls >= 1)
             val rawMarker = markerPixels(rawBytes, bounds)
             val hiddenMarker = markerPixels(hiddenImage.bytes, bounds)
             assertTrue("raw screenshot must contain the overlay marker ($rawMarker)", rawMarker > 50)
@@ -279,6 +285,22 @@ class OverlaySafetyP0InstrumentationTest {
             runCatching { windowDevice?.disconnect() }
             barrier.stopOverlay()
             TestAdbIdentity.delete(created.alias)
+        }
+    }
+
+    private fun observeAfterFocusSettles(service: AdbPhoneDriverService): PhoneSnapshot {
+        val until = SystemClock.elapsedRealtime() + 10_000L
+        while (true) {
+            try {
+                return runBlocking { service.observe(15_000L) }
+            } catch (failure: PhoneDriverException) {
+                if (failure.failure != PhoneDriverFailure.WINDOW_CHANGED ||
+                    SystemClock.elapsedRealtime() >= until
+                ) {
+                    throw failure
+                }
+                Thread.sleep(500L)
+            }
         }
     }
 

@@ -49,11 +49,12 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
 - `overlay/progress/`: bounded task/event store and native event ports. Task identity is stable across
   grant epochs; model narration stays unverified. Handoff/end require native stop receipts.
 - `overlay/safety/`: dynamic mode gate, real WindowManager witnesses, geometry-generation policy and
-  point/swipe exclusion. A manager expectation is not proof that the overlay is visible.
+  point/swipe exclusion, plus the default-false `makeWay` capsule escape on the barrier contract. A
+  manager expectation is not proof that the overlay is visible.
 - `android/overlay/`: separate bounded display service, permission/demo flow, manager-owned layout,
-  first-frame-aware read-hide tickets, prompt/notice projection from the current task's notification
-  question, progress adapters, the lazy driver barrier and the bounded `awaitDriverSurface(epoch)`
-  used before the first driver read.
+  first-frame-awaited automatic make-way placement, capture-only read-hide tickets, prompt/notice
+  projection from the current task's notification question, progress adapters, the lazy driver
+  barrier and the bounded `awaitDriverSurface(epoch)` used before the first driver read.
 
 ## Flow
 
@@ -71,7 +72,7 @@ not a lease. Either duration can be the explicit `PhoneTimeLimits.PERMANENT` sen
 and restored as configuration only, never as a persisted grant. A finite window still bounds a
 permanent per-task choice. The first valid chat `request` binds the scope to the current runtime and
 session. Every task then creates a fresh epoch and a lease bounded by the per-task duration and the
-remaining window; another session is refused. `request` performs scope checks, the core standing
+remaining window; another session is refused only while the bound chat still owns a live/retained task (after it ends, the next task from any chat on the same runtime rebinds the session). `request` performs scope checks, the core standing
 grant, the foreground stop entry, native task/lease binding, launching one preauthorized package and
 a real `Observe` of that foreground target before replying `Started(RUNNING)`. Failure rolls back
 exactly the epoch/task. `apps` lists only preauthorized labels/packages, never the installed
@@ -143,12 +144,18 @@ results and PendingIntents cannot publish/clear a newer owner's state.
 
 The optional overlay is not the browser window. Its presentation is `ui/phone/overlay`; native setup
 tests reachability without granting control. Explicit notification-only mode retains the original
-driver path. Selected overlay mode requires real window evidence, temporarily hides its own surface
-for collection and restores only current native authority after a first frame. Before the first read
+driver path. Selected overlay mode requires real window evidence and keeps the capsule visible for
+observation: it is never the focused window, so its nodes cannot enter the focused app's hierarchy
+dump, and a fresh VISIBLE witness is required before and after the read. Only capture hides and
+restores its own surface, and only after a first frame. A tap/focus point or swipe segment that would
+land on the capsule triggers one bounded make-way layout (opposite edge at the same height, then the
+farthest vertical half) for the current live owner only; it never grants, renews, stops or persists
+the person's drag posture, and a still-obstructed action is `OVERLAY_OBSTRUCTED` with nothing sent.
+Before the first read
 for an epoch, the native side waits on a bounded current-epoch surface attach; a timeout fails the
 start/continuation and rolls back exactly that lease. Overlay loss reports an honest
-stop-channel/visibility reason, never a person takeover, and requires native recovery. Normal
-hide/restore is separate from a real failure. A short synchronized ticket store isolates
+stop-channel/visibility reason, never a person takeover, and requires native recovery. Hide/restore
+of a capture is separate from a real failure. A short synchronized ticket store isolates
 cancellation, restore timeout and newer owners; stop requests are never converted into rollback
 claims. The overlay can stop/return/end, never grant or renew.
 
