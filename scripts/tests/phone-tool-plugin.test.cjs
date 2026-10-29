@@ -341,10 +341,11 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /granted on the phone|native grant/);
   // need_user is limited to real human-only steps, never transient page/observation noise.
   assert.match(tool.description, /"need_user" is only for a real human-only step/);
-  assert.match(tool.description, /signing in/);
-  assert.match(tool.description, /already signed-in third-party authorization/);
-  assert.match(tool.description, /tap its Agree\/Allow button yourself and continue/);
-  assert.match(tool.description, /Do not switch accounts, create accounts or change the selected account/);
+  assert.match(tool.description, /Signing in and authorizing are not such steps/);
+  assert.match(tool.description, /tap one-tap\/quick login/);
+  assert.match(tool.description, /tap Agree\/Allow on a third-party authorization page/);
+  assert.match(tool.description, /this tool cannot type into password fields/);
+  assert.match(tool.description, /do not pick an account the person did not name/);
   assert.match(tool.description, /verification code/);
   assert.match(tool.description, /payment or other money confirmation/);
   assert.match(tool.description, /permission decision/);

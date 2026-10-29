@@ -204,12 +204,13 @@ fail closed; no new acknowledgement shortcuts this entry into resuming.
   navigation only; the native person dialog is still required.
   Ordinary chat questions, answer choices and OpenCode permission replies do not by themselves
   require this phone handoff; a genuinely manual operation on the phone still does.
-  The tool guidance tells the agent that an already signed-in third-party authorization page
-  (for example a QQ/WeChat "allow this app to use your avatar and nickname" page with the account
-  already selected) is not such a step when it belongs to the requested task: the agent taps
-  Agree/Allow itself and must not switch, create or change the selected account. Entering a
-  password, choosing which account to sign in with, verification codes, payments and system
-  permission dialogs still hand off to the person. This is guidance, not an enforced native rule.
+  The tool guidance tells the agent that signing in and authorizing are not such steps when they
+  belong to the requested task and need no password or code: it ticks the required agreement box,
+  taps one-tap/quick login with the shown account, taps Agree/Allow on a third-party authorization
+  page, and picks an account only when the person named it in the chat. It never creates accounts
+  or asks for a password in the chat. Password fields (the tool cannot type into them; they are
+  never editable to the model), verification codes, payments and system permission dialogs still
+  hand off to the person. This is guidance, not an enforced native rule.
 - **Retry NotResumed:** a failure before any wake attempt and before a recovery grant, or after an
   exact-owner rollback confirmed that no recovery grant remains, records
   `continuationState=NOT_RESUMED` plus one fixed failure reason. The same task key/history and the
