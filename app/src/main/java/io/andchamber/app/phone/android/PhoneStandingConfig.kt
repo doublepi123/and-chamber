@@ -61,6 +61,41 @@ internal const val STANDING_MIN_WINDOW_MS = 60_000L
 internal const val STANDING_MAX_WINDOW_MS = 24L * 60L * 60L * 1_000L
 
 /**
+ * All-apps follow mode: the task follows the launched app when it hands off to another allowed app
+ * (QQ OAuth, a payment sheet, a browser). Explicit mode stays one exact target.
+ *
+ * The observed package is accepted only when it passes the all-apps name policy; secure surfaces
+ * are already excluded by [PhoneTargetPolicy] in all-apps mode. Pure so the start, continuation and
+ * re-open paths share one rule.
+ */
+internal fun standingAcceptsObservedPackage(
+    allApps: Boolean,
+    launchedPackage: String,
+    observedPackage: String,
+    allAppsPolicyAllowed: Boolean,
+): Boolean =
+    if (allApps) allAppsPolicyAllowed else observedPackage == launchedPackage
+
+/**
+ * `open_app` inside a live task. Explicit mode only reopens the task's exact target. All-apps mode
+ * may open any package that passes the all-apps name policy and has a launcher activity right now;
+ * it keeps the same task/epoch and still needs a real observation of the result.
+ */
+internal fun openAppTargetAllowed(
+    allApps: Boolean,
+    taskTarget: String,
+    grantTarget: String,
+    packageName: String,
+    allAppsPolicyAllowed: Boolean,
+    launchable: Boolean,
+): Boolean =
+    if (allApps) {
+        allAppsPolicyAllowed && launchable
+    } else {
+        packageName == taskTarget && packageName == grantTarget
+    }
+
+/**
  * A host-target start must not be admitted while the native phone-control page is the composed
  * route. Launching AndChamber would bring that very page forward and its entry applies the
  * host-return stop, which would revoke the brand-new grant in the middle of the startup observe.

@@ -159,6 +159,14 @@ interface PhoneTaskStarter {
         key: PhoneTaskKey,
     ): Boolean
 
+    /**
+     * A READ_TIMEOUT abandoned the control connection. The core has already revoked the lease and
+     * published the disconnect; the native side may re-arm one bounded silent background reconnect
+     * for this event. It never restores a lease, grants, pairs, resumes or starts a task, and the
+     * default is a no-op.
+     */
+    suspend fun onReadTimeout() {}
+
     /** The default is a closed gate: no configured standing backend, no apps, no starts, no launches. */
     object Unavailable : PhoneTaskStarter {
         override val available: Boolean = false

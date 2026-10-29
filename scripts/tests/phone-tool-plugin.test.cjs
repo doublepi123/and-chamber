@@ -270,7 +270,7 @@ test('package.json and tool registration shape', () => {
   }
   assert.equal(tool.input.properties.summary.maxLength, 200);
   assert.equal(tool.input.properties.packageName.maxLength, 200);
-  assert.match(tool.input.properties.packageName.description, /the current task's own target/);
+  assert.match(tool.input.properties.packageName.description, /any launchable allowed app in the all-apps scope/);
   for (const key of ['phase', 'message', 'reason']) {
     assert.equal(tool.input.properties[key].maxLength, 120, key);
   }
@@ -313,10 +313,14 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /the native phone-control page is open/);
   assert.match(tool.description, /must not be brought forward because it stops control/);
   assert.match(tool.description, /leave the phone-control page \(Home or chat\) and send the request again/);
-  // One target per task: open_app only reopens it; a new target needs a new request after finish.
-  assert.match(tool.description, /One task has exactly one target for its whole life/);
-  assert.match(tool.description, /it never switches to a different app/);
-  assert.match(tool.description, /only becomes available in a new "request" after this task has finished/);
+  // All-apps follow mode: a handoff to another allowed app is part of the same task.
+  assert.match(tool.description, /FOLLOWS the foreground when the target app hands off to another allowed app/);
+  assert.match(tool.description, /take a fresh snapshot after any app switch/);
+  assert.match(tool.description, /An explicit scope never follows another package/);
+  assert.match(tool.description, /a secure surface still ends the task/);
+  // Explicit scope: one target; all-apps open_app keeps the same task/epoch for an allowed app.
+  assert.match(tool.description, /In an explicit scope the task has exactly one target for its whole life/);
+  assert.match(tool.description, /may bring any launchable allowed app forward inside the SAME task and epoch/);
   assert.match(tool.description, /never enable, pair, grant, resume, acknowledge or open overlay permission/);
   assert.match(tool.description, /Take "snapshot" first/);
   assert.match(tool.description, /observationId/);
@@ -420,10 +424,11 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /Never repeat the action to find out/);
   assert.match(tool.description, /do not auto-resume or clear a standing block or unknown/);
 
-  // READ_TIMEOUT keeps the explicit reconnect hard stop; it is not an automatic recovery.
+  // READ_TIMEOUT: one bounded automatic reconnect, then a status check and a new request.
   assert.match(tool.description, /READ_TIMEOUT/);
-  assert.match(tool.description, /reconnect explicitly/);
-  assert.match(tool.description, /cannot recover it automatically/);
+  assert.match(tool.description, /bounded automatic reconnect in the background/);
+  assert.match(tool.description, /Check "status" for connected/);
+  assert.doesNotMatch(tool.description, /reconnect explicitly/);
   assert.doesNotMatch(tool.description, /shell|intent|package list/i);
 });
 

@@ -59,4 +59,21 @@ class PhoneLaunchAutoConnectTest {
     fun `one attempt per app run, never a retry loop`() {
         assertFalse(allowed(attemptedThisRun = true))
     }
+
+    @Test
+    fun `a read-timeout disconnect re-arms exactly one background attempt`() {
+        assertTrue(
+            shouldRearmAfterReadTimeout(
+                enabled = true,
+                available = true,
+                pending = false,
+                searching = false,
+            ),
+        )
+        // Disabled, unsupported, a pending device operation or a running search stays closed.
+        assertFalse(shouldRearmAfterReadTimeout(enabled = false, available = true, pending = false, searching = false))
+        assertFalse(shouldRearmAfterReadTimeout(enabled = true, available = false, pending = false, searching = false))
+        assertFalse(shouldRearmAfterReadTimeout(enabled = true, available = true, pending = true, searching = false))
+        assertFalse(shouldRearmAfterReadTimeout(enabled = true, available = true, pending = false, searching = true))
+    }
 }

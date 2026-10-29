@@ -862,8 +862,28 @@ class PhoneToolServer(
                 )
             }
         }
+        if (result.isReadTimeout()) {
+            // The core already revoked/disconnected this exact connection. Give the native side one
+            // bounded chance to re-arm its silent background reconnect; a failure is swallowed and
+            // never changes this call's READ_TIMEOUT result.
+            try {
+                taskStarter.onReadTimeout()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Nothing to report: the reply is already the fixed READ_TIMEOUT refusal.
+            }
+        }
         return encodeResult(action, result)
     }
+
+    /** READ_TIMEOUT can be the first cause of a refused read or an unknown dispatch. */
+    private fun PhoneCallResult.isReadTimeout(): Boolean =
+        when (this) {
+            is PhoneCallResult.Refused -> error == PhoneErrorCode.READ_TIMEOUT
+            is PhoneCallResult.Dispatched -> error == PhoneErrorCode.READ_TIMEOUT
+            is PhoneCallResult.Observed, is PhoneCallResult.Captured -> false
+        }
 
     private fun nativeCallOutcome(result: PhoneCallResult): PhoneNativeCallOutcome =
         when (result) {

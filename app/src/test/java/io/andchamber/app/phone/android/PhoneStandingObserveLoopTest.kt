@@ -1,6 +1,7 @@
 package io.andchamber.app.phone.android
 
 import io.andchamber.app.phone.core.PhoneErrorCode
+import io.andchamber.app.phone.core.PhoneTargetPolicy
 import io.andchamber.app.phone.standing.PhoneTaskStartFailureStage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
@@ -26,7 +27,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { now },
-                expectedPackage = target,
+                acceptPackage = { it == target },
                 delayFor = { wait -> now += wait },
             ) {
                 reads += 1
@@ -51,7 +52,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { 0L },
-                expectedPackage = target,
+                acceptPackage = { it == target },
             ) {
                 reads += 1
                 // The old bug retried this and then reported the later NOT_CONNECTED instead.
@@ -76,7 +77,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { 0L },
-                expectedPackage = target,
+                acceptPackage = { it == target },
             ) {
                 reads += 1
                 PhoneStandingObserveRead.Failed(hierarchyBusy)
@@ -94,7 +95,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { 0L },
-                expectedPackage = target,
+                acceptPackage = { it == target },
             ) {
                 reads += 1
                 if (reads == 1) {
@@ -117,7 +118,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { now },
-                expectedPackage = target,
+                acceptPackage = { it == target },
                 delayFor = { wait -> now += wait },
             ) { remaining ->
                 remainingSeen += remaining
@@ -146,7 +147,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { now },
-                expectedPackage = target,
+                acceptPackage = { it == target },
             ) {
                 now += 15_001L
                 PhoneStandingObserveRead.Observed(target)
@@ -163,7 +164,7 @@ class PhoneStandingObserveLoopTest {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { now },
-                expectedPackage = target,
+                acceptPackage = { it == target },
                 delayFor = { wait -> now += wait },
             ) {
                 reads += 1
@@ -176,13 +177,38 @@ class PhoneStandingObserveLoopTest {
     }
 
     @Test
+    fun `all apps follow mode accepts the first allowed handoff package`() = runTest {
+        val launched = "com.example.target"
+        val handoff = "com.tencent.mobileqq"
+        var reads = 0
+        val result =
+            observeStandingWithinBudget(
+                deadlineElapsedMs = 15_000L,
+                nowElapsedMs = { 0L },
+                acceptPackage = { observed ->
+                    standingAcceptsObservedPackage(
+                        allApps = true,
+                        launchedPackage = launched,
+                        observedPackage = observed,
+                        allAppsPolicyAllowed = PhoneTargetPolicy().refusal(observed, allApps = true) == null,
+                    )
+                },
+            ) {
+                reads += 1
+                PhoneStandingObserveRead.Observed(handoff)
+            }
+        assertEquals(PhoneStandingObserveResult.Observed, result)
+        assertEquals("the handoff is accepted on the first stable read", 1, reads)
+    }
+
+    @Test
     fun `cancellation propagates without another attempt`() = runTest {
         var reads = 0
         try {
             observeStandingWithinBudget(
                 deadlineElapsedMs = 15_000L,
                 nowElapsedMs = { 0L },
-                expectedPackage = target,
+                acceptPackage = { it == target },
             ) {
                 reads += 1
                 throw CancellationException("cancelled")

@@ -376,6 +376,96 @@ class PhoneStandingConfigTest {
     }
 
     @Test
+    fun `all apps follow accepts an allowed observed package and explicit stays exact`() {
+        assertTrue(
+            standingAcceptsObservedPackage(
+                allApps = true,
+                launchedPackage = "io.andchamber.app",
+                observedPackage = "com.tencent.mobileqq",
+                allAppsPolicyAllowed = true,
+            ),
+        )
+        assertFalse(
+            standingAcceptsObservedPackage(
+                allApps = true,
+                launchedPackage = "io.andchamber.app",
+                observedPackage = "com.android.systemui",
+                allAppsPolicyAllowed = false,
+            ),
+        )
+        assertTrue(
+            standingAcceptsObservedPackage(
+                allApps = false,
+                launchedPackage = "com.example.target",
+                observedPackage = "com.example.target",
+                allAppsPolicyAllowed = true,
+            ),
+        )
+        assertFalse(
+            standingAcceptsObservedPackage(
+                allApps = false,
+                launchedPackage = "com.example.target",
+                observedPackage = "com.tencent.mobileqq",
+                allAppsPolicyAllowed = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `open app is target-exact in explicit mode and policy-bound in all apps`() {
+        assertTrue(
+            openAppTargetAllowed(
+                allApps = false,
+                taskTarget = "com.example.target",
+                grantTarget = "com.example.target",
+                packageName = "com.example.target",
+                allAppsPolicyAllowed = true,
+                launchable = true,
+            ),
+        )
+        assertFalse(
+            openAppTargetAllowed(
+                allApps = false,
+                taskTarget = "com.example.target",
+                grantTarget = "com.example.target",
+                packageName = "com.tencent.mobileqq",
+                allAppsPolicyAllowed = true,
+                launchable = true,
+            ),
+        )
+        assertTrue(
+            openAppTargetAllowed(
+                allApps = true,
+                taskTarget = "com.example.target",
+                grantTarget = "com.example.target",
+                packageName = "com.tencent.mobileqq",
+                allAppsPolicyAllowed = true,
+                launchable = true,
+            ),
+        )
+        assertFalse(
+            openAppTargetAllowed(
+                allApps = true,
+                taskTarget = "com.example.target",
+                grantTarget = "com.example.target",
+                packageName = "com.tencent.mobileqq",
+                allAppsPolicyAllowed = false,
+                launchable = true,
+            ),
+        )
+        assertFalse(
+            openAppTargetAllowed(
+                allApps = true,
+                taskTarget = "com.example.target",
+                grantTarget = "com.example.target",
+                packageName = "com.android.settings",
+                allAppsPolicyAllowed = true,
+                launchable = false,
+            ),
+        )
+    }
+
+    @Test
     fun `transitioning or unknown runtime is never reported ready`() {
         assertEquals(
             PhoneToolStatus.Ready,

@@ -72,6 +72,12 @@ internal data class PhoneScreenFacts(
     val standingEnabled: Boolean = false,
     /** The saved configuration, if any. It is not authority. */
     val standingState: PhoneStandingState? = null,
+    /**
+     * Display-only: the last accepted observation package of the live all-apps task. It survives an
+     * observation invalidation after a sent action, so a followed handoff keeps naming the app now
+     * in front. Null in explicit mode or before the first observation. Never authority.
+     */
+    val followedPackage: String? = null,
     /** Truthful runtime/tool projection, separate from the local endpoint being reachable. */
     val runtimeStatus: PhoneRuntimeStatus = PhoneRuntimeStatus(),
     /** Native continuation facts after a stop. */
@@ -119,7 +125,7 @@ internal fun phoneScreenState(
     val halt = facts.halt
     val record = facts.task
     // A remembered halt keeps its own lease, so the reason survives the controller clearing its grant.
-    val lease = halt?.lease?.toLease(core) ?: facts.lease?.toLease(core)
+    val lease = halt?.lease?.toLease(core, facts) ?: facts.lease?.toLease(core, facts)
     val outcomeUnknown = core.blocked == PhoneBlockReason.UNKNOWN_OUTCOME
 
     val standing = standingProjection(core, facts, nowElapsedMs)
@@ -319,13 +325,36 @@ private fun PhoneDiscoveryStatus.toScreenDiscovery(): PhoneDiscovery =
         PhoneDiscoveryStatus.Unavailable -> PhoneDiscovery.Unavailable
     }
 
-private fun PhoneLeaseFacts.toLease(core: PhoneState): PhoneLease =
+private fun PhoneLeaseFacts.toLease(
+    core: PhoneState,
+    facts: PhoneScreenFacts,
+): PhoneLease =
     PhoneLease(
-        target = target,
+        target = followedTarget(core, facts, target),
         summary = summary,
         actions = actions,
         expiresAtMs = core.grant?.expiresAtMs ?: 0L,
     )
+
+/**
+ * Display target for a live all-apps task: the package the latest accepted observation really saw.
+ * A handoff to another allowed app (OAuth/payment/browser) therefore names that app in the screen,
+ * overlay and task labels. Explicit mode and a retained halt keep the launched target, and this
+ * never changes identity, authority or the dispatch binding.
+ */
+private fun followedTarget(
+    core: PhoneState,
+    facts: PhoneScreenFacts,
+    launched: PhoneTarget,
+): PhoneTarget {
+    if (core.grant?.allApps != true) return launched
+    // The live observation wins; after a sent action invalidates it, the remembered followed package
+    // keeps the label on the app now in front.
+    val followed = core.observation?.binding?.packageName ?: facts.followedPackage ?: return launched
+    if (followed == launched.packageName) return launched
+    return facts.targets.firstOrNull { it.packageName == followed }
+        ?: PhoneTarget(label = followed, packageName = followed)
+}
 
 private fun targetFor(
     facts: PhoneScreenFacts,

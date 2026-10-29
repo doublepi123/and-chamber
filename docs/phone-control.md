@@ -36,14 +36,22 @@ document.
   settings variants are allowed; `android`, `com.android.systemui` and `com.android.keyguard` stay
   refused) and by a real launcher check at that moment. An app without a launcher activity is
   refused. The grant freezes the mode, so a later re-check can never widen or narrow it.
-- In the explicit mode only apps in the saved set are openable, exactly as before. In both modes
-  there is no arbitrary intent, shell, URI or package-install surface; the installed-app catalogue
-  is never handed to the model except as the bounded all-apps picker. The host, system UI, settings
-  and system authorization surfaces cannot be selected in explicit mode.
+- In all-apps mode one task **follows the foreground** when the target app hands off to another
+  allowed app: a QQ/WeChat OAuth or login page, a payment sheet, a browser. The follow is proven by a
+  fresh real observation of the new package (the controller records that real package), the target
+  policy still refuses secure surfaces, and every action still needs a snapshot of the live window -
+  never an old page. The task/epoch, lease and stop entry stay the same; `open_app` may bring any
+  launchable allowed app forward inside that same task. Moving to a secure surface ends the task as
+  `TargetLeft`. In the explicit mode only apps in the saved set are openable and another package is
+  a target loss, exactly as before.
+- In both modes there is no arbitrary intent, shell, URI or package-install surface; the installed-app
+  catalogue is never handed to the model except as the bounded all-apps picker. The host, system UI,
+  settings and system authorization surfaces cannot be selected in explicit mode.
 - Choosing All apps is a real risk increase: the agent may reach any launchable app, including one
-  that shows money, identity or passwords. Locking the screen, taking over, `need_user`, connection
-  loss, a runtime change or turning the experiment off still stops the task, and the one-task/one-
-  target rule still applies. With AndChamber itself as the target, resuming or opening the native
+  that shows money, identity or passwords, and it may follow a handoff to another such app. Locking
+  the screen, taking over, `need_user`, connection loss, a runtime change or turning the experiment
+  off still stops the task, and the one-target-per-task rule is replaced only by "follow an allowed
+  foreground" in this mode. With AndChamber itself as the target, resuming or opening the native
   **Phone control** page applies the host-return stop; ordinary chat/Home reading does not. A
   host-target task in overlay mode keeps the notification stop entry only: the overlay surface is
   deliberately detached while the host Activity is in front, so no capsule is shown over AndChamber
@@ -101,17 +109,22 @@ document.
    same runtime may start the next task, which moves the session binding to that chat; a different
    runtime is still refused. Every task has a fresh epoch.
 7. In chat, `request` starts directly inside the scope with a bounded summary and one package. In
-   explicit mode that package must be in the saved set. In all-apps mode it must pass the all-apps
-   policy and have a launcher activity right now; the host, Settings and installers are allowed and
-   the secure surfaces stay refused. The native side checks the scope, proves a foreground stop
-   entry, creates the task/lease, launches that package and performs a real foreground observation
-   before replying `RUNNING`/`READY` with the epoch. There is no per-task `PENDING_CONFIRMATION` in
-   this mode.
+   explicit mode that package must be in the saved set and the startup observation accepts only it.
+   In all-apps mode it must pass the all-apps policy and have a launcher activity right now; the
+   host, Settings and installers are allowed and the secure surfaces stay refused. The native side
+   checks the scope, proves a foreground stop entry, creates the task/lease, launches that package
+   and performs a real foreground observation before replying `RUNNING`/`READY` with the epoch. If
+   the launched app immediately hands off to another allowed app (OAuth/payment/browser), that first
+   real observation is accepted and recorded with the new package instead of retrying the launched
+   one. There is no per-task `PENDING_CONFIRMATION` in this mode.
 8. `apps` lists only the person-authorized labels/packages: the explicit set, or in all-apps mode
    the bounded launchable catalogue (sanitized, deduplicated, capped at 400, with `allApps: true` and
-   an honest `truncated` flag). `open_app` brings the current live task's same target back to the
-   foreground and proves the observation; it cannot switch to another app or create a new epoch. One
-   task keeps one target; a different target needs a new `request` after the task finished.
+   an honest `truncated` flag). In explicit mode `open_app` brings the current live task's same
+   target back to the foreground. In all-apps mode it may bring any launchable allowed app forward
+   (that is how a handoff is resumed or checked) inside the same task and epoch. Both prove a real
+   observation afterwards. In explicit mode one task keeps one target; a different target needs a
+   new `request` after the task finished. In all-apps mode the task follows an allowed foreground;
+   a secure surface ends it.
 
 The legacy per-task native grant form remains in the controller for compatibility, but the default
 UI is configure-once standing. A chat proposal/request is never authority by itself.
@@ -243,7 +256,11 @@ real user's field cause or exclude every OEM difference.
   its watchdog expired. The exact connection is no longer usable for control; the core publishes the
   logical disconnect and revokes in the same call, keeps a first `READ_TIMEOUT`, preserves an
   already-recorded unknown outcome, and fences the revoke to that exact connection so a newer
-  reconnect survives. It does not claim that a physical socket close has completed.
+  reconnect survives. It does not claim that a physical socket close has completed. The native side
+  then re-arms the same bounded, silent background reconnect it uses at launch for that one event
+  (one search, at most one TLS connect, no lease/grant/resume, no task start, no runtime restart);
+  the tool tells the model to check `status` connected and send a new request instead of repeating a
+  mutating action.
 - The existing hard watchdog still closes the stream and connection to unblock a blocking read. There
   is no stream-only keepalive and no extension of the total call bound. The outer bound is the fresh
   remaining plan deadline; the driver gets a margin of at most 500 ms below it only so its own typed
@@ -466,13 +483,17 @@ The new no-task resume does not replace that retained-task path.
 
 The **All apps** standing choice and a host (AndChamber) target have JVM coverage only so far: the
 configuration/scope shapes, the all-apps target policy, the grant-frozen mode, the bounded `apps`
-catalogue and the one-target `open_app` rule are tested without a device, and the PHONE-route
+catalogue, the follow-the-foreground observation/dispatch rules (an allowed handoff is accepted,
+secure surfaces are refused, a stale pre-switch binding cannot act), the `open_app` target rules and
+the one-event READ_TIMEOUT reconnect re-arm are tested without a device, and the PHONE-route
 resume/revoke entry plus the host-target notification-only overlay path are code-level changes.
-They have **not** been exercised on an emulator or a physical device. Emulator acceptance still has
-to show: a Settings target, an AndChamber Home/chat target that survives ordinary reading and is
-revoked by the native phone page (including reopening/resuming that page), and a host-target task
-under overlay mode that really uses the notification stop entry. Until then this is not device
-evidence and no OEM/TalkBack claim is made.
+They have **not** been exercised on an emulator or a physical device in this follow form. Emulator
+acceptance still has to show: a Settings target, an AndChamber Home/chat target that survives
+ordinary reading and is revoked by the native phone page (including reopening/resuming that page), a
+host-target task under overlay mode that really uses the notification stop entry, a real OAuth
+handoff (for example QQ) followed and acted on through a fresh snapshot, and an automatic reconnect
+after a heavy-page READ_TIMEOUT. Until then this is not device evidence and no OEM/TalkBack claim is
+made.
 
 A later API 35 / x86_64 independent-App acceptance covered the startup read path in four groups:
 static idle start, bounded busy (6 s), sustained busy (30 s) and a forced read fault. The static and

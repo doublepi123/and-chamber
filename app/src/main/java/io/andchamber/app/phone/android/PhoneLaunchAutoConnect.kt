@@ -35,3 +35,17 @@ internal fun shouldAutoConnectOnLaunch(
         !connected &&
         !connecting &&
         !attemptedThisRun
+
+/**
+ * A READ_TIMEOUT abandoned the exact control connection; the core has already revoked the lease and
+ * published the disconnect. The same silent, bounded background reconnect may then run once more for
+ * that event, but only while the experiment is on, the device is supported, no other device
+ * operation is pending and no search is already running. It never restores a lease, grants, pairs,
+ * starts a task or restarts the runtime, and it is never retried in a loop.
+ */
+internal fun shouldRearmAfterReadTimeout(
+    enabled: Boolean,
+    available: Boolean,
+    pending: Boolean,
+    searching: Boolean,
+): Boolean = enabled && available && !pending && !searching

@@ -417,7 +417,7 @@ object PhoneToolProtocol {
             PhoneToolCodes.CAPACITY -> "Too many phone-control requests for this launch."
             PhoneToolCodes.BUSY -> "The phone is busy with another action."
             PhoneToolCodes.TARGET_FORBIDDEN ->
-                "That app cannot be controlled here. One task has exactly one target: \"open_app\" only reopens the current task's target, and another app becomes available only in a new \"request\" after the current task has finished. Never a secure surface such as the system UI or keyguard."
+                "That app cannot be controlled here. In an explicit scope a task has exactly one target; in the all-apps scope a task follows the app into another allowed app (for example an OAuth, payment or browser handoff), but never into a secure surface such as the system UI or keyguard, and \"open_app\" may only open a launchable allowed app. Take a fresh snapshot after any app switch."
             PhoneToolCodes.TARGET_MISMATCH -> "The foreground app changed. Take a new snapshot."
             PhoneToolCodes.WINDOW_CHANGED -> "The phone window changed. Take a new snapshot."
             PhoneToolCodes.GEOMETRY_CHANGED -> "The screen geometry changed. Take a new snapshot."
@@ -438,7 +438,7 @@ object PhoneToolProtocol {
             PhoneToolCodes.HIERARCHY_NOT_IDLE ->
                 "The phone did not provide a valid hierarchy or page. This does not mean the connection is down, and it does not by itself revoke an existing task. Do not call need_user for this. Use status to see whether the original task is still live or a start was rolled back; if it is live, keep it and wait for the page to settle. If no task is live, do not fake a grant with snapshot or resume in place; only the existing saved scope and authority can support a new legal request. This error never authorises automatic recovery of stopped control, and retries are bounded."
             PhoneToolCodes.READ_TIMEOUT ->
-                "Reading the phone timed out. This control connection is no longer used. Ask the person to check the phone and reconnect explicitly; this does not prove the network is down or that the physical socket has closed, and this tool cannot recover it automatically."
+                "Reading the phone timed out. This control connection is no longer used; the phone will try one bounded automatic reconnect in the background. Check \"status\" for connected before sending anything, then send a new request or take a fresh snapshot. Do not repeat a mutating action: this does not prove the network is down or that the socket closed, and it does not confirm whether an earlier action applied."
             PhoneToolCodes.CANCELLED -> "Cancelled."
             PhoneToolCodes.SESSION_BUSY ->
                 "Another chat session's phone task is still running or waiting. Do not retry in a loop. After that task ends (or the person ends it on the phone), this session can send a new request; no new setup is needed."

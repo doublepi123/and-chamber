@@ -192,6 +192,13 @@ internal class PhoneIntegration(
     /** True once a launcher-catalogue load was started for the all-apps listing. */
     private var launchableCatalogRequested: Boolean = false
 
+    /**
+     * Last accepted observation package of the live all-apps task, kept across an observation
+     * invalidation after a sent action. Display/reconnect hints only; cleared with the grant epoch.
+     */
+    @Volatile
+    private var lastObservedPackage: String? = null
+
     /** All-apps name policy, shared by the listing, a new request and a re-open. */
     private val allAppsPolicy = PhoneTargetPolicy(hostPackage)
 
@@ -548,18 +555,29 @@ internal class PhoneIntegration(
     }
 
     /**
-     * Read-only, thread-safe: the live native grant's target is AndChamber itself. The overlay
+     * Read-only, thread-safe: the package the live task is currently on. In all-apps follow mode it
+     * is the latest accepted observation's real package (the target may have handed off to another
+     * allowed app); before the first observation it is the grant's launched target. Null when no
+     * live grant exists.
+     */
+    fun currentForegroundPackage(): String? {
+        val grant = controller.state.value.grant ?: return null
+        return lastObservedPackage ?: grant.targetPackage
+    }
+
+    /**
+     * Read-only, thread-safe: the current foreground target is AndChamber itself. The overlay
      * manager uses it to stay on the notification-only path while the host is the app in front,
      * because its own surface is deliberately detached then. It never grants, stops or widens
      * anything.
      */
-    fun currentTaskIsHost(): Boolean = controller.state.value.grant?.targetPackage == hostPackage
+    fun currentTaskIsHost(): Boolean = currentForegroundPackage() == hostPackage
 
     /**
-     * Read-only, thread-safe: the live grant's target package, or null. Used only to compare the
+     * Read-only, thread-safe: the current foreground package, or null. Used only to compare the
      * focused app for the "target hides non-system overlays" fallback; never authority.
      */
-    fun liveTaskTargetPackage(): String? = controller.state.value.grant?.targetPackage
+    fun liveTaskTargetPackage(): String? = currentForegroundPackage()
 
     /**
      * Read-only, thread-safe: the person's notification stop entry is verified right now. The
@@ -788,6 +806,8 @@ internal class PhoneIntegration(
                 is io.andchamber.app.phone.standing.PhoneStandingGrantResult.Refused ->
                     return PhoneTaskStartResult.Refused(result.refusal)
             }
+        // A new grant epoch starts with the launched package until its first real observation.
+        lastObservedPackage = null
         val epoch = granted.epoch
         // Every failure after the grant is a fixed stage; the exact epoch/key rollback is unchanged
         // and a newer owner is never overwritten by this start's diagnostic.
@@ -796,6 +816,9 @@ internal class PhoneIntegration(
             error: PhoneErrorCode?,
             key: PhoneTaskKey?,
         ): PhoneTaskStartResult.Refused {
+            // A watchdog read abandoned the connection (core already revoked). Re-arm the same
+            // bounded silent reconnect once; this never restores the lease or starts anything.
+            if (error == PhoneErrorCode.READ_TIMEOUT) onReadTimeoutDisconnected()
             publishStandingStartFailure(epoch, key, stage, error)
             rollbackStandingStart(epoch, key)
             return PhoneTaskStartResult.Refused(PhoneStandingRefusal.START_FAILED, stage, error)
@@ -872,8 +895,12 @@ internal class PhoneIntegration(
                     key = taskKey,
                 )
             }
-            // Only a real foreground observation of the allowed package may answer Started.
-            when (val observed = observeStandingTarget(epoch, sessionId, packageName)) {
+            // Only a real foreground observation of an allowed package may answer Started. In
+            // all-apps mode that includes the target's own handoff to another allowed app.
+            when (
+                val observed =
+                    observeStandingTarget(epoch, sessionId, packageName, allApps = state.config.allApps)
+            ) {
                 is PhoneStandingObserveResult.Failed ->
                     return@transaction failStart(
                         observed.stage,
@@ -909,8 +936,9 @@ internal class PhoneIntegration(
     }
 
     /**
-     * Brings the already-running task's exact target back to the foreground. It never switches to
-     * another app, creates an epoch or publishes a route.
+     * Brings an allowed app to the foreground inside the already-running task. It never creates an
+     * epoch or publishes a route. Explicit mode only reopens the task's exact target; all-apps mode
+     * may open any launchable allowed package (the target may hand off to another app).
      */
     internal suspend fun openStandingApp(
         sessionId: String,
@@ -933,16 +961,18 @@ internal class PhoneIntegration(
         val currentSession = taskSession ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.INVALID)
         if (currentSession != sessionId) return PhoneOpenAppResult.Refused(PhoneStandingRefusal.SESSION_MISMATCH)
         val current = lease ?: return PhoneOpenAppResult.Refused(PhoneStandingRefusal.INVALID)
-        if (current.target.packageName != packageName ||
-            grant.targetPackage != packageName
-        ) {
-            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
-        }
-        // All-apps mode keeps the same two gates as a new request: the name policy and a real
-        // launcher activity right now. Explicit mode already proved its list at grant time.
-        if (state.config.allApps &&
-            (allAppsPolicy.refusal(packageName, allApps = true) != null || !hasLaunchTarget(packageName))
-        ) {
+        val allowedTarget =
+            openAppTargetAllowed(
+                allApps = state.config.allApps,
+                taskTarget = current.target.packageName,
+                grantTarget = grant.targetPackage,
+                packageName = packageName,
+                // The all-apps name policy and a real launcher activity right now. Explicit mode
+                // already proved its list at grant time.
+                allAppsPolicyAllowed = allAppsPolicy.refusal(packageName, allApps = true) == null,
+                launchable = hasLaunchTarget(packageName),
+            )
+        if (!allowedTarget) {
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
         }
         val epoch = grant.epoch
@@ -950,8 +980,14 @@ internal class PhoneIntegration(
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
         }
         // A successful startActivity is not proof. Only a real Observe of this exact epoch/session
-        // showing the same package may answer Opened; a pause/stop/newer epoch invalidates it.
-        if (observeStandingTarget(epoch, sessionId, packageName) !is PhoneStandingObserveResult.Observed) {
+        // showing the allowed package may answer Opened; a pause/stop/newer epoch invalidates it.
+        if (observeStandingTarget(
+                epoch,
+                sessionId,
+                packageName,
+                allApps = state.config.allApps,
+            ) !is PhoneStandingObserveResult.Observed
+        ) {
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
         }
         val after = controller.state.value
@@ -1521,6 +1557,7 @@ internal class PhoneIntegration(
                     return
                 }
             }
+        lastObservedPackage = null
         val epoch = granted.epoch
         var continuationKey: PhoneTaskKey? = null
         val attempt =
@@ -1536,6 +1573,7 @@ internal class PhoneIntegration(
             stage: PhoneTaskStartFailureStage? = null,
             error: PhoneErrorCode? = null,
         ) {
+            if (error == PhoneErrorCode.READ_TIMEOUT) onReadTimeoutDisconnected()
             if (
                 rollbackContinuation(
                     epoch = epoch,
@@ -1618,7 +1656,7 @@ internal class PhoneIntegration(
         }
         val observed =
             withCancelRollback(PhoneTaskStartFailureStage.OBSERVATION) {
-                observeStandingTarget(epoch, session, target.packageName)
+                observeStandingTarget(epoch, session, target.packageName, allApps = state.config.allApps)
             }
         if (observed is PhoneStandingObserveResult.Failed) {
             fail(
@@ -1872,11 +1910,17 @@ internal class PhoneIntegration(
      * that is not foreground yet retry; the first terminal typed error (hierarchy busy, read timeout,
      * deadline, lost connection, cancellation, security refusal, any other driver failure) stops and
      * is returned unchanged. A real window/package observation is still required before success.
+     *
+     * [allApps] is the frozen standing mode. In explicit mode only [packageName] is accepted. In
+     * all-apps follow mode any foreground package that passes the all-apps policy is accepted (the
+     * target may hand off to an OAuth/payment/browser app); the real package is recorded by the
+     * controller's observation, never replaced by the launched one.
      */
     private suspend fun observeStandingTarget(
         epoch: Long,
         sessionId: String,
         packageName: String,
+        allApps: Boolean,
     ): PhoneStandingObserveResult {
         val deadlineElapsedMs = clock() + PhoneLimits.MAX_CALL_MS
         // With the overlay selected, the first real driver read must wait until the current epoch's
@@ -1897,10 +1941,19 @@ internal class PhoneIntegration(
                 error = if (clock() >= deadlineElapsedMs) PhoneErrorCode.DEADLINE else null,
             )
         }
+        val acceptPackage: (String) -> Boolean = { observed ->
+            standingAcceptsObservedPackage(
+                allApps = allApps,
+                launchedPackage = packageName,
+                observedPackage = observed,
+                allAppsPolicyAllowed =
+                    allApps && allAppsPolicy.refusal(observed, allApps = true) == null,
+            )
+        }
         return observeStandingWithinBudget(
             deadlineElapsedMs = deadlineElapsedMs,
             nowElapsedMs = clock,
-            expectedPackage = packageName,
+            acceptPackage = acceptPackage,
         ) { remainingMs ->
             val core = controller.state.value
             val localFailure =
@@ -2063,12 +2116,24 @@ internal class PhoneIntegration(
         val current = lease ?: return null
         return notifications.running(
             epoch = epoch,
-            appLabel = current.target.label,
+            // In all-apps follow mode the label names the app now in front, not only the launched
+            // one. It is display only; the lease/epoch still own authority.
+            appLabel = followedTargetLabel(core, current.target),
             paused = core.paused,
             // A pause is only settled once the in-flight action has finished; until then the
             // notification must not claim the agent is paused.
             pausing = core.pausing || (core.paused && core.inFlightMutation),
         )
+    }
+
+    /** Display label for the currently followed package; falls back to the launched target. */
+    private fun followedTargetLabel(core: PhoneState, launched: PhoneTarget): String {
+        if (core.grant?.allApps != true) return launched.label
+        val followed =
+            core.observation?.binding?.packageName ?: lastObservedPackage ?: return launched.label
+        if (followed == launched.packageName) return launched.label
+        return facts.value.targets.firstOrNull { it.packageName == followed }?.label
+            ?: safeAppLabel(followed, followed)
     }
 
     /**
@@ -2292,6 +2357,27 @@ internal class PhoneIntegration(
             launchAutoConnectAttempted = true
             startConnectSearch(silent = true)
         }
+    }
+
+    /**
+     * A READ_TIMEOUT abandoned the exact control connection; the core has already revoked the lease
+     * and published the disconnect. This only re-arms the same bounded, silent background reconnect
+     * as a launch: one attempt for this event, no lease/grant/resume, no task start and no runtime
+     * restart. A pending device operation or an existing search is left alone.
+     */
+    fun onReadTimeoutDisconnected() {
+        launchAutoConnectAttempted = false
+        launchAutoConnectInFlight = false
+        if (!shouldRearmAfterReadTimeout(
+                enabled = facts.value.enabled,
+                available = facts.value.available,
+                pending = facts.value.pending != null,
+                searching = connectSearchActive,
+            )
+        ) {
+            return
+        }
+        startConnectSearch(silent = true)
     }
 
     fun openWirelessDebuggingSettings() {
@@ -3104,7 +3190,11 @@ internal class PhoneIntegration(
             if (facts.value.halt == null) {
                 val stopReason =
                     when (error) {
-                        PhoneErrorCode.TARGET_MISMATCH -> PhoneHaltReason.TargetLeft
+                        // Explicit mode: another package is a target loss. All-apps follow mode:
+                        // an allowed handoff is not a loss, but a refused secure surface is.
+                        PhoneErrorCode.TARGET_MISMATCH,
+                        PhoneErrorCode.TARGET_FORBIDDEN,
+                        -> PhoneHaltReason.TargetLeft
                         PhoneErrorCode.WINDOW_CHANGED, PhoneErrorCode.GEOMETRY_CHANGED,
                         PhoneErrorCode.STALE_OBSERVATION,
                         -> PhoneHaltReason.ScreenUncertain
@@ -3983,6 +4073,17 @@ internal class PhoneIntegration(
                         core.runtimeId != standingBinding.runtimeId
                     ) {
                         standingBinding = PhoneStandingBindingState()
+                    }
+                    // All-apps follow display: remember the last real observation package for this
+                    // grant epoch. It survives the observation invalidation after a sent action and
+                    // is cleared by any new grant/revoke (epoch change). Never authority.
+                    if (core.grant?.epoch != previous?.grant?.epoch) lastObservedPackage = null
+                    if (core.grant?.allApps == true) {
+                        core.observation?.binding?.packageName?.let { lastObservedPackage = it }
+                    }
+                    val followedNow = if (core.grant?.allApps == true) lastObservedPackage else null
+                    if (facts.value.followedPackage != followedNow) {
+                        mutateFacts { it.copy(followedPackage = followedNow) }
                     }
                     previous = core
                     publish()

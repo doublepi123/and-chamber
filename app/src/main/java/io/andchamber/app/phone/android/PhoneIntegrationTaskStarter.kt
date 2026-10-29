@@ -56,4 +56,10 @@ internal class PhoneIntegrationTaskStarter(
         withContext(dispatcher + NonCancellable) {
             owner().abortStandingTask(epoch, key)
         }
+
+    /** Re-arm at most one bounded silent reconnect; the core already revoked this connection. */
+    override suspend fun onReadTimeout() =
+        withContext(dispatcher) {
+            owner().onReadTimeoutDisconnected()
+        }
 }

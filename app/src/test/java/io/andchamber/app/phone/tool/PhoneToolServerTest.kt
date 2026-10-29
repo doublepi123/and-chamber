@@ -3,6 +3,7 @@ package io.andchamber.app.phone.tool
 import io.andchamber.app.phone.core.PhoneActionKind
 import io.andchamber.app.phone.core.PhoneBlockReason
 import io.andchamber.app.phone.core.PhoneDispatchReceipt
+import io.andchamber.app.phone.core.PhoneDriverFailure
 import io.andchamber.app.phone.core.PhoneErrorCode
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.core.PhoneTimeLimits
@@ -425,6 +426,21 @@ class PhoneToolServerTest {
                 httpPost(fixture.port, toolBody("ses-a", "ha5", input("open_app", extra = mapOf("packageName" to "io.andchamber.app"))))
             assertTrue(reopened.ok())
             assertEquals("OPENED", reopened.data()["state"]!!.toString().trim('"'))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a read timeout re-arms the native reconnect exactly once`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.granted()
+            fixture.driver.observeFailure = PhoneDriverFailure.READ_TIMEOUT
+
+            val response = httpPost(fixture.port, snapshotBody(session = "ses-a", callId = "rt1"))
+            assertEquals("READ_TIMEOUT", response.code())
+            assertEquals("one bounded reconnect per timed-out call", 1, fixture.taskStarter.readTimeouts)
         } finally {
             fixture.close()
         }

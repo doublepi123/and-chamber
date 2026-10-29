@@ -59,7 +59,12 @@ class PhoneStandingAllAppsControllerTest {
         override suspend fun dispatch(
             request: PhoneDispatchRequest,
             deadlineMs: Long,
-        ): PhoneDispatchReceipt = PhoneDispatchReceipt.Sent
+        ): PhoneDispatchReceipt {
+            dispatchCalls += 1
+            return PhoneDispatchReceipt.Sent
+        }
+
+        var dispatchCalls: Int = 0
     }
 
     private class Fixture(packageName: String) {
@@ -203,5 +208,140 @@ class PhoneStandingAllAppsControllerTest {
             // The package mismatch is the first gate; the host itself must never be observed.
         )
         assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `an all apps task follows an allowed handoff and acts on the fresh snapshot`() = runTest {
+        val fixture = Fixture(host).connected()
+        val grant =
+            (fixture.controller.grantFromPreauthorization(allAppsScope(), host) as PhoneStandingGrantResult.Granted).grant
+
+        // The launched app hands off to QQ's OAuth page: a different but allowed package.
+        fixture.driver.packageName = "com.tencent.mobileqq"
+        val observed =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.Observe,
+                ),
+            )
+        assertTrue("the handoff must be observed: $observed", observed is PhoneCallResult.Observed)
+        val observation = (observed as PhoneCallResult.Observed).observation
+        assertEquals("the observation keeps the real package, not the launched one", "com.tencent.mobileqq", observation.binding.packageName)
+        assertEquals("com.tencent.mobileqq", fixture.controller.state.value.observation?.binding?.packageName)
+
+        val tap =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.TapRef("n0"),
+                    observation = observation.binding,
+                ),
+            )
+        assertTrue("following is acted on through a fresh snapshot: $tap", tap is PhoneCallResult.Dispatched)
+        assertEquals(1, fixture.driver.dispatchCalls)
+    }
+
+    @Test
+    fun `an all apps task never follows a secure surface`() = runTest {
+        listOf("com.android.systemui", "com.android.keyguard", "android").forEach { surface ->
+            val fixture = Fixture(host).connected()
+            val grant =
+                (fixture.controller.grantFromPreauthorization(allAppsScope(), host) as PhoneStandingGrantResult.Granted).grant
+            fixture.driver.packageName = surface
+            val observed =
+                fixture.controller.execute(
+                    PhoneAgentRequest(
+                        requestId = fixture.nextRequestId(),
+                        epoch = grant.epoch,
+                        sessionLabel = "ses-a",
+                        action = PhoneAgentAction.Observe,
+                    ),
+                )
+            assertEquals(
+                surface,
+                PhoneErrorCode.TARGET_FORBIDDEN,
+                (observed as PhoneCallResult.Refused).error,
+            )
+            assertNull(fixture.controller.state.value.observation)
+        }
+    }
+
+    @Test
+    fun `an explicit scope still refuses another allowed package`() = runTest {
+        val fixture = Fixture("com.example.target").connected()
+        val scope =
+            PhoneStandingScope(
+                runtimeId = runtime,
+                sessionLabel = "ses-a",
+                allowedPackages = listOf("com.example.target"),
+                allowedActions = setOf(PhoneActionKind.TAP),
+                windowEndsMs = 1_000_000L,
+                perTaskMs = 60_000L,
+            )
+        val grant =
+            (fixture.controller.grantFromPreauthorization(scope, "com.example.target") as PhoneStandingGrantResult.Granted).grant
+        fixture.driver.packageName = "com.tencent.mobileqq"
+        val observed =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.Observe,
+                ),
+            )
+        assertEquals(PhoneErrorCode.TARGET_MISMATCH, (observed as PhoneCallResult.Refused).error)
+        assertNull(fixture.controller.state.value.observation)
+    }
+
+    @Test
+    fun `a stale binding after an app switch cannot act on the old page`() = runTest {
+        val fixture = Fixture("com.example.one").connected()
+        val grant =
+            (fixture.controller.grantFromPreauthorization(allAppsScope(), "com.example.one") as PhoneStandingGrantResult.Granted).grant
+
+        val first =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.Observe,
+                ),
+            ) as PhoneCallResult.Observed
+
+        // The app switches again: the old page's binding is no longer the current observation.
+        fixture.driver.packageName = "com.example.two"
+        val second =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.Observe,
+                ),
+            ) as PhoneCallResult.Observed
+        assertEquals("com.example.two", second.observation.binding.packageName)
+
+        val staleTap =
+            fixture.controller.execute(
+                PhoneAgentRequest(
+                    requestId = fixture.nextRequestId(),
+                    epoch = grant.epoch,
+                    sessionLabel = "ses-a",
+                    action = PhoneAgentAction.TapRef("n0"),
+                    observation = first.observation.binding,
+                ),
+            )
+        assertEquals(
+            PhoneErrorCode.STALE_OBSERVATION,
+            (staleTap as PhoneCallResult.Refused).error,
+        )
+        assertEquals("an old page is never injected", 0, fixture.driver.dispatchCalls)
     }
 }

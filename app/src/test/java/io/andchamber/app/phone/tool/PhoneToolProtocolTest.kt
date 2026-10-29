@@ -486,12 +486,16 @@ class PhoneToolProtocolTest {
         assertTrue(!hierarchy.contains("reconnect", ignoreCase = true))
         assertTrue(!hierarchy.contains("There is no confirmed phone task"))
         assertTrue("must not claim missing XML support", !hierarchy.contains("XML"))
-        // READ_TIMEOUT abandons the connection, but it is not proof of a network/socket close and
-        // must not become an automatic reconnect instruction.
+        // READ_TIMEOUT abandons the connection, but it is not proof of a network/socket close. It
+        // may announce one bounded background reconnect; it must never tell the model to repeat a
+        // mutating action or to treat the action as failed.
         assertTrue(readTimeout.contains("no longer used"))
         assertTrue(readTimeout.contains("does not prove the network is down"))
-        assertTrue(readTimeout.contains("reconnect explicitly"))
-        assertTrue(readTimeout.contains("cannot recover it automatically"))
+        assertTrue(readTimeout.contains("bounded automatic reconnect in the background"))
+        assertTrue(readTimeout.contains("Check \"status\" for connected"))
+        assertTrue(readTimeout.contains("Do not repeat a mutating action"))
+        assertTrue(!readTimeout.contains("reconnect explicitly"))
+        assertTrue(!readTimeout.contains("cannot recover it automatically"))
         assertTrue(!readTimeout.contains("There is no confirmed phone task"))
         assertTrue(!readTimeout.contains("need_user", ignoreCase = true))
         assertTrue(!readTimeout.contains("hierarchy", ignoreCase = true))

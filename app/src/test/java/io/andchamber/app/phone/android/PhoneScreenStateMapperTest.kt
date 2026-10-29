@@ -122,6 +122,60 @@ class PhoneScreenStateMapperTest {
     }
 
     @Test
+    fun `an all apps live task names the followed package in its display lease`() {
+        val qq = PhoneTarget(label = "QQ", packageName = "com.tencent.mobileqq")
+        val core =
+            PhoneState(
+                enabled = true,
+                epoch = 7,
+                grant =
+                    PhoneGrant(
+                        epoch = 7,
+                        targetPackage = target.packageName,
+                        allowedActions = emptySet(),
+                        grantedAtMs = 1_000,
+                        expiresAtMs = 61_000,
+                        allApps = true,
+                    ),
+                observation =
+                    PhoneObservationSummary(
+                        binding =
+                            PhoneObservationBinding(
+                                observationId = "obs-follow",
+                                generation = 2,
+                                packageName = qq.packageName,
+                                windowId = "w-follow",
+                                rotation = 0,
+                                geometry = io.andchamber.app.phone.core.PhoneGeometry(1080, 2400, 0),
+                            ),
+                        nodeCount = 8,
+                        observedAtMs = 2_000,
+                    ),
+                connection = PhoneConnectionState.CONNECTED,
+            )
+        val mapped =
+            phoneScreenState(
+                core,
+                facts().copy(targets = listOf(target, qq)),
+                nowElapsedMs = 2_000,
+            )
+        val control = mapped.control as PhoneControl.Agent
+        assertEquals("the UI names the app now in front", qq, control.lease.target)
+        assertEquals(qq.packageName, (mapped.task as PhoneTask.Active).target?.packageName)
+        // The observation summary keeps the real followed package for the tool/status surface.
+        assertEquals(qq.packageName, core.observation?.binding?.packageName)
+
+        // After a sent action invalidates the observation, the remembered package keeps the label.
+        val remembered =
+            phoneScreenState(
+                core.copy(observation = null),
+                facts().copy(targets = listOf(target, qq), followedPackage = qq.packageName),
+                nowElapsedMs = 2_000,
+            )
+        assertEquals(qq, (remembered.control as PhoneControl.Agent).lease.target)
+    }
+
+    @Test
     fun `a revoked lease keeps its reason and may still apply`() {
         val halt =
             PhoneHaltSnapshot(

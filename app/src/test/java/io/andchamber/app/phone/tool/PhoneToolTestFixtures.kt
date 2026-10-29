@@ -366,6 +366,13 @@ internal class FakeTaskStarter(
         abortFailure?.let { throw it }
         return abortResult
     }
+
+    /** Native READ_TIMEOUT re-arm count; the tool must ask exactly once per timed-out call. */
+    var readTimeouts: Int = 0
+
+    override suspend fun onReadTimeout() {
+        readTimeouts += 1
+    }
 }
 
 internal class PhoneServerFixture(

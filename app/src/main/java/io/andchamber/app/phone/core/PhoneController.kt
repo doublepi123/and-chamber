@@ -586,7 +586,7 @@ class PhoneController(
             if (current.binding != binding) {
                 return@synchronized PlanResult.Refused(PhoneErrorCode.STALE_OBSERVATION)
             }
-            if (binding.packageName != grant.targetPackage) {
+            if (!grant.allApps && binding.packageName != grant.targetPackage) {
                 return@synchronized PlanResult.Refused(PhoneErrorCode.TARGET_MISMATCH)
             }
             targetPolicy.refusal(binding.packageName, allApps = grant.allApps)?.let {
@@ -1028,11 +1028,21 @@ class PhoneController(
         targetPackage: String,
         allApps: Boolean,
     ): SnapshotCheck {
-        if (snapshot.packageName != targetPackage) {
-            return SnapshotCheck.Invalid(PhoneErrorCode.TARGET_MISMATCH)
-        }
-        targetPolicy.refusal(snapshot.packageName, allApps = allApps)?.let {
-            return SnapshotCheck.Invalid(it)
+        if (allApps) {
+            // Follow mode: the task follows the target app into another allowed app (OAuth,
+            // payment, browser). The package policy is the only name gate; the real package is
+            // recorded in the observation and every action still needs a fresh snapshot of the live
+            // window. Secure surfaces (`android`, system UI, keyguard) stay refused.
+            targetPolicy.refusal(snapshot.packageName, allApps = true)?.let {
+                return SnapshotCheck.Invalid(it)
+            }
+        } else {
+            if (snapshot.packageName != targetPackage) {
+                return SnapshotCheck.Invalid(PhoneErrorCode.TARGET_MISMATCH)
+            }
+            targetPolicy.refusal(snapshot.packageName, allApps = false)?.let {
+                return SnapshotCheck.Invalid(it)
+            }
         }
         if (!validWindowId(snapshot.windowId)) {
             return SnapshotCheck.Invalid(PhoneErrorCode.WINDOW_CHANGED)

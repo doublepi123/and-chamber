@@ -74,7 +74,7 @@ internal fun PhoneErrorCode.toStandingObserveRead(): PhoneStandingObserveRead =
 internal suspend fun observeStandingWithinBudget(
     deadlineElapsedMs: Long,
     nowElapsedMs: () -> Long,
-    expectedPackage: String,
+    acceptPackage: (String) -> Boolean,
     maxAttempts: Int = STANDING_OBSERVE_MAX_ATTEMPTS,
     retryDelayMs: Long = STANDING_OBSERVE_RETRY_MS,
     delayFor: suspend (Long) -> Unit = { delay(it) },
@@ -95,7 +95,7 @@ internal suspend fun observeStandingWithinBudget(
         attempt += 1
         when (val observed = read(remaining)) {
             is PhoneStandingObserveRead.Observed -> {
-                if (observed.packageName == expectedPackage) {
+                if (acceptPackage(observed.packageName)) {
                     // A result that arrives past the shared deadline is never accepted.
                     return if (nowElapsedMs() <= deadlineElapsedMs) {
                         PhoneStandingObserveResult.Observed

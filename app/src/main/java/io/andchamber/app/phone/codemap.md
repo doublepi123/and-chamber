@@ -19,7 +19,10 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   `PhoneTimeLimits.PERMANENT` sentinel, standing block/grant/resume primitives and target policy. The
   target policy has an explicit all-apps mode (host/Settings/installers/`android.*` allowed;
   `android`, system UI and keyguard always refused); the mode is frozen into the grant and every plan
-  re-check reads that frozen value, never the current configuration.
+  re-check reads that frozen value, never the current configuration. In all-apps mode a snapshot of
+  another package is accepted when that policy allows it (the task follows a handoff); the recorded
+  observation keeps the real package and dispatch still needs the same live window. Explicit mode
+  keeps one exact target.
   The controller starts each driver call from the fresh remaining plan deadline (driver margin ≤500 ms
   is reporting-only), and on `READ_TIMEOUT` publishes the logical disconnect/revoke in the same call,
   keeps the first error, preserves unknown, and fences the revoke to the planned connection owner.
@@ -37,11 +40,13 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   (mapped to `WINDOW_CHANGED`), `AdbDeviceFailure.READ_TIMEOUT` for an abandoned read-service
   open/read, and the monotonic read deadline gate. No arbitrary shell tool surface.
 - `tool/`: strict versioned tool schema, authenticated loopback server, per-launch claims/cancel
-  tombstones, session-label routing, direct `request`, `apps` and same-target `open_app`, plus
-  permanent-lease status without a countdown. In all-apps mode `apps` returns the bounded
-  (400, `truncated`), sanitized launchable catalogue with `allApps: true`; explicit mode keeps the old
-  response. `open_app` only reopens the current task's target; one target per task. The old native
-  pending-proposal store remains only for compatibility; the primary mode has no
+  tombstones, session-label routing, direct `request`, `apps` and `open_app`, plus permanent-lease
+  status without a countdown. In all-apps mode `apps` returns the bounded (400, `truncated`),
+  sanitized launchable catalogue with `allApps: true`; explicit mode keeps the old response. In
+  all-apps mode the task follows the foreground into another allowed app and `open_app` may open any
+  launchable allowed app inside the same task/epoch; explicit mode keeps one exact target. A
+  `READ_TIMEOUT` result also asks the native side to re-arm one bounded silent reconnect. The old
+  native pending-proposal store remains only for compatibility; the primary mode has no
   `PENDING_CONFIRMATION`. Labels are not authentication.
 - `android/`: lazy AndroidKeyStore identity, private receipt metadata, native coordinator/foreground
   service, notification pairing replies, target catalogue/verdicts (with an honest truncation fact),
@@ -88,16 +93,21 @@ grant, the foreground stop entry, native task/lease binding, launching one allow
 a real `Observe` of that foreground target before replying `Started(RUNNING)`. Failure rolls back
 exactly the epoch/task. All-apps mode has no membership list: the name policy (host, Settings,
 installers and `android.*` allowed; `android`/system UI/keyguard refused) plus a live launcher check
-gate the target, and the grant freezes the mode for every later re-check. `apps` lists only
+gate the target, and the grant freezes the mode for every later re-check. The startup observation (and
+a continuation) accepts the first stable allowed foreground package, so a target that immediately
+hands off to another allowed app (OAuth/payment/browser) is followed instead of retried; the real
+package is recorded, and every action still needs a fresh snapshot of that live window. `apps` lists
 preauthorized labels/packages in explicit mode, or the bounded launchable catalogue in all-apps mode,
-never an unrestricted catalogue; `open_app` accepts only the live task's same session/target and
-proves the foreground observation.
+never an unrestricted catalogue; explicit mode `open_app` accepts only the live task's same
+session/target, all-apps mode may open any launchable allowed app in the same task/epoch and proves
+the foreground observation.
 
 That start/continuation observation uses one shared budget of at most 15 seconds, including the
 overlay wait and the real remaining time; it retries only explicit window/geometry/target
 transitions. A busy hierarchy is `HIERARCHY_NOT_IDLE`, and a read-service watchdog expiry is
 `READ_TIMEOUT`; the latter publishes the logical disconnect/revoke in the same call and never claims
-the physical close. A complete official `mCurrentFocus=null`/`mFocusedApp=null` line is `NOT_READY`
+the physical close. The native side then re-arms one bounded silent launch-style reconnect for that
+event (no lease/grant/resume/task), so a heavy page does not require the phone page. A complete official `mCurrentFocus=null`/`mFocusedApp=null` line is `NOT_READY`
 and maps to `WINDOW_CHANGED` inside the same budget; malformed/truncated/oversized/unknown output
 stays fail-closed.
 
@@ -183,7 +193,8 @@ start that is stopped during its own startup rolls back its exact epoch (clearin
 nothing may have been applied); a revoked read-only call frees the single driver slot at once. A target that itself asks the
 system to hide non-system overlays (`mForceHideNonSystemOverlayWindow=true`, as Settings does) also
 uses the notification stop entry: the driver accepts only a real witness where our surface still
-exists but the focused app is the live task's own target and the stop channel is verified, then
+exists but the focused app is the live task's own target (the current followed package) and the stop
+channel is verified, then
 re-proves it before each injection. Any other invisible-window state stays fail-closed.
 
 The tool's `progress`, `need_user` and `finish` actions use a frozen explicit epoch and the native

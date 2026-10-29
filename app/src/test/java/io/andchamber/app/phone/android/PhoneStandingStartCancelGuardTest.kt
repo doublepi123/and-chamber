@@ -178,7 +178,7 @@ class PhoneStandingStartCancelGuardTest {
                     observeStandingWithinBudget(
                         deadlineElapsedMs = 15_000L,
                         nowElapsedMs = { 0L },
-                        expectedPackage = targetPackage,
+                        acceptPackage = { it == targetPackage },
                     ) {
                         reads += 1
                         suspendCancellableCoroutine<PhoneStandingObserveRead> { }
