@@ -342,8 +342,11 @@ test('package.json and tool registration shape', () => {
   // need_user is limited to real human-only steps, never transient page/observation noise.
   assert.match(tool.description, /"need_user" is only for a real human-only step/);
   assert.match(tool.description, /signing in/);
+  assert.match(tool.description, /already signed-in third-party authorization/);
+  assert.match(tool.description, /tap its Agree\/Allow button yourself and continue/);
+  assert.match(tool.description, /Do not switch accounts, create accounts or change the selected account/);
   assert.match(tool.description, /verification code/);
-  assert.match(tool.description, /payment or other confirmation/);
+  assert.match(tool.description, /payment or other money confirmation/);
   assert.match(tool.description, /permission decision/);
   assert.match(tool.description, /input the device cannot type/);
   assert.match(tool.description, /choice that belongs to the person/);
