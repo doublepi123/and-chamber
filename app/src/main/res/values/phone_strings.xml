@@ -296,6 +296,13 @@
     <string name="phone_standing_revoke">Turn off chat use</string>
     <string name="phone_standing_step_apps">Choose apps</string>
     <string name="phone_standing_apps_body">Up to %1$d apps. Installed apps and ordinary preinstalled ones can be chosen; settings, permission, password and payment apps can\'t.</string>
+    <string name="phone_standing_all_apps">All apps (including Settings, payments and AndChamber)</string>
+    <string name="phone_standing_all_apps_hint">No app list and no 8-app limit. Off by default.</string>
+    <string name="phone_standing_all_apps_risk_title">High risk: every app</string>
+    <string name="phone_standing_all_apps_risk_body">The agent can open and control any app, including system Settings, payment, bank and password apps, and AndChamber itself.</string>
+    <string name="phone_standing_all_apps_confirm_title">Let chat use all apps?</string>
+    <string name="phone_standing_all_apps_confirm_body">The agent can open and control any app on this phone, including system Settings, payment, bank and password apps, and AndChamber itself. It will see the list of apps you can launch. Each task still uses one app. Locking the screen, taking over and the stop entries still stop it, and opening AndChamber\'s phone-control page still ends the current task.</string>
+    <string name="phone_standing_all_apps_summary">All apps</string>
     <string name="phone_standing_blocked_hidden">%1$d apps can\'t be chosen and aren\'t listed. Search for one to see why.</string>
     <string name="phone_standing_too_many">Too many apps. Choose fewer.</string>
     <string name="phone_standing_window">How long this scope lasts</string>

@@ -296,6 +296,13 @@
     <string name="phone_standing_revoke">关闭聊天使用</string>
     <string name="phone_standing_step_apps">选择应用</string>
     <string name="phone_standing_apps_body">最多 %1$d 个。可以选已安装的应用和普通预装应用；不能选设置、权限、密码和支付类应用。</string>
+    <string name="phone_standing_all_apps">所有 App（包括设置、支付和 AndChamber）</string>
+    <string name="phone_standing_all_apps_hint">不用选列表，也没有 8 个的上限。默认关闭。</string>
+    <string name="phone_standing_all_apps_risk_title">高风险：所有应用</string>
+    <string name="phone_standing_all_apps_risk_body">代理可以打开并操作任何应用，包括系统设置、支付、银行和密码类应用，以及 AndChamber 本身。</string>
+    <string name="phone_standing_all_apps_confirm_title">允许聊天使用所有应用？</string>
+    <string name="phone_standing_all_apps_confirm_body">代理可以打开并操作这台手机上的任何应用，包括系统设置、支付、银行和密码类应用，以及 AndChamber 本身。它会看到你可启动的应用列表。每个任务仍然只用一个应用。锁屏、接管和各个停止入口仍然会让它停下；打开 AndChamber 的手机控制页面仍会结束当前任务。</string>
+    <string name="phone_standing_all_apps_summary">所有 App</string>
     <string name="phone_standing_blocked_hidden">另有 %1$d 个应用不可选，未列出。搜索应用名可查看原因。</string>
     <string name="phone_standing_too_many">选的应用太多了，请少选几个。</string>
     <string name="phone_standing_window">这个范围的有效时长</string>

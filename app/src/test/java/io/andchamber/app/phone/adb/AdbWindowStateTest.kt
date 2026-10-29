@@ -65,6 +65,20 @@ class AdbWindowStateTest {
     }
 
     @Test
+    fun aNamedNonAppFocusWindowIsTypedNotReadyNotAMalformedDump() {
+        // Real focus titles without `pkg/activity`: input method, starting window, system bars.
+        listOf("InputMethod", "Splash Screen com.example.app", "NotificationShade").forEach { title ->
+            val error = assertThrows(AdbWindowStateException::class.java) {
+                AdbWindowStateParser.parse(
+                    "mCurrentFocus=Window{7068ee4 u0 $title}\n" +
+                        "mFocusedApp=ActivityRecord{312191b u0 com.example.app/.MainActivity t16}",
+                )
+            }
+            assertEquals(title, AdbWindowStateFailure.NOT_READY, error.failure)
+        }
+    }
+
+    @Test
     fun aCompleteNullCurrentFocusLineIsTypedNotReady() {
         val error = assertThrows(AdbWindowStateException::class.java) {
             AdbWindowStateParser.parse(

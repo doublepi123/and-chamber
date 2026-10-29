@@ -25,6 +25,12 @@ data class OverlayWindowState(
     val hasSurface: Boolean,
     val visible: Boolean,
     val displayId: Int,
+    /**
+     * Real `mForceHideNonSystemOverlayWindow=true`: the focused app asked WindowManager to hide
+     * every non-system overlay. It explains a policy-hidden window (our surface is still attached
+     * but the system does not show it); it is not visibility proof by itself.
+     */
+    val forceHiddenBySystem: Boolean = false,
 ) {
     /**
      * The manager-owned window key: the full name with the framework `Sys<type>:` prefix removed.
@@ -86,6 +92,7 @@ object OverlayWindowStateParser {
     private val IS_ON_SCREEN = Regex("""isOnScreen=(true|false)""")
     private val VIEW_VISIBILITY = Regex("""mViewVisibility=0x([0-9a-fA-F]+)""")
     private val POLICY_VISIBILITY = Regex("""mPolicyVisibility=(true|false)""")
+    private val FORCE_HIDDEN = Regex("""mForceHideNonSystemOverlayWindow=(true|false)""")
     private val DISPLAY_ID = Regex("""mDisplayId=(\d+)""")
     private val SYS_PREFIX = Regex("""^Sys\d+:""")
 
@@ -126,6 +133,7 @@ object OverlayWindowStateParser {
                 ?.let { it == 0 }
                 ?: true
             val policyVisible = POLICY_VISIBILITY.find(body)?.groupValues?.get(1) != "false"
+            val forceHiddenBySystem = FORCE_HIDDEN.find(body)?.groupValues?.get(1) == "true"
             val displayId = DISPLAY_ID.find(body)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             windows += OverlayWindowState(
                 windowHash = token,
@@ -135,6 +143,7 @@ object OverlayWindowStateParser {
                 hasSurface = hasSurface,
                 visible = hasSurface && isVisible && onScreen && viewVisible && policyVisible,
                 displayId = displayId,
+                forceHiddenBySystem = forceHiddenBySystem,
             )
         }
 
@@ -182,21 +191,22 @@ object OverlayWitnessReader {
         val key = expectation.windowToken
         val window = key?.let { OverlayWindowStateParser.findWindow(scan, it) }
         val focused = window != null && scan.currentFocusToken == window.windowHash
+        val forceHiddenBySystem = window?.forceHiddenBySystem == true
         if (nowMs > expectation.freshnessDeadlineMs) {
-            return unavailable(expectation, display, focused, key)
+            return unavailable(expectation, display, focused, key, window)
         }
         if (forcedHiddenPhase != null) {
             if (forcedHiddenPhase != OverlayPhase.CAPTURE_HIDDEN &&
                 forcedHiddenPhase != OverlayPhase.COLLECTION_HIDDEN
             ) {
-                return unavailable(expectation, display, focused, key)
+                return unavailable(expectation, display, focused, key, window)
             }
             if (key == null) {
-                return unavailable(expectation, display, focused, null)
+                return unavailable(expectation, display, focused, null, null)
             }
             if (window != null && window.hasSurface && window.visible) {
                 // The manager claimed a hide but the real window tree still shows a visible surface.
-                return unavailable(expectation, display, focused, key)
+                return unavailable(expectation, display, focused, key, window)
             }
             return OverlayWitness(
                 owner = expectation.owner,
@@ -210,10 +220,11 @@ object OverlayWitnessReader {
                 focused = focused,
                 display = display,
                 freshnessDeadlineMs = expectation.freshnessDeadlineMs,
+                forceHiddenBySystem = forceHiddenBySystem,
             )
         }
         if (expectation.phase != OverlayPhase.VISIBLE || key == null) {
-            return unavailable(expectation, display, focused, key)
+            return unavailable(expectation, display, focused, key, window)
         }
         val bounds = window?.bounds
         if (window == null ||
@@ -223,7 +234,7 @@ object OverlayWitnessReader {
             bounds == null ||
             !bounds.isWithin(display)
         ) {
-            return unavailable(expectation, display, focused, key)
+            return unavailable(expectation, display, focused, key, window)
         }
         return OverlayWitness(
             owner = expectation.owner,
@@ -237,14 +248,21 @@ object OverlayWitnessReader {
             focused = focused,
             display = display,
             freshnessDeadlineMs = expectation.freshnessDeadlineMs,
+            forceHiddenBySystem = forceHiddenBySystem,
         )
     }
 
+    /**
+     * An UNAVAILABLE witness keeps the parsed real facts about the matched window (surface present,
+     * system-force-hidden) so the driver can tell "our window exists but the target app hides it"
+     * apart from "the window is gone / unknown". Neither field ever makes the witness VISIBLE.
+     */
     private fun unavailable(
         expectation: OverlayExpectation,
         display: PhoneGeometry,
         focused: Boolean,
         key: String?,
+        window: OverlayWindowState?,
     ): OverlayWitness = OverlayWitness(
         owner = expectation.owner,
         generation = expectation.generation,
@@ -252,10 +270,11 @@ object OverlayWitnessReader {
         phase = OverlayPhase.UNAVAILABLE,
         windowToken = key,
         actualBounds = emptyList(),
-        hasSurface = false,
+        hasSurface = window?.hasSurface == true,
         visible = false,
         focused = focused,
         display = display,
         freshnessDeadlineMs = expectation.freshnessDeadlineMs,
+        forceHiddenBySystem = window?.forceHiddenBySystem == true,
     )
 }

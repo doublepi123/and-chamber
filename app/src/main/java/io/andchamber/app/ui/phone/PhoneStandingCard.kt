@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -24,6 +26,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -257,7 +260,16 @@ private fun ScopeSummary(
 ) {
     HorizontalDivider()
     Text(stringResource(R.string.phone_standing_scope), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-    standing.apps.forEach { app ->
+    if (standing.allApps) {
+        Text(
+            stringResource(R.string.phone_standing_all_apps_summary),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.testTag(StandingAllAppsTags.SUMMARY),
+        )
+    }
+    if (!standing.allApps) standing.apps.forEach { app ->
         Column {
             Text(app.label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(app.packageName, style = ChamberTextStyles.codeSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -295,6 +307,8 @@ private fun StandingEditor(
     cancellable: Boolean,
 ) {
     var chosen by rememberSaveable { mutableStateOf(standing.apps.map { it.packageName }.toSet()) }
+    // "All apps" is an explicit choice, never the default; editing an all-apps scope starts on it.
+    var allApps by rememberSaveable { mutableStateOf(standing.allApps) }
     var scope by rememberSaveable { mutableStateOf((standing.actions.ifEmpty { DEFAULT_ACTIONS }).map { it.name }.toSet()) }
     var hours by rememberSaveable { mutableIntStateOf(initialWindowChoice(standing.status)) }
     // "Permanent" is a choice, never the default: new scopes start at the bounded defaults.
@@ -305,49 +319,76 @@ private fun StandingEditor(
 
     val apps = sanitizeStandingApps(state.targets.filter { it.packageName in chosen }, state.hostPackage)
     val chosenActions = scope.mapNotNull { n -> PhoneActionScope.entries.firstOrNull { it.name == n } }.toSet()
-    val block = standingBlock(state, state.targets.filter { it.packageName in chosen }, chosenActions)
+    val block = standingBlock(state, state.targets.filter { it.packageName in chosen }, chosenActions, allApps)
 
     HorizontalDivider()
-    StepHeading(1, stringResource(R.string.phone_standing_step_apps), done = apps.isNotEmpty())
-    BodyText(stringResource(R.string.phone_standing_apps_body, MAX_STANDING_APPS))
-    androidx.compose.material3.OutlinedTextField(
-        value = query,
-        onValueChange = { query = it.take(80) },
-        label = { Text(stringResource(R.string.phone_target_search)) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    val listing = targetListing(state.targets, state.hostPackage, query, null)
-    // Chosen apps stay listed even when they fall outside the compact slice.
-    val rows = (state.targets.filter { it.packageName in chosen }.map { it to targetBlock(it, state.hostPackage) } + listing.rows).distinctBy { it.first.packageName }
-    rows.forEach { (target, blockReason) ->
-        val checked = target.packageName in chosen
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 52.dp)
-                    .toggleable(
-                        value = checked,
-                        enabled = blockReason == null && (checked || chosen.size < MAX_STANDING_APPS),
-                        role = Role.Checkbox,
-                        onValueChange = { on -> chosen = if (on) chosen + target.packageName else chosen - target.packageName },
-                    ),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Checkbox(checked = checked && blockReason == null, onCheckedChange = null, enabled = blockReason == null)
-            Spacer(Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(target.label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(target.packageName, style = ChamberTextStyles.codeSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (blockReason != null) {
-                    Text(stringResource(blockReason.message()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+    StepHeading(1, stringResource(R.string.phone_standing_step_apps), done = allApps || apps.isNotEmpty())
+    // Explicit, off by default. On: the picker and its 8-app cap go away; off: the picker (and the
+    // earlier selection) come back unchanged.
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 52.dp)
+                .toggleable(value = allApps, role = Role.Switch, onValueChange = { allApps = it })
+                .testTag(StandingAllAppsTags.SWITCH),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(stringResource(R.string.phone_standing_all_apps), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
+            Text(stringResource(R.string.phone_standing_all_apps_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(8.dp))
+        Switch(checked = allApps, onCheckedChange = null)
+    }
+    if (allApps) {
+        PhoneNotice(
+            NoticeTone.Error,
+            Icons.Rounded.WarningAmber,
+            stringResource(R.string.phone_standing_all_apps_risk_title),
+            body = stringResource(R.string.phone_standing_all_apps_risk_body),
+        )
+    } else {
+        BodyText(stringResource(R.string.phone_standing_apps_body, MAX_STANDING_APPS))
+        androidx.compose.material3.OutlinedTextField(
+            value = query,
+            onValueChange = { query = it.take(80) },
+            label = { Text(stringResource(R.string.phone_target_search)) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        val listing = targetListing(state.targets, state.hostPackage, query, null)
+        // Chosen apps stay listed even when they fall outside the compact slice.
+        val rows = (state.targets.filter { it.packageName in chosen }.map { it to targetBlock(it, state.hostPackage) } + listing.rows).distinctBy { it.first.packageName }
+        rows.forEach { (target, blockReason) ->
+            val checked = target.packageName in chosen
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .toggleable(
+                            value = checked,
+                            enabled = blockReason == null && (checked || chosen.size < MAX_STANDING_APPS),
+                            role = Role.Checkbox,
+                            onValueChange = { on -> chosen = if (on) chosen + target.packageName else chosen - target.packageName },
+                        ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = checked && blockReason == null, onCheckedChange = null, enabled = blockReason == null)
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(target.label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(target.packageName, style = ChamberTextStyles.codeSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (blockReason != null) {
+                        Text(stringResource(blockReason.message()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
                 }
             }
         }
+        if (listing.moreAllowed > 0) BodyText(stringResource(R.string.phone_targets_more, listing.moreAllowed))
+        if (listing.hiddenBlocked > 0) BodyText(stringResource(R.string.phone_standing_blocked_hidden, listing.hiddenBlocked))
     }
-    if (listing.moreAllowed > 0) BodyText(stringResource(R.string.phone_targets_more, listing.moreAllowed))
-    if (listing.hiddenBlocked > 0) BodyText(stringResource(R.string.phone_standing_blocked_hidden, listing.hiddenBlocked))
 
     HorizontalDivider()
     StepHeading(2, stringResource(R.string.phone_grant_step_limits), done = chosenActions.isNotEmpty())
@@ -415,10 +456,26 @@ private fun StandingEditor(
         AlertDialog(
             onDismissRequest = { confirming = false },
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            title = { Text(stringResource(R.string.phone_standing_confirm_title), style = MaterialTheme.typography.titleLarge) },
+            title = {
+                Text(
+                    stringResource(if (allApps) R.string.phone_standing_all_apps_confirm_title else R.string.phone_standing_confirm_title),
+                    style = MaterialTheme.typography.titleLarge,
+                )
+            },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(apps.joinToString(stringResource(R.string.phone_list_separator)) { it.label }, style = MaterialTheme.typography.bodyMedium)
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (allApps) {
+                        // The strongest warning first, before the details.
+                        PhoneNotice(
+                            NoticeTone.Error,
+                            Icons.Rounded.WarningAmber,
+                            stringResource(R.string.phone_standing_all_apps_risk_title),
+                            body = stringResource(R.string.phone_standing_all_apps_confirm_body),
+                            modifier = Modifier.testTag(StandingAllAppsTags.RISK),
+                        )
+                    } else {
+                        Text(apps.joinToString(stringResource(R.string.phone_list_separator)) { it.label }, style = MaterialTheme.typography.bodyMedium)
+                    }
                     Text(stringResource(R.string.phone_grant_confirm_actions, actionList(chosenActions)), style = MaterialTheme.typography.bodyMedium)
                     Text(
                         if (hours == PERMANENT_CHOICE) stringResource(R.string.phone_standing_confirm_window_permanent) else stringResource(R.string.phone_standing_confirm_window_hours, hours),
@@ -443,8 +500,8 @@ private fun StandingEditor(
                 TextButton(
                     onClick = {
                         confirming = false
-                        if (standingBlock(state, apps, chosenActions) == null) {
-                            actions.onSaveStanding(standingRequest(apps, chosenActions, hours, perTask))
+                        if (standingBlock(state, apps, chosenActions, allApps) == null) {
+                            actions.onSaveStanding(standingRequest(apps, chosenActions, hours, perTask, allApps))
                             onDone()
                         }
                     },
@@ -621,7 +678,14 @@ internal fun continueBlockedReason(state: PhoneScreenState): Int {
         delivery == PhoneContinueDelivery.Sending -> R.string.phone_continue_blocked_sending
         !continueRequestAllowed(delivery) -> R.string.phone_continue_blocked_already
         standingBaseReadiness(state) != StandingReadiness.Ready -> R.string.phone_continue_blocked_not_ready
-        state.standing?.apps?.none { it.packageName == halted.lease.target.packageName } == true -> R.string.phone_continue_blocked_scope
+        state.standing?.let { !standingCoversApp(it, halted.lease.target.packageName) } == true -> R.string.phone_continue_blocked_scope
         else -> R.string.phone_continue_blocked_generic
     }
+}
+
+/** Test tags for the "All apps" choice, kept beside the card that draws it. */
+internal object StandingAllAppsTags {
+    const val SWITCH = "phone.standingAllApps"
+    const val RISK = "phone.standingAllAppsRisk"
+    const val SUMMARY = "phone.standingAllAppsSummary"
 }

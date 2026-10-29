@@ -16,13 +16,18 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
 
 - `core/`: Android-free contracts, admission guard, single-operation controller, bounded request
   records, observation generations, structured delivery/unknown results, monotonic leases, the single
-  `PhoneTimeLimits.PERMANENT` sentinel, standing block/grant/resume primitives and target policy.
+  `PhoneTimeLimits.PERMANENT` sentinel, standing block/grant/resume primitives and target policy. The
+  target policy has an explicit all-apps mode (host/Settings/installers/`android.*` allowed;
+  `android`, system UI and keyguard always refused); the mode is frozen into the grant and every plan
+  re-check reads that frozen value, never the current configuration.
   The controller starts each driver call from the fresh remaining plan deadline (driver margin ≤500 ms
   is reporting-only), and on `READ_TIMEOUT` publishes the logical disconnect/revoke in the same call,
   keeps the first error, preserves unknown, and fences the revoke to the planned connection owner.
 - `standing/`: native-only standing scope, admission policy, refusal/start/open-app result types and
-  the `PhoneTaskStarter` port. Permanent window/per-task values remain configuration and are still
-  bounded by a finite scope end; the model/tool surface cannot construct a scope or grant itself.
+  the `PhoneTaskStarter` port. A scope is either a non-empty deduplicated explicit package list or the
+  person's explicit all-apps shape (empty list, policy in all-apps mode, membership skipped); mixed
+  shapes are `INVALID`. Permanent window/per-task values remain configuration and are still bounded
+  by a finite scope end; the model/tool surface cannot construct a scope or grant itself.
 - `adb/`: local-host policy, pairing receipts, fixed command schema, bounded XML/window parsing,
   window/content witnesses (actions compare only the real-window part; a tap by ref also needs its
   element at the observed bounds), native device transport and driver. Fixed typed read failures:
@@ -32,14 +37,17 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   (mapped to `WINDOW_CHANGED`), `AdbDeviceFailure.READ_TIMEOUT` for an abandoned read-service
   open/read, and the monotonic read deadline gate. No arbitrary shell tool surface.
 - `tool/`: strict versioned tool schema, authenticated loopback server, per-launch claims/cancel
-  tombstones, session-label routing, direct `request`, preauthorized `apps` and same-target
-  `open_app`, plus permanent-lease status without a countdown. The old native pending-proposal store
-  remains only for compatibility; the primary mode has no `PENDING_CONFIRMATION`. Labels are not
-  authentication.
+  tombstones, session-label routing, direct `request`, `apps` and same-target `open_app`, plus
+  permanent-lease status without a countdown. In all-apps mode `apps` returns the bounded
+  (400, `truncated`), sanitized launchable catalogue with `allApps: true`; explicit mode keeps the old
+  response. `open_app` only reopens the current task's target; one target per task. The old native
+  pending-proposal store remains only for compatibility; the primary mode has no
+  `PENDING_CONFIRMATION`. Labels are not authentication.
 - `android/`: lazy AndroidKeyStore identity, private receipt metadata, native coordinator/foreground
-  service, notification pairing replies, target catalogue/verdicts, bounded auto-port discovery with
-  resolve tokens and loopback bind validation, process/epoch intent identities, the validating
-  notification Return Activity, standing config persistence (finite or permanent sentinel)/mapping,
+  service, notification pairing replies, target catalogue/verdicts (with an honest truncation fact),
+  bounded auto-port discovery with resolve tokens and loopback bind validation, process/epoch intent
+  identities, the validating notification Return Activity, standing config persistence (finite or
+  permanent sentinel; the all-apps flag is absent=false and a non-boolean value rejects the document),
   the fail-closed standing pause projection and fresh-gated person resume coordinator, the shared
   startup/continuation observation loop (one 15 s budget, only explicit window transitions retried,
   first typed failure retained), the lazy tool starter adapter and the one-shot continuation sender.
@@ -52,9 +60,11 @@ transform/tool list. See [feature boundaries](../../../../../../../../docs/phone
   point/swipe exclusion, plus the default-false `makeWay` capsule escape on the barrier contract. A
   manager expectation is not proof that the overlay is visible.
 - `android/overlay/`: separate bounded display service, permission/demo flow, manager-owned layout,
-  first-frame-awaited automatic make-way placement, capture-only read-hide tickets, prompt/notice
-  projection from the current task's notification question, progress adapters, the lazy driver
-  barrier and the bounded `awaitDriverSurface(epoch)` used before the first driver read.
+  first-frame-awaited automatic make-way placement, capture-only read-hide tickets (hide makes the
+  attached root view `INVISIBLE`, keeps the window/token/surface/Compose owner and restores the same
+  view after a real frame; no remove/re-add flash), prompt/notice projection from the current task's
+  notification question, progress adapters, the lazy driver barrier and the bounded
+  `awaitDriverSurface(epoch)` used before the first driver read.
 
 ## Flow
 
@@ -67,17 +77,21 @@ ready when `output.ok==true` and `output.id=="andchamber_phone"`. Stop/new launc
 and late results are ignored; the legacy transport handshake remains only as a fallback when no RPC
 probe is wired. The runtime is restarted only after the person confirms it.
 
-Saving a standing scope stores apps, actions, the window and per-task duration; it is configuration,
+Saving a standing scope stores apps (or the all-apps flag with no list), actions, the window and
+per-task duration; it is configuration,
 not a lease. Either duration can be the explicit `PhoneTimeLimits.PERMANENT` sentinel; it is stored
 and restored as configuration only, never as a persisted grant. A finite window still bounds a
 permanent per-task choice. The first valid chat `request` binds the scope to the current runtime and
 session. Every task then creates a fresh epoch and a lease bounded by the per-task duration and the
 remaining window; another session is refused only while the bound chat still owns a live/retained task (after it ends, the next task from any chat on the same runtime rebinds the session). `request` performs scope checks, the core standing
-grant, the foreground stop entry, native task/lease binding, launching one preauthorized package and
+grant, the foreground stop entry, native task/lease binding, launching one allowed package and
 a real `Observe` of that foreground target before replying `Started(RUNNING)`. Failure rolls back
-exactly the epoch/task. `apps` lists only preauthorized labels/packages, never the installed
-catalogue; `open_app` accepts only the live task's same session/target and proves the foreground
-observation.
+exactly the epoch/task. All-apps mode has no membership list: the name policy (host, Settings,
+installers and `android.*` allowed; `android`/system UI/keyguard refused) plus a live launcher check
+gate the target, and the grant freezes the mode for every later re-check. `apps` lists only
+preauthorized labels/packages in explicit mode, or the bounded launchable catalogue in all-apps mode,
+never an unrestricted catalogue; `open_app` accepts only the live task's same session/target and
+proves the foreground observation.
 
 That start/continuation observation uses one shared budget of at most 15 seconds, including the
 overlay wait and the real remaining time; it retries only explicit window/geometry/target
@@ -101,7 +115,8 @@ otherwise legacy resolve is serial and bounded. Resolve results are gated by per
 tokens and session revisions, so a service-lost callback cannot revive a stale port.
 
 Returning to ordinary local chat does not revoke. Entering the real native phone page applies the
-host-return stop; notification/overlay Return remain explicit revoke actions. `need_user`, takeover,
+host-return stop, and so does resuming the app while that page is the composed route; notification and
+overlay Return remain explicit revoke actions. `need_user`, takeover,
 unknown outcome, screen lock, connection loss and runtime change set a standing block. Only a native
 person confirmation may continue: the same retained task/session/runtime gets a fresh epoch, a fresh
 observation and exactly one fixed wake-up prompt through the launch-guarded `LocalApiClient` to the
@@ -147,17 +162,29 @@ tests reachability without granting control. Explicit notification-only mode ret
 driver path. Selected overlay mode requires real window evidence and keeps the capsule visible for
 observation: it is never the focused window, so its nodes cannot enter the focused app's hierarchy
 dump, and a fresh VISIBLE witness is required before and after the read. Only capture hides and
-restores its own surface, and only after a first frame. A tap/focus point or swipe segment that would
-land on the capsule triggers one bounded make-way layout (opposite edge at the same height, then the
-farthest vertical half) for the current live owner only; it never grants, renews, stops or persists
-the person's drag posture, and a still-obstructed action is `OVERLAY_OBSTRUCTED` with nothing sent.
-Before the first read
-for an epoch, the native side waits on a bounded current-epoch surface attach; a timeout fails the
+restores its own surface: the same attached window's root view goes `INVISIBLE` (proved from
+`mViewVisibility=0x4`, never by removing the window) and is shown again after a real frame. The
+collapsed live capsule reserves its status line plus two progress lines, so progress updates never
+resize the WRAP_CONTENT window. A tap/focus point or swipe segment that would land on the capsule
+triggers one bounded make-way layout (opposite edge at the same height, then the farthest vertical
+half) for the current live owner only; it never grants, renews, stops or persists the person's drag
+posture, and a still-obstructed action is `OVERLAY_OBSTRUCTED` with nothing sent. Before the first
+read for an epoch, the native side waits on a bounded current-epoch surface attach; a timeout fails the
 start/continuation and rolls back exactly that lease. Overlay loss reports an honest
 stop-channel/visibility reason, never a person takeover, and requires native recovery. Hide/restore
 of a capture is separate from a real failure. A short synchronized ticket store isolates
 cancellation, restore timeout and newer owners; stop requests are never converted into rollback
-claims. The overlay can stop/return/end, never grant or renew.
+claims. The overlay can stop/return/end, never grant or renew. A host-target task (AndChamber itself)
+stays on the notification stop entry: the manager detaches its surface while the host Activity is in
+front, so the driver keeps its original notification-only path instead of waiting for a window that
+cannot appear; a shown surface still enforces the normal barrier rules. A host-target `request` is
+refused with `PHONE_SCREEN_OPEN` before any grant while the native phone page is the open route, and a
+start that is stopped during its own startup rolls back its exact epoch (clearing that halt only when
+nothing may have been applied); a revoked read-only call frees the single driver slot at once. A target that itself asks the
+system to hide non-system overlays (`mForceHideNonSystemOverlayWindow=true`, as Settings does) also
+uses the notification stop entry: the driver accepts only a real witness where our surface still
+exists but the focused app is the live task's own target and the stop channel is verified, then
+re-proves it before each injection. Any other invisible-window state stays fail-closed.
 
 The tool's `progress`, `need_user` and `finish` actions use a frozen explicit epoch and the native
 published route. Native-only completion callbacks carry observation/delivery metadata, not typed
@@ -185,7 +212,11 @@ Source/license/relink information is in `third_party/phone-adb/`.
 
 JVM tests cover state/races/driver/protocol/receipt codecs, standing admission/rollback, permanent
 duration/sentinel handling, the standing pause projection/resume gate, discovery endpoint/token/probe
-policy, registration probe retry/cancellation and readiness ownership. Native wiring and UI smoke are
+policy, registration probe retry/cancellation and readiness ownership. They also cover the all-apps
+configuration shape/persistence, the two scope shapes, the all-apps target policy (host/Settings
+allowed; `android`/system UI/keyguard refused), a grant-frozen mode used by later observation
+re-checks, and both `apps` listing shapes (explicit list vs. bounded/truncated launchable catalogue).
+Native wiring and UI smoke are
 under `androidTest/.../phone/`. `scripts/phone-e2e/` supplies a synthetic target
 (`io.example.phonefixture`) and a deterministic model protocol, not a fake device driver or model
 reasoning. Covered API 35/x86_64 emulator flows passed, including direct begin, `apps`/`open_app`,

@@ -123,6 +123,16 @@ class LaunchDecisionTest {
     }
 
     @Test
+    fun `leaving from home or the phone page opens the local instance`() {
+        // Both Home and the native phone page clear the remembered instance, exactly like a
+        // remembered local id: the next launch never reopens a remote behind the person's back.
+        val remotes = setOf("r1")
+        assertEquals(ResumeTarget.Local, resumeTarget(null, remotes, linkPending = false))
+        assertEquals(ResumeTarget.Local, resumeTarget(null, emptySet(), linkPending = false))
+        assertEquals(ResumeTarget.Local, resumeTarget(ServerTarget.LOCAL_ID, remotes, linkPending = false))
+    }
+
+    @Test
     fun `remote resume covers the first frame regardless of runtime state`() {
         assertEquals(LaunchStage.Opening, initialLaunchStage(true, true, RuntimeState.NotInstalled, remoteResume = true))
         assertEquals(LaunchStage.Done, initialLaunchStage(true, false, RuntimeState.NotInstalled, remoteResume = true))

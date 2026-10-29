@@ -29,6 +29,7 @@ import io.andchamber.app.phone.core.PhoneGrantResult
 import io.andchamber.app.phone.core.PhoneLimits
 import io.andchamber.app.phone.core.PhoneState
 import io.andchamber.app.phone.core.PhoneStandingBlockReason
+import io.andchamber.app.phone.core.PhoneTargetPolicy
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.overlay.progress.PhoneProgressKind
 import io.andchamber.app.phone.overlay.progress.PhoneProgressReason
@@ -36,6 +37,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneStopAcknowledgement
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import io.andchamber.app.phone.standing.PhoneOpenAppResult
+import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.phone.standing.PhoneStandingResume
 import io.andchamber.app.phone.standing.PhoneStandingScope
@@ -83,6 +85,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
@@ -126,6 +129,8 @@ internal class PhoneIntegration(
     private val wallClock: () -> Long = { System.currentTimeMillis() },
     private val hostPackage: String = context.packageName,
     private val launchTarget: (String) -> Boolean = { launchDefaultApp(context, it) },
+    /** Read-only: does this package have a launcher activity right now? Never grants. */
+    private val hasLaunchTarget: (String) -> Boolean = { packageName -> hasLauncherActivity(context, packageName) },
     private val openDeveloperSettings: () -> Unit = { openDevelopmentSettings(context) },
     private val openNotificationSettings: () -> Unit = { openAppNotificationSettings(context) },
     private val serviceStart: (Long) -> Boolean = { epoch -> PhoneControlService.start(context, epoch) },
@@ -174,6 +179,22 @@ internal class PhoneIntegration(
     @Volatile
     private var standingViewCache: PhoneStandingView? = null
 
+    /**
+     * All-apps mode listing, published from the launcher catalogue on the main thread. Bounded and
+     * sanitized; it is a picker, never authority.
+     */
+    @Volatile
+    private var launchableAppsCache: List<PhoneStandingApp> = emptyList()
+
+    @Volatile
+    private var launchableAppsTruncated: Boolean = false
+
+    /** True once a launcher-catalogue load was started for the all-apps listing. */
+    private var launchableCatalogRequested: Boolean = false
+
+    /** All-apps name policy, shared by the listing, a new request and a re-open. */
+    private val allAppsPolicy = PhoneTargetPolicy(hostPackage)
+
     private var continuationDelivery = PhoneContinueDelivery.Idle
 
     /**
@@ -203,6 +224,13 @@ internal class PhoneIntegration(
 
     /** Bumped whenever the real native phone screen opens; a queued chat start must not proceed. */
     private var phoneScreenGeneration = 0L
+
+    /**
+     * True while the native PHONE route is composed. Only that route's own entry/dispose and its
+     * activity-resume effect touch it. A host-target start is refused while it is true: the host
+     * launch would bring that page forward and the page applies the host-return stop.
+     */
+    private var phoneScreenOpen = false
 
     private val facts =
         MutableStateFlow(
@@ -291,6 +319,17 @@ internal class PhoneIntegration(
     private var connectSearchActive = false
     private var connectSearchConsumed = false
 
+    /**
+     * A launch reconnect stays silent: when nothing answers (wireless debugging off, no endpoint)
+     * it reports no problem, so the native page keeps its ordinary "Find and connect" path.
+     */
+    private var connectSearchSilent = false
+
+    /** One launch reconnect per app run; the person's own connect is never limited by it. */
+    private var launchAutoConnectAttempted = false
+    private var launchAutoConnectInFlight = false
+    private var launchAutoConnectRuntime: String? = null
+
     private val autoConnect = PhoneAutoConnectGate()
 
     private val observers = mutableListOf<Job>()
@@ -362,7 +401,11 @@ internal class PhoneIntegration(
         // The real native phone screen is in front: apply the old host-return stop exactly here,
         // not merely because the Activity resumed on the chat screen. Bump the generation first so
         // a queued chat start can never launch after this point.
+        phoneScreenOpen = true
         phoneScreenGeneration += 1
+        // A silent launch reconnect yields to the person's own control surface; it must not leave
+        // the page waiting on a search the person did not start.
+        if (connectSearchActive && connectSearchSilent) cancelConnectSearch(clearPending = true)
         onHostResumed()
         if (!facts.value.available) return
         recheckStopChannel()
@@ -374,6 +417,7 @@ internal class PhoneIntegration(
     }
 
     fun onScreenClosed() {
+        phoneScreenOpen = false
         // The ordinary screen's cheap hint discovery is gone. An explicit pairing must keep its
         // foreground discovery while the person is in the system settings pages; only the separate
         // in-process "connect to this phone" search belongs to the screen.
@@ -502,6 +546,26 @@ internal class PhoneIntegration(
             packageName = current.target.packageName,
         )
     }
+
+    /**
+     * Read-only, thread-safe: the live native grant's target is AndChamber itself. The overlay
+     * manager uses it to stay on the notification-only path while the host is the app in front,
+     * because its own surface is deliberately detached then. It never grants, stops or widens
+     * anything.
+     */
+    fun currentTaskIsHost(): Boolean = controller.state.value.grant?.targetPackage == hostPackage
+
+    /**
+     * Read-only, thread-safe: the live grant's target package, or null. Used only to compare the
+     * focused app for the "target hides non-system overlays" fallback; never authority.
+     */
+    fun liveTaskTargetPackage(): String? = controller.state.value.grant?.targetPackage
+
+    /**
+     * Read-only, thread-safe: the person's notification stop entry is verified right now. The
+     * overlay fallback may only use the notification path while this is true.
+     */
+    fun notificationStopVerified(): Boolean = facts.value.stopChannel == PhoneStopChannel.Verified
 
     /**
      * Stops exactly the task/epoch the model asked to hand over. Main thread only. It returns null
@@ -678,8 +742,21 @@ internal class PhoneIntegration(
                 blocked = core.standingBlocked || core.blocked != null,
             )
         if (refusal != null) return PhoneTaskStartResult.Refused(refusal)
-        if (state.config.apps.none { it.packageName == packageName }) {
+        if (state.config.allApps) {
+            // No list to check: the all-apps name policy plus a real launcher activity right now.
+            if (allAppsPolicy.refusal(packageName, allApps = true) != null ||
+                !hasLaunchTarget(packageName)
+            ) {
+                return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+            }
+        } else if (state.config.apps.none { it.packageName == packageName }) {
             return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+        // A host-target request must not bring the native phone page forward: that page applies the
+        // host-return stop and would revoke this brand-new grant mid-observation. Refuse before any
+        // grant/lease; the person leaves the page and retries.
+        if (hostTargetBlockedByPhoneScreen(packageName, hostPackage, phoneScreenOpen)) {
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.PHONE_SCREEN_OPEN)
         }
         // The person must have a reachable stop entry before any new lease is created.
         val stopChannel = notifications.stopChannelState()
@@ -703,6 +780,7 @@ internal class PhoneIntegration(
                 windowEndsMs = state.endsAtElapsedMs,
                 perTaskMs = state.config.perTaskMs,
                 taskRevision = revision,
+                allApps = state.config.allApps,
             )
         val granted =
             when (val result = controller.grantFromPreauthorization(scope, packageName)) {
@@ -860,6 +938,13 @@ internal class PhoneIntegration(
         ) {
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
         }
+        // All-apps mode keeps the same two gates as a new request: the name policy and a real
+        // launcher activity right now. Explicit mode already proved its list at grant time.
+        if (state.config.allApps &&
+            (allAppsPolicy.refusal(packageName, allApps = true) != null || !hasLaunchTarget(packageName))
+        ) {
+            return PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
         val epoch = grant.epoch
         if (!runCatching { launchTarget(packageName) }.getOrDefault(false)) {
             return PhoneOpenAppResult.Refused(PhoneStandingRefusal.START_FAILED)
@@ -990,13 +1075,20 @@ internal class PhoneIntegration(
             mutateFacts { it.copy(busy = PhoneBusy.RequestIgnored) }
             return
         }
+        // "All apps" is the person's explicit whole-device choice: no list is stored. Any apps the
+        // screen still carries alongside that flag are ignored, so the two shapes can never mix.
+        val allApps = request.allApps
         val apps =
-            request.apps
-                .distinctBy { it.packageName }
-                .filter { PhoneTargetCatalog.verdictFor(it.packageName, hostPackage) == PhoneTargetVerdict.Allowed }
-                .take(MAX_STANDING_APPS)
+            if (allApps) {
+                emptyList()
+            } else {
+                request.apps
+                    .distinctBy { it.packageName }
+                    .filter { PhoneTargetCatalog.verdictFor(it.packageName, hostPackage) == PhoneTargetVerdict.Allowed }
+                    .take(MAX_STANDING_APPS)
+            }
         val kinds = actionKinds(request.actions)
-        if (apps.isEmpty() ||
+        if ((!allApps && apps.isEmpty()) ||
             kinds.isEmpty() ||
             !validStandingBounds(request.windowMs, request.perTaskMs)
         ) {
@@ -1027,6 +1119,7 @@ internal class PhoneIntegration(
                 // PERMANENT maps to PERMANENT without adding MAX to the clock (overflow).
                 windowEndsAtWallMs = PhoneTimeLimits.expiresAt(nowWallMs, request.windowMs),
                 perTaskMs = request.perTaskMs,
+                allApps = allApps,
             )
         standingState =
             PhoneStandingState(
@@ -1133,7 +1226,7 @@ internal class PhoneIntegration(
         ) {
             return
         }
-        if (state.config.apps.none { it.packageName == halt.lease.target.packageName }) return
+        if (!standingTargetCovered(state.config, halt.lease.target.packageName)) return
         if (facts.value.runtimeStatus.tool != io.andchamber.app.ui.phone.PhoneToolStatus.Ready) return
         if (facts.value.stopChannel != PhoneStopChannel.Verified) return
         continuationInFlight = true
@@ -1386,6 +1479,20 @@ internal class PhoneIntegration(
             clearSendingWhenSuperseded()
             return
         }
+        // Revalidate after the async resume: the all-apps launcher fact may have changed, and this
+        // keeps the same policy+launcher rule as the pre-confirmation gate. Explicit mode is just
+        // list membership, exactly as before.
+        if (!standingTargetCovered(state.config, target.packageName)) {
+            if (supersededBeforeGrant()) {
+                clearSendingWhenSuperseded()
+            } else {
+                controller.blockStanding(halt.reason.toStandingBlockReason())
+                val failure = continuationFailureFor(null, null, PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+                setContinuationDelivery(continuationPreWakeDelivery(), failure)
+                refreshContinuation()
+            }
+            return
+        }
         val scope =
             PhoneStandingScope(
                 runtimeId = runtimeId,
@@ -1395,6 +1502,7 @@ internal class PhoneIntegration(
                 windowEndsMs = state.endsAtElapsedMs,
                 perTaskMs = state.config.perTaskMs,
                 taskRevision = revision,
+                allApps = state.config.allApps,
             )
         val granted =
             when (val result = controller.grantFromPreauthorization(scope, target.packageName)) {
@@ -1707,6 +1815,26 @@ internal class PhoneIntegration(
                 verdict = PhoneTargetVerdict.Allowed,
             )
 
+    /**
+     * Continuation coverage for the halted target. Explicit mode stays list membership; all-apps
+     * mode has no list, so it needs the same two gates as a new request: the all-apps name policy
+     * and a real launcher activity right now. Read-only; it never grants or widens the scope.
+     */
+    private fun standingTargetCovered(
+        config: PhoneStandingConfig,
+        packageName: String,
+    ): Boolean =
+        if (!config.allApps) {
+            standingCoversHaltedTarget(config, packageName, allAppsPolicyAllowed = false, launchable = false)
+        } else {
+            standingCoversHaltedTarget(
+                config = config,
+                packageName = packageName,
+                allAppsPolicyAllowed = allAppsPolicy.refusal(packageName, allApps = true) == null,
+                launchable = hasLaunchTarget(packageName),
+            )
+        }
+
     private suspend fun startStopEntry(epoch: Long): Boolean =
         try {
             serviceStart(epoch) && serviceAwaitReady(epoch)
@@ -1885,15 +2013,26 @@ internal class PhoneIntegration(
                 taskNative.onTaskBinding(null)
                 taskIdentity.clear()
             }
+            // This start was never reported as started. A stop that landed during its own startup
+            // (for example the host-return stop) produced a halt for this exact epoch; keeping it
+            // would project a retained task the person can neither continue nor end and would make
+            // every later request BUSY. Clear it only when no action may have been applied.
+            val clearHalt =
+                rollbackMayClearHalt(
+                    haltLastAction = facts.value.halt?.lastAction,
+                    retainedEpoch = retainedBefore,
+                    requestedEpoch = epoch,
+                    identityMatchesRequestedKey = keyMatches,
+                )
             lease = null
             taskSession = null
             retainedTaskEpoch = null
-            if (facts.value.halt == null) store.clearTask()
+            if (facts.value.halt == null || clearHalt) store.clearTask()
             mutateFacts {
                 it.copy(
                     lease = null,
-                    halt = it.halt,
-                    task = if (it.halt == null) null else store.task(),
+                    halt = if (clearHalt) null else it.halt,
+                    task = if (clearHalt || it.halt == null) null else store.task(),
                     pending = null,
                     busy = null,
                     continuation = PhoneContinuation(),
@@ -2075,9 +2214,84 @@ internal class PhoneIntegration(
      * single current local TLS-connect endpoint; it never scans ports and never runs from screen open.
      */
     fun connectToThisPhone() {
+        // A launch reconnect may already be searching. The person's tap adopts it, so the result is
+        // reported normally instead of staying silent.
+        if (connectSearchActive && connectSearchSilent) {
+            connectSearchSilent = false
+            return
+        }
         if (guardBusy()) return
         if (!facts.value.available || !facts.value.enabled) return
         startConnectSearch()
+    }
+
+    /**
+     * Background reconnect for a phone link the person already configured. It is called when the
+     * local instance is in front with its runtime starting or running, so the chat tool has a device
+     * to work with without opening the native phone page (opening it applies the host-return stop).
+     *
+     * Reuses the same bounded connect discovery and one TLS connect as **Find and connect**. It
+     * never pairs, never grants, never changes the standing scope, never starts a task and never
+     * restarts the runtime for the plugin. Single-flight per app run; a failure stays silent and
+     * leaves the native page's normal connect path untouched.
+     */
+    fun autoConnectIfConfigured(localRuntimeReady: Boolean) {
+        // A connect made before this launch's phone tool registered is revoked when the runtime
+        // identity is recorded, so the attempt belongs to one runtime identity, not to the app run.
+        val runtimeNow = controller.state.value.runtimeId
+        if (launchAutoConnectRuntime != runtimeNow) {
+            launchAutoConnectRuntime = runtimeNow
+            launchAutoConnectAttempted = false
+        }
+        if (launchAutoConnectAttempted || launchAutoConnectInFlight) return
+        val state = facts.value
+        val core = controller.state.value
+        // Cheap facts first, so a disabled experiment or a visible link never touches the driver.
+        if (!state.enabled || !state.available || state.standingState == null || !localRuntimeReady) return
+        if (core.connection == PhoneConnectionState.CONNECTED) return
+        if (state.pending == PhonePending.Connecting || connectSearchActive) return
+        launchAutoConnectInFlight = true
+        scope.launch {
+            val hasReceipt =
+                withContext(Dispatchers.IO) {
+                    runCatching { driver.hasPairingReceipt(DEFAULT_HOST) }.getOrDefault(false)
+                }
+            // Wait (bounded) until this launch's phone tool is registered and the runtime identity
+            // is recorded. Connecting earlier is undone by that registration.
+            val toolReady =
+                withTimeoutOrNull(AUTO_CONNECT_TOOL_WAIT_MS) {
+                    while (
+                        runCatching { readiness.toolReady() }.getOrNull() != true ||
+                        controller.state.value.runtimeId == null
+                    ) {
+                        delay(AUTO_CONNECT_TOOL_POLL_MS)
+                    }
+                    true
+                } ?: false
+            launchAutoConnectInFlight = false
+            if (launchAutoConnectRuntime != controller.state.value.runtimeId) {
+                launchAutoConnectRuntime = controller.state.value.runtimeId
+                launchAutoConnectAttempted = false
+            }
+            // Re-check on the main thread: a person may have connected, disabled or paired meanwhile.
+            val now = facts.value
+            val coreNow = controller.state.value
+            if (!shouldAutoConnectOnLaunch(
+                    enabled = now.enabled,
+                    available = now.available,
+                    hasPairingReceipt = hasReceipt,
+                    hasStandingScope = now.standingState != null,
+                    localRuntimeReady = localRuntimeReady && toolReady,
+                    connected = coreNow.connection == PhoneConnectionState.CONNECTED,
+                    connecting = now.pending == PhonePending.Connecting || connectSearchActive,
+                    attemptedThisRun = launchAutoConnectAttempted,
+                )
+            ) {
+                return@launch
+            }
+            launchAutoConnectAttempted = true
+            startConnectSearch(silent = true)
+        }
     }
 
     fun openWirelessDebuggingSettings() {
@@ -3094,16 +3308,10 @@ internal class PhoneIntegration(
         if (state != null && expired != state.expired) {
             standingState = state.copy(expired = expired)
         }
-        val current = standingState
-        standingViewCache =
-            current
-                ?.takeIf {
-                    !it.expired &&
-                        !it.config.revoked &&
-                        it.endsAtElapsedMs > nowElapsed &&
-                        it.config.isActive(nowWall)
-                }
-                ?.let { PhoneStandingView(apps = it.config.apps, actions = it.config.actions, windowEndsAtMs = it.endsAtElapsedMs) }
+        publishStandingView()
+        // The all-apps listing needs the launcher catalogue, which the screen normally loads when it
+        // opens. A launch with a restored all-apps scope (no screen yet) still needs it for `apps`.
+        if (standingState?.config?.allApps == true && !launchableCatalogRequested) loadTargets()
         mutateFacts {
             if (it.standingEnabled == available && it.standingState == standingState) {
                 it
@@ -3111,6 +3319,30 @@ internal class PhoneIntegration(
                 it.copy(standingEnabled = available, standingState = standingState)
             }
         }
+    }
+
+    /** Publishes the volatile tool projection. It carries no authority and is never persisted. */
+    private fun publishStandingView() {
+        val nowElapsed = clock()
+        val nowWall = wallClock()
+        standingViewCache =
+            standingState
+                ?.takeIf {
+                    !it.expired &&
+                        !it.config.revoked &&
+                        it.endsAtElapsedMs > nowElapsed &&
+                        it.config.isActive(nowWall)
+                }
+                ?.let { state ->
+                    PhoneStandingView(
+                        apps = state.config.apps,
+                        actions = state.config.actions,
+                        windowEndsAtMs = state.endsAtElapsedMs,
+                        allApps = state.config.allApps,
+                        launchableApps = if (state.config.allApps) launchableAppsCache else emptyList(),
+                        catalogueTruncated = state.config.allApps && launchableAppsTruncated,
+                    )
+                }
     }
 
     private fun setContinuationDelivery(
@@ -3160,10 +3392,40 @@ internal class PhoneIntegration(
 
     private fun loadTargets() {
         if (!facts.value.available) return
+        launchableCatalogRequested = true
         scope.launch {
-            val targets = withContext(Dispatchers.IO) { runCatching { catalog.load() }.getOrDefault(emptyList()) }
-            mutateFacts { it.copy(targets = targets) }
+            val loaded =
+                withContext(Dispatchers.IO) { runCatching { catalog.loadAll() }.getOrNull() }
+            if (loaded == null) {
+                // Let a later projection retry instead of claiming an empty catalogue forever.
+                launchableCatalogRequested = false
+                return@launch
+            }
+            publishLaunchableApps(loaded)
+            mutateFacts { it.copy(targets = loaded.targets) }
         }
+    }
+
+    /**
+     * The all-apps `apps` listing: the launchable catalogue filtered by the all-apps name policy,
+     * deduplicated by package, sanitized and bounded. [LauncherCatalog.truncated] stays honest when
+     * the device reported more apps than the bound. It is a picker, not authority.
+     */
+    private fun publishLaunchableApps(loaded: LauncherCatalog) {
+        val allowed =
+            loaded.targets
+                .filter { allAppsPolicy.refusal(it.packageName, allApps = true) == null }
+                .distinctBy { it.packageName }
+        val bounded = allowed.take(PhoneTargetCatalog.MAX_TARGETS)
+        launchableAppsCache =
+            bounded.map { target ->
+                PhoneStandingApp(
+                    label = safeAppLabel(target.label, target.packageName),
+                    packageName = target.packageName,
+                )
+            }
+        launchableAppsTruncated = loaded.truncated || allowed.size > bounded.size
+        publishStandingView()
     }
 
     // --- bounded local discovery ------------------------------------------------------------
@@ -3388,19 +3650,33 @@ internal class PhoneIntegration(
     /**
      * "Connect to this phone" after pairing: one short in-process search for the single current
      * TLS-connect endpoint. It never scans ports and never loops; ambiguity waits for the bound.
+     * [silent] is only for the launch reconnect: a search that finds nothing then leaves no error
+     * behind, so the page keeps its own connect action.
      */
-    private fun startConnectSearch() {
+    private fun startConnectSearch(silent: Boolean = false) {
         if (!facts.value.available || !facts.value.enabled) return
         if (connectSearchActive) return
         val generation = ++connectSearchGeneration
         connectSearchConsumed = false
+        connectSearchSilent = silent
         val created =
             PhonePortDiscovery(context) { _, connect ->
                 onConnectSearchUpdate(generation, connect)
             }
         if (!created.start(setOf(PhoneDiscoveryKind.CONNECT), CONNECT_SEARCH_TIMEOUT_MS)) {
             created.stop()
+            connectSearchSilent = false
             connectDiscoveryStatus = PhoneDiscoveryStatus.Unavailable
+            if (silent) {
+                mutateFacts {
+                    it.copy(
+                        pending = null,
+                        problem = null,
+                        discoveryConnect = PhoneDiscoveryStatus.Idle,
+                    )
+                }
+                return
+            }
             mutateFacts {
                 it.copy(
                     pending = null,
@@ -3444,13 +3720,25 @@ internal class PhoneIntegration(
             PhoneDiscoveryStatus.TimedOut,
             PhoneDiscoveryStatus.Unavailable,
             -> {
+                val silent = connectSearchSilent
                 cancelConnectSearch(clearPending = false)
-                mutateFacts {
-                    it.copy(
-                        pending = null,
-                        problem = PhoneDeviceProblem.Other,
-                        discoveryConnect = status,
-                    )
+                if (silent) {
+                    // Nothing answered: stay disconnected and say nothing; the page's own connect
+                    // action is still there.
+                    mutateFacts {
+                        it.copy(
+                            pending = null,
+                            discoveryConnect = PhoneDiscoveryStatus.Idle,
+                        )
+                    }
+                } else {
+                    mutateFacts {
+                        it.copy(
+                            pending = null,
+                            problem = PhoneDeviceProblem.Other,
+                            discoveryConnect = status,
+                        )
+                    }
                 }
             }
             PhoneDiscoveryStatus.Idle,
@@ -3466,6 +3754,7 @@ internal class PhoneIntegration(
         connectSearch = null
         connectSearchActive = false
         connectSearchConsumed = false
+        connectSearchSilent = false
         connectSearchGeneration += 1
         if (clearPending && wasActive && facts.value.pending == PhonePending.Connecting) {
             mutateFacts { it.copy(pending = null) }
@@ -3546,6 +3835,9 @@ internal class PhoneIntegration(
     ) {
         val explicitGeneration =
             if (autoPairGeneration == null) connectSearchGeneration else null
+        // A launch reconnect found something but the one connect failed: stay quiet, keep the
+        // manual "Find and connect" path.
+        val silent = autoPairGeneration == null && connectSearchSilent
         fun stillCurrent(): Boolean =
             if (autoPairGeneration == null) {
                 facts.value.enabled &&
@@ -3579,7 +3871,7 @@ internal class PhoneIntegration(
                     it.copy(
                         pending = null,
                         paired = false,
-                        problem = PhoneDeviceProblem.NotAuthorized,
+                        problem = if (silent) null else PhoneDeviceProblem.NotAuthorized,
                         discoveryConnect = PhoneDiscoveryStatus.Idle,
                         autoConnect =
                             if (autoPairGeneration == null) {
@@ -3604,7 +3896,7 @@ internal class PhoneIntegration(
                 mutateFacts {
                     it.copy(
                         pending = null,
-                        problem = PhoneDeviceProblem.Other,
+                        problem = if (silent) null else PhoneDeviceProblem.Other,
                         discoveryConnect = PhoneDiscoveryStatus.Idle,
                         autoConnect =
                             if (autoPairGeneration == null) {
@@ -3637,7 +3929,7 @@ internal class PhoneIntegration(
                     mutateFacts {
                         it.copy(
                             pending = null,
-                            problem = problemFor(result.error),
+                            problem = if (silent) null else problemFor(result.error),
                             discoveryConnect = PhoneDiscoveryStatus.Idle,
                             autoConnect =
                                 if (autoPairGeneration == null) {
@@ -4030,6 +4322,10 @@ internal class PhoneIntegration(
         /** One explicit "connect to this phone" search, short and in-process. */
         const val CONNECT_SEARCH_TIMEOUT_MS = 45_000L
 
+        /** Bounded wait for this launch's phone tool before a background reconnect. */
+        private const val AUTO_CONNECT_TOOL_WAIT_MS = 120_000L
+        private const val AUTO_CONNECT_TOOL_POLL_MS = 1_000L
+
         /** Stop reasons an agent-requested handoff may carry into the task store. */
         private val TASK_STOP_REASONS: Set<PhoneProgressReason> =
             setOf(
@@ -4055,6 +4351,20 @@ internal class PhoneIntegration(
                 context.startActivity(intent)
                 true
             }.getOrDefault(false)
+
+        /**
+         * Read-only launcher check for all-apps mode: the package must have a launch intent right
+         * now. It proves nothing about authority and launches nothing.
+         */
+        internal fun hasLauncherActivity(context: Context, packageName: String): Boolean =
+            runCatching { context.packageManager.getLaunchIntentForPackage(packageName) != null }
+                .getOrDefault(false)
+
+        /** One bounded, control-character-free label; the package is the fallback. */
+        internal fun safeAppLabel(label: String, packageName: String): String {
+            val bounded = label.trim().take(PhoneLimits.MAX_NODE_LABEL_CHARS)
+            return if (bounded.isEmpty() || bounded.any(Char::isISOControl)) packageName else bounded
+        }
 
         internal fun openDevelopmentSettings(context: Context) {
             val opened =

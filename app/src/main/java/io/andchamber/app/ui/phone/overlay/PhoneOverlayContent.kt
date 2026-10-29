@@ -103,6 +103,9 @@ internal fun PhoneOverlayContent(
     }
 }
 
+/** Lines the live capsule always reserves for the newest step; a window must not resize per update. */
+internal const val CAPSULE_PROGRESS_MIN_LINES = 2
+
 private val CapsuleShape = RoundedCornerShape(28.dp)
 
 @Composable
@@ -222,6 +225,11 @@ private fun ClassicCapsuleText(
 /**
  * Running / pausing / paused: a short status word with the compact facts ("3 sent · 4 min left";
  * no time text for a permanent lease), then the newest step on up to two lines with the width.
+ *
+ * The progress block always reserves [CAPSULE_PROGRESS_MIN_LINES] lines, even when the newest step
+ * fits on one. Otherwise every 1 → 2 line update resized a WRAP_CONTENT window, and the capsule
+ * visibly flickered/jumped during a task. The collapsed height is therefore constant for the whole
+ * live phase; `PhoneOverlaySurfaceHost` uses the same 72 dp assumption for placement/make-way.
  */
 @Composable
 private fun LiveCapsuleText(
@@ -254,7 +262,8 @@ private fun LiveCapsuleText(
             progress,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
+            minLines = CAPSULE_PROGRESS_MIN_LINES,
+            maxLines = CAPSULE_PROGRESS_MIN_LINES,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 2.dp).testTag(OverlayTags.CAPSULE_PROGRESS),
         )

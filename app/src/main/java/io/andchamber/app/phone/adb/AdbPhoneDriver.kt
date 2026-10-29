@@ -182,8 +182,21 @@ class AdbPhoneDriver(
         binding: PhoneObservationBinding,
         startedAt: Long,
         deadlineMs: Long,
+        notificationFallback: Boolean = false,
     ): PhoneImage {
         val before = verifyLiveWindow(binding, startedAt, deadlineMs)
+        if (notificationFallback &&
+            !notificationFallbackProof(
+                focusedPackage = before.focus.focusedAppPackage,
+                focusMatchesHierarchy = before.focus.focusedAppPackage == before.hierarchy.packageName,
+                display = binding.geometry,
+                expectation = overlayExpectation(startedAt + deadlineMs),
+                startedAt = startedAt,
+                deadlineMs = deadlineMs,
+            )
+        ) {
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
         val bytes = device.capturePng(left(startedAt, deadlineMs), captureMaxBytes)
         // Re-read the real window after the screenshot. If it changed while pixels were being
         // copied, discard the image instead of returning another window's content.
@@ -198,6 +211,11 @@ class AdbPhoneDriver(
         ) {
             throw PhoneDriverException(PhoneDriverFailure.GEOMETRY_CHANGED)
         }
+        if (!notificationFallback && overlayRequired(startedAt + deadlineMs)) {
+            // The mode became overlay while pixels were copied without hiding it: discard.
+            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        }
+        clearOverlayObservation(binding.windowId)
         return PhoneImage(
             bytes = bytes,
             mimeType = "image/png",
@@ -212,18 +230,26 @@ class AdbPhoneDriver(
         deadlineMs: Long,
     ): PhoneImage {
         val observation = overlayObservation(binding.windowId)
-            ?: throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+        if (observation == null) {
+            // No stored overlay observation means the preceding observe used the notification
+            // fallback (the target force-hides non-system overlays). Capture without hide/restore
+            // only when the same fresh proof still holds; the helper refuses otherwise.
+            return captureWithoutOverlay(binding, startedAt, deadlineMs, notificationFallback = true)
+        }
         val preExpectation = overlayExpectation(startedAt + deadlineMs)
         val pre = readOverlayWitness(preExpectation, binding.geometry, startedAt, deadlineMs)
         if (OverlaySafetyPolicy.identityRefusal(pre, observation, clock()) != null) {
             throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
         }
+        // The slow page reads (a full hierarchy dump each) bracket the hidden period instead of
+        // running inside it, so the capsule disappears only for the screenshot itself. The window
+        // identity must be the same before the hide and after the restore, which covers the capture.
+        val before = verifyLiveWindow(binding, startedAt, deadlineMs)
         val image = withOverlayHidden(
             expectation = preExpectation,
             phase = OverlayPhase.CAPTURE_HIDDEN,
             deadlineAtMs = startedAt + deadlineMs,
         ) {
-            val before = verifyLiveWindow(binding, startedAt, deadlineMs)
             val hidden = readOverlayWitness(
                 expectation = preExpectation,
                 display = binding.geometry,
@@ -235,10 +261,6 @@ class AdbPhoneDriver(
                 throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
             }
             val bytes = device.capturePng(left(startedAt, deadlineMs), captureMaxBytes)
-            val after = verifyLiveWindow(binding, startedAt, deadlineMs)
-            if (windowDigest(before.snapshot.windowId) != windowDigest(after.snapshot.windowId)) {
-                throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
-            }
             val size = AdbPng.readSize(bytes)
                 ?: throw PhoneDriverException(PhoneDriverFailure.DRIVER)
             if (size.first != binding.geometry.displayWidth ||
@@ -252,6 +274,10 @@ class AdbPhoneDriver(
                 width = size.first,
                 height = size.second,
             )
+        }
+        val after = verifyLiveWindow(binding, startedAt, deadlineMs)
+        if (windowDigest(before.snapshot.windowId) != windowDigest(after.snapshot.windowId)) {
+            throw PhoneDriverException(PhoneDriverFailure.WINDOW_CHANGED)
         }
         val postExpectation = overlayExpectation(startedAt + deadlineMs)
         val post = readOverlayWitness(postExpectation, binding.geometry, startedAt, deadlineMs)
@@ -294,7 +320,16 @@ class AdbPhoneDriver(
         // Freeze the dynamic mode for this mutation. A fresh observation is required when the
         // overlay mode is on; an observation captured under overlay mode taints a notification-mode
         // dispatch until the caller observes again (fail closed on a mode change).
-        val overlayMode = overlayRequired(started + deadlineMs)
+        //
+        // The task's own target may force-hide non-system overlays (Settings does). That task then
+        // uses the notification stop entry: the overlay cannot be drawn for it, so the original
+        // notification path applies (no capsule to avoid, no overlay observation). The proof is
+        // frozen once here, exactly like the mode, and re-proved before every injection.
+        val overlayRequiredNow = overlayRequired(started + deadlineMs)
+        val overlayFallback =
+            overlayRequiredNow &&
+                notificationFallbackStillHolds(binding.packageName, binding.geometry, started, deadlineMs)
+        val overlayMode = overlayRequiredNow && !overlayFallback
         val storedOverlay = if (overlayMode) {
             overlayObservation(binding.windowId)
                 ?: return@withContext PhoneDispatchReceipt.NotSent(
@@ -311,19 +346,38 @@ class AdbPhoneDriver(
             // The expectation that produced the validated WM witness, per injection step.
             val validated = arrayOfNulls<OverlayExpectation>(1)
             val before = {
-                if (overlayRequired(started + deadlineMs) != overlayMode) {
-                    // Mode changed between the operation start and this injection.
-                    throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                if (overlayFallback) {
+                    // Fresh re-proof: the target must still be the focused app that force-hides
+                    // non-system overlays, and the verified stop entry must still be available.
+                    if (!notificationFallbackStillHolds(
+                            binding.packageName,
+                            binding.geometry,
+                            started,
+                            deadlineMs,
+                        )
+                    ) {
+                        throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                    }
+                } else {
+                    if (overlayRequired(started + deadlineMs) != overlayMode) {
+                        // Mode changed between the operation start and this injection.
+                        throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+                    }
+                    validated[0] = validate()
                 }
-                validated[0] = validate()
             }
             val finalGuard = {
-                finalOverlayGuard(
-                    overlayMode = overlayMode,
-                    validated = validated[0],
-                    startedAt = started,
-                    deadlineMs = deadlineMs,
-                )
+                if (!overlayFallback) {
+                    finalOverlayGuard(
+                        overlayMode = overlayMode,
+                        validated = validated[0],
+                        startedAt = started,
+                        deadlineMs = deadlineMs,
+                    )
+                }
+                // Fallback: the target force-hides non-system overlays, so there is no expectation
+                // for a drawn capsule to validate. The per-step before-guard already re-proved the
+                // real force-hide state immediately before this injection.
             }
             return before to finalGuard
         }
@@ -601,6 +655,13 @@ class AdbPhoneDriver(
      * mode change while the read is in flight discards the snapshot. The witness is remembered for
      * the following action/capture checks exactly as before. Capture still hides (see
      * [captureWithOverlay]) because pixels would otherwise contain the capsule.
+     *
+     * One honest exception: the task's own target may set `mForceHideNonSystemOverlayWindow=true`
+     * (Settings does this). The window still exists with a surface, but WindowManager refuses to show
+     * it and no overlay can be drawn for that target. With the fresh witness proving exactly that,
+     * the focused app being this task's target, and a verified notification stop entry from the
+     * barrier, this operation continues on the original notification path instead of claiming an
+     * overlay visibility loss.
      */
     private suspend fun observeWithOverlay(
         startedAt: Long,
@@ -618,7 +679,25 @@ class AdbPhoneDriver(
             deadlineMs = deadlineMs,
         )
         if (OverlaySafetyPolicy.visibleRefusal(pre, clock()) != null) {
-            throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+            if (!notificationFallbackProof(
+                    focusedPackage = live.focus.focusedAppPackage,
+                    focusMatchesHierarchy = live.focus.focusedAppPackage == live.hierarchy.packageName,
+                    display = live.geometry,
+                    expectation = expectation,
+                    startedAt = startedAt,
+                    deadlineMs = deadlineMs,
+                )
+            ) {
+                throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+            }
+            // Notification-only path for this operation: no expectation token, no hide/restore and
+            // no stored overlay observation for the actions that follow. The mode must still be
+            // overlay-required; a switch to notification-only mid-read is not a downgrade source.
+            if (!overlayRequired(startedAt + deadlineMs)) {
+                throw PhoneDriverException(PhoneDriverFailure.POLICY_DENIED)
+            }
+            clearOverlayObservation(live.snapshot.windowId)
+            return live.snapshot
         }
         val postExpectation = overlayExpectation(startedAt + deadlineMs)
         val post = readOverlayWitness(
@@ -637,6 +716,83 @@ class AdbPhoneDriver(
         }
         rememberOverlay(live.snapshot.windowId, post)
         return live.snapshot
+    }
+
+    /**
+     * The one accepted reason to use the notification path while Overlay is selected: the real
+     * window scan proves our own window still exists (surface attached) while
+     * `mForceHideNonSystemOverlayWindow=true` is set - the focused app itself asked the system to
+     * hide non-system overlays. It additionally requires the focused app to be the live task's own
+     * target and the person's notification stop entry to be verified. Any other reason our window is
+     * not visible (our own detach, permission loss, unknown state) stays fail-closed.
+     */
+    private fun notificationFallbackProof(
+        focusedPackage: String,
+        focusMatchesHierarchy: Boolean,
+        display: PhoneGeometry,
+        expectation: OverlayExpectation,
+        startedAt: Long,
+        deadlineMs: Long,
+    ): Boolean {
+        if (!focusMatchesHierarchy || focusedPackage.isBlank()) return false
+        val barrier = overlayBarrier ?: return false
+        val target =
+            try {
+                barrier.liveTargetPackage()
+            } catch (_: Exception) {
+                return false
+            }
+        if (target == null || target != focusedPackage) return false
+        if (expectation.phase != OverlayPhase.VISIBLE || expectation.windowToken == null) return false
+        val witness =
+            try {
+                readOverlayWitness(expectation, display, startedAt, deadlineMs)
+            } catch (_: Exception) {
+                return false
+            }
+        if (witness.phase != OverlayPhase.UNAVAILABLE || witness.visible) return false
+        if (!witness.hasSurface || !witness.forceHiddenBySystem) return false
+        return try {
+            barrier.notificationFallbackAllowed()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Fresh bounded re-proof before each injection of a frozen notification-fallback dispatch.
+     * Reads the real focus and overlay window state again, so a target that stops force-hiding (or a
+     * lost stop entry / changed task target) refuses the step without injecting anything.
+     */
+    private fun notificationFallbackStillHolds(
+        targetPackage: String,
+        display: PhoneGeometry,
+        startedAt: Long,
+        deadlineMs: Long,
+    ): Boolean {
+        val expectation =
+            try {
+                overlayExpectation(startedAt + deadlineMs)
+            } catch (_: Exception) {
+                return false
+            }
+        val focus =
+            try {
+                readWindowFocus(startedAt, deadlineMs)
+            } catch (_: Exception) {
+                return false
+            }
+        if (focus.currentFocusPackage != targetPackage || focus.focusedAppPackage != targetPackage) {
+            return false
+        }
+        return notificationFallbackProof(
+            focusedPackage = focus.focusedAppPackage,
+            focusMatchesHierarchy = true,
+            display = display,
+            expectation = expectation,
+            startedAt = startedAt,
+            deadlineMs = deadlineMs,
+        )
     }
 
     private suspend fun <T> withOverlayHidden(

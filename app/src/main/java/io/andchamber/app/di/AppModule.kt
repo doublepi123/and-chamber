@@ -311,6 +311,8 @@ val appModule =
                     PhoneOverlayHolder.current()
                         ?.driverMakeWay(avoid, currentFrame, deadlineMs) ?: false
                 },
+                liveTaskTarget = { PhoneOverlayHolder.current()?.driverLiveTargetPackage() },
+                notificationFallback = { PhoneOverlayHolder.current()?.driverNotificationFallbackAllowed() ?: false },
             )
         }
 

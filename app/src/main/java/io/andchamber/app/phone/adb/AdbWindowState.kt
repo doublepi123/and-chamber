@@ -51,6 +51,8 @@ object AdbWindowStateParser {
     private val CURRENT_FOCUS = Regex(
         """mCurrentFocus=Window\{([0-9a-fA-F]+)\s+u(\d+)\s+([^\s/}]+)/([^\s}]+)\}""",
     )
+    /** A real `mCurrentFocus=Window{...}` value: a named system/transient window has no pkg/activity. */
+    private val CURRENT_FOCUS_FIELD_LINE = Regex("""^mCurrentFocus=Window\{.*$""")
     private val FOCUSED_APP = Regex(
         """mFocusedApp=ActivityRecord\{([0-9a-fA-F]+)\s+u(\d+)\s+([^\s/}]+)/([^\s}]+)\s+t(\d+)\}""",
     )
@@ -71,6 +73,17 @@ object AdbWindowStateParser {
         app?.let(::validateApp)
 
         if (focus == null && !hasExactNullFieldLine(text, CURRENT_FOCUS_FIELD)) {
+            if (hasNamedFocusWindow(text)) {
+                // A real focus window whose title is not `<pkg>/<activity>` - the input method
+                // (`InputMethod`), a splash/starting window, the notification shade or a system bar.
+                // That is a normal transient non-app focus, not malformed output: the read cannot
+                // identify the focused app yet, so it is a window change to retry, never a device
+                // failure. Any real malformed token still fails below when the field is absent.
+                throw AdbWindowStateException(
+                    "focus is not an app window",
+                    failure = AdbWindowStateFailure.NOT_READY,
+                )
+            }
             throw AdbWindowStateException("mCurrentFocus is unavailable")
         }
         if (app == null && !hasExactNullFieldLine(text, FOCUSED_APP_FIELD)) {
@@ -126,6 +139,14 @@ object AdbWindowStateParser {
      */
     private fun hasExactNullFieldLine(text: String, field: String): Boolean =
         text.lineSequence().any { it.trim() == "$field=null" }
+
+    /**
+     * A non-null `mCurrentFocus=` line that did not match the `<pkg>/<activity>` shape (for example
+     * `Window{... u0 InputMethod}` or a starting window). Presence alone is the transient signal;
+     * the value is never used as an identity.
+     */
+    private fun hasNamedFocusWindow(text: String): Boolean =
+        text.lineSequence().any { line -> CURRENT_FOCUS_FIELD_LINE.matches(line.trim()) }
 
     private fun validActivity(value: String): Boolean =
         value.isNotBlank() && value.length <= 200 && value.none { it.isISOControl() }

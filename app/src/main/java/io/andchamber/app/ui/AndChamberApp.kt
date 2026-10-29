@@ -272,7 +272,8 @@ internal fun AndChamberApp(
         val requestStorageAccess = rememberStorageAccessRequest(onResult = refreshStorage)
 
         // Until the runtime has looked at the disk it reports Detecting; no "Set up" offer before then.
-        val checking = runtime.state.collectAsState().value == RuntimeState.Detecting
+        val runtimeState = runtime.state.collectAsState().value
+        val checking = runtimeState == RuntimeState.Detecting
 
         // --- Launch: decide once per launch whether to open the last used OpenChamber directly. ---
         val uiPrefs = rememberUiPrefs()
@@ -307,10 +308,12 @@ internal fun AndChamberApp(
                 initialLaunchStage(launchPending, wantsOpen(), runtime.state.value, remoteResume = rememberedRemoteId != null),
             )
         }
-        // A tap on the app icon while the app is open on Home counts as a new launch.
+        // A tap on the app icon while the app is open on Home or the native phone page counts as a
+        // new launch: no chat is in front there, so the launch goes to the remembered remote, or to
+        // the local instance when Home/the phone page was the last place (Home is forgotten).
         LauncherIntentEffect {
-            val onHome = nav.currentBackStackEntry?.destination?.route == Routes.HOME
-            if (onHome && stage == LaunchStage.Done) launchPending = true
+            val route = nav.currentBackStackEntry?.destination?.route
+            if (route != Routes.WEB && stage == LaunchStage.Done) launchPending = true
         }
         LaunchedEffect(launchPending) {
             if (!launchPending) return@LaunchedEffect
@@ -406,6 +409,17 @@ internal fun AndChamberApp(
         val background = MaterialTheme.colorScheme.background
         val currentEntry by nav.currentBackStackEntryAsState()
         val onWeb = currentEntry?.destination?.route == Routes.WEB
+        // A phone link the person already configured reconnects in the background when the local
+        // instance is in front and its runtime is starting or running, so the chat tool has a device
+        // without opening the native phone page (opening it applies the host-return stop). It never
+        // pairs, grants, changes the scope, starts a task or restarts the runtime.
+        val onLocalChat =
+            onWeb && currentEntry?.arguments?.getString(Routes.ARG_TARGET) == ServerTarget.LOCAL_ID
+        val localRuntimeReady = runtimeState is RuntimeState.Running || runtimeState is RuntimeState.Starting
+        LaunchedEffect(phone, onLocalChat, localRuntimeReady) {
+            if (inspection || phone == null || !onLocalChat || !localRuntimeReady) return@LaunchedEffect
+            phone.autoConnectIfConfigured(localRuntimeReady = true)
+        }
         WindowBackgroundEffect(background)
         SystemBarsEffect(darkIcons = ((if (onWeb) webBarColor else null) ?: background).luminance() > 0.5f)
 
@@ -548,6 +562,13 @@ internal fun AndChamberApp(
                             target.onScreenOpened()
                             onDispose { target.onScreenClosed() }
                         }
+                        // Entering is not the only way the phone page comes to the front: resuming
+                        // the Activity with this route already composed must still apply the
+                        // host-return stop. A chat task started while the app was backgrounded on
+                        // this page must not survive. onScreenOpened is the same idempotent entry.
+                        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+                            target.onScreenOpened()
+                        }
                         PhoneControlScreen(
                             state = phoneState,
                             actions = phoneActions,
@@ -666,7 +687,10 @@ private suspend fun openLocalOnLaunch(
     // Starting the foreground service needs the app in the foreground. Everything from here on runs
     // without suspending, so the app is still resumed when the start is requested.
     lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
-    if (nav.currentBackStackEntry?.destination?.route != Routes.HOME) return
+    // A launch starts from Home, or from the native phone page when the app icon is tapped there;
+    // any chat page already in front is left alone.
+    val from = nav.currentBackStackEntry?.destination?.route
+    if (from != Routes.HOME && from != Routes.PHONE) return
     // Decide on the state as it is now; it may have moved on while the screens came up.
     when (launchTarget(runtime.state.value)) {
         LaunchTarget.StartAndOpenLocal -> {
@@ -676,7 +700,11 @@ private suspend fun openLocalOnLaunch(
         LaunchTarget.OpenLocal -> Unit
         LaunchTarget.Home, LaunchTarget.Wait -> return
     }
-    nav.navigate(Routes.web(ServerTarget.LOCAL_ID)) { launchSingleTop = true }
+    nav.navigate(Routes.web(ServerTarget.LOCAL_ID)) {
+        // From the phone page (or any non-Home entry), Back still leads to Home.
+        if (from != Routes.HOME) popUpTo(Routes.HOME)
+        launchSingleTop = true
+    }
     if (underCover) {
         withTimeoutOrNull(NAV_READY_TIMEOUT_MS) {
             nav.currentBackStackEntryFlow.first { it.destination.route == Routes.WEB }
@@ -702,8 +730,13 @@ private suspend fun openRemoteOnLaunch(
     if (covered) onOpening()
     withTimeoutOrNull(NAV_READY_TIMEOUT_MS) { nav.currentBackStackEntryFlow.first() } ?: return
     lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
-    if (nav.currentBackStackEntry?.destination?.route != Routes.HOME) return
-    nav.navigate(Routes.web(targetId)) { launchSingleTop = true }
+    // Home, or the native phone page when the app icon is tapped there; never another page.
+    val from = nav.currentBackStackEntry?.destination?.route
+    if (from != Routes.HOME && from != Routes.PHONE) return
+    nav.navigate(Routes.web(targetId)) {
+        if (from != Routes.HOME) popUpTo(Routes.HOME)
+        launchSingleTop = true
+    }
     if (covered) {
         withTimeoutOrNull(NAV_READY_TIMEOUT_MS) {
             nav.currentBackStackEntryFlow.first { it.destination.route == Routes.WEB }

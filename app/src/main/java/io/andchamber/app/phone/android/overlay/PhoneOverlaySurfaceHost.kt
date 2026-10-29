@@ -32,6 +32,7 @@ import io.andchamber.app.phone.overlay.safety.PhoneOverlayBarrier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /** Native-only overlay data. Never the task summary's page text, nodes or input. */
@@ -127,10 +128,13 @@ internal class PhoneOverlayHideRefused(
  * `addView` remains a *request*, not visibility.
  *
  * `withContentHidden` refuses to run a read unless the exact owner/generation/revision was hidden and
- * confirmed, and restores under a bounded NonCancellable for the same display owner. A restore whose
- * Main scheduling exceeds that budget is marked uncertain, rejects new actions, and is settled by an
- * independent owner-bound Main cleanup. A temporary read never bumps the generation, and a detach
- * invalidates every pending restore.
+ * confirmed, and restores under a bounded NonCancellable for the same display owner. A capture hide
+ * only makes the attached root view INVISIBLE: the window, its `LayoutParams.title` token, its surface
+ * and its Compose owner stay alive, so WindowManager reports `mViewVisibility=0x4` and no
+ * remove/add (and no Compose destroy/recreate) can flash the capsule between two reads. A restore
+ * whose Main scheduling exceeds that budget is marked uncertain, rejects new actions, and is settled
+ * by an independent owner-bound Main cleanup. A temporary read never bumps the generation, and a
+ * detach invalidates every pending restore.
  */
 internal class PhoneOverlaySurfaceHost(
     private val context: Context,
@@ -168,7 +172,12 @@ internal class PhoneOverlaySurfaceHost(
     @Volatile
     private var freshnessDeadlineMs = 0L
 
-    val isShown: Boolean get() = synchronized(lock) { view != null }
+    /**
+     * The window is attached and intended to be visible. A capture-hidden window keeps its real view
+     * attached but is "not shown" here, exactly as the former remove/restore path looked to callers.
+     */
+    val isShown: Boolean get() = synchronized(lock) { view != null && !hiddenForRead }
+
     val isHiddenForRead: Boolean get() = hiddenForRead
 
     /** Current screen/inset geometry for drag clamping; null before a display owner exists. */
@@ -322,14 +331,23 @@ internal class PhoneOverlaySurfaceHost(
         val lease = PhoneOverlayReadLease(owner, generation, revision, phase)
         return withOverlayReadHide(
             lease = lease,
-            hide = { withContext(Dispatchers.Main.immediate) { hideNow(lease) } },
+            hide = { withContext(Dispatchers.Main.immediate) { hideNow(lease, deadlineMs) } },
             restore = { restoreReadHide(it) },
         ) {
             block()
         }
     }
 
-    private fun hideNow(lease: PhoneOverlayReadLease): Boolean {
+    /**
+     * Hides the attached window without removing it. The root view becomes INVISIBLE, so the next
+     * traversal reports the window with `mViewVisibility=0x4` while the surface/token/title and the
+     * Compose owner remain the same. The wait for that traversal is what makes the driver's
+     * `dumpsys window` forced-hidden witness honest; a view that never gets there refuses the read.
+     */
+    private suspend fun hideNow(
+        lease: PhoneOverlayReadLease,
+        deadlineMs: Long,
+    ): Boolean {
         checkMainThread()
         val currentView = view ?: return false
         val currentState = state ?: return false
@@ -346,21 +364,23 @@ internal class PhoneOverlaySurfaceHost(
         }
         hiddenPhase = lease.phase
         hiddenForRead = true
-        if (!removeWindow(currentView)) {
-            hiddenForRead = false
-            return false
-        }
-        // Confirmation: the view is really gone; `removeViewImmediate` throwing leaves it attached.
-        if (view != null) {
-            hiddenForRead = false
-            return false
-        }
-        // Recorded after the real removal. If cancellation wins before hide() returns, the try/finally
-        // in withOverlayReadHide still has this exact owner-bound ticket to restore.
+        currentView.visibility = View.INVISIBLE
+        // Installed before the traversal wait. If cancellation wins while the hide is still being
+        // committed, the try/finally in withOverlayReadHide still has this owner-bound ticket.
         readHideTickets.install(lease)
         freshnessDeadlineMs = clock() + FRESHNESS_MS
-        return true
+        val budget = (deadlineMs - clock()).coerceIn(1L, MAX_HIDE_COMMIT_MS)
+        // A refused commit leaves the ticket for the caller's restore (which shows the current
+        // state again); the driver then fails closed instead of reading through the capsule.
+        return awaitViewHidden(currentView, budget)
     }
+
+    /** Waits for the real traversal that carries `View.INVISIBLE` to WindowManager. */
+    private suspend fun awaitViewHidden(view: ComposeView, timeoutMs: Long): Boolean =
+        withTimeoutOrNull(timeoutMs) {
+            awaitOverlayFirstFrame(view)
+            view.windowVisibility == View.INVISIBLE
+        } ?: false
 
     private suspend fun restoreReadHide(lease: PhoneOverlayReadLease) {
         settleReadHideWithTimeout(
@@ -384,8 +404,9 @@ internal class PhoneOverlaySurfaceHost(
     private fun settleTimedOutReadHide(lease: PhoneOverlayReadLease) {
         checkMainThread()
         val settled = readHideTickets.settleTimedOut(lease) ?: return
-        // A restore may have requested addWindow but never reached its first frame. Remove that
-        // uncertain view before the coordinator decides to fail closed or re-show current state.
+        // The restore never reached its visible frame. Remove the still-attached (INVISIBLE) window
+        // before the coordinator decides to fail closed or re-show current state; a new owner must
+        // never inherit a view whose frame was never confirmed.
         if (view != null) {
             detach()
         } else {
@@ -400,14 +421,18 @@ internal class PhoneOverlaySurfaceHost(
         checkMainThread()
         if (readHideTickets.activeLease() !== lease) {
             // No ticket owns this hide (for example a deliberate detach already cleared it). If a
-            // hidden flag was left without an owner, fail safe instead of leaving the window hidden
-            // forever; a newer ticket must never be touched.
-            if (readHideTickets.activeLease() == null && hiddenForRead) hiddenForRead = false
+            // hidden flag was left without an owner, fail safe instead of leaving the attached window
+            // invisible forever; a newer ticket must never be touched.
+            if (readHideTickets.activeLease() == null && hiddenForRead) {
+                hiddenForRead = false
+                showCurrentWindow()
+            }
             return
         }
         val currentState = state
         val currentActions = actions
-        if (currentState == null || currentActions == null) {
+        val currentView = view
+        if (currentState == null || currentActions == null || currentView == null) {
             if (readHideTickets.settle(lease)) hiddenForRead = false
             if (view == null) onVisibilityChanged(false)
             return
@@ -417,44 +442,27 @@ internal class PhoneOverlaySurfaceHost(
                 requestOwner = lease.owner,
                 requestGeneration = lease.generation,
                 current = currentState,
-                attached = view != null,
+                attached = true,
                 detached = detached,
             )
         if (refusal != null) {
-            // A newer owner/generation or a deliberate detach wins. The old read never restores it;
-            // the next coordinator refresh may attach the current authoritative state.
-            if (readHideTickets.settle(lease)) hiddenForRead = false
-            if (view == null) onVisibilityChanged(false)
+            // A deliberate detach wins. The old read never restores it; the next coordinator refresh
+            // may attach the current authoritative state.
+            if (readHideTickets.settle(lease)) {
+                hiddenForRead = false
+                if (!detached) showCurrentWindow()
+            }
             return
         }
 
-        val existingView = view
-        val currentView =
-            existingView ?: run {
-                // addWindow renders the captured current state and leaves hiddenForRead true with
-                // restoring=true, so no refresh may attach a second window during the frame wait.
-                if (!addWindow(currentState, currentActions, restoring = true)) {
-                    if (readHideTickets.settle(lease)) hiddenForRead = false
-                    return
-                }
-                view
-            } ?: run {
-                if (readHideTickets.settle(lease)) hiddenForRead = false
-                return
-            }
+        // Same window, same owner: render the current native authority and make the very same view
+        // visible again. Never remove/add, never destroy/recreate the Compose owner.
+        applyLayout(currentView, currentState)
+        render(currentView, currentState, currentActions)
         var rendered = currentState
-        if (view != currentView) {
-            abandonRestore(lease, currentView)
-            return
-        }
-        if (existingView != null) {
-            // The view was already present (unusual while hidden): make sure this frame carries the
-            // current authority, not a stale rendering.
-            applyLayout(currentView, currentState)
-            render(currentView, currentState, currentActions)
-        }
 
         while (true) {
+            currentView.visibility = View.VISIBLE
             val framed =
                 awaitCurrentReadFrame(
                     lease = lease,
@@ -470,7 +478,7 @@ internal class PhoneOverlaySurfaceHost(
             }
             val latest = state
             val latestActions = actions
-            if (latest == null || latestActions == null) {
+            if (latest == null || latestActions == null || view !== currentView) {
                 abandonRestore(lease, currentView)
                 return
             }
@@ -482,6 +490,7 @@ internal class PhoneOverlaySurfaceHost(
                     return
                 }
                 hiddenForRead = false
+                touchFreshness()
                 return
             }
             // Pause/Takeover/need_user/new geometry arrived while hidden. Render the latest native
@@ -490,6 +499,12 @@ internal class PhoneOverlaySurfaceHost(
             render(currentView, latest, latestActions)
             rendered = latest
         }
+    }
+
+    /** Fails safe on an attached-but-invisible window that no live ticket owns any more. */
+    private fun showCurrentWindow() {
+        val current = view ?: return
+        if (!detached && current.visibility != View.VISIBLE) current.visibility = View.VISIBLE
     }
 
     /** A restore cannot settle its old ticket; remove only this read's view and leave new tickets. */
@@ -543,7 +558,6 @@ internal class PhoneOverlaySurfaceHost(
     private fun addWindow(
         next: PhoneOverlayWindowState,
         nextActions: PhoneOverlaySurfaceActions,
-        restoring: Boolean = false,
     ): Boolean {
         val manager = windowManager ?: return false
         val composeOwner = ComposeOwner()
@@ -579,7 +593,7 @@ internal class PhoneOverlaySurfaceHost(
         this.composeOwner = composeOwner
         params = layout
         detached = false
-        if (!restoring) hiddenForRead = false
+        hiddenForRead = false
         touchFreshness()
         onVisibilityChanged(true)
         return true
@@ -731,5 +745,8 @@ internal class PhoneOverlaySurfaceHost(
     private companion object {
         const val FRESHNESS_MS = 45_000L
         const val RESTORE_TIMEOUT_MS = 1_000L
+
+        /** A main-loop traversal normally runs within a frame; never wait longer than this. */
+        const val MAX_HIDE_COMMIT_MS = 250L
     }
 }

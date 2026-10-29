@@ -211,6 +211,34 @@ class OverlaySafetyContractTest {
         assertEquals(OverlayRefusal.UNAVAILABLE, OverlaySafetyPolicy.visibleRefusal(hidden, 500))
     }
 
+    /**
+     * Production capture no longer removes its window: the root view becomes INVISIBLE, so the real
+     * dump still contains the window with its surface and `isVisible=true`, but `mViewVisibility`
+     * is 0x4. That is a real forced hide; the same state can never be accepted as VISIBLE.
+     */
+    @Test
+    fun anInvisibleButStillAttachedWindowCountsAsForcedHidden() {
+        val invisibleDump = fullDump.replace("mViewVisibility=0x0", "mViewVisibility=0x4")
+        val scan = OverlayWindowStateParser.parse(invisibleDump)
+        val window = scan.windows.single { it.windowHash == "593486a" }
+        assertTrue("the window and its surface stay attached", window.hasSurface)
+        assertFalse("the INVISIBLE root view is the visibility proof", window.visible)
+
+        val hidden = OverlayWitnessReader.read(
+            expectation,
+            scan,
+            display,
+            nowMs = 500,
+            forcedHiddenPhase = OverlayPhase.CAPTURE_HIDDEN,
+        )
+        assertEquals(OverlayPhase.CAPTURE_HIDDEN, hidden.phase)
+        assertFalse(hidden.visible)
+        assertTrue(hidden.actualBounds.isEmpty())
+
+        val claimedVisible = OverlayWitnessReader.read(expectation, scan, display, nowMs = 500)
+        assertEquals(OverlayPhase.UNAVAILABLE, claimedVisible.phase)
+    }
+
     @Test
     fun boundsOutsideTheDisplayAreUnavailable() {
         val moved = detailDump.replace(
@@ -224,6 +252,41 @@ class OverlaySafetyContractTest {
             nowMs = 500,
         )
         assertEquals(OverlayPhase.UNAVAILABLE, witness.phase)
+    }
+
+    @Test
+    fun forceHiddenBySystemIsParsedAndNeverCountsAsVisible() {
+        // Real Settings behavior: our window keeps its surface, the system policy hides it and the
+        // focused app set mForceHideNonSystemOverlayWindow=true.
+        val forced =
+            fullDump
+                .replace("mViewVisibility=0x0", "mViewVisibility=0x0\n            mPolicyVisibility=false")
+                .replace("isVisible=true", "isVisible=false")
+                .replace("isOnScreen=true", "isOnScreen=false")
+                .replace("isOnScreen=false", "isOnScreen=false\n            mForceHideNonSystemOverlayWindow=true")
+        val scan = OverlayWindowStateParser.parse(forced)
+        val window = scan.windows.single()
+        assertTrue("the surface stays attached", window.hasSurface)
+        assertFalse("a force-hidden window is not visible", window.visible)
+        assertTrue("the real force-hide flag is parsed", window.forceHiddenBySystem)
+
+        val witness = OverlayWitnessReader.read(expectation.copy(windowToken = window.titleKey), scan, display, nowMs = 500)
+        assertEquals(OverlayPhase.UNAVAILABLE, witness.phase)
+        assertTrue(witness.hasSurface)
+        assertFalse(witness.visible)
+        assertTrue("the witness carries the force-hide explanation", witness.forceHiddenBySystem)
+        assertEquals(OverlayRefusal.UNAVAILABLE, OverlaySafetyPolicy.visibleRefusal(witness, 500))
+
+        // The same window without the system force-hide flag stays an unexplained unavailable state.
+        val unexplained = forced.replace("mForceHideNonSystemOverlayWindow=true", "mForceHideNonSystemOverlayWindow=false")
+        val plain = OverlayWitnessReader.read(
+            expectation.copy(windowToken = window.titleKey),
+            OverlayWindowStateParser.parse(unexplained),
+            display,
+            nowMs = 500,
+        )
+        assertFalse(plain.forceHiddenBySystem)
+        assertEquals(OverlayPhase.UNAVAILABLE, plain.phase)
     }
 
     @Test

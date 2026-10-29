@@ -49,6 +49,12 @@ data class OverlayWitness(
     val focused: Boolean,
     val display: PhoneGeometry,
     val freshnessDeadlineMs: Long,
+    /**
+     * The matched real window reported `mForceHideNonSystemOverlayWindow=true`: the focused app
+     * asked WindowManager to hide every non-system overlay. It is the only accepted explanation for
+     * a policy-hidden (not visible) overlay in overlay mode; it is not visibility proof itself.
+     */
+    val forceHiddenBySystem: Boolean = false,
 ) {
     /** The manager key that was matched (stable title, or a binder hash for tests/legacy). */
     val windowKey: String? get() = windowToken
@@ -146,6 +152,22 @@ interface PhoneOverlayBarrier {
      * (fail closed). A mode change during one operation is a refusal, never a silent downgrade.
      */
     fun required(deadlineMs: Long): Boolean = true
+
+    /**
+     * The live task's own target package, or null when no live task/lease owns this overlay.
+     * Read-only, non-blocking and safe from the driver's IO thread; the driver only compares it with
+     * the focused app before it may fall back to the notification path. It is never a grant.
+     */
+    fun liveTargetPackage(): String? = null
+
+    /**
+     * True only while a live task exists and the person's notification stop entry is verified. The
+     * driver uses it together with [liveTargetPackage] and a real
+     * `mForceHideNonSystemOverlayWindow=true` witness when the target app itself hides non-system
+     * overlays: that task then continues on the notification-only path. The default `false` keeps
+     * every other implementation fail-closed.
+     */
+    fun notificationFallbackAllowed(): Boolean = false
 
     /**
      * Latest manager claim. Must be non-blocking and safe to call from the driver's IO thread: the

@@ -191,6 +191,7 @@ class PhoneController(
                         allowedActions = scope.allowedActions.toSet(),
                         grantedAtMs = now,
                         expiresAtMs = PhoneTimeLimits.expiresAt(now, ttl),
+                        allApps = scope.allApps,
                     )
                 open = activeCall
                 requestRecords.clear()
@@ -588,7 +589,7 @@ class PhoneController(
             if (binding.packageName != grant.targetPackage) {
                 return@synchronized PlanResult.Refused(PhoneErrorCode.TARGET_MISMATCH)
             }
-            targetPolicy.refusal(binding.packageName)?.let {
+            targetPolicy.refusal(binding.packageName, allApps = grant.allApps)?.let {
                 return@synchronized PlanResult.Refused(it)
             }
             if (!validWindowId(binding.windowId)) {
@@ -695,6 +696,7 @@ class PhoneController(
                 key = key,
                 epoch = request.epoch,
                 targetPackage = grant.targetPackage,
+                allApps = grant.allApps,
                 controlEpoch = controlEpoch,
                 connectionId = state.connectionId,
                 timeoutMs = timeout,
@@ -818,7 +820,7 @@ class PhoneController(
         snapshot: PhoneSnapshot,
     ): PhoneCallResult {
         authorityError(plan)?.let { return refused(request, it) }
-        when (val check = validateSnapshot(snapshot, plan.targetPackage)) {
+        when (val check = validateSnapshot(snapshot, plan.targetPackage, plan.allApps)) {
             SnapshotCheck.Valid -> Unit
             is SnapshotCheck.Invalid -> return refused(request, check.error)
         }
@@ -1024,11 +1026,12 @@ class PhoneController(
     private fun validateSnapshot(
         snapshot: PhoneSnapshot,
         targetPackage: String,
+        allApps: Boolean,
     ): SnapshotCheck {
         if (snapshot.packageName != targetPackage) {
             return SnapshotCheck.Invalid(PhoneErrorCode.TARGET_MISMATCH)
         }
-        targetPolicy.refusal(snapshot.packageName)?.let {
+        targetPolicy.refusal(snapshot.packageName, allApps = allApps)?.let {
             return SnapshotCheck.Invalid(it)
         }
         if (!validWindowId(snapshot.windowId)) {
@@ -1170,6 +1173,15 @@ class PhoneController(
         if (call == null) return
         call.token.cancelReason = reason
         call.job.cancel()
+        // A cancelled read-only operation (observe/capture) releases the single driver slot at once,
+        // even while its transport read is still unwinding. The grant and control epoch are already
+        // revoked, and the late result is fenced by epoch/controlEpoch/token identity, so a new
+        // operation must not be refused BUSY for the rest of an abandoned call's deadline.
+        // Mutations keep the slot until the driver returns, because that is what settles
+        // inFlightMutation via finishCall.
+        if (!call.token.mutation) {
+            synchronized(lock) { if (activeCall?.token === call.token) activeCall = null }
+        }
     }
 
     private fun publishLocked(event: PhoneEvent, mutate: (PhoneState) -> PhoneState) {
@@ -1259,6 +1271,11 @@ class PhoneController(
         val key: PhoneRequestKey,
         val epoch: Long,
         val targetPackage: String,
+        /**
+         * The target-policy mode frozen from the grant that created this plan. A later configuration
+         * change can never re-check this call under a different mode.
+         */
+        val allApps: Boolean,
         val controlEpoch: Long,
         /** Exact connection this call was planned against; fences a late READ_TIMEOUT. */
         val connectionId: String?,

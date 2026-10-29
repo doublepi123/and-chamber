@@ -17,6 +17,7 @@ import io.andchamber.app.phone.core.PhoneNode
 import io.andchamber.app.phone.core.PhoneObservationBinding
 import io.andchamber.app.phone.core.PhoneRect
 import io.andchamber.app.phone.core.PhoneSnapshot
+import io.andchamber.app.phone.core.PhoneTargetPolicy
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskState
 import io.andchamber.app.phone.standing.PhoneOpenAppResult
@@ -264,6 +265,14 @@ internal class FakeTaskStarter(
     var perTaskMs: Long = 60_000L
     var startState: PhoneTaskStartState = PhoneTaskStartState.RUNNING
 
+    /** All-apps projection: no list, a bounded launchable catalogue, and its truncation fact. */
+    var allApps: Boolean = false
+    var launchableApps: List<PhoneStandingApp> = emptyList()
+    var catalogueTruncated: Boolean = false
+
+    /** The target of the most recent request, for the one-target-per-task open_app rule. */
+    var lastRequested: String? = null
+
     /** When set, [request] returns it verbatim (used to exercise stale/odd native results). */
     var startOverride: PhoneTaskStartResult? = null
 
@@ -278,7 +287,18 @@ internal class FakeTaskStarter(
     override val available: Boolean get() = availableFlag
 
     override fun standing(): PhoneStandingView? =
-        if (!availableFlag) null else PhoneStandingView(apps, actions, windowEndsMs)
+        if (!availableFlag) {
+            null
+        } else {
+            PhoneStandingView(
+                apps = apps,
+                actions = actions,
+                windowEndsAtMs = windowEndsMs,
+                allApps = allApps,
+                launchableApps = if (allApps) launchableApps else emptyList(),
+                catalogueTruncated = allApps && catalogueTruncated,
+            )
+        }
 
     override fun continuation(): PhoneTaskContinuationStatus? =
         if (!availableFlag) null else continuationStatus
@@ -291,19 +311,24 @@ internal class FakeTaskStarter(
         requests += Triple(sessionId, summary, packageName)
         startOverride?.let { return it }
         if (!availableFlag) return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
-        if (apps.none { it.packageName == packageName }) {
+        if (!allApps && apps.none { it.packageName == packageName }) {
             return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
         }
+        if (allApps && PhoneTargetPolicy().refusal(packageName, allApps = true) != null) {
+            return PhoneTaskStartResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)
+        }
+        lastRequested = packageName
         val runtimeId = controller.state.value.runtimeId
             ?: return PhoneTaskStartResult.Refused(PhoneStandingRefusal.NOT_CONNECTED)
         val scope =
             PhoneStandingScope(
                 runtimeId = runtimeId,
                 sessionLabel = sessionId,
-                allowedPackages = apps.map { it.packageName },
+                allowedPackages = if (allApps) emptyList() else apps.map { it.packageName },
                 allowedActions = actions,
                 windowEndsMs = windowEndsMs,
                 perTaskMs = perTaskMs,
+                allApps = allApps,
             )
         return when (val result = controller.grantFromPreauthorization(scope, packageName)) {
             is PhoneStandingGrantResult.Granted ->
@@ -323,7 +348,10 @@ internal class FakeTaskStarter(
     ): PhoneOpenAppResult {
         opened += packageName
         if (!availableFlag) return PhoneOpenAppResult.Refused(PhoneStandingRefusal.NOT_CONFIGURED)
-        return if (apps.any { it.packageName == packageName }) {
+        // Explicit list: the package must be listed. All-apps: only this task's own target may be
+        // reopened (one target per task), exactly like the native launcher rule.
+        val allowed = if (allApps) packageName == lastRequested else apps.any { it.packageName == packageName }
+        return if (allowed) {
             PhoneOpenAppResult.Opened
         } else {
             PhoneOpenAppResult.Refused(PhoneStandingRefusal.TARGET_NOT_ALLOWED)

@@ -91,4 +91,17 @@ class PhoneTargetCatalogTest {
         assertEquals(PhoneTargetVerdict.Sensitive, verdicts["com.android.keyguard"])
         assertEquals(PhoneTargetVerdict.Host, verdicts["io.andchamber.app"])
     }
+
+    @Test
+    fun `loadAll reports an honest truncation fact and load stays the same list`() {
+        val raw = (1..5).map { RawLauncherTarget("App $it", "com.example.app$it", system = false) }
+        val catalog = PhoneTargetCatalog(hostPackage = "io.andchamber.app", limit = 3) { raw }
+        val limited = catalog.loadAll()
+        assertEquals(3, limited.targets.size)
+        assertTrue(limited.truncated)
+        assertEquals(limited.targets, catalog.load())
+
+        val exact = PhoneTargetCatalog(hostPackage = "io.andchamber.app", limit = 5) { raw }
+        assertFalse(exact.loadAll().truncated)
+    }
 }

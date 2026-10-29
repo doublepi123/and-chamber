@@ -568,6 +568,50 @@ class PhoneControllerTest {
     }
 
     @Test
+    fun `a revoked observe releases the call slot even while its read unwinds`() = runTest {
+        val fixture = Fixture()
+        fixture.active()
+        val gate = CompletableDeferred<Unit>()
+        val enteredGate = CompletableDeferred<Unit>()
+        var first = true
+        fixture.driver.observeHandler = {
+            if (first) {
+                first = false
+                withContext(NonCancellable) {
+                    enteredGate.complete(Unit)
+                    gate.await()
+                }
+            }
+            snapshot()
+        }
+
+        val abandoned = async {
+            fixture.controller.execute(
+                fixture.request(PhoneAgentAction.Observe, requestId = "old-1"),
+            )
+        }
+        fixture.driver.enteredObserve.await()
+        enteredGate.await()
+
+        // The stop/revoke cancels the abandoned read, but the transport read is still unwinding.
+        fixture.controller.revoke()
+        val regrant = fixture.controller.grant(TARGET, setOf(PhoneActionKind.TAP), 60_000L)
+        val epoch = (regrant as PhoneGrantResult.Granted).grant.epoch
+
+        // It must not be refused BUSY for the rest of the abandoned read's deadline.
+        val fresh =
+            fixture.controller.execute(
+                fixture.request(PhoneAgentAction.Observe, epoch = epoch, requestId = "new-1"),
+            )
+        assertTrue("expected a fresh observation but was $fresh", fresh is PhoneCallResult.Observed)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        val old = abandoned.await()
+        assertEquals(PhoneErrorCode.EPOCH_CHANGED, (old as PhoneCallResult.Refused).error)
+    }
+
+    @Test
     fun `unknown outcome blocks new mutations until a person acknowledges`() = runTest {
         val fixture = Fixture()
         fixture.active()

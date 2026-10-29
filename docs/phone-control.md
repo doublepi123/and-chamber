@@ -23,15 +23,40 @@ document.
   calls; they are not a separate authentication boundary.
 - Wireless debugging authorizes a device-level ADB identity. Restricting the tool to a native
   preauthorized app set is an admission policy, not an Android permission sandbox.
-- The person saves one bounded **standing scope**: allowed apps, allowed actions, a window and a
-  per-task duration. Both duration selectors offer an explicit **Permanent** choice; the finite
-  defaults are unchanged. This is configuration, not a lease. The first valid chat request binds it
-  to the current runtime and session. Each task then gets a new controller epoch and a lease bounded
-  by the per-task duration and the remaining window. A permanent per-task choice inside a finite
-  window is still bounded by that window's end.
-- Only apps in that preauthorized set are openable. There is no arbitrary intent, shell, URI or
-  package-install surface, and the installed-app catalogue is never handed to the model. The host,
-  system UI, settings and system authorization surfaces cannot be selected for agent control.
+- The person saves one bounded **standing scope**: allowed apps (or the explicit **All apps** choice),
+  allowed actions, a window and a per-task duration. Both duration selectors offer an explicit
+  **Permanent** choice; the finite defaults are unchanged. This is configuration, not a lease. The
+  first valid chat request binds it to the current runtime and session. Each task then gets a new
+  controller epoch and a lease bounded by the per-task duration and the remaining window. A permanent
+  per-task choice inside a finite window is still bounded by that window's end.
+- **All apps** is one extra person choice, never a default and never the model's decision. It stores
+  no package list (`apps` stays empty) and covers every app that is launchable right now, including
+  Settings, payment/bank/password apps and AndChamber itself. Each request is still checked by the
+  all-apps target policy (the host, Settings, permission controller, package installer and Google
+  settings variants are allowed; `android`, `com.android.systemui` and `com.android.keyguard` stay
+  refused) and by a real launcher check at that moment. An app without a launcher activity is
+  refused. The grant freezes the mode, so a later re-check can never widen or narrow it.
+- In the explicit mode only apps in the saved set are openable, exactly as before. In both modes
+  there is no arbitrary intent, shell, URI or package-install surface; the installed-app catalogue
+  is never handed to the model except as the bounded all-apps picker. The host, system UI, settings
+  and system authorization surfaces cannot be selected in explicit mode.
+- Choosing All apps is a real risk increase: the agent may reach any launchable app, including one
+  that shows money, identity or passwords. Locking the screen, taking over, `need_user`, connection
+  loss, a runtime change or turning the experiment off still stops the task, and the one-task/one-
+  target rule still applies. With AndChamber itself as the target, resuming or opening the native
+  **Phone control** page applies the host-return stop; ordinary chat/Home reading does not. A
+  host-target task in overlay mode keeps the notification stop entry only: the overlay surface is
+  deliberately detached while the host Activity is in front, so no capsule is shown over AndChamber
+  and the driver keeps its original notification-only path. Do not read that as the overlay safety
+  gate being disabled: whenever this app does own a shown surface, the barrier rules still apply.
+  While the native phone-control page is the open route, a host-target `request` is refused with
+  `PHONE_SCREEN_OPEN` before any grant or lease: bringing AndChamber forward would show that page,
+  which stops control. The person leaves the page (Home or chat) and retries. If a stop still lands
+  during a startup observation, the failed start rolls back exactly its own epoch and clears that
+  halt together with the task that never started - unless an action may already have been applied,
+  which always keeps the halt for the person. A revoked read-only operation also releases the single
+  driver call slot immediately instead of leaving a later request BUSY until an abandoned transport
+  read unwinds.
 - Pairing keys stay on the native side. Pairing codes are transient, are not sent through chat, and
   are not included in notification history or logs by this app. Deleting local state does not revoke
   authorization in Android's Wireless debugging settings.
@@ -60,20 +85,33 @@ document.
    the service type without a trailing dot and normalise a leading dot the platform may report, while
    accepting only those two exact types. Nothing scans ports or reads shell properties, and the
    feature adds no nearby-device or location runtime permission.
-4. Save the standing scope: apps, action classes, window and per-task duration. Saving does not
-   grant or launch anything, and it works before the running launcher has loaded the plugin.
-5. Once the new runtime is actually running and the tool handshake is ready, the first valid chat
+4. Save the standing scope: apps (or **All apps**), action classes, window and per-task duration.
+   Saving does not grant or launch anything, and it works before the running launcher has loaded the
+   plugin. All apps stores no list; the picker is then the current launchable catalogue.
+5. After that setup, the device reconnects on its own when the local instance is in front and its
+   runtime is starting or running: the app runs the same bounded connect discovery and at most one
+   TLS connect as **Find and connect**, on launch and whenever the person switches back to the local
+   instance. It never opens the native phone page (opening it applies the host-return stop), never
+   pairs, grants, changes the standing scope, starts a task or restarts the runtime for the plugin.
+   One attempt per app run; if Wireless debugging is off or nothing answers, it stays disconnected
+   without an error and the page's own connect action remains the manual path.
+6. Once the new runtime is actually running and the tool handshake is ready, the first valid chat
    request binds the scope to that runtime and chat session. While that chat's task is live or
    retained, another session receives a mismatch refusal. Once the task has ended, any chat on the
    same runtime may start the next task, which moves the session binding to that chat; a different
    runtime is still refused. Every task has a fresh epoch.
-6. In chat, `request` starts directly inside the scope with a bounded summary and one preauthorized
-   package. The native side checks the scope, proves a foreground stop entry, creates the task/lease,
-   launches that package and performs a real foreground observation before replying
-   `RUNNING`/`READY` with the epoch. There is no per-task `PENDING_CONFIRMATION` in this mode.
-7. `apps` lists only the person-preauthorized labels/packages. `open_app` brings the current live
-   task's same target back to the foreground and proves the observation; it cannot switch to another
-   app or create a new epoch.
+7. In chat, `request` starts directly inside the scope with a bounded summary and one package. In
+   explicit mode that package must be in the saved set. In all-apps mode it must pass the all-apps
+   policy and have a launcher activity right now; the host, Settings and installers are allowed and
+   the secure surfaces stay refused. The native side checks the scope, proves a foreground stop
+   entry, creates the task/lease, launches that package and performs a real foreground observation
+   before replying `RUNNING`/`READY` with the epoch. There is no per-task `PENDING_CONFIRMATION` in
+   this mode.
+8. `apps` lists only the person-authorized labels/packages: the explicit set, or in all-apps mode
+   the bounded launchable catalogue (sanitized, deduplicated, capped at 400, with `allApps: true` and
+   an honest `truncated` flag). `open_app` brings the current live task's same target back to the
+   foreground and proves the observation; it cannot switch to another app or create a new epoch. One
+   task keeps one target; a different target needs a new `request` after the task finished.
 
 The legacy per-task native grant form remains in the controller for compatibility, but the default
 UI is configure-once standing. A chat proposal/request is never authority by itself.
@@ -97,14 +135,19 @@ an endpoint file or a new launch never inherits readiness.
 ## Stop, blockers and continuation
 
 Returning to ordinary local chat does **not** revoke. Entering the real native phone page applies the
-host-return stop; notification Return and overlay Return remain explicit revoke actions.
+host-return stop, and so does resuming this app while that page is already the composed route: a chat
+task started while the app was backgrounded on the phone page does not survive. Notification Return
+and overlay Return remain explicit revoke actions.
 
 `need_user`, takeover, unknown outcome, screen lock, connection loss and runtime change set a standing
 block. A chat request, renewal or reconnect cannot bypass that block. A native person confirmation may
 continue the same retained task/session/runtime: the controller creates a fresh epoch, the target is
 observed again, and exactly one fixed wake-up prompt is sent through the launch-guarded local API to
 the original chat session. The prompt asks the agent to observe again and not repeat an old action.
-A failed wake-up is not retried and does not roll back an already established task; it is not proof of
+For an all-apps scope the halted target must still pass the all-apps name policy and have a launcher
+activity at continuation time (an explicit scope keeps exact list membership); a failure reports
+`TargetUnavailable` and keeps the original halt. A failed wake-up is not retried and does not roll back
+an already established task; it is not proof of
 business success. There is no automatic restart after process death.
 
 A standing block with no retained task is shown as a **pause**, not as Ready. The screen mapper
@@ -209,11 +252,14 @@ real user's field cause or exclude every OEM difference.
   completion/expiry gate prevents a late watchdog from closing after a genuine pre-deadline finish.
 - A transient window-manager state with a complete official `mCurrentFocus=null` or
   `mFocusedApp=null` line and no matching window is typed `NOT_READY` and mapped to
-  `WINDOW_CHANGED`; it is retried only inside the shared startup budget. Missing fields, truncated
-  or oversized output, bad packages/activities and unknown formats stay fail-closed. No partial
-  window or target nodes are produced, and capture/mutation still verify the window on both sides: a
-  pre-injection `null` is `NotSent(WINDOW_CHANGED)`, while a failure after a possible touch remains
-  `UNKNOWN` and is never replayed.
+  `WINDOW_CHANGED`; it is retried only inside the shared startup budget. A present focus window whose
+  title is not a `pkg/activity` app window - the input method (`InputMethod`), a starting/splash
+  window, the notification shade or a system bar - is the same transient `NOT_READY`, never a
+  malformed dump: the focused app is not identifiable yet, so nothing is observed. Missing fields,
+  truncated or oversized output, bad packages/activities and unknown formats stay fail-closed. No
+  partial window or target nodes are produced, and capture/mutation still verify the window on both
+  sides: a pre-injection `null` is `NotSent(WINDOW_CHANGED)`, while a failure after a possible touch
+  remains `UNKNOWN` and is never replayed.
 - Mutation semantics are unchanged: an `afterWrite`/touched timeout or read failure remains `UNKNOWN`
   and is never automatically replayed. Cancel after a grant rolls back exactly that epoch/task and
   propagates the original cancellation; a newer owner is unaffected. The old scope and person-resume
@@ -239,7 +285,9 @@ available in both modes. A system draw-over permission does not grant device con
 The draggable, edge-snapped capsule shows the control phase and dispatch count, not a percentage of
 business completion. Tap its body for the bounded task panel. The confirmed summary is folded by
 default. Events distinguish native observations/confirmations, dispatched actions and unverified
-agent notes. No event means waiting for updates, not fabricated progress.
+agent notes. No event means waiting for updates, not fabricated progress. While the task is live the
+collapsed capsule always reserves the status line plus two progress lines, so a 0/1/2-line update
+never resizes or jumps the WRAP_CONTENT window.
 
 **Take over** revokes observation and changes while leaving the current target page open. **Pause
 actions** in the panel stops new mutations but can still allow observation. Pending stop requests are
@@ -256,11 +304,13 @@ The exact lease is stopped and the retained task facts stay for native recovery.
 no longer removes the surface: the capsule is not focusable, so the focused app's hierarchy dump never
 contains it, and hiding/re-showing on every snapshot only made it flicker. Observation instead
 requires a fresh real-window VISIBLE witness before and after the read, and a mode change during the
-read discards the snapshot. Capture is the only hide/restore path: it removes the surface temporarily,
-verifies absence, restores the latest native state and waits for the first frame, because a screenshot
-must not contain the capsule's summary or notices. A cancelled or timed-out restore cannot silently
-leave a permanent hidden state or resurrect an older owner. Actual WindowManager checks, not
-`FLAG_SECURE`, establish the supported exclusion behavior.
+read discards the snapshot. Capture is the only hide/restore path, and it keeps the same window: the
+attached root view is made `INVISIBLE` (WindowManager reports `mViewVisibility=0x4`), the driver proves
+that real state before the screenshot, then the latest native state is shown again on that same view
+and one real frame is awaited. The window, its token, its surface and the Compose owner are never
+removed/recreated, so snapshot+capture steps no longer flash the capsule. A cancelled or timed-out
+restore cannot silently leave a permanent hidden state or resurrect an older owner. Actual
+WindowManager checks, not `FLAG_SECURE`, establish the supported exclusion behavior.
 
 An action whose point, swipe or input focus would land on the visible capsule asks the overlay to move
 first; only if the capsule is still in the way is the action refused alone as `OVERLAY_OBSTRUCTED`:
@@ -271,6 +321,18 @@ revokes, and it is never stored as the person's own drag position, so their reme
 wins next time. The capsule's display revision (a chat notice, expand/collapse, drag) is not part of
 the observation identity; each action re-reads the real frame and checks against it. A new display
 owner or generation, a hidden/unverifiable window or a display change still fails closed as before.
+
+A target app may ask the system to hide every non-system overlay (`setHideOverlayWindows(true)`;
+Settings does this). When the real window scan shows our own window still has a surface while
+`mForceHideNonSystemOverlayWindow=true`, the focused app is exactly the live task's own target, and the
+person's notification stop entry is verified, that task automatically uses the notification stop
+channel and the original notification driver path for the operation: no overlay visibility witness, no
+hide/restore, no point-in-overlay check and no make-way, because no capsule is drawn for that target.
+The driver re-proves the same real state before every injection, so a target that stops force-hiding
+(or a lost stop entry or changed target) refuses the action instead of injecting. Any other reason the
+window is not visible (our own detach, permission loss, an unknown state, the overlay sitting under
+some other focused app) keeps the previous fail-closed `POLICY_DENIED`; a genuinely lost overlay is
+still an overlay-loss stop, not a silent mode switch.
 
 The tool has three additional closed actions, all requiring the published session route and explicit
 current `epoch`: `progress(phase)`, `need_user(reason)` and `finish(summary)`. Their bounded text is
@@ -401,6 +463,16 @@ emulator evidence only, not API 37/arm64 tablet evidence. A separate regression 
 confirmed that a stopped task still uses its own **Continue** entry after a new-task `need_user`
 pause: one original fixed wake-up, same-session fixture input and an independent target read-back.
 The new no-task resume does not replace that retained-task path.
+
+The **All apps** standing choice and a host (AndChamber) target have JVM coverage only so far: the
+configuration/scope shapes, the all-apps target policy, the grant-frozen mode, the bounded `apps`
+catalogue and the one-target `open_app` rule are tested without a device, and the PHONE-route
+resume/revoke entry plus the host-target notification-only overlay path are code-level changes.
+They have **not** been exercised on an emulator or a physical device. Emulator acceptance still has
+to show: a Settings target, an AndChamber Home/chat target that survives ordinary reading and is
+revoked by the native phone page (including reopening/resuming that page), and a host-target task
+under overlay mode that really uses the notification stop entry. Until then this is not device
+evidence and no OEM/TalkBack claim is made.
 
 A later API 35 / x86_64 independent-App acceptance covered the startup read path in four groups:
 static idle start, bounded busy (6 s), sustained busy (30 s) and a forced read fault. The static and

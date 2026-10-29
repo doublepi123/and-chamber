@@ -10,11 +10,24 @@ data class PhoneStandingApp(
     val packageName: String,
 )
 
-/** Read-only native standing projection: only the person-confirmed scope. */
+/**
+ * Read-only native standing projection: only the person-confirmed scope.
+ *
+ * [apps] is the explicit list. With [allApps] it is always empty and [launchableApps] is the
+ * bounded, sanitized snapshot of launchable packages the person authorized by choosing "all apps";
+ * [catalogueTruncated] says whether the device catalogue had more entries than the bound. Neither
+ * field is authority: the native launcher check and the frozen grant still decide every task.
+ */
 data class PhoneStandingView(
     val apps: List<PhoneStandingApp>,
     val actions: Set<PhoneActionKind>,
     val windowEndsAtMs: Long,
+    /** The person authorized every launchable app; [apps] is then empty. */
+    val allApps: Boolean = false,
+    /** Launchable catalogue for [allApps] mode (already sanitized/deduped/capped). */
+    val launchableApps: List<PhoneStandingApp> = emptyList(),
+    /** True when the device had more launchable apps than the bounded catalogue. */
+    val catalogueTruncated: Boolean = false,
 )
 
 enum class PhoneTaskStartState {

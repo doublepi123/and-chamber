@@ -7,6 +7,12 @@ import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.ui.phone.PhoneToolStatus
 import io.andchamber.app.ui.phone.PhoneUiLimits
+import io.andchamber.app.ui.phone.PhoneLastAction
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -238,6 +244,133 @@ class PhoneStandingConfigTest {
             PrefsPhoneIntegrationStore.decodeStanding(
                 PrefsPhoneIntegrationStore.encodeStanding(corruptWindow),
                 nowWallMs = 1_700_000_000_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `an all apps config round-trips and an old document means explicit mode`() {
+        val allApps =
+            config.copy(
+                apps = emptyList(),
+                windowEndsAtWallMs = 1_700_000_060_000L,
+                allApps = true,
+            )
+        assertEquals(allApps, PrefsPhoneIntegrationStore.decodeStanding(PrefsPhoneIntegrationStore.encodeStanding(allApps)))
+        // The exact flag survives a finite and a permanent shape.
+        val permanent = allApps.copy(windowEndsAtWallMs = PhoneTimeLimits.PERMANENT, perTaskMs = PhoneTimeLimits.PERMANENT)
+        assertEquals(permanent, PrefsPhoneIntegrationStore.decodeStanding(PrefsPhoneIntegrationStore.encodeStanding(permanent)))
+        assertFalse(config.allApps)
+
+        // A document written before the field existed has no allApps key and stays explicit.
+        val legacy =
+            JsonObject(
+                Json.parseToJsonElement(PrefsPhoneIntegrationStore.encodeStanding(config)).jsonObject
+                    .filterKeys { it != "allApps" },
+            )
+        assertEquals(config, PrefsPhoneIntegrationStore.decodeStanding(legacy.toString()))
+    }
+
+    @Test
+    fun `a non-boolean all apps flag or a mixed shape rejects the config`() {
+        val raw = Json.parseToJsonElement(PrefsPhoneIntegrationStore.encodeStanding(config)).jsonObject
+        for (bad in listOf(JsonPrimitive("true"), JsonPrimitive(1), JsonNull)) {
+            val decoded =
+                PrefsPhoneIntegrationStore.decodeStanding(
+                    JsonObject(raw + ("allApps" to bad)).toString(),
+                )
+            assertNull("allApps=$bad must be rejected", decoded)
+        }
+        // allApps=true with a stored list is not a valid shape either.
+        val mixed =
+            config.copy(
+                windowEndsAtWallMs = 1_700_000_060_000L,
+                allApps = true,
+            )
+        assertNull(PrefsPhoneIntegrationStore.decodeStanding(PrefsPhoneIntegrationStore.encodeStanding(mixed)))
+        // An explicit config with an empty list is also rejected, as before.
+        assertNull(
+            PrefsPhoneIntegrationStore.decodeStanding(
+                PrefsPhoneIntegrationStore.encodeStanding(config.copy(apps = emptyList())),
+            ),
+        )
+    }
+
+    @Test
+    fun `continuation coverage is list membership or the all apps policy plus launcher`() {
+        val notesOnly = config.copy(apps = listOf(target))
+        assertTrue(standingCoversHaltedTarget(notesOnly, target.packageName, allAppsPolicyAllowed = false, launchable = false))
+        // Explicit mode never widens just because the all-apps facts happen to be positive.
+        assertFalse(standingCoversHaltedTarget(notesOnly, "com.example.other", allAppsPolicyAllowed = true, launchable = true))
+
+        val all = config.copy(apps = emptyList(), allApps = true)
+        assertTrue(standingCoversHaltedTarget(all, "com.android.settings", allAppsPolicyAllowed = true, launchable = true))
+        // No launcher right now: not covered, even if the name policy allows it.
+        assertFalse(standingCoversHaltedTarget(all, "com.android.settings", allAppsPolicyAllowed = true, launchable = false))
+        // Secure surfaces are never covered.
+        val policy = io.andchamber.app.phone.core.PhoneTargetPolicy()
+        assertFalse(
+            standingCoversHaltedTarget(
+                all,
+                "com.android.systemui",
+                allAppsPolicyAllowed = policy.refusal("com.android.systemui", allApps = true) == null,
+                launchable = true,
+            ),
+        )
+        assertFalse(standingCoversHaltedTarget(null, target.packageName, allAppsPolicyAllowed = true, launchable = true))
+    }
+
+    @Test
+    fun `a host target is refused only while the phone page is the open route`() {
+        assertTrue(hostTargetBlockedByPhoneScreen(hostPackage = "io.andchamber.app", targetPackage = "io.andchamber.app", phoneScreenOpen = true))
+        assertFalse(hostTargetBlockedByPhoneScreen(hostPackage = "io.andchamber.app", targetPackage = "io.andchamber.app", phoneScreenOpen = false))
+        // Explicit/other targets are never affected by the phone route.
+        assertFalse(hostTargetBlockedByPhoneScreen(hostPackage = "io.andchamber.app", targetPackage = "com.android.settings", phoneScreenOpen = true))
+    }
+
+    @Test
+    fun `a rolled-back start clears only its own halt and never an applied action`() {
+        // The stop landed during this start's own epoch and nothing may have been applied.
+        assertTrue(
+            rollbackMayClearHalt(
+                haltLastAction = PhoneLastAction.NoneInFlight,
+                retainedEpoch = 7,
+                requestedEpoch = 7,
+                identityMatchesRequestedKey = false,
+            ),
+        )
+        // A possibly-applied action always keeps the halt for the person.
+        assertFalse(
+            rollbackMayClearHalt(
+                haltLastAction = PhoneLastAction.MayStillApply,
+                retainedEpoch = 7,
+                requestedEpoch = 7,
+                identityMatchesRequestedKey = false,
+            ),
+        )
+        // A halt for another task's epoch/identity is never cleared by this rollback.
+        assertFalse(
+            rollbackMayClearHalt(
+                haltLastAction = PhoneLastAction.NoneInFlight,
+                retainedEpoch = 8,
+                requestedEpoch = 7,
+                identityMatchesRequestedKey = false,
+            ),
+        )
+        assertTrue(
+            rollbackMayClearHalt(
+                haltLastAction = PhoneLastAction.NoneInFlight,
+                retainedEpoch = null,
+                requestedEpoch = 7,
+                identityMatchesRequestedKey = true,
+            ),
+        )
+        assertFalse(
+            rollbackMayClearHalt(
+                haltLastAction = null,
+                retainedEpoch = 7,
+                requestedEpoch = 7,
+                identityMatchesRequestedKey = true,
             ),
         )
     }

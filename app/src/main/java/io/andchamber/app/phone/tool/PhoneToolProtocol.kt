@@ -129,6 +129,12 @@ object PhoneToolProtocol {
     const val MAX_COORDINATE = PhoneLimits.MAX_DISPLAY_PX
     const val DEFAULT_SWIPE_MS = 300
 
+    /**
+     * Bound for the all-apps `apps` listing. The native projection is already bounded; this is the
+     * protocol-level cap that keeps one reply small regardless of the device.
+     */
+    const val MAX_APPS = 400
+
     /** The fixed reply for a successful proposal: the person confirms in the app, not here. */
     const val CONFIRM_IN_APP = "请在AndChamber手机控制中确认"
 
@@ -410,7 +416,8 @@ object PhoneToolProtocol {
             PhoneToolCodes.DUPLICATE, PhoneToolCodes.DUPLICATE_CALL -> "This call was already handled."
             PhoneToolCodes.CAPACITY -> "Too many phone-control requests for this launch."
             PhoneToolCodes.BUSY -> "The phone is busy with another action."
-            PhoneToolCodes.TARGET_FORBIDDEN -> "That app cannot be controlled."
+            PhoneToolCodes.TARGET_FORBIDDEN ->
+                "That app cannot be controlled here. One task has exactly one target: \"open_app\" only reopens the current task's target, and another app becomes available only in a new \"request\" after the current task has finished. Never a secure surface such as the system UI or keyguard."
             PhoneToolCodes.TARGET_MISMATCH -> "The foreground app changed. Take a new snapshot."
             PhoneToolCodes.WINDOW_CHANGED -> "The phone window changed. Take a new snapshot."
             PhoneToolCodes.GEOMETRY_CHANGED -> "The screen geometry changed. Take a new snapshot."
@@ -457,6 +464,8 @@ object PhoneToolProtocol {
                 "The phone-control standing scope expired. Ask the person to set it up again on the phone."
             PhoneToolCodes.START_FAILED, PhoneToolCodes.TARGET_LAUNCH_FAILED ->
                 "The phone task could not be started. Nothing is running; ask the person to check the phone before trying again."
+            PhoneToolCodes.PHONE_SCREEN_OPEN ->
+                "The native phone-control page is open on the phone, so AndChamber itself cannot be started as a target: bringing it forward would show that page, which stops control. Nothing was started. Ask the person to leave the phone-control page (Home or chat) and send the request again."
             PhoneToolCodes.UNAUTHORIZED -> "Unauthorized."
             PhoneToolCodes.FORBIDDEN -> "Forbidden."
             PhoneToolCodes.NOT_FOUND -> "Not found."
@@ -646,6 +655,9 @@ object PhoneToolCodes {
     const val STANDING_UNAVAILABLE = "STANDING_UNAVAILABLE"
     const val STANDING_BLOCKED = "STANDING_BLOCKED"
     const val STANDING_EXPIRED = "STANDING_EXPIRED"
+
+    /** The native phone-control page is open; a host-target request must not bring it forward. */
+    const val PHONE_SCREEN_OPEN = "PHONE_SCREEN_OPEN"
 
     /**
      * A native start that the tool had already admitted could not be kept executable. The native

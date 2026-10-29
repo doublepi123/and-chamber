@@ -23,7 +23,8 @@ import kotlinx.serialization.json.put
  *
  * Stored: the person's explicit opt-in, a minimal task record (target package, the task summary the
  * person already saw, and whether the result still needs a human check), and the person-confirmed
- * standing scope (apps/actions/window/per-task duration; never a grant or lease).
+ * standing scope (apps or the explicit all-apps flag, actions, window, per-task duration; never a
+ * grant or lease).
  * Never stored: grants, epochs, leases, the ADB identity, pairing codes, ports, coordinates,
  * screenshots or page text.
  */
@@ -164,6 +165,7 @@ class PrefsPhoneIntegrationStore(
                 put("windowEndsAtWallMs", config.windowEndsAtWallMs)
                 put("perTaskMs", config.perTaskMs)
                 put("revoked", config.revoked)
+                put("allApps", config.allApps)
                 put("actions", JsonArray(config.actions.sortedBy { it.name }.map { JsonPrimitive(it.name) }))
                 put(
                     "apps",
@@ -188,6 +190,14 @@ class PrefsPhoneIntegrationStore(
                 val windowEndsAtWallMs = root["windowEndsAtWallMs"]?.jsonPrimitive?.longOrNull ?: return null
                 val perTaskMs = root["perTaskMs"]?.jsonPrimitive?.longOrNull ?: return null
                 val revoked = root["revoked"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
+                // A document written before all-apps existed has no field and means explicit mode.
+                // Anything present that is not a JSON boolean (a string, a number, null) is corrupt.
+                val allApps =
+                    root["allApps"]?.let { element ->
+                        val primitive = element as? JsonPrimitive ?: return null
+                        if (primitive.isString) return null
+                        primitive.content.toBooleanStrictOrNull() ?: return null
+                    } ?: false
                 val actions =
                     root["actions"]
                         ?.jsonArray
@@ -209,7 +219,10 @@ class PrefsPhoneIntegrationStore(
                         }
                         .distinctBy { it.packageName }
                         .take(PhoneStandingPolicy.MAX_PACKAGES)
-                if (apps.isEmpty() || actions.isEmpty()) return null
+                if (actions.isEmpty()) return null
+                // Exactly one shape: an all-apps scope has no list; an explicit scope needs one.
+                if (allApps && apps.isNotEmpty()) return null
+                if (!allApps && apps.isEmpty()) return null
                 // A finite end is at most the configured window ahead of the save. A far-future value
                 // that is not the exact sentinel is corrupt, not permanent.
                 if (!PhoneTimeLimits.isPermanent(windowEndsAtWallMs) &&
@@ -229,6 +242,7 @@ class PrefsPhoneIntegrationStore(
                     windowEndsAtWallMs = windowEndsAtWallMs,
                     perTaskMs = perTaskMs,
                     revoked = revoked,
+                    allApps = allApps,
                 )
             }.getOrNull()
     }

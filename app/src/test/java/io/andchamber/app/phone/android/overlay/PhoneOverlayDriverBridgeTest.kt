@@ -60,6 +60,8 @@ class PhoneOverlayDriverBridgeTest {
         owner: () -> String? = { "grant-7:2" },
         lost: MutableList<Pair<Long, String?>> = mutableListOf(),
         makeWay: (suspend (List<PhoneRect>, PhoneRect, Long) -> Boolean) = { _, _, _ -> false },
+        liveTarget: () -> String? = { null },
+        fallback: () -> Boolean = { false },
     ) = PhoneOverlayDriverBridge(
         overlayRequired = required,
         manager = manager,
@@ -67,8 +69,38 @@ class PhoneOverlayDriverBridgeTest {
         displayOwner = owner,
         onSafetyLost = { e, o -> lost += e to o },
         makeWay = makeWay,
+        liveTaskTarget = liveTarget,
+        notificationFallback = fallback,
         mainDispatcher = Dispatchers.Unconfined,
     )
+
+    @Test
+    fun `the target-hides fallback facts are forwarded and a throw stays fail-closed`() {
+        var target: String? = "com.android.settings"
+        var allowed = true
+        val bridge =
+            bridge(
+                required = { true },
+                liveTarget = { target },
+                fallback = { allowed },
+            )
+        assertEquals("com.android.settings", bridge.liveTargetPackage())
+        assertTrue(bridge.notificationFallbackAllowed())
+
+        target = null
+        allowed = false
+        assertNull(bridge.liveTargetPackage())
+        assertFalse(bridge.notificationFallbackAllowed())
+
+        val throwing =
+            bridge(
+                required = { true },
+                liveTarget = { error("no coordinator") },
+                fallback = { error("no stop channel") },
+            )
+        assertNull(throwing.liveTargetPackage())
+        assertFalse(throwing.notificationFallbackAllowed())
+    }
 
     @Test
     fun `constructing the bridge resolves neither the coordinator nor the authority`() {

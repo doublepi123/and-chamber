@@ -16,6 +16,12 @@ internal data class RawLauncherTarget(
     val system: Boolean,
 )
 
+/** The bounded launcher catalogue and whether the device reported more entries than the bound. */
+internal data class LauncherCatalog(
+    val targets: List<PhoneTarget>,
+    val truncated: Boolean,
+)
+
 /**
  * The apps a person may pick from: launcher activities only.
  *
@@ -30,7 +36,26 @@ internal class PhoneTargetCatalog(
     private val policy: PhoneTargetPolicy = PhoneTargetPolicy(hostPackage),
     private val query: () -> List<RawLauncherTarget>,
 ) {
-    fun load(): List<PhoneTarget> = entries(query(), limit, hostPackage, policy)
+    fun load(): List<PhoneTarget> = loadAll().targets
+
+    /**
+     * The same launcher catalogue plus an honest truncation fact. [truncated] is true when the
+     * platform reported more distinct packages than the bound; the picker and the all-apps listing
+     * both need to know that the list is not the whole device.
+     */
+    fun loadAll(): LauncherCatalog {
+        val raw =
+            query()
+                .asSequence()
+                .filter { it.packageName.isNotBlank() }
+                .distinctBy { it.packageName }
+                .toList()
+        val bounded = raw.take(limit.coerceIn(1, MAX_TARGETS))
+        return LauncherCatalog(
+            targets = entries(bounded, limit, hostPackage, policy),
+            truncated = raw.size > bounded.size,
+        )
+    }
 
     companion object {
         const val MAX_TARGETS = 400

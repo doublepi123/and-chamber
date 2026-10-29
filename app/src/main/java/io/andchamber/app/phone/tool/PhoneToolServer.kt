@@ -626,20 +626,51 @@ class PhoneToolServer(
             ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
         val data =
             buildJsonObject {
-                put(
-                    "apps",
-                    JsonArray(
-                        standing.apps.map { app ->
-                            buildJsonObject {
-                                put("label", app.label)
-                                put("packageName", app.packageName)
-                            }
-                        },
-                    ),
-                )
+                if (standing.allApps) {
+                    // All-apps scope: the bounded launchable catalogue, never an arbitrary package
+                    // list and never authority. `truncated` is honest about the device bound.
+                    val listed =
+                        standing.launchableApps
+                            .distinctBy { it.packageName }
+                            .take(PhoneToolProtocol.MAX_APPS)
+                    put(
+                        "apps",
+                        JsonArray(
+                            listed.map { app ->
+                                buildJsonObject {
+                                    put("label", safeLabel(app.label, app.packageName))
+                                    put("packageName", app.packageName)
+                                }
+                            },
+                        ),
+                    )
+                    put("allApps", true)
+                    put("truncated", standing.catalogueTruncated || standing.launchableApps.size > listed.size)
+                } else {
+                    put(
+                        "apps",
+                        JsonArray(
+                            standing.apps.map { app ->
+                                buildJsonObject {
+                                    put("label", app.label)
+                                    put("packageName", app.packageName)
+                                }
+                            },
+                        ),
+                    )
+                }
                 put("actions", JsonArray(standing.actions.sortedBy { it.name }.map { JsonPrimitive(it.name) }))
             }
         return PhoneToolProtocol.envelope(action, true, state.epoch, data)
+    }
+
+    /** Bounded, control-character-free label for the all-apps listing; the package is the fallback. */
+    private fun safeLabel(
+        label: String,
+        packageName: String,
+    ): String {
+        val bounded = label.trim().take(PhoneLimits.MAX_NODE_LABEL_CHARS)
+        return if (bounded.isEmpty() || bounded.any(Char::isISOControl)) packageName else bounded
     }
 
     /**
@@ -656,7 +687,9 @@ class PhoneToolServer(
         if (readyLaunch() != launchId) return failure(action, state.epoch, PhoneToolCodes.RUNTIME_NOT_READY)
         val standing = taskStarter.takeIf { it.available }?.standing()
             ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
-        if (standing.apps.none { it.packageName == request.packageName }) {
+        // Explicit list: only a preauthorized package. All-apps: the native starter applies the
+        // all-apps name policy and the real launcher check, so no list exists here to test.
+        if (!standing.allApps && standing.apps.none { it.packageName == request.packageName }) {
             return failure(action, state.epoch, PhoneToolCodes.TARGET_FORBIDDEN)
         }
         return when (val result = taskStarter.request(call.sessionId, request.summary, request.packageName)) {
@@ -728,7 +761,9 @@ class PhoneToolServer(
         if (readyLaunch() != launchId) return failure(action, state.epoch, PhoneToolCodes.RUNTIME_NOT_READY)
         val standing = taskStarter.takeIf { it.available }?.standing()
             ?: return failure(action, state.epoch, PhoneToolCodes.STANDING_UNAVAILABLE)
-        if (standing.apps.none { it.packageName == request.packageName }) {
+        // Explicit list only. All-apps mode has no list; the native starter still only accepts the
+        // current task's own target and proves the foreground observation.
+        if (!standing.allApps && standing.apps.none { it.packageName == request.packageName }) {
             return failure(action, state.epoch, PhoneToolCodes.TARGET_FORBIDDEN)
         }
         return when (val result = taskStarter.openApp(call.sessionId, request.packageName)) {
@@ -753,6 +788,7 @@ class PhoneToolServer(
             PhoneStandingRefusal.UNKNOWN_OUTCOME -> PhoneToolCodes.OUTCOME_UNKNOWN
             PhoneStandingRefusal.TARGET_NOT_ALLOWED -> PhoneToolCodes.TARGET_FORBIDDEN
             PhoneStandingRefusal.ACTION_NOT_ALLOWED -> PhoneToolCodes.ACTION_NOT_GRANTED
+            PhoneStandingRefusal.PHONE_SCREEN_OPEN -> PhoneToolCodes.PHONE_SCREEN_OPEN
             PhoneStandingRefusal.SESSION_MISMATCH -> PhoneToolCodes.SESSION_BUSY
             PhoneStandingRefusal.TASK_ACTIVE -> PhoneToolCodes.BUSY
             PhoneStandingRefusal.START_FAILED -> PhoneToolCodes.START_FAILED

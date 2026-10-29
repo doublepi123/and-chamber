@@ -6,6 +6,7 @@ import io.andchamber.app.phone.core.PhoneStandingBlockReason
 import io.andchamber.app.phone.core.PhoneTimeLimits
 import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
+import io.andchamber.app.ui.phone.PhoneLastAction
 import io.andchamber.app.ui.phone.PhonePending
 import io.andchamber.app.ui.phone.PhoneRuntimeStatus
 import io.andchamber.app.ui.phone.PhoneToolStatus
@@ -14,6 +15,10 @@ import io.andchamber.app.ui.phone.PhoneToolStatus
  * The person-confirmed standing configuration. This is configuration, never a lease: saving it does
  * not grant, connect, launch or start anything. It may be saved before the runtime loaded the tool,
  * and it survives a process restart as a bounded window (wall-clock end), never as authority.
+ *
+ * [apps] and [allApps] are mutually exclusive: an explicit scope has a non-empty list; the all-apps
+ * choice stores no list. Either way the persisted value only selects the policy shape for a later
+ * task, which still needs a fresh grant and a real launcher check.
  *
  * Either [windowEndsAtWallMs] or [perTaskMs] may be [PhoneTimeLimits.PERMANENT]. That is still only a
  * configured scope: after a reboot or process death there is no grant, no task binding and no
@@ -27,6 +32,12 @@ data class PhoneStandingConfig(
     /** Per-task limit, or [PhoneTimeLimits.PERMANENT] when the person chose no per-task limit. */
     val perTaskMs: Long,
     val revoked: Boolean = false,
+    /**
+     * The person explicitly authorized every launchable app (Settings, payment/bank/password apps
+     * and AndChamber itself included). [apps] is then empty. Still only configuration: each task
+     * still needs the runtime, a fresh grant and the native target policy/launcher checks.
+     */
+    val allApps: Boolean = false,
 )
 
 /**
@@ -48,6 +59,55 @@ internal data class PhoneStandingBindingState(
 
 internal const val STANDING_MIN_WINDOW_MS = 60_000L
 internal const val STANDING_MAX_WINDOW_MS = 24L * 60L * 60L * 1_000L
+
+/**
+ * A host-target start must not be admitted while the native phone-control page is the composed
+ * route. Launching AndChamber would bring that very page forward and its entry applies the
+ * host-return stop, which would revoke the brand-new grant in the middle of the startup observe.
+ * The caller refuses before any grant or lease; the person leaves the page (Home or chat) and the
+ * next request is admitted normally. Pure so the decision is testable without Android.
+ */
+internal fun hostTargetBlockedByPhoneScreen(
+    targetPackage: String,
+    hostPackage: String,
+    phoneScreenOpen: Boolean,
+): Boolean = phoneScreenOpen && targetPackage == hostPackage
+
+/**
+ * A start that is being rolled back was never reported as started. If a stop landed during its
+ * startup observation and produced a halt for that exact epoch, the halt may be cleared together
+ * with the never-really-started task - but only when no action may have been applied, and only for
+ * this start's own epoch/identity. Any possibly-applied action keeps the halt for the person.
+ */
+internal fun rollbackMayClearHalt(
+    haltLastAction: PhoneLastAction?,
+    retainedEpoch: Long?,
+    requestedEpoch: Long,
+    identityMatchesRequestedKey: Boolean,
+): Boolean =
+    haltLastAction != null &&
+        haltLastAction != PhoneLastAction.MayStillApply &&
+        (retainedEpoch == requestedEpoch || identityMatchesRequestedKey)
+
+/**
+ * Does the saved scope still cover an already-halted task's target for a person continuation?
+ *
+ * Explicit mode: exact membership in the saved list. All-apps mode: no list exists, so the caller
+ * supplies the same two facts a new request needs - the all-apps target policy verdict and a real
+ * launcher activity right now. Pure and Android-free, so both the pre-confirmation gate and the
+ * post-resume revalidation use exactly this rule. It never grants or widens anything.
+ */
+internal fun standingCoversHaltedTarget(
+    config: PhoneStandingConfig?,
+    packageName: String,
+    allAppsPolicyAllowed: Boolean,
+    launchable: Boolean,
+): Boolean =
+    when {
+        config == null -> false
+        !config.allApps -> config.apps.any { it.packageName == packageName }
+        else -> allAppsPolicyAllowed && launchable
+    }
 
 internal fun PhoneStandingConfig.isActive(nowWallMs: Long): Boolean =
     !revoked && !PhoneTimeLimits.isExpired(nowWallMs, windowEndsAtWallMs)

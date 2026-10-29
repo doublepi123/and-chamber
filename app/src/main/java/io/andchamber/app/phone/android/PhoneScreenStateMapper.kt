@@ -267,6 +267,7 @@ internal fun standingProjection(
         runtime = facts.runtimeStatus,
         continuation = facts.continuation,
         pause = standingPause(core, facts.halt),
+        allApps = state?.config?.allApps == true,
     )
 }
 

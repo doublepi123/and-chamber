@@ -391,13 +391,33 @@ internal class PhoneOverlayCoordinator(
      * was lost: the driver must refuse, not fall back) or this manager still owns a surface. False
      * only for an explicitly notification-only/off mode with no own surface, preserving the original
      * no-overlay driver path. Never derived from model input.
+     *
+     * The one extra case is a host-target task: while AndChamber itself is the target, its Activity
+     * is in front, so [onHostVisible] has already detached this manager's surface and only the
+     * notification stop entry exists. Requiring a surface that may not lawfully be shown would just
+     * fail the task; no capsule is on screen, so nothing is bypassed. A shown surface always wins.
      */
     internal fun driverOverlayRequired(): Boolean =
-        settings.mode() == PhoneOverlayMode.OVERLAY || surface.isShown ||
-            surface.isHiddenForRead || demoSurface.isShown
+        surface.isShown || surface.isHiddenForRead || demoSurface.isShown ||
+            (settings.mode() == PhoneOverlayMode.OVERLAY && !integration.currentTaskIsHost())
 
     /** Driver-only read-only barrier: exactly this manager surface, never a second window. */
     internal fun driverOverlayBarrier(): PhoneOverlayBarrier = surface
+
+    /**
+     * Driver-only read-only fact: the live task's own target package. It lets the driver compare the
+     * focused app with the task target for the "target hides non-system overlays" fallback. Null
+     * when no live grant/task owns the overlay; never authority.
+     */
+    internal fun driverLiveTargetPackage(): String? = integration.liveTaskTargetPackage()
+
+    /**
+     * Driver-only read-only fact: the notification stop entry is verified for the live task. The
+     * driver may only use the notification fallback while this is true; the coordinator never
+     * grants, resumes or extends anything through it.
+     */
+    internal fun driverNotificationFallbackAllowed(): Boolean =
+        integration.liveLeaseEpoch() != null && integration.notificationStopVerified()
 
     /** Thread-safe display-owner snapshot for an epoch-bounded safety callback. */
     internal fun driverDisplayOwner(): String = driverOwnerSnapshot
@@ -416,6 +436,10 @@ internal class PhoneOverlayCoordinator(
     internal suspend fun awaitDriverSurface(epoch: Long): Boolean =
         withContext(Dispatchers.Main.immediate) {
             if (settings.mode() != PhoneOverlayMode.OVERLAY) return@withContext true
+            // Host-target tasks never attach this manager's surface (the host is in front), so they
+            // keep the original notification-only path instead of waiting for a window that cannot
+            // appear. The notification stop entry is still required before any grant.
+            if (integration.currentTaskIsHost()) return@withContext true
             val startedAtMs = clock()
             var elapsedMs = 0L
             while (elapsedMs < SURFACE_WAIT_TIMEOUT_MS) {

@@ -552,6 +552,176 @@ class AdbPhoneDriverTest {
     }
 
     @Test
+    fun `a host webview page observes on the notification path`() = runBlocking {
+        // Real probe evidence: AndChamber's own WebView chat page exposes a small, valid hierarchy
+        // (8 nodes) with the host package, while the host target runs on the notification-only path.
+        val host = "io.andchamber.app.phoneprobe"
+        val webViewPage =
+            buildString {
+                append("""<hierarchy rotation="0">""")
+                append("""<node class="android.webkit.WebView" package="$host" bounds="[0,0][1080,2400]">""")
+                (1..7).forEach { i ->
+                    append(
+                        """<node class="android.view.View" package="$host" """ +
+                            """content-desc="row $i" bounds="[0,${i * 100}][1080,${i * 100 + 80}]" />""",
+                    )
+                }
+                append("</node></hierarchy>")
+            }
+        val overlay = FakeOverlay()
+        overlay.required = false
+        val device =
+            FakeDevice(
+                webViewPage.toByteArray(),
+                windowStateProvider = {
+                    windowState(pkg = host, activity = "io.andchamber.app.MainActivity")
+                },
+            )
+        val snapshot = overlayDriver(device, overlay).observe(5_000)
+
+        assertEquals(host, snapshot.packageName)
+        assertEquals(8, snapshot.nodes.size)
+        assertEquals(8, snapshot.refs.size)
+        assertEquals(snapshot.nodes.map { it.ref }.toSet(), snapshot.refs.keys)
+        assertTrue(snapshot.nodes.all { it.bounds.isWithin(snapshot.geometry) })
+        assertEquals("notification mode never hides the overlay", 0, overlay.hiddenCalls)
+    }
+
+    @Test
+    fun aTargetThatForceHidesOverlaysUsesTheNotificationStopEntry() = runBlocking {
+        val overlay = FakeOverlay()
+        // The manager still claims VISIBLE (it attached its surface) but the real dump is policy-hidden
+        // by the focused target app.
+        overlay.visible = false
+        overlay.managerClaimsVisible = true
+        overlay.forceHiddenBySystem = true
+        overlay.liveTarget = "com.example.app"
+        overlay.fallbackAllowed = true
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+
+        val snapshot = driver.observe(5_000)
+        assertEquals("com.example.app", snapshot.packageName)
+        assertEquals("observe must not hide a window that is not drawn", 0, overlay.hiddenCalls)
+        assertEquals(0, overlay.makeWayCalls)
+
+        val binding = bindingFor(snapshot)
+        // This point is inside the capsule's own bounds; it is Sent only because no capsule is drawn.
+        assertEquals(
+            PhoneDispatchReceipt.Sent,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(150, 450)), binding), 5_000),
+        )
+        assertEquals(listOf(AdbInputCommand.Tap(150, 450)), device.injected)
+        assertEquals("no point-in-overlay check and no make-way", 0, overlay.makeWayCalls)
+
+        val image = driver.capture(binding, 5_000)
+        assertEquals(1080, image.width)
+        assertEquals("capture must not hide an already-hidden window", 0, overlay.hiddenCalls)
+        assertEquals(0, overlay.restoreCalls)
+    }
+
+    @Test
+    fun aForceHiddenOverlayWithoutAVerifiedNotificationEntryIsRefused() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.visible = false
+        overlay.managerClaimsVisible = true
+        overlay.forceHiddenBySystem = true
+        overlay.liveTarget = "com.example.app"
+        overlay.fallbackAllowed = false
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(device.injected.isEmpty())
+        assertEquals(0, overlay.hiddenCalls)
+    }
+
+    @Test
+    fun aDifferentFocusedAppThatForceHidesOverlaysIsRefused() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.visible = false
+        overlay.managerClaimsVisible = true
+        overlay.forceHiddenBySystem = true
+        // The live task targets another package; the focused app that hides overlays is not it.
+        overlay.liveTarget = "com.example.other"
+        overlay.fallbackAllowed = true
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
+    fun anInvisibleOverlayWithoutTheForceHideFlagStaysRefused() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.visible = false
+        overlay.managerClaimsVisible = true
+        // Our own detach/permission loss/unknown state: no target force-hide proof.
+        overlay.attachedButInvisible = true
+        overlay.forceHiddenBySystem = false
+        overlay.liveTarget = "com.example.app"
+        overlay.fallbackAllowed = true
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+
+        val failure = runCatching { driver.observe(5_000) }.exceptionOrNull()
+        assertEquals(
+            PhoneDriverFailure.POLICY_DENIED,
+            (failure as PhoneDriverException).failure,
+        )
+    }
+
+    @Test
+    fun aFrozenNotificationFallbackIsRefusedWhenTheTargetStopsHidingOverlays() = runBlocking {
+        val overlay = FakeOverlay()
+        overlay.visible = false
+        overlay.managerClaimsVisible = true
+        overlay.forceHiddenBySystem = true
+        overlay.liveTarget = "com.example.app"
+        overlay.fallbackAllowed = true
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+
+        // The proof disappears before the injection: the step is re-proved and nothing is sent.
+        overlay.forceHiddenBySystem = false
+        assertNotSent(
+            PhoneDriverFailure.POLICY_DENIED,
+            driver.dispatch(request(PhoneDriverAction.Tap(PhonePoint(50, 50)), binding), 5_000),
+        )
+        assertTrue(device.injected.isEmpty())
+    }
+
+    @Test
     fun overlayThatBecomesHiddenIsRefusedForObserveAndDispatch() = runBlocking {
         val overlay = FakeOverlay()
         val device = FakeDevice(
@@ -616,6 +786,28 @@ class AdbPhoneDriverTest {
             PhoneDriverFailure.POLICY_DENIED,
             (failure as PhoneDriverException).failure,
         )
+    }
+
+    @Test
+    fun captureHidesByMakingTheAttachedWindowInvisibleInsteadOfRemovingIt() = runBlocking {
+        val overlay = FakeOverlay()
+        var hiddenDump: String? = null
+        overlay.onHidden = { hiddenDump = overlay.windowState() }
+        val device = FakeDevice(
+            editableHierarchy.toByteArray(),
+            windowStateProvider = { overlay.windowState() },
+            windowDetailProvider = { overlay.detailState() },
+        )
+        val driver = overlayDriver(device, overlay)
+        val binding = bindingFor(driver.observe(5_000))
+        driver.capture(binding, 5_000)
+
+        val dump = requireNotNull(hiddenDump) { "capture must really hide the window" }
+        // Same window/token/surface: only the root view became INVISIBLE.
+        assertTrue("the window must stay attached", dump.contains("Sys2038:${overlay.key}"))
+        assertTrue("the real surface must stay attached", dump.contains("mHasSurface=true"))
+        assertTrue("the hide must be the INVISIBLE root view", dump.contains("mViewVisibility=0x4"))
+        assertEquals("the same window must be restored, not re-added", 1, overlay.restoreCalls)
     }
 
     @Test
@@ -1518,6 +1710,29 @@ class AdbPhoneDriverTest {
     ) : PhoneOverlayBarrier {
         var hiddenCalls = 0
         var restoreCalls = 0
+
+        /**
+         * The target app set `mForceHideNonSystemOverlayWindow=true`: our surface stays attached but
+         * WindowManager hides every non-system overlay.
+         */
+        var forceHiddenBySystem: Boolean = false
+
+        /** Manager-side claim, independent of the real dump. Null keeps the legacy [visible] tie. */
+        var managerClaimsVisible: Boolean? = null
+
+        /** Window exists with a surface but is invisible for a reason other than the target's flag. */
+        var attachedButInvisible: Boolean = false
+
+        /** Live task target for the target-hides-overlay fallback, and the verified stop entry. */
+        var liveTarget: String? = null
+        var fallbackAllowed: Boolean = false
+
+        /**
+         * Production capture hide keeps the window attached and only makes its root view INVISIBLE.
+         * [hiddenForRead] models that state: the window section is still present with a surface and
+         * `isVisible=true`, but `mViewVisibility=0x4`. [visible] means the window is really absent.
+         */
+        var hiddenForRead: Boolean = false
         var required: Boolean = true
         var requiredThrows: Boolean = false
         var expectationCalls: Int = 0
@@ -1530,6 +1745,8 @@ class AdbPhoneDriverTest {
         var makeWayFrame: PhoneRect? = null
         var makeWayResult: Boolean = false
         var onMakeWay: ((List<PhoneRect>, PhoneRect) -> Unit)? = null
+        /** Runs inside the hide, after the fake's visibility state was applied. */
+        var onHidden: (() -> Unit)? = null
 
         override suspend fun makeWay(
             avoid: List<PhoneRect>,
@@ -1556,11 +1773,15 @@ class AdbPhoneDriverTest {
                 owner = owner,
                 generation = generation,
                 revision = revision,
-                phase = if (visible) OverlayPhase.VISIBLE else OverlayPhase.UNAVAILABLE,
+                phase = if (managerClaimsVisible ?: visible) OverlayPhase.VISIBLE else OverlayPhase.UNAVAILABLE,
                 windowToken = key,
                 freshnessDeadlineMs = deadlineMs + 60_000L,
             )
         }
+
+        override fun liveTargetPackage(): String? = liveTarget
+
+        override fun notificationFallbackAllowed(): Boolean = fallbackAllowed
 
         override suspend fun <T> withContentHidden(
             owner: String,
@@ -1571,12 +1792,13 @@ class AdbPhoneDriverTest {
             block: suspend () -> T,
         ): T {
             hiddenCalls += 1
-            val previous = visible
-            if (honest) visible = false
+            val previous = hiddenForRead
+            if (honest) hiddenForRead = true
+            onHidden?.invoke()
             try {
                 return block()
             } finally {
-                visible = previous
+                hiddenForRead = previous
                 restoreCalls += 1
             }
         }
@@ -1585,7 +1807,7 @@ class AdbPhoneDriverTest {
         fun windowState(): String = buildString {
             append("mCurrentFocus=Window{7068ee4 u0 com.example.app/MainActivity}\n")
             append("mFocusedApp=ActivityRecord{312191b u0 com.example.app/MainActivity t16}\n")
-            if (visible) append(windowSection(detail = false))
+            if (visible || forceHiddenBySystem || attachedButInvisible) append(windowSection(detail = false))
         }
 
         /** Targeted `dumpsys window <token>`: carries the real frame. */
@@ -1608,9 +1830,15 @@ class AdbPhoneDriverTest {
                         "last=[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]\n",
                 )
             }
-            append("    mViewVisibility=0x0 mHaveFrame=true mObscured=false\n")
-            append("    isOnScreen=true\n")
-            append("    isVisible=true\n")
+            // A capture-hide keeps the same window: INVISIBLE root view -> mViewVisibility=0x4,
+            // while the policy and surface still say the window exists.
+            append("    mViewVisibility=0x${if (hiddenForRead) "4" else "0"} mHaveFrame=true mObscured=false\n")
+            // A target that force-hides non-system overlays keeps the surface but the policy hides
+            // the window and it is not on screen; the focused app set the force-hide flag.
+            append("    mPolicyVisibility=${if (forceHiddenBySystem || attachedButInvisible) "false" else "true"}\n")
+            append("    isOnScreen=${if (forceHiddenBySystem || attachedButInvisible) "false" else "true"}\n")
+            append("    isVisible=${if (forceHiddenBySystem || attachedButInvisible || !visible) "false" else "true"}\n")
+            if (forceHiddenBySystem) append("    mForceHideNonSystemOverlayWindow=true\n")
         }
     }
 

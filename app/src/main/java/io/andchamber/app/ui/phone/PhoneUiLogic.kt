@@ -769,17 +769,23 @@ internal fun chatCanUsePhone(state: PhoneScreenState): Boolean = standingReadine
 /** The first reason a standing scope can't be saved. */
 internal enum class StandingBlock { NotConnected, StopChannel, NoApps, TooManyApps, AppNotAllowed, NoActions, Busy }
 
+/**
+ * [allApps]: the person chose "All apps" (incl. Settings, payment apps and AndChamber). The picked
+ * list is then ignored, so the empty-list, 8-app cap and per-app checks don't apply; the connection,
+ * stop entry, actions and busy checks still do.
+ */
 internal fun standingBlock(
     state: PhoneScreenState,
     apps: List<PhoneTarget>,
     actions: Set<PhoneActionScope>,
+    allApps: Boolean = false,
 ): StandingBlock? =
     when {
         state.device.link != PhoneLink.Connected -> StandingBlock.NotConnected
         state.stopChannel != PhoneStopChannel.Verified -> StandingBlock.StopChannel
-        apps.isEmpty() -> StandingBlock.NoApps
-        apps.size > MAX_STANDING_APPS -> StandingBlock.TooManyApps
-        apps.any { targetBlock(it, state.hostPackage) != null } -> StandingBlock.AppNotAllowed
+        !allApps && apps.isEmpty() -> StandingBlock.NoApps
+        !allApps && apps.size > MAX_STANDING_APPS -> StandingBlock.TooManyApps
+        !allApps && apps.any { targetBlock(it, state.hostPackage) != null } -> StandingBlock.AppNotAllowed
         actions.isEmpty() -> StandingBlock.NoActions
         state.pending != null -> StandingBlock.Busy
         else -> null
@@ -800,10 +806,16 @@ internal fun canContinueInChat(state: PhoneScreenState): Boolean {
         state.stopChannel == PhoneStopChannel.Verified &&
         state.pending == null &&
         continueRequestAllowed(standing.continuation.delivery) &&
-        halted.target() in standing.apps.map { it.packageName }
+        standingCoversApp(standing, halted.target())
 }
 
 private fun PhoneControl.Halted.target(): String = lease.target.packageName
+
+/** Whether the saved scope includes [packageName]: every app for an all-apps scope, else the list. */
+internal fun standingCoversApp(
+    standing: PhoneStanding,
+    packageName: String,
+): Boolean = standing.allApps || standing.apps.any { it.packageName == packageName }
 
 /**
  * "Resume chat use" for a paused standing scope with no stopped or running task. Offered only when
@@ -962,12 +974,24 @@ internal fun perTaskDisplay(
     }
 
 /** What the confirm button sends. "Permanent" travels as [PhoneUiLimits.PERMANENT_MS], unchanged. */
+/**
+ * The request the confirm dialog sends. [allApps]: every launchable app; the explicit list is then
+ * always empty, so a stale selection can never travel with an all-apps scope.
+ */
 internal fun standingRequest(
     apps: List<PhoneTarget>,
     actions: Set<PhoneActionScope>,
     hours: Int,
     minutes: Int,
-): PhoneStandingRequest = PhoneStandingRequest(apps, actions, standingWindowMs(hours), standingPerTaskMs(minutes))
+    allApps: Boolean = false,
+): PhoneStandingRequest =
+    PhoneStandingRequest(
+        apps = if (allApps) emptyList() else apps,
+        actions = actions,
+        windowMs = standingWindowMs(hours),
+        perTaskMs = standingPerTaskMs(minutes),
+        allApps = allApps,
+    )
 
 /**
  * Per-task "no time limit". [PhoneStanding.perTaskPermanent] is the field; `Int.MAX_VALUE` minutes

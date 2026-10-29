@@ -139,12 +139,19 @@ enum class PhoneErrorCode {
     CANCELLED,
 }
 
+/**
+ * One native lease. [allApps] freezes the target-policy mode the grant was created with: an
+ * all-apps standing grant must be re-checked with the same mode on every later plan/observation,
+ * so a stale grant can never be widened or narrowed by a changed configuration.
+ */
 data class PhoneGrant(
     val epoch: Long,
     val targetPackage: String,
     val allowedActions: Set<PhoneActionKind>,
     val grantedAtMs: Long,
     val expiresAtMs: Long,
+    /** True for a grant created inside a person-authorized all-apps standing scope. */
+    val allApps: Boolean = false,
 )
 
 sealed interface PhoneGrantResult {

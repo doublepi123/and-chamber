@@ -410,6 +410,38 @@ class PhoneScreenStateMapperTest {
     }
 
     @Test
+    fun `an all apps configuration projects the flag and no app list`() {
+        val config =
+            PhoneStandingConfig(
+                apps = emptyList(),
+                actions = setOf(io.andchamber.app.phone.core.PhoneActionKind.TAP),
+                windowEndsAtWallMs = 10_000L,
+                perTaskMs = 60_000L,
+                allApps = true,
+            )
+        val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
+        val mapped =
+            phoneScreenState(
+                core,
+                facts().copy(standingEnabled = true, standingState = PhoneStandingState(config, endsAtElapsedMs = 5_000L)),
+                nowElapsedMs = 1_000L,
+            )
+        assertEquals(true, mapped.standing?.allApps)
+        assertTrue(mapped.standing?.apps?.isEmpty() == true)
+        // Explicit mode keeps the flag false; the projection is not inferred from an empty list.
+        val explicit =
+            phoneScreenState(
+                core,
+                facts().copy(
+                    standingEnabled = true,
+                    standingState = PhoneStandingState(config.copy(allApps = false, apps = listOf()), 5_000L),
+                ),
+                nowElapsedMs = 1_000L,
+            )
+        assertEquals(false, explicit.standing?.allApps)
+    }
+
+    @Test
     fun `standing surface is opt-in so the legacy per-task flow stays untouched`() {
         val core = PhoneState(enabled = true, epoch = 1, connection = PhoneConnectionState.CONNECTED)
         assertNull(phoneScreenState(core, facts()).standing)

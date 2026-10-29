@@ -40,10 +40,16 @@ internal class PhoneOverlayDriverBridge(
     private val onSafetyLost: (epoch: Long, owner: String?) -> Unit,
     /** Native make-way request; never grants, renews, resumes or revokes. */
     makeWay: suspend (List<PhoneRect>, PhoneRect, Long) -> Boolean = { _, _, _ -> false },
+    /** Live task target for the target-hides-overlay fallback; null when no live task owns it. */
+    liveTaskTarget: () -> String? = { null },
+    /** Verified notification stop entry for the live task; false keeps the driver fail-closed. */
+    notificationFallback: () -> Boolean = { false },
     /** A post, not an inline call: the failed driver operation and the controller result settle first. */
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
 ) : PhoneOverlayBarrier {
     private val requestMakeWay = makeWay
+    private val readLiveTaskTarget = liveTaskTarget
+    private val readNotificationFallback = notificationFallback
 
     /** Immutable authority captured before one driver operation. */
     data class OperationGuard(
@@ -68,6 +74,22 @@ internal class PhoneOverlayDriverBridge(
             manager() ?: throw IllegalStateException("overlay manager is not available")
         return surface.expectation(deadlineMs)
     }
+
+    /** Read-only live task target; any failure is "no target", which keeps the fallback closed. */
+    override fun liveTargetPackage(): String? =
+        try {
+            readLiveTaskTarget()
+        } catch (_: Exception) {
+            null
+        }
+
+    /** Read-only stop-entry fact; any failure keeps the driver on the overlay path. */
+    override fun notificationFallbackAllowed(): Boolean =
+        try {
+            readNotificationFallback()
+        } catch (_: Exception) {
+            false
+        }
 
     override suspend fun <T> withContentHidden(
         owner: String,

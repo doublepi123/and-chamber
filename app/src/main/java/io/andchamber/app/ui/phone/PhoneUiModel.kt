@@ -223,6 +223,8 @@ internal data class PhoneStanding(
     val continuation: PhoneContinuation = PhoneContinuation(),
     /** Native standing block, if any. Never Ready while set; only [PhoneControlActions.onResumeStanding] asks to end it. */
     val pause: PhoneStandingPause? = null,
+    /** The person allowed every launchable app (incl. Settings, payment apps and AndChamber); [apps] is then empty. */
+    val allApps: Boolean = false,
 )
 
 /** What the person confirmed natively for the standing scope. */
@@ -234,6 +236,8 @@ internal data class PhoneStandingRequest(
     val windowMs: Long,
     /** [PhoneUiLimits.PERMANENT_MS] only when the person explicitly chose "Permanent". */
     val perTaskMs: Long,
+    /** The person explicitly chose "All apps"; [apps] is then empty. */
+    val allApps: Boolean = false,
 )
 
 /** Device connection (wireless debugging), separate from who controls and from the task. */

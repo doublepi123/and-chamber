@@ -17,6 +17,7 @@ import io.andchamber.app.phone.overlay.progress.PhoneTaskEventHandler
 import io.andchamber.app.phone.overlay.progress.PhoneTaskEventReply
 import io.andchamber.app.phone.overlay.progress.PhoneTaskKey
 import io.andchamber.app.phone.overlay.progress.PhoneTaskState
+import io.andchamber.app.phone.standing.PhoneStandingApp
 import io.andchamber.app.phone.standing.PhoneStandingRefusal
 import io.andchamber.app.phone.standing.PhoneTaskContinuationFailure
 import io.andchamber.app.phone.standing.PhoneTaskContinuationState
@@ -349,6 +350,102 @@ class PhoneToolServerTest {
             assertEquals("true", status.data()["standingConfigured"].toString())
             assertEquals("false", status.data()["nativeTaskEvents"].toString())
             assertEquals("true", status.data()["runtimeReady"].toString())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `all apps lists the bounded launchable catalogue and reports truncation`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            fixture.taskStarter.allApps = true
+            fixture.taskStarter.apps = emptyList()
+            fixture.taskStarter.launchableApps =
+                (1..PhoneToolProtocol.MAX_APPS + 5).map {
+                    PhoneStandingApp("App $it", "com.example.app$it")
+                }
+
+            val response = httpPost(fixture.port, toolBody("ses-a", "aa1", input("apps")))
+            assertTrue(response.ok())
+            assertEquals("phone.apps", response.action())
+            val apps = response.data()["apps"] as JsonArray
+            assertEquals(PhoneToolProtocol.MAX_APPS, apps.size)
+            assertEquals("true", response.data()["allApps"].toString())
+            assertEquals("true", response.data()["truncated"].toString())
+            assertTrue(response.body.contains("com.example.app1"))
+            assertEquals(
+                setOf("TAP", "SWIPE", "INPUT", "BACK"),
+                (response.data()["actions"] as JsonArray).map { it.toString().trim('"') }.toSet(),
+            )
+
+            // The native truncation fact alone also reports truncated.
+            fixture.taskStarter.allApps = false
+            val explicit = httpPost(fixture.port, toolBody("ses-a", "aa2", input("apps")))
+            assertTrue(explicit.ok())
+            assertNull("explicit mode must not add an allApps key", explicit.data()["allApps"])
+            assertNull("explicit mode must not add a truncated key", explicit.data()["truncated"])
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `all apps request accepts a launchable app and refuses the secure surfaces`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            fixture.taskStarter.allApps = true
+            fixture.taskStarter.apps = emptyList()
+
+            assertEquals(
+                "TARGET_FORBIDDEN",
+                httpPost(fixture.port, requestBody("open system ui", "com.android.systemui", callId = "ha1")).code(),
+            )
+            assertEquals(
+                "TARGET_FORBIDDEN",
+                httpPost(fixture.port, requestBody("open keyguard", "com.android.keyguard", callId = "ha2")).code(),
+            )
+            assertEquals(0, fixture.taskStarter.opened.size)
+            assertNull("a refused target must not create a grant", fixture.controller.state.value.grant)
+
+            val hostTask =
+                httpPost(fixture.port, requestBody("check AndChamber", "io.andchamber.app", callId = "ha3"))
+            assertTrue(hostTask.ok())
+            assertEquals("RUNNING", hostTask.data()["state"]!!.toString().trim('"'))
+            assertEquals("io.andchamber.app", fixture.taskStarter.lastRequested)
+
+            // One target per task: open_app only reopens this task's own target.
+            assertEquals(
+                "TARGET_FORBIDDEN",
+                httpPost(fixture.port, toolBody("ses-a", "ha4", input("open_app", extra = mapOf("packageName" to "com.android.settings")))).code(),
+            )
+            val reopened =
+                httpPost(fixture.port, toolBody("ses-a", "ha5", input("open_app", extra = mapOf("packageName" to "io.andchamber.app"))))
+            assertTrue(reopened.ok())
+            assertEquals("OPENED", reopened.data()["state"]!!.toString().trim('"'))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `a host start refused because the phone page is open has a clear code`() = runBlocking {
+        val fixture = PhoneServerFixture()
+        try {
+            fixture.standingReady()
+            fixture.taskStarter.allApps = true
+            fixture.taskStarter.apps = emptyList()
+            fixture.taskStarter.startOverride =
+                PhoneTaskStartResult.Refused(PhoneStandingRefusal.PHONE_SCREEN_OPEN)
+
+            val response =
+                httpPost(fixture.port, requestBody("check AndChamber", "io.andchamber.app", callId = "p1"))
+            assertEquals("PHONE_SCREEN_OPEN", response.code())
+            val message = (response.json["error"] as JsonObject)["message"]!!.toString()
+            assertTrue("the fixed message must say to leave the page: $message", message.contains("leave the phone-control page"))
+            assertTrue("nothing may be started", fixture.controller.state.value.grant == null)
         } finally {
             fixture.close()
         }

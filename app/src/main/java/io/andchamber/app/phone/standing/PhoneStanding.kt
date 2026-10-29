@@ -26,6 +26,13 @@ enum class PhoneStandingRefusal {
     TARGET_NOT_ALLOWED,
     ACTION_NOT_ALLOWED,
 
+    /**
+     * The native phone-control page is the route in front, and the requested target is AndChamber
+     * itself. Bringing the host forward would show that page, which applies the host-return stop, so
+     * the start is refused before any grant/lease. The person must leave the page (Home or chat).
+     */
+    PHONE_SCREEN_OPEN,
+
     /** Another chat session owns the current standing task/binding. Routing is not authentication. */
     SESSION_MISMATCH,
 
@@ -48,6 +55,10 @@ enum class PhoneStandingRefusal {
 data class PhoneStandingScope internal constructor(
     val runtimeId: String,
     val sessionLabel: String,
+    /**
+     * The explicit person-confirmed app list, or empty when [allApps] is true. Never both: an
+     * all-apps scope carries no list, so it cannot be mistaken for a named subset.
+     */
     val allowedPackages: List<String>,
     val allowedActions: Set<PhoneActionKind>,
     /** Absolute elapsedRealtime end of the standing window, or the explicit permanent sentinel. */
@@ -59,6 +70,11 @@ data class PhoneStandingScope internal constructor(
     val perTaskMs: Long,
     /** Optional native binding revision; it only invalidates stale native callbacks. */
     val taskRevision: Long? = null,
+    /**
+     * The person explicitly authorized every launchable app. The target policy then runs in
+     * all-apps mode and the membership check is skipped; [allowedPackages] must be empty.
+     */
+    val allApps: Boolean = false,
 )
 
 /**
@@ -97,11 +113,19 @@ object PhoneStandingPolicy {
         state: PhoneState,
         targetPolicy: PhoneTargetPolicy,
     ): PhoneStandingRefusal? {
+        // An explicit scope is a non-empty deduplicated package list; an all-apps scope is exactly
+        // the absence of that list. Either shape may never carry the other's fields.
+        val packagesValid =
+            if (scope.allApps) {
+                scope.allowedPackages.isEmpty()
+            } else {
+                scope.allowedPackages.size in 1..MAX_PACKAGES &&
+                    scope.allowedPackages.distinct().size == scope.allowedPackages.size &&
+                    scope.allowedPackages.all { PACKAGE_PATTERN.matches(it) }
+            }
         if (!validLabel(scope.runtimeId, MAX_RUNTIME_CHARS) ||
             !validLabel(scope.sessionLabel, MAX_SESSION_CHARS) ||
-            scope.allowedPackages.size !in 1..MAX_PACKAGES ||
-            scope.allowedPackages.distinct().size != scope.allowedPackages.size ||
-            scope.allowedPackages.any { !PACKAGE_PATTERN.matches(it) } ||
+            !packagesValid ||
             scope.allowedActions.isEmpty() ||
             (!PhoneTimeLimits.isPermanent(scope.perTaskMs) &&
                 scope.perTaskMs !in PhoneLimits.MIN_LEASE_MS..PhoneLimits.MAX_LEASE_MS) ||
@@ -114,8 +138,13 @@ object PhoneStandingPolicy {
         ) {
             return PhoneStandingRefusal.EXPIRED
         }
-        if (targetPackage !in scope.allowedPackages) return PhoneStandingRefusal.TARGET_NOT_ALLOWED
-        if (targetPolicy.refusal(targetPackage) != null) return PhoneStandingRefusal.TARGET_NOT_ALLOWED
+        // All-apps mode has no membership list: the target policy (same mode) is the only name gate.
+        if (!scope.allApps && targetPackage !in scope.allowedPackages) {
+            return PhoneStandingRefusal.TARGET_NOT_ALLOWED
+        }
+        if (targetPolicy.refusal(targetPackage, allApps = scope.allApps) != null) {
+            return PhoneStandingRefusal.TARGET_NOT_ALLOWED
+        }
 
         if (!state.enabled) return PhoneStandingRefusal.DISABLED
         if (state.connection != PhoneConnectionState.CONNECTED) return PhoneStandingRefusal.NOT_CONNECTED

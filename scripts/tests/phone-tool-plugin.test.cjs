@@ -270,6 +270,7 @@ test('package.json and tool registration shape', () => {
   }
   assert.equal(tool.input.properties.summary.maxLength, 200);
   assert.equal(tool.input.properties.packageName.maxLength, 200);
+  assert.match(tool.input.properties.packageName.description, /the current task's own target/);
   for (const key of ['phase', 'message', 'reason']) {
     assert.equal(tool.input.properties[key].maxLength, 120, key);
   }
@@ -299,6 +300,23 @@ test('package.json and tool registration shape', () => {
   assert.match(tool.description, /standing scope/);
   assert.match(tool.description, /There is no PENDING_CONFIRMATION step/);
   assert.match(tool.description, /never exposes the installed-app catalogue/);
+  // The standing "all apps" choice lists launchable apps only; it stays a picker, not authority.
+  assert.match(tool.description, /standing "all apps" choice/);
+  assert.match(tool.description, /launchable right now/);
+  assert.match(tool.description, /answered with allApps true/);
+  assert.match(tool.description, /it is a picker, never authority/);
+  assert.match(tool.description, /An explicit scope accepts only its listed package/);
+  assert.match(tool.description, /An all-apps scope accepts any currently launchable app/);
+  assert.match(tool.description, /secure surfaces \(system UI and keyguard\)/);
+  assert.match(tool.description, /an app whose launcher is gone, or one that is not launchable, is refused/);
+  assert.match(tool.description, /PHONE_SCREEN_OPEN/);
+  assert.match(tool.description, /the native phone-control page is open/);
+  assert.match(tool.description, /must not be brought forward because it stops control/);
+  assert.match(tool.description, /leave the phone-control page \(Home or chat\) and send the request again/);
+  // One target per task: open_app only reopens it; a new target needs a new request after finish.
+  assert.match(tool.description, /One task has exactly one target for its whole life/);
+  assert.match(tool.description, /it never switches to a different app/);
+  assert.match(tool.description, /only becomes available in a new "request" after this task has finished/);
   assert.match(tool.description, /never enable, pair, grant, resume, acknowledge or open overlay permission/);
   assert.match(tool.description, /Take "snapshot" first/);
   assert.match(tool.description, /observationId/);
