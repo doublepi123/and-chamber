@@ -393,16 +393,11 @@ internal class LocalProviderRun(
         if (inspection.packageName != "@openchamber/web") {
             fail("installed-package-name: ${inspection.packageName}")
         }
-        // Installed package must be exactly what the runtime recorded (an in-app update may be newer
-        // than the bundled pin, never older).
+        // Installed package must be exactly what the runtime recorded.
         if (inspection.packageVersion != metadata.openChamberVersion) {
             fail("installed-package-version: ${inspection.packageVersion} recorded ${metadata.openChamberVersion}")
         }
-        val installedVersion = inspection.packageVersion
-            ?: fail("installed-package-version-missing")
-        if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(installedVersion, manifest.openChamberVersion) < 0) {
-            fail("installed-package-below-pin: $installedVersion")
-        }
+        if (inspection.packageVersion == null) fail("installed-package-version-missing")
         // A version match alone does not prove stock: the retired patched build was also 2.4.0. Its
         // marker file and the provider module must be absent.
         if (File(inspection.moduleRoot, "provider-artifact.json").exists()) fail("installed-patched-marker-present")

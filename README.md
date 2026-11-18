@@ -101,8 +101,8 @@ AndChamber 在应用私有存储里用 PRoot 搭建一个 Alpine Linux 用户空
 |---|---|---|
 | Alpine Linux minirootfs | 3.24.1 | dl-cdn.alpinelinux.org，SHA-256 固定 |
 | Node.js | 24.x | Alpine `nodejs` 包 |
-| OpenChamber | 2.4.0 | npm `@openchamber/web` |
-| OpenCode | 2.0.32 | npm `@opencode/cli`（musl 版本） |
+| OpenChamber | 部署时 npm `latest` | npm `@openchamber/web`，不固定版本 |
+| OpenCode | 部署时 npm `latest`（至少 2.0.20） | npm `@opencode/cli`（musl 版本），不固定版本 |
 | PRoot | 5.1.107.98 | 源码构建：固定版本源码归档，SHA-256 校验，编译为 jniLibs（与 talloc、libandroid-shmem 一起随 APK 分发） |
 
 ## 从源码构建

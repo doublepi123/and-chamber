@@ -31,7 +31,7 @@ import java.io.File
 
 private fun fakeRuntime(root: File) = runtimeWith(root, versions = null)
 
-/** A runtime whose installed npm versions are [versions] (the manifest pins 2.4.0 / 2.0.32 when null). */
+/** A runtime whose installed npm versions are [versions] (fixture defaults 2.4.0 / 2.0.32 when null). */
 private fun runtimeWith(
     root: File,
     versions: PackageVersions?,
@@ -194,7 +194,6 @@ class LocalRuntimeControllerTest {
         policy: RestartPolicy = RestartPolicy(listOf(1_000L, 2_000L), healthyResetMillis = 120_000L),
         watchdogPollMillis: Long = 500L,
         versionSource: PackageVersionSource? = null,
-        pinnedVersions: PackageVersions? = null,
     ): DefaultLocalRuntimeController {
         val job = SupervisorJob()
         val scope = CoroutineScope(job + StandardTestDispatcher(testScheduler))
@@ -217,7 +216,6 @@ class LocalRuntimeControllerTest {
             // Mirrors the production gate (arm64-v8a and x86_64), so ABI-specific cases run against it.
             supportedAbis = setOf("arm64-v8a", "x86_64"),
             versionSource = versionSource,
-            pinnedVersions = pinnedVersions,
         )
     }
 
@@ -812,37 +810,35 @@ class LocalRuntimeControllerTest {
     ) : PackageVersionSource {
         var calls = 0
 
-        override suspend fun latest(pinned: PackageVersions): PackageVersions {
+        override suspend fun latest(): PackageVersions {
             calls++
             error?.let { throw it }
-            return answer ?: pinned
+            return checkNotNull(answer)
         }
     }
 
-    private val pins = PackageVersions(openChamber = "2.4.0", openCode = "2.0.32")
+    private val registryVersions = PackageVersions(openChamber = "2.4.0", openCode = "2.0.32")
 
     @Test
-    fun `bundled pins newer than the installed runtime are offered without network`() =
+    fun `no update is invented without a registry source`() =
         controllerTest {
             val root = folder.root
             val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
-            val controller = controller(installed, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installed, FakeServer())
             controller.initialize()
             step()
 
-            val available = controller.updates.value.available
-            assertEquals(VersionChange(current = "2.3.0", target = "2.4.0"), available?.openChamber)
-            assertEquals(VersionChange(current = "2.0.20", target = "2.0.32"), available?.openCode)
+            assertEquals(null, controller.updates.value.available)
             assertEquals(false, controller.updates.value.checkFailed)
         }
 
     @Test
-    fun `a failed registry check still offers the bundled pins and says the check failed`() =
+    fun `a failed registry check does not invent a bundled update`() =
         controllerTest {
             val root = folder.root
             val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.32")))
             val source = FixedSource(error = java.io.IOException("offline"))
-            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            val controller = controller(installed, FakeServer(), versionSource = source)
             controller.initialize()
             step()
             // The automatic check after detect has already failed; a manual check made after it finished
@@ -854,18 +850,16 @@ class LocalRuntimeControllerTest {
             assertEquals("manual check after the first finished runs again", 2, source.calls)
             assertTrue(controller.updates.value.checkFailed)
             assertEquals(false, controller.updates.value.checking)
-            assertEquals(VersionChange(current = "2.3.0", target = "2.4.0"), controller.updates.value.available?.openChamber)
-            // Unchanged packages stay as a VersionChange with changed == false; the UI filters on `changed`.
-            assertEquals(false, controller.updates.value.available?.openCode?.changed)
+            assertEquals(null, controller.updates.value.available)
         }
 
     @Test
-    fun `a registry version newer than the pins is offered`() =
+    fun `a registry version newer than installed is offered`() =
         controllerTest {
             val root = folder.root
-            val installed = FakeInstaller(root, installed = runtimeWith(root, pins))
+            val installed = FakeInstaller(root, installed = runtimeWith(root, registryVersions))
             val source = FixedSource(answer = PackageVersions("2.5.1", "2.0.40"))
-            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            val controller = controller(installed, FakeServer(), versionSource = source)
             controller.initialize()
             step()
             controller.checkForUpdates()
@@ -882,9 +876,9 @@ class LocalRuntimeControllerTest {
     fun `an older installed version is never offered a downgrade`() =
         controllerTest {
             val root = folder.root
-            // OpenCode was updated past the pin already; the pin must not pull it back down.
+            // A registry latest older than the installed OpenCode must not pull it back down.
             val installed = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.4.0", "2.0.40")))
-            val controller = controller(installed, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installed, FakeServer(), versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
 
@@ -896,8 +890,8 @@ class LocalRuntimeControllerTest {
         controllerTest {
             val root = folder.root
             val installed = FakeInstaller(root, installed = fakeRuntime(root))
-            val source = FixedSource(answer = pins)
-            val controller = controller(installed, FakeServer(), versionSource = source, pinnedVersions = pins)
+            val source = FixedSource(answer = registryVersions)
+            val controller = controller(installed, FakeServer(), versionSource = source)
             controller.initialize()
             step()
             assertEquals("the first detect checks automatically", 1, source.calls)
@@ -917,7 +911,7 @@ class LocalRuntimeControllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
             val server = FakeServer()
-            val controller = controller(installer, server, pinnedVersions = pins)
+            val controller = controller(installer, server, versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
             controller.perform(RuntimeOperation.Start)
@@ -927,7 +921,7 @@ class LocalRuntimeControllerTest {
             controller.perform(RuntimeOperation.Update)
             step()
 
-            assertEquals(listOf(pins), installer.updateCalls)
+            assertEquals(listOf(registryVersions), installer.updateCalls)
             assertTrue("running server is restarted", controller.state.value is RuntimeState.Running)
             assertEquals(null, controller.updates.value.lastFailure)
             assertEquals(null, controller.updates.value.available)
@@ -943,7 +937,7 @@ class LocalRuntimeControllerTest {
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
             val server = FakeServer()
             val states = mutableListOf<RuntimeState>()
-            val controller = controller(installer, server, states = states, pinnedVersions = pins)
+            val controller = controller(installer, server, states = states, versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
             assertEquals(RuntimeState.Stopped, controller.state.value)
@@ -964,7 +958,7 @@ class LocalRuntimeControllerTest {
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
             installer.updateFailWith = UserFacingException(MessageKey.UpdateNotEnoughSpace, "no space", detail = "df")
             val server = FakeServer()
-            val controller = controller(installer, server, pinnedVersions = pins)
+            val controller = controller(installer, server, versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
             controller.perform(RuntimeOperation.Start)
@@ -993,7 +987,7 @@ class LocalRuntimeControllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
             installer.updateFailWith = IllegalStateException("npm failed")
-            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installer, FakeServer(), versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
 
@@ -1005,27 +999,27 @@ class LocalRuntimeControllerTest {
         }
 
     @Test
-    fun `repair installs at least the installed versions so OpenCode is never downgraded`() =
+    fun `repair resolves npm latest instead of installed versions`() =
         controllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.4.0", "2.0.40")))
-            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installer, FakeServer(), versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
 
             controller.perform(RuntimeOperation.Repair)
             step()
 
-            assertEquals(PackageVersions(openChamber = "2.4.0", openCode = "2.0.40"), installer.installCalls.last())
+            assertEquals(null, installer.installCalls.last())
             controller.perform(RuntimeOperation.Stop)
             step()
         }
 
     @Test
-    fun `a fresh install takes the manifest pins`() =
+    fun `a fresh install resolves npm latest`() =
         controllerTest {
             val installer = FakeInstaller(folder.root)
-            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installer, FakeServer(), versionSource = FixedSource(answer = registryVersions))
             controller.perform(RuntimeOperation.Install)
             step()
 
@@ -1039,7 +1033,7 @@ class LocalRuntimeControllerTest {
         controllerTest {
             val root = folder.root
             val installer = FakeInstaller(root, installed = runtimeWith(root, PackageVersions("2.3.0", "2.0.20")))
-            val controller = controller(installer, FakeServer(), pinnedVersions = pins)
+            val controller = controller(installer, FakeServer(), versionSource = FixedSource(answer = registryVersions))
             controller.initialize()
             step()
             assertTrue(controller.updates.value.available != null)

@@ -198,21 +198,7 @@ async function checkPreconditions({ adbFn, pkg, log }) {
   const metadata = parseJson(metadataRaw);
   if (!metadata) throw new Error('installed runtime metadata missing');
   if (metadata.abi !== 'x86_64') throw new Error(`installed runtime abi is ${metadata.abi}, expected x86_64`);
-  const manifest = parseJson(fs.readFileSync(path.resolve(__dirname, '..', 'app/src/main/assets/runtime-manifest.json'), 'utf8'));
-  if (!manifest) throw new Error('runtime manifest asset is missing');
-  // The in-app update may move past the bundled pin; it must never be older.
-  const versionParts = (value) => String(value || '').split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const notOlder = (a, b) => {
-    const x = versionParts(a); const y = versionParts(b);
-    for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
-      if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
-    }
-    return true;
-  };
-  if (!notOlder(metadata.openChamberVersion, manifest.openChamberVersion)) {
-    throw new Error(`installed OpenChamber is ${metadata.openChamberVersion}, older than pin ${manifest.openChamberVersion}`);
-  }
-  // Stock npm package recorded in the runtime manifest; no patched marker is expected. The guest
+  // Stock npm package recorded in the runtime metadata; no patched marker is expected. The guest
   // plugin directory carries the APK's browser-tool files (bytes re-checked in-process).
   const moduleRoot = 'files/runtime/environment/rootfs/usr/local/lib/node_modules/@openchamber/web';
   const packageRaw = await readPrivateText(adbFn, pkg, `${moduleRoot}/package.json`);

@@ -98,16 +98,11 @@ class NotificationPairingE2ETest {
             isolated = true
             grantNotifications(run)
             val manifest = run.runtimeManifest()
-            if (manifest.openChamberVersion != OPEN_CHAMBER_PIN || manifest.openCodeVersion != OPEN_CODE_PIN) {
-                run.fail("manifest-pins-changed: ${manifest.openChamberVersion}/${manifest.openCodeVersion}")
-            }
 
             stage = "runtime"
             val activity = run.launchActivity()
             ensureRunning(run, paths)
             val metadata = run.verifyStockOpenChamber(manifest, paths).metadata
-            if (metadata.openChamberVersion != OPEN_CHAMBER_PIN) run.fail("installed-openchamber-version")
-            if (metadata.openCodeVersion != OPEN_CODE_PIN) run.fail("installed-opencode-version")
             run.record("runtime", JSONObject()
                 .put("openChamberVersion", metadata.openChamberVersion)
                 .put("openCodeVersion", metadata.openCodeVersion)
@@ -914,8 +909,6 @@ class NotificationPairingE2ETest {
 
     private companion object {
         const val ISOLATED_PACKAGE = "io.andchamber.pairprobe"
-        const val OPEN_CHAMBER_PIN = "2.4.0"
-        const val OPEN_CODE_PIN = "2.0.32"
         const val COMMUNITY_REPO = "https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
         const val ALPINE_APK_URL =
             "$COMMUNITY_REPO/x86_64/android-tools-adb-35.0.2-r21.apk"

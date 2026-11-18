@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running OpenChamber 2.4.0 with OpenCode 2.0.32): install, start, stop, repair, restart, uninstall and crash recovery. Also defines the contract types (state, failure phases, message keys, server targets, shared-storage state) that the UI and the foreground service depend on. Implementations live in the subfolders.
+Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running OpenChamber with OpenCode, resolved from npm `latest` at deployment): install, start, stop, repair, restart, uninstall and crash recovery. Also defines the contract types (state, failure phases, message keys, server targets, shared-storage state) that the UI and the foreground service depend on. Implementations live in the subfolders.
 
 ## Design
 
@@ -16,10 +16,10 @@ Lifecycle of the on-device Linux runtime (Alpine rootfs under PRoot running Open
 - `LocalRuntimeController.kt`: `DefaultLocalRuntimeController`. Every operation runs under one `operationLock` (a Mutex). `wantsRunning` records user intent and gates automatic recovery. The watchdog and recovery jobs take the same lock.
 - Updates (OpenChamber and OpenCode npm packages, no Alpine re-download):
   - `updates: StateFlow<RuntimeUpdateState>` holds `checking`, `available` (`RuntimeUpdate`, one `VersionChange` per package, `changed` says whether it moves), `lastCheckedAtMs`, `checkFailed`, `lastFailure`.
-  - Available = per package the higher of the registry (`PackageVersionSource`, `NpmPackageVersionSource`) and the manifest pins, compared with the installed metadata. It never offers a downgrade. A failed registry check still offers the bundled pins, with `checkFailed` set.
+  - Available comes from the registry (`PackageVersionSource`, `NpmPackageVersionSource`), compared with the installed metadata. It never offers a downgrade. A failed registry check sets `checkFailed` and does not invent an update from bundled pins.
   - `checkForUpdates()` runs outside `operationLock` so the network never holds up the runtime. It is ignored while a check runs. Automatic checks run after detect and after install, throttled by `updateCheckIntervalMillis` (6 h). Manual checks ignore the throttle.
   - `update()` → `RuntimeOperation.Update` → `updateLocked()`. It stops a running server, calls `installer.update`, and publishes `Installing(updating = true)` while it runs. Success recomputes `available`. Failure does not publish `Failed`: it sets `lastFailure` and keeps the old environment. The server restarts if it was running, otherwise the state rests at Stopped.
-  - Repair installs `max(installed, pinned)` per package, so a repair never downgrades OpenCode. A fresh install uses the pins.
+  - Fresh installs and repairs both install the npm `latest` packages rather than reusing installed or bundled versions. OpenCode must still satisfy the app's minimum compatible version.
 - `WorkCounter.kt`: counts queued and running work and publishes `busy = count > 0` under one lock. Decrement uses `invokeOnCompletion`, so a job cancelled before it starts still releases its count.
 - `RestartPolicy.kt`: pure backoff budget (2 s, 5 s, 15 s, 30 s). The budget refills only after 120 s of continuous health. A manual start calls `reset()`. The clock is injected.
 - `RuntimePaths.kt`: layout under `filesDir/runtime`. `environment/` (rootfs and `metadata.json`), `environment.staging`, `environment.rollback`, `home/` (guest /root, survives repair), `cache`, `logs`, `workspace`, `proot-tmp`, `command-suite`, `ui-password`.
@@ -48,7 +48,7 @@ Invariants:
 
 ## Integration
 
-- `di/AppModule.kt` builds `DefaultLocalRuntimeController` (with `NpmPackageVersionSource(OkHttpClient)` and the manifest pins), `RuntimeInstallerImpl`, `ProotOpenChamberServer`, `ProotStaleServerCleaner` and `SharedStorageControllerImpl`.
+- `di/AppModule.kt` builds `DefaultLocalRuntimeController` (with `NpmPackageVersionSource(OkHttpClient)`), `RuntimeInstallerImpl`, `ProotOpenChamberServer`, `ProotStaleServerCleaner` and `SharedStorageControllerImpl`.
 - `di/AppModule.kt` wires `ForegroundStarter { op -> RuntimeService.request(context, op) }`, so the service is started only through this lambda. The service runs `perform(op)`, and reads `busy`. The UI observes `state`, `logTail` and `info`.
 - `data/WebSessionAuthenticatorImpl.kt` implements `WebSessionAuthenticator.prepare(target, cookies)`. It receives the per-target `WebSessionCookies` from `data/WebSessionProfiles.kt` and never touches a global cookie store. The UI passes that capability from `ui/web/WebScreen.kt`.
 - Live DNS: `ProotOpenChamberServer` receives `DnsRefresherMonitor(DnsRefresher(AndroidSystemDnsProvider, AndroidNetworkEvents, reporter))` from `di/AppModule.kt`. The monitor starts after readiness and stops before teardown. See `network/codemap.md`.

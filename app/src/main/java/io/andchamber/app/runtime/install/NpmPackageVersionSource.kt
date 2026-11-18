@@ -14,33 +14,32 @@ import java.util.concurrent.TimeUnit
  * [PackageVersionSource] over the npm registry's abbreviated metadata (`GET /<name>`, with the
  * `application/vnd.npm.install-v1+json` accept header). [registryBaseUrl] is injectable for tests.
  *
- * Selection per package (see [selectLatest]): the highest stable version with the same major as the pin.
- * OpenCode additionally needs at least [OpenChamberInstaller.MIN_OPENCODE_VERSION]. The result is never
- * lower than the pin, so a registry that lags behind the app's bundled versions cannot downgrade it.
+ * Uses dist-tags.latest without a major-version ceiling. OpenCode must meet the compatibility minimum.
  */
 class NpmPackageVersionSource(
     private val client: OkHttpClient,
     private val registryBaseUrl: String = DEFAULT_REGISTRY,
 ) : PackageVersionSource {
-    override suspend fun latest(pinned: PackageVersions): PackageVersions =
+    override suspend fun latest(): PackageVersions =
         withContext(Dispatchers.IO) {
             PackageVersions(
-                openChamber = latestOf(OPENCHAMBER_PACKAGE, pinned.openChamber, minimum = null),
-                openCode = latestOf(OPENCODE_PACKAGE, pinned.openCode, minimum = OpenChamberInstaller.MIN_OPENCODE_VERSION),
+                openChamber = latestOf(OPENCHAMBER_PACKAGE, minimum = null),
+                openCode = latestOf(OPENCODE_PACKAGE, minimum = OpenChamberInstaller.MIN_OPENCODE_VERSION),
             )
         }
 
     private fun latestOf(
         name: String,
-        pinned: String,
         minimum: String?,
     ): String {
-        val found = selectLatest(fetchVersions(name), pinned, minimum)
-        // Never below the pin: the registry can only add a newer version, never remove the bundled one.
-        return if (found == null || OpenChamberInstaller.compareVersions(found, pinned) < 0) pinned else found
+        val found = fetchLatest(name)
+        require(minimum == null || OpenChamberInstaller.compareVersions(found, minimum) >= 0) {
+            "$name latest $found is older than the required $minimum"
+        }
+        return found
     }
 
-    private fun fetchVersions(name: String): Collection<String> {
+    private fun fetchLatest(name: String): String {
         // The scope slash must be percent-encoded for the registry's path routing.
         val encoded = name.replace("/", "%2f")
         val request =
@@ -56,7 +55,7 @@ class NpmPackageVersionSource(
         bounded.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "npm registry answered ${response.code} for $name" }
             val body = response.body?.string() ?: error("npm registry sent no body for $name")
-            return parseVersionKeys(body)
+            return parseLatest(body)
         }
     }
 
@@ -68,33 +67,14 @@ class NpmPackageVersionSource(
 
         private val json = Json { ignoreUnknownKeys = true }
 
-        /** The keys of the registry document's `versions` object. Throws when the document is malformed. */
-        internal fun parseVersionKeys(body: String): Set<String> {
+        /** Reads the stable latest tag, never guesses from the versions catalog. */
+        internal fun parseLatest(body: String): String {
             val root: JsonObject = json.parseToJsonElement(body).jsonObject
-            val versions = root["versions"]?.jsonObject ?: error("npm metadata has no versions")
-            return versions.keys
+            val latest = root["dist-tags"]?.jsonObject?.get("latest")?.jsonPrimitive
+                ?: error("npm metadata has no dist-tags.latest")
+            require(latest.isString && STABLE.matches(latest.content)) { "npm latest must be a stable numeric version" }
+            return latest.content
         }
-
-        /**
-         * The highest stable version among [candidates] that shares [pinned]'s major version and, when
-         * [minimum] is set, is at least it. Pre-releases (any `-` or `+` suffix, which covers `0.0.0-dev-*`)
-         * are excluded. Returns null when nothing qualifies.
-         */
-        internal fun selectLatest(
-            candidates: Collection<String>,
-            pinned: String,
-            minimum: String?,
-        ): String? {
-            val major = majorOf(pinned)
-            return candidates
-                .filter { STABLE.matches(it) }
-                .filter { majorOf(it) == major }
-                .filter { minimum == null || OpenChamberInstaller.compareVersions(it, minimum) >= 0 }
-                .maxWithOrNull { a, b -> OpenChamberInstaller.compareVersions(a, b) }
-        }
-
-        private fun majorOf(version: String): Int =
-            OpenChamberInstaller.extractVersion(version).substringBefore('.').toIntOrNull() ?: -1
 
         private val STABLE = Regex("""^\d+(\.\d+)+$""")
     }

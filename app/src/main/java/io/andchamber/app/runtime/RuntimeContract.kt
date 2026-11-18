@@ -200,7 +200,7 @@ data class RuntimeUpdateState(
     val available: RuntimeUpdate? = null,
     /** When the last check finished (success or failure), epoch ms. */
     val lastCheckedAtMs: Long? = null,
-    /** The last check could not reach the registry. [available] may still come from the app's bundled versions. */
+    /** The last check could not reach the registry. [available] may still hold a previously fetched target. */
     val checkFailed: Boolean = false,
     /** Set when the last update failed; cleared by a new update or [LocalRuntimeController.dismissUpdateFailure]. */
     val lastFailure: UpdateFailure? = null,

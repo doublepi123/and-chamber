@@ -51,7 +51,7 @@ class OpenChamberInstaller(
 
     /**
      * Full install: download, extract, packages, OpenChamber, native modules, verify, activate.
-     * [versions] null installs the manifest's pinned npm versions.
+     * [versions] null installs npm's latest tags.
      */
     suspend fun install(
         report: InstallReporter,
@@ -59,7 +59,6 @@ class OpenChamberInstaller(
         versions: PackageVersions? = null,
     ): InstalledRuntime =
         withContext(Dispatchers.IO) {
-            val pinned = versions ?: manifestVersions()
             val architecture = manifest.architecture(abi)
             paths.cache.mkdirs()
             paths.logs.mkdirs()
@@ -106,7 +105,7 @@ class OpenChamberInstaller(
                     runner = runner,
                     rootfs = rootfs,
                     staging = staging,
-                    versions = pinned,
+                    versions = versions,
                     installStep = InstallStep.InstallOpenChamber,
                     reuseMetadata = null,
                 )
@@ -194,9 +193,6 @@ class OpenChamberInstaller(
      */
     internal fun removeGlobalPackages(rootfs: File) = Companion.removeGlobalPackages(rootfs)
 
-    private fun manifestVersions(): PackageVersions =
-        PackageVersions(openChamber = manifest.openChamberVersion, openCode = manifest.openCodeVersion)
-
     private fun installedMetadataOrNull(): RuntimeMetadata? {
         val file = paths.metadataFile
         if (!file.isFile) return null
@@ -231,15 +227,13 @@ class OpenChamberInstaller(
         runner: GuestRunner,
         rootfs: File,
         staging: File,
-        versions: PackageVersions,
+        versions: PackageVersions?,
         installStep: InstallStep,
         reuseMetadata: RuntimeMetadata?,
     ): InstalledRuntime {
-        report.step(installStep, null, "npm i @openchamber/web@${versions.openChamber}", MessageKey.ProgressInstallingOpenChamber)
+        report.step(installStep, null, npmInstallCommand(versions), MessageKey.ProgressInstallingOpenChamber)
         runner.mustSucceed(
-            "set -e; npm i -g --no-fund --no-audit " +
-                "@openchamber/web@${versions.openChamber} " +
-                "@opencode/cli@${versions.openCode}",
+            npmInstallCommand(versions),
             MessageKey.OpenChamberInstallFailed,
             "Unable to install OpenChamber from npm.",
             timeoutMinutes = NPM_TIMEOUT_MINUTES,
@@ -276,9 +270,7 @@ class OpenChamberInstaller(
             "OpenChamber web bundle is missing after install"
         }
         // Stock npm install of the requested version. No patched artifact and no version pin.
-        val installedOpenChamber =
-            runCatching { installedPackageVersion(runner, "@openchamber/web") }.getOrNull()
-                ?: versions.openChamber
+        val installedOpenChamber = installedPackageVersion(runner, "@openchamber/web")
 
         val metadata =
             RuntimeMetadata(
@@ -312,9 +304,7 @@ class OpenChamberInstaller(
         packageName: String,
     ): String {
         val output = runner.output("node -p \"require('/usr/local/lib/node_modules/$packageName/package.json').version\"")
-        val version = VERSION_PATTERN.find(output)?.value
-        require(version != null) { "No version reported for $packageName" }
-        return version
+        return parseInstalledPackageVersion(output)
     }
 
     /**
@@ -490,6 +480,17 @@ class OpenChamberInstaller(
     }
 
     companion object {
+        internal fun parseInstalledPackageVersion(output: String): String {
+            val version = output.trim()
+            require(Regex("""\d+(\.\d+)+""").matches(version)) { "No stable installed package version reported" }
+            return version
+        }
+
+        internal fun npmInstallCommand(versions: PackageVersions? = null): String =
+            "set -e; npm i -g --no-fund --no-audit " +
+                "@openchamber/web@${versions?.openChamber ?: "latest"} " +
+                "@opencode/cli@${versions?.openCode ?: "latest"}"
+
         /** Alpine packages. The build toolchain is needed to rebuild node-pty for musl. */
         val APK_PACKAGES =
             listOf(

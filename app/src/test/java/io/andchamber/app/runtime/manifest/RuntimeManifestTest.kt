@@ -16,8 +16,6 @@ class RuntimeManifestTest {
             schemaVersion = 1,
             runtimeVersion = "2026.10.18.1",
             alpineVersion = "3.24.1",
-            openChamberVersion = "2.4.0",
-            openCodeVersion = "2.0.32",
             port = 3000,
             architectures = mapOf("arm64-v8a" to arch),
         )
@@ -50,7 +48,16 @@ class RuntimeManifestTest {
     }
 
     @Test
-    fun `reader parses the bundled json shape`() {
+    fun `reader accepts manifest without npm pins`() {
+        val source = java.io.File("src/main/assets/runtime-manifest.json").readText()
+        val parsed = RuntimeManifestReader { source }.read()
+        assertEquals("3.24.1", parsed.alpineVersion)
+        org.junit.Assert.assertFalse(source.contains("openChamberVersion"))
+        org.junit.Assert.assertFalse(source.contains("openCodeVersion"))
+    }
+
+    @Test
+    fun `reader ignores legacy npm pins`() {
         val json =
             """
             {"schemaVersion":1,"runtimeVersion":"r","alpineVersion":"3.24.1","openChamberVersion":"2.4.0",
@@ -58,7 +65,7 @@ class RuntimeManifestTest {
              "architectures":{"x86_64":{"alpineUrl":"https://e/x.tar.gz","alpineSha256":"${"b".repeat(64)}"}}}
             """.trimIndent()
         val parsed = RuntimeManifestReader { json }.read()
-        assertEquals("2.4.0", parsed.openChamberVersion)
+        assertEquals("r", parsed.runtimeVersion)
         assertEquals(3000, parsed.port)
     }
 }

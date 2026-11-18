@@ -41,7 +41,6 @@ import io.andchamber.app.runtime.RuntimeState
 import io.andchamber.app.runtime.RuntimeStateListener
 import io.andchamber.app.runtime.WebSessionAuthenticator
 import io.andchamber.app.runtime.install.NpmPackageVersionSource
-import io.andchamber.app.runtime.install.PackageVersions
 import io.andchamber.app.runtime.install.RuntimeInstallerImpl
 import io.andchamber.app.runtime.network.AndroidNetworkEvents
 import io.andchamber.app.runtime.network.AndroidSystemDnsProvider
@@ -489,11 +488,6 @@ val appModule =
                     }
                 },
                 versionSource = NpmPackageVersionSource(get<OkHttpClient>()),
-                pinnedVersions =
-                    PackageVersions(
-                        openChamber = manifest.openChamberVersion,
-                        openCode = manifest.openCodeVersion,
-                    ),
             ).also { it.initialize() }
         }
 

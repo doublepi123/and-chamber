@@ -3,14 +3,12 @@ package io.andchamber.app.runtime.manifest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-/** `assets/runtime-manifest.json`: which Alpine rootfs and OpenChamber/OpenCode versions to install. */
+/** `assets/runtime-manifest.json`: which Alpine rootfs to install and which port OpenChamber uses. */
 @Serializable
 data class RuntimeManifest(
     val schemaVersion: Int,
     val runtimeVersion: String,
     val alpineVersion: String,
-    val openChamberVersion: String,
-    val openCodeVersion: String,
     val port: Int,
     val architectures: Map<String, RuntimeArchitecture>,
 ) {
@@ -21,8 +19,6 @@ data class RuntimeManifest(
         require(schemaVersion == 1) { "Unsupported runtime manifest schema: $schemaVersion" }
         require(runtimeVersion.isNotBlank()) { "Runtime version is missing" }
         require(alpineVersion.isNotBlank()) { "Alpine version is missing" }
-        require(openChamberVersion.isNotBlank()) { "OpenChamber version is missing" }
-        require(openCodeVersion.isNotBlank()) { "OpenCode version is missing" }
         require(port in 1024..65535) { "Invalid OpenChamber port: $port" }
         require(architectures.isNotEmpty()) { "Runtime manifest has no architectures" }
         architectures.forEach { (abi, item) -> item.validate(abi) }

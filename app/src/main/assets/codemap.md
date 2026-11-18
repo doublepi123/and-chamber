@@ -4,14 +4,14 @@
 
 Packaged static inputs read at runtime by the app, not by the build:
 
-- `runtime-manifest.json`: pins the guest runtime (Alpine rootfs per ABI, OpenChamber and OpenCode versions, port).
+- `runtime-manifest.json`: pins the Alpine rootfs per ABI and supplies the guest runtime port; OpenChamber and OpenCode are not pinned.
 - `android-shim.cjs`: a Node preload script copied into the guest rootfs to work around an Android SELinux failure.
 - `browser-tool/package.json`, `browser-tool/index.js`: the App-injected OpenCode plugin tool `andchamber_web` for the in-app browser. Both files are synced into the private guest home on launch.
 - `phone-tool/package.json`, `phone-tool/index.js`: the independent opt-in `andchamber_phone` plugin. Its per-launch endpoint and native grant are separate from the browser.
 
 ## Design
 
-- **Pinned manifest, not discovery.** `runtime-manifest.json` is the single source of truth for the guest versions. `runtimeVersion` (date-based), `alpineVersion`, `openChamberVersion`, `openCodeVersion` and `port` are top-level. Per-ABI entries (`arm64-v8a`, `x86_64`) carry `alpineUrl` and `alpineSha256`, so the rootfs download is verified before extraction.
+- **Pinned rootfs, unpinned npm packages.** `runtime-manifest.json` is the single source of truth for the guest base. `runtimeVersion` (date-based), `alpineVersion` and `port` are top-level. Per-ABI entries (`arm64-v8a`, `x86_64`) carry `alpineUrl` and `alpineSha256`, so the rootfs download is verified before extraction. OpenChamber and OpenCode use npm `latest` for fresh installs and repairs.
 - **Schema versioned.** `schemaVersion: 1` lets the Kotlin parser reject unknown layouts.
 - **Shim is a plain CJS file.** `android-shim.cjs` wraps `os.networkInterfaces`. If the original throws (`uv_interface_addresses` gives EACCES under SELinux on Android), it returns a synthetic loopback-only `lo` entry. It is `'use strict'`, has no dependencies, and is deliberately small.
 - **Browser plugin is a zero-dependency ESM package.** `browser-tool/index.js` registers one tool, `andchamber_web`, with one action per call. It reads the endpoint file named by `ANDCHAMBER_BROWSER_TOOL_FILE` on every call and never prints the token.
@@ -29,7 +29,7 @@ Packaged static inputs read at runtime by the app, not by the build:
 ## Integration
 
 - `app/src/main/java/io/andchamber/app/runtime/manifest/`: parses `runtime-manifest.json`.
-- `app/src/main/java/io/andchamber/app/runtime/install/OpenChamberInstaller.kt`: consumes the Alpine and OpenChamber/OpenCode versions and writes the shim.
+- `app/src/main/java/io/andchamber/app/runtime/install/OpenChamberInstaller.kt`: consumes the Alpine rootfs pin, installs npm `latest` for fresh installs/repairs, and writes the shim.
 - `app/src/main/java/io/andchamber/app/runtime/process/ProotCommands.kt`: sets `NODE_OPTIONS`. Tests `ProotCommandsTest.kt` and `OpenChamberInstallerTest.kt` assert both the path and the env value.
 - `app/src/main/java/io/andchamber/app/di/AppModule.kt`: loads the shim text via Koin wiring and reads the browser adapter asset.
 - `scripts/tests/browser-tool-plugin.test.cjs`: Node tests for the plugin. Run with `node --test scripts/tests/browser-tool-plugin.test.cjs`.

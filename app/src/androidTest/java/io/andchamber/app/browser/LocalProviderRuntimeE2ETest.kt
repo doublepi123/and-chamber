@@ -66,8 +66,6 @@ class LocalProviderRuntimeE2ETest {
             run.record("runtimeManifest", JSONObject()
                 .put("runtimeVersion", manifest.runtimeVersion)
                 .put("alpineVersion", manifest.alpineVersion)
-                .put("openChamberVersion", manifest.openChamberVersion)
-                .put("openCodeVersion", manifest.openCodeVersion)
                 .put("port", manifest.port))
             run.verifyProotProvenance()
 
@@ -83,13 +81,6 @@ class LocalProviderRuntimeE2ETest {
             val metadata = inspection.metadata
             if (metadata.port != manifest.port) run.fail("metadata-port: ${metadata.port}")
             if (metadata.alpineVersion != manifest.alpineVersion) run.fail("metadata-alpine: ${metadata.alpineVersion}")
-            // The in-app update may have moved past the bundled pin; never below it.
-            if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(metadata.openChamberVersion, manifest.openChamberVersion) < 0) {
-                run.fail("metadata-openchamber-below-pin: ${metadata.openChamberVersion}")
-            }
-            if (io.andchamber.app.runtime.install.OpenChamberInstaller.compareVersions(metadata.openCodeVersion, manifest.openCodeVersion) < 0) {
-                run.fail("metadata-opencode-below-pin: ${metadata.openCodeVersion}")
-            }
             val firstLaunch = run.server().readyLaunchId() ?: run.fail("launch-id-missing")
             run.record("firstRuntimeLaunchId", firstLaunch)
             run.record("firstRunningState", stateSnapshot(run))

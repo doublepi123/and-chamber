@@ -29,11 +29,8 @@ data class PackageVersions(
  * I/O and must be called off the main thread. Throws when the registry cannot be read.
  */
 fun interface PackageVersionSource {
-    /**
-     * The newest stable versions allowed for this app: same major version as [pinned] (the manifest's
-     * versions), no pre-releases, OpenCode at least the app's minimum.
-     */
-    suspend fun latest(pinned: PackageVersions): PackageVersions
+    /** Stable npm dist-tags.latest versions, with OpenCode at least the app's minimum. */
+    suspend fun latest(): PackageVersions
 }
 
 data class InstalledRuntime(
@@ -69,7 +66,7 @@ interface RuntimeInstaller {
     /**
      * Builds a fresh environment in staging, verifies it, then atomically activates it. The active
      * environment is untouched until that swap, so a failed install or repair keeps the old one.
-     * [versions] null installs the versions pinned in the app's runtime manifest.
+     * [versions] null installs npm's latest tags.
      * Throws on failure.
      */
     suspend fun install(

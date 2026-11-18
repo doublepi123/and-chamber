@@ -11,9 +11,29 @@ import org.junit.Test
 
 /**
  * The installer's guest command strings. The real commands are verified on a device; these pin
- * the parts a regression would silently break (package list, npm pins, node-pty path, shim path).
+ * the parts a regression would silently break (package list, npm package selection, node-pty path, shim path).
  */
 class OpenChamberInstallerTest {
+    @Test
+    fun `existing runtime metadata still decodes independently of manifest npm versions`() {
+        val metadata = kotlinx.serialization.json.Json.decodeFromString<RuntimeMetadata>(
+            """{"runtimeVersion":"r","alpineVersion":"3.24.1","abi":"arm64-v8a","port":3000,"openChamberVersion":"2.4.0","openCodeVersion":"2.0.32","installedAt":1}""",
+        )
+        assertEquals("2.4.0", metadata.openChamberVersion)
+        assertEquals("2.0.32", metadata.openCodeVersion)
+        assertEquals(null, metadata.nodeVersion)
+    }
+
+    @Test
+    fun `metadata uses a real installed version and never latest or failed output`() {
+        assertEquals("3.1.0", OpenChamberInstaller.parseInstalledPackageVersion("3.1.0\n"))
+        for (output in listOf("latest", "", "Error reading package.json 3.1.0")) {
+            org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+                OpenChamberInstaller.parseInstalledPackageVersion(output)
+            }
+        }
+    }
+
     @Test
     fun `apk installs the runtime packages including the node-pty build toolchain`() {
         val packages = APK_PACKAGES.split(" ")
@@ -23,13 +43,18 @@ class OpenChamberInstallerTest {
     }
 
     @Test
-    fun `openchamber is installed from the manifest pins`() {
-        val script = openChamberInstallScript(openChamberVersion = "2.4.0", openCodeVersion = "2.0.32")
+    fun `explicit update versions are installed`() {
+        val script = OpenChamberInstaller.npmInstallCommand(PackageVersions("2.4.0", "2.0.32"))
 
         assertEquals(
-            "npm i -g --no-fund --no-audit @openchamber/web@2.4.0 @opencode/cli@2.0.32",
+            "set -e; npm i -g --no-fund --no-audit @openchamber/web@2.4.0 @opencode/cli@2.0.32",
             script,
         )
+    }
+
+    @Test
+    fun `fresh and repair install npm latest`() {
+        assertEquals("set -e; npm i -g --no-fund --no-audit @openchamber/web@latest @opencode/cli@latest", OpenChamberInstaller.npmInstallCommand())
     }
 
     @Test
@@ -74,11 +99,4 @@ class OpenChamberInstallerTest {
         assertTrue(OpenChamberInstaller.compareVersions("3.0.0", MIN_OPENCODE_VERSION) > 0)
     }
 
-    private fun openChamberInstallScript(
-        openChamberVersion: String,
-        openCodeVersion: String,
-    ): String =
-        "npm i -g --no-fund --no-audit " +
-            "@openchamber/web@$openChamberVersion " +
-            "@opencode/cli@$openCodeVersion"
 }

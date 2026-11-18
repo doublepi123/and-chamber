@@ -2,8 +2,6 @@
   "schemaVersion": 1,
   "runtimeVersion": "2026.10.18.1",
   "alpineVersion": "3.24.1",
-  "openChamberVersion": "2.4.0",
-  "openCodeVersion": "2.0.32",
   "port": 3000,
   "architectures": {
     "arm64-v8a": {

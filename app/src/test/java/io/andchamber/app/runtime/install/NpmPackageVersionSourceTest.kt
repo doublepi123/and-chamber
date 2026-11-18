@@ -4,107 +4,57 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
-import org.junit.Before
 import org.junit.Test
-import java.util.concurrent.TimeUnit
 
 class NpmPackageVersionSourceTest {
-    private lateinit var server: MockWebServer
-    private val client = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).build()
-
-    @Before
-    fun start() {
-        server = MockWebServer()
-        server.start()
-    }
-
-    @After
-    fun stop() {
-        server.shutdown()
-    }
-
-    private fun source() = NpmPackageVersionSource(client, registryBaseUrl = server.url("/").toString())
-
-    private fun metadata(vararg versions: String): String =
-        """{"name":"x","dist-tags":{"latest":"x"},"versions":{${versions.joinToString(",") { "\"$it\":{}" }}}}"""
-
-    private val pins = PackageVersions(openChamber = "2.4.0", openCode = "2.0.32")
+    private fun metadata(version: String) = """{"dist-tags":{"latest":"$version"},"versions":{"99.0.0":{}}}"""
 
     @Test
-    fun `picks the highest stable version of the pinned major and skips prereleases and other majors`() {
-        server.enqueue(MockResponse().setBody(metadata("2.3.9", "2.4.0", "2.4.1", "2.5.0-beta.1", "2.9.0-rc.1", "3.0.0")))
-        server.enqueue(MockResponse().setBody(metadata("0.0.0-dev-20260101", "2.0.32", "2.0.33", "2.1.0", "3.0.0")))
-
-        val latest = runBlocking { source().latest(pins) }
-
-        assertEquals(PackageVersions(openChamber = "2.4.1", openCode = "2.1.0"), latest)
-    }
-
-    @Test
-    fun `opencode devs and versions below the minimum are excluded`() {
-        server.enqueue(MockResponse().setBody(metadata("2.4.0")))
-        server.enqueue(MockResponse().setBody(metadata("0.0.0-dev-1", "2.0.19", "2.0.20", "2.0.25")))
-
-        val latest = runBlocking { source().latest(pins) }
-
-        // 2.0.25 is a stable 2.x but below the pin's 2.0.32: the pin is the floor, so it wins.
-        assertEquals("2.0.32", latest.openCode)
-    }
-
-    @Test
-    fun `never returns a version below the pin`() {
-        server.enqueue(MockResponse().setBody(metadata("2.3.0")))
-        server.enqueue(MockResponse().setBody(metadata("2.0.30")))
-
-        val latest = runBlocking { source().latest(pins) }
-
-        assertEquals(PackageVersions(openChamber = "2.4.0", openCode = "2.0.32"), latest)
-    }
-
-    @Test
-    fun `sends the abbreviated metadata accept header and percent-encodes the scope`() {
-        server.enqueue(MockResponse().setBody(metadata("2.4.0")))
-        server.enqueue(MockResponse().setBody(metadata("2.0.32")))
-
-        runBlocking { source().latest(pins) }
-
-        val first = server.takeRequest()
-        assertEquals("application/vnd.npm.install-v1+json", first.getHeader("Accept"))
-        assertEquals("/@openchamber%2fweb", first.path)
-        val second = server.takeRequest()
-        assertEquals("/@opencode%2fcli", second.path)
-    }
-
-    @Test
-    fun `a non-success answer throws`() {
-        server.enqueue(MockResponse().setResponseCode(503))
-
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking { source().latest(pins) }
+    fun `latest dist tag allows new majors and ignores higher catalog versions`() {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setBody(metadata("3.1.0")))
+            server.enqueue(MockResponse().setBody(metadata("4.0.0")))
+            val result = runBlocking { NpmPackageVersionSource(OkHttpClient(), server.url("/").toString()).latest() }
+            assertEquals(PackageVersions("3.1.0", "4.0.0"), result)
+            val request = server.takeRequest()
+            assertEquals("/@openchamber%2fweb", request.path)
+            assertEquals("application/vnd.npm.install-v1+json", request.getHeader("Accept"))
+            assertEquals("/@opencode%2fcli", server.takeRequest().path)
         }
     }
 
     @Test
-    fun `a body without versions throws`() {
-        server.enqueue(MockResponse().setBody("""{"name":"x"}"""))
-
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking { source().latest(pins) }
+    fun `minimum opencode is accepted but older or prerelease latest fails`() {
+        for (version in listOf("2.0.20", "2.0.19", "3.0.0-beta.1")) {
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setBody(metadata("2.0.0")))
+                server.enqueue(MockResponse().setBody(metadata(version)))
+                val source = NpmPackageVersionSource(OkHttpClient(), server.url("/").toString())
+                if (version == "2.0.20") assertEquals(version, runBlocking { source.latest() }.openCode)
+                else assertThrows(IllegalArgumentException::class.java) { runBlocking { source.latest() } }
+            }
         }
     }
 
     @Test
-    fun `selectLatest ignores build metadata and every prerelease form`() {
-        val picked =
-            NpmPackageVersionSource.selectLatest(
-                candidates = listOf("2.4.0+build.5", "2.4.0-dev", "2.4.1", "2.4.2-0"),
-                pinned = "2.4.0",
-                minimum = null,
-            )
+    fun `malformed absent or unstable dist tags are rejected`() {
+        for (body in listOf("{}", "not json", """{"dist-tags":{"latest":3}}""", metadata("v3.0.0"), metadata("3.0.0+build"), metadata("latest"), metadata("3.0.0-rc.1"))) {
+            assertThrows(Exception::class.java) { NpmPackageVersionSource.parseLatest(body) }
+        }
+    }
 
-        assertEquals("2.4.1", picked)
+    @Test
+    fun `registry error throws instead of returning bundled versions`() {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(MockResponse().setResponseCode(503))
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking { NpmPackageVersionSource(OkHttpClient(), server.url("/").toString()).latest() }
+            }
+        }
     }
 }

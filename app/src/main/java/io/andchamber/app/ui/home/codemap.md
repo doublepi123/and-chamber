@@ -42,7 +42,7 @@ Install and start:
 4. Failed → Retry → `local.retry()`. Repair opens a confirm dialog, then `local.repair()`.
 
 Update:
-1. The runtime fills `updates.available` (bundled pins at detection, then the npm registry check). The card shows the offer.
+1. The runtime fills `updates.available` from the npm registry check when a newer version exists. The card shows the offer.
 2. Update → confirm → `HomeActions.onUpdate` → `local.update()`: asks for notifications, discards the pooled local WebView, then `runtime.update()`.
 3. The runtime stops the server and reports `Installing(updating = true)` through `updateSteps`, then swaps the environment in and starts the server again if it was running.
 4. Failure: the state goes back to Stopped or Running (never Failed) and `updates.lastFailure` is set. The card shows the failure row; Try again repeats from step 2, the close button calls `local.dismissUpdateFailure()`.

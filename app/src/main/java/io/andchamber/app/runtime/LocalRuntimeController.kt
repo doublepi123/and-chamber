@@ -76,13 +76,8 @@ class DefaultLocalRuntimeController(
      * Other ABIs are UnsupportedAbi (remote servers still work).
      */
     private val supportedAbis: Set<String> = setOf("arm64-v8a", "x86_64"),
-    /** Registry lookup for newer versions. Null disables the registry check; the bundled pins still apply. */
+    /** Registry lookup for newer versions. Null disables update discovery. */
     private val versionSource: PackageVersionSource? = null,
-    /**
-     * The versions bundled in the app's manifest. They are the update floor and what a fresh install
-     * takes. Null means there are no bundled versions (tests only).
-     */
-    private val pinnedVersions: PackageVersions? = null,
     /** Minimum time between automatic registry checks. Manual checks ignore it. */
     private val updateCheckIntervalMillis: Long = UPDATE_CHECK_INTERVAL_MILLIS,
 ) : LocalRuntimeController {
@@ -194,7 +189,7 @@ class DefaultLocalRuntimeController(
                     // into staging and swap atomically. A failed repair leaves the old runtime intact.
                     stopLocked()
                     currentPhase = FailurePhase.Install
-                    installLocked(thenStart = true, repair = true)
+                    installLocked(thenStart = true)
                 }
             RuntimeOperation.Restart -> {
                 // One queued op, so stop and start can't be reordered by the lock (two separate
@@ -263,7 +258,7 @@ class DefaultLocalRuntimeController(
         } else {
             refreshInfo(existing)
             publish(RuntimeState.Stopped)
-            // The bundled pins may already be newer than what is installed: offer that without network.
+            // Reuse any previously fetched registry target while refreshing in the background.
             recomputeAvailable(existing)
             maybeCheckForUpdates()
         }
@@ -271,12 +266,10 @@ class DefaultLocalRuntimeController(
 
     /**
      * Install, then optionally start (Install and Repair both end running, as the user asked for it).
-     * A repair ([repair] = true) installs at least the installed versions, so it never downgrades
-     * OpenCode after an update.
+     * Both fresh installs and repairs resolve the npm latest tags at install time.
      */
     private suspend fun installLocked(
         thenStart: Boolean,
-        repair: Boolean = false,
     ) {
         if (abi !in supportedAbis) {
             publish(RuntimeState.UnsupportedAbi)
@@ -284,8 +277,7 @@ class DefaultLocalRuntimeController(
         }
         cancelRequested = false
         publish(RuntimeState.Installing(InstallStep.DownloadRootfs, 0f, null))
-        val versions = if (repair) repairVersions() else null
-        val installed = installer.install(installReporter(updating = false), versions)
+        val installed = installer.install(installReporter(updating = false), null)
         refreshInfo(installed)
         recomputeAvailable(installed)
         maybeCheckForUpdates()
@@ -309,18 +301,6 @@ class DefaultLocalRuntimeController(
 
             override fun log(line: String) = appendLog(line)
         }
-
-    /** Per package, the newer of the installed and the bundled version. Null when nothing is known. */
-    private fun repairVersions(): PackageVersions? {
-        val installed = installedVersions
-        val pinned = pinnedVersions
-        if (installed == null) return null
-        if (pinned == null) return installed
-        return PackageVersions(
-            openChamber = newerOf(installed.openChamber, pinned.openChamber),
-            openCode = newerOf(installed.openCode, pinned.openCode),
-        )
-    }
 
     private fun newerOf(
         a: String,
@@ -386,7 +366,7 @@ class DefaultLocalRuntimeController(
 
     /**
      * Recomputes [RuntimeUpdateState.available] from the installed versions and the newest known
-     * versions: the registry's (when fetched) and the bundled pins. Never offers a downgrade.
+     * registry versions (when fetched). Never offers a downgrade.
      */
     private fun recomputeAvailable(runtime: InstalledRuntime) {
         val installed =
@@ -402,24 +382,11 @@ class DefaultLocalRuntimeController(
         installed: PackageVersions,
         registry: PackageVersions?,
     ): RuntimeUpdate? {
-        val target = newestOf(registry, pinnedVersions) ?: return null
+        val target = registry ?: return null
         val openChamber = VersionChange(current = installed.openChamber, target = newerOf(target.openChamber, installed.openChamber))
         val openCode = VersionChange(current = installed.openCode, target = newerOf(target.openCode, installed.openCode))
         val update = RuntimeUpdate(openChamber = openChamber, openCode = openCode)
         return update.takeIf { it.hasChanges }
-    }
-
-    /** Per package, the higher of the registry and the bundled version. Either may be null. */
-    private fun newestOf(
-        registry: PackageVersions?,
-        pinned: PackageVersions?,
-    ): PackageVersions? {
-        if (registry == null) return pinned
-        if (pinned == null) return registry
-        return PackageVersions(
-            openChamber = newerOf(registry.openChamber, pinned.openChamber),
-            openCode = newerOf(registry.openCode, pinned.openCode),
-        )
     }
 
     /** An automatic check, throttled by [updateCheckIntervalMillis] since the last one. */
@@ -433,17 +400,16 @@ class DefaultLocalRuntimeController(
 
     /**
      * Asks the registry for newer versions, with no operationLock: the network must not hold up the
-     * runtime. Cancellation propagates. A failure keeps the bundled pins and sets [RuntimeUpdateState.checkFailed].
+     * runtime. Cancellation propagates. A failure keeps prior registry results and sets [RuntimeUpdateState.checkFailed].
      */
     private suspend fun runUpdateCheck() {
         val source = versionSource ?: return
-        val pinned = pinnedVersions
         val installed = installedVersions ?: return
         mutableUpdates.update { it.copy(checking = true) }
         try {
             val latest: PackageVersions? =
                 try {
-                    source.latest(pinned ?: installed)
+                    source.latest()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {

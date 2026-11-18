@@ -7,10 +7,10 @@ Builds the Alpine + Node + OpenChamber environment in staging, verifies it, and 
 ## Design
 
 - `RuntimeInstaller` (interface): `recover()`, `installedRuntime()`, `install(report, versions?)`, `update(report, versions)`, `discardEnvironment()`, `removeAll()`. `RuntimeInstallerImpl` implements it over the on-disk layout and is not thread-safe, since the controller serialises calls.
-- `PackageVersions` (npm versions of `@openchamber/web` and `@opencode/cli`) and `PackageVersionSource` (fun interface: `latest(pinned)`).
-- `NpmPackageVersionSource`: `PackageVersionSource` over the npm registry's abbreviated metadata (OkHttp, 15 s call timeout, `registryBaseUrl` injectable). Picks the highest stable version with the pin's major. Excludes prereleases (`0.0.0-dev-*`) and OpenCode below `MIN_OPENCODE_VERSION`. Never returns below the pin.
+- `PackageVersions` (npm versions of `@openchamber/web` and `@opencode/cli`) and `PackageVersionSource` (fun interface: `latest()`).
+- `NpmPackageVersionSource`: `PackageVersionSource` over the npm registry's abbreviated metadata (OkHttp, 15 s call timeout, `registryBaseUrl` injectable). Reads each package's stable `dist-tags.latest`, across major versions, and rejects OpenCode below `MIN_OPENCODE_VERSION`. No bundled version or same-major restriction applies.
 - `OpenChamberInstaller`: the pipeline. Its nested `GuestRunner` runs `/bin/sh -lc` inside PRoot with `ProotCommands`, streams output to `InstallReporter.log` and `logs/install.log`, and enforces a timeout. On timeout or interrupt, `awaitExit` kills the PRoot tree and waits for the launcher before returning. The live DNS monitor is not part of install: `configureRootfs` writes resolv.conf once, from the system DNS at that moment.
-  - `install` and `update` share `finishEnvironment`: npm install of the versions, node-pty rebuild, PTY smoke, verify, metadata, then the swap. Metadata records the version read back from the installed `package.json`, not the requested one.
+  - `install` and `update` share `finishEnvironment`: npm install of `@latest` for a fresh install/repair or explicit registry-resolved versions for an update, node-pty rebuild, PTY smoke, verify, metadata, then the swap. Metadata records the version read back from the installed `package.json`, not the requested tag.
   - `update` requires an active environment with metadata. It checks free space (`treeSize` + 512 MiB, else `UpdateNotEnoughSpace`), copies the environment with `copyTreeStrict`, clears the copied marker, normalizes the links into staging, removes the old global packages (`removeGlobalPackages`), refreshes resolv.conf, then runs the shared tail. Failure deletes staging only.
 - `GuestOutputPump` (internal): reads a guest command's combined output on a daemon thread and passes each line to `onLine`. Two entry points, both bounded by a caller-supplied deadline:
   - `drain(deadline)`: normal exit. Waits for end-of-stream so trailing lines are delivered. An unfinished reader returns `ReaderStillRunning`.
@@ -43,7 +43,7 @@ Install (`OpenChamberInstaller.install`):
 3. ExtractRootfs: `extractTarGz` into `staging/rootfs`, then `configureRootfs` (resolv.conf from `SystemDnsProvider`, `/etc/hosts`, libapk SONAME symlink) and `seedHome`.
 4. InstallPackages: `apk add nodejs npm bash git curl ripgrep openssh-client ca-certificates libstdc++ python3 make g++ linux-headers` (`set -e`, 20 min).
 5. Write `/opt/andchamber/android-shim.cjs` (before npm).
-6. InstallOpenChamber: `npm i -g --no-fund --no-audit @openchamber/web@2.4.0 @opencode/cli@2.0.32` (30 min).
+6. InstallOpenChamber: `npm i -g --no-fund --no-audit @openchamber/web@latest @opencode/cli@latest` for a fresh install (30 min).
 7. BuildNativeModules: `node-gyp rebuild` in `node_modules/node-pty`, then the PTY smoke script (2 min).
 8. Verify: `node --version`, `opencode --version` (must be at least 2.0.20), and `dist/index.html` must exist.
 9. Write `metadata.json` in staging. Then `activateRuntimeEnvironment(active, staging, rollback)`.
@@ -72,9 +72,9 @@ Recovery (`recoverInterruptedRuntimeEnvironment`, at every detection):
 
 - Controller: `runtime/LocalRuntimeController.kt` calls `recover`, `installedRuntime`, `install`, `removeAll`.
 - Wiring: `di/AppModule.kt` builds `RuntimeInstallerImpl` with `VerifiedRuntimeDownloader(OkHttpClient)`, the manifest, and the shim asset.
-- Depends on: `runtime/manifest/RuntimeManifest` (pins), `runtime/process/ProotCommands` and `EmbeddedCommandSuite` (launch), `runtime/process/ProcessTree` (kill on timeout), `runtime/network/ResolvConf`, `runtime/fs/SafeFiles`.
+- Depends on: `runtime/manifest/RuntimeManifest` (rootfs pins and port), `runtime/process/ProotCommands` and `EmbeddedCommandSuite` (launch), `runtime/process/ProcessTree` (kill on timeout), `runtime/network/ResolvConf`, `runtime/fs/SafeFiles`.
 - External contracts:
   - Alpine tarball: HTTPS URL and SHA-256 from `runtime-manifest.json`.
-  - npm pins: `@openchamber/web@2.4.0`, `@opencode/cli@2.0.32`, and `opencode --version` at least 2.0.20.
+  - npm packages: `@openchamber/web@latest` and `@opencode/cli@latest` for fresh installs/repairs; updates use registry-resolved versions. `opencode --version` must be at least 2.0.20.
   - Guest paths: `/usr/local/lib/node_modules/@openchamber/web` (`dist/index.html`), `/opt/andchamber/android-shim.cjs`, `/opt/andchamber/pty-smoke.cjs`.
   - `metadata.json` fields: `runtimeVersion`, `alpineVersion`, `abi`, `port`, `openChamberVersion`, `openCodeVersion`, `nodeVersion`, `installedAt`.
